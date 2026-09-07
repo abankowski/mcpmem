@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
 use parking_lot::{Mutex, MutexGuard};
-use rusqlite::{params, types::ToSql, Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params, types::ToSql};
 
 use crate::config::{Durability, SqliteTuning};
 use crate::errors::{MCSError, Result};
@@ -63,9 +63,7 @@ fn load_observations_opt(conn: &Connection, entity_id: i64) -> Vec<String> {
 fn entity_name_lookup(conn: &Connection, name: &str) -> Result<Option<i64>> {
     let h = name_hash(name);
     let mut stmt = conn
-        .prepare_cached(
-            "SELECT id FROM entity WHERE name_hash = ?1 AND name = ?2 AND flags = 0",
-        )
+        .prepare_cached("SELECT id FROM entity WHERE name_hash = ?1 AND name = ?2 AND flags = 0")
         .map_err(sqlite_err)?;
     match stmt.query_row(params![h, name], |row| row.get::<_, i64>(0)) {
         Ok(id) => Ok(Some(id)),
@@ -143,10 +141,7 @@ fn select_all_types(conn: &Connection, kind: i64) -> Result<Vec<(String, usize)>
         .map_err(sqlite_err)?;
     let rows = stmt
         .query_map(params![kind], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? as usize,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })
         .map_err(sqlite_err)?
         .filter_map(|r| r.ok())
@@ -218,7 +213,14 @@ fn batch_entities_by_ids(conn: &Connection, ids: &[i64]) -> FxHashMap<i64, Entit
     {
         for (id, name, etype, obs_json) in rows.flatten() {
             let observations: Vec<String> = serde_json::from_str(&obs_json).unwrap_or_default();
-            map.insert(id, Entity { name, entity_type: etype, observations });
+            map.insert(
+                id,
+                Entity {
+                    name,
+                    entity_type: etype,
+                    observations,
+                },
+            );
         }
     }
     map
@@ -268,8 +270,8 @@ fn fts_candidate_ids(conn: &Connection, query: &str, cap: usize) -> Vec<i64> {
     let mut seen: HashSet<i64> = HashSet::new();
     let cap_i64 = cap as i64;
 
-    if let Ok(mut stmt) = conn
-        .prepare("SELECT rowid FROM name_fts WHERE name_fts MATCH ?1 ORDER BY rank LIMIT ?2")
+    if let Ok(mut stmt) =
+        conn.prepare("SELECT rowid FROM name_fts WHERE name_fts MATCH ?1 ORDER BY rank LIMIT ?2")
         && let Ok(rows) = stmt.query_map(params![query, cap_i64], |row| row.get::<_, i64>(0))
     {
         for id in rows.flatten() {
@@ -490,7 +492,7 @@ impl GraphHandle {
         .map_err(sqlite_err)?;
 
         conn.execute_batch(&format!(
-             "PRAGMA journal_mode = WAL;
+            "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = OFF;
              PRAGMA cache_size    = -{};
              PRAGMA temp_store    = MEMORY;
@@ -502,7 +504,7 @@ impl GraphHandle {
         .map_err(sqlite_err)?;
 
         conn.execute_batch(
-             "CREATE TABLE IF NOT EXISTS entity (
+            "CREATE TABLE IF NOT EXISTS entity (
                  id          INTEGER PRIMARY KEY,
                  name_hash   INTEGER NOT NULL,
                  name        TEXT    NOT NULL,
@@ -756,7 +758,16 @@ impl GraphHandle {
                 let observations = load_observations_opt(&conn, id);
                 drop(stmt);
                 drop(conn);
-                self.meta_set(&ename, EntityMeta { id, type_id, obs_count, out_deg, in_deg });
+                self.meta_set(
+                    &ename,
+                    EntityMeta {
+                        id,
+                        type_id,
+                        obs_count,
+                        out_deg,
+                        in_deg,
+                    },
+                );
                 Ok(Some(Entity {
                     name: ename,
                     entity_type: etype,
@@ -829,9 +840,12 @@ impl GraphHandle {
                     idxs.push(i);
                 }
 
-                obs_sql.push_str("INSERT INTO observation (id,entity_id,idx,body,created_us) VALUES");
+                obs_sql
+                    .push_str("INSERT INTO observation (id,entity_id,idx,body,created_us) VALUES");
                 for i in 0..n {
-                    if i > 0 { obs_sql.push(','); }
+                    if i > 0 {
+                        obs_sql.push(',');
+                    }
                     obs_sql.push_str("(?,?,?,?,?)");
                 }
 
@@ -857,13 +871,16 @@ impl GraphHandle {
             total_obs += obs_count;
 
             created.push(entity.clone());
-            created_metas.push((entity.name.clone(), EntityMeta {
-                id,
-                type_id,
-                obs_count,
-                out_deg: 0,
-                in_deg: 0,
-            }));
+            created_metas.push((
+                entity.name.clone(),
+                EntityMeta {
+                    id,
+                    type_id,
+                    obs_count,
+                    out_deg: 0,
+                    in_deg: 0,
+                },
+            ));
         }
 
         if total_entities > 0 {
@@ -946,9 +963,7 @@ impl GraphHandle {
             .map_err(sqlite_err)? as i64;
 
         // Phase 4: Batch FTS deletes.
-        let fts_values: Vec<String> = (0..n)
-            .map(|_| "('delete', ?, '')".to_string())
-            .collect();
+        let fts_values: Vec<String> = (0..n).map(|_| "('delete', ?, '')".to_string()).collect();
         let fts_sql = format!(
             "INSERT INTO name_fts(name_fts, rowid, name) VALUES {}",
             fts_values.join(", ")
@@ -986,13 +1001,17 @@ impl GraphHandle {
                 params.push(Box::new(*delta));
             }
             let param_refs: Vec<&dyn ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            conn.execute(&sql, param_refs.as_slice()).map_err(sqlite_err)?;
+            conn.execute(&sql, param_refs.as_slice())
+                .map_err(sqlite_err)?;
         }
 
         // Phase 6: Batch DELETE entities.
         conn.execute(
             &format!("DELETE FROM entity WHERE id IN ({})", obs_p.join(",")),
-            ids.iter().map(|id| id as &dyn ToSql).collect::<Vec<_>>().as_slice(),
+            ids.iter()
+                .map(|id| id as &dyn ToSql)
+                .collect::<Vec<_>>()
+                .as_slice(),
         )
         .map_err(sqlite_err)?;
 
@@ -1015,7 +1034,12 @@ impl GraphHandle {
     /// removed (file + symbols).
     #[cfg(feature = "code")]
     pub fn code_purge_file(&self, rel_path: &str) -> Result<usize> {
-        let defines = self.search_relations(Some(rel_path), None, Some("defines"), Some(crate::code::MAX_SYMBOLS_PER_FILE));
+        let defines = self.search_relations(
+            Some(rel_path),
+            None,
+            Some("defines"),
+            Some(crate::code::MAX_SYMBOLS_PER_FILE),
+        );
         let mut names: Vec<String> = defines.into_iter().map(|r| r.to).collect();
         names.push(rel_path.to_string());
         let n = names.len();
@@ -1147,15 +1171,18 @@ impl GraphHandle {
         }
 
         // Batch DELETE using VALUES subquery.
-        let mut sql = String::from(
-            "DELETE FROM relation WHERE (from_id, to_id, type_id) IN (",
-        );
+        let mut sql = String::from("DELETE FROM relation WHERE (from_id, to_id, type_id) IN (");
         for (i, _) in triples.iter().enumerate() {
             if i > 0 {
                 sql.push_str(", ");
             }
             let base = (i * 3) + 1;
-            sql.push_str(&format!("SELECT ?{b}, ?{bp1}, ?{bp2}", b = base, bp1 = base + 1, bp2 = base + 2));
+            sql.push_str(&format!(
+                "SELECT ?{b}, ?{bp1}, ?{bp2}",
+                b = base,
+                bp1 = base + 1,
+                bp2 = base + 2
+            ));
         }
         sql.push(')');
 
@@ -1166,7 +1193,9 @@ impl GraphHandle {
             param_values.push(Box::new(tp));
         }
         let param_refs: Vec<&dyn ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let total = conn.execute(&sql, param_refs.as_slice()).map_err(sqlite_err)?;
+        let total = conn
+            .execute(&sql, param_refs.as_slice())
+            .map_err(sqlite_err)?;
         if total == 0 {
             return Ok(());
         }
@@ -1205,7 +1234,8 @@ impl GraphHandle {
                 params.push(Box::new(*delta));
             }
             let param_refs: Vec<&dyn ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            conn.execute(&sql, param_refs.as_slice()).map_err(sqlite_err)?;
+            conn.execute(&sql, param_refs.as_slice())
+                .map_err(sqlite_err)?;
         }
 
         // Batch in_deg updates.
@@ -1232,7 +1262,8 @@ impl GraphHandle {
                 params.push(Box::new(*delta));
             }
             let param_refs: Vec<&dyn ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            conn.execute(&sql, param_refs.as_slice()).map_err(sqlite_err)?;
+            conn.execute(&sql, param_refs.as_slice())
+                .map_err(sqlite_err)?;
         }
 
         // Batch type_dict updates.
@@ -1259,7 +1290,8 @@ impl GraphHandle {
                 params.push(Box::new(*delta));
             }
             let param_refs: Vec<&dyn ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            conn.execute(&sql, param_refs.as_slice()).map_err(sqlite_err)?;
+            conn.execute(&sql, param_refs.as_slice())
+                .map_err(sqlite_err)?;
         }
 
         inc_graph_stat(&conn, "relations", -(total as i64))?;
@@ -1281,7 +1313,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Entity '{entity_name}' not found"
-                )))
+                )));
             }
         };
 
@@ -1334,7 +1366,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Entity '{entity_name}' not found"
-                )))
+                )));
             }
         };
 
@@ -1352,7 +1384,9 @@ impl GraphHandle {
             param_values.push(Box::new(obs.as_str()));
         }
         let param_refs: Vec<&dyn ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let removed = conn.execute(&sql, param_refs.as_slice()).map_err(sqlite_err)? as i64;
+        let removed = conn
+            .execute(&sql, param_refs.as_slice())
+            .map_err(sqlite_err)? as i64;
 
         if removed > 0 {
             conn.execute(
@@ -1362,7 +1396,9 @@ impl GraphHandle {
             .map_err(sqlite_err)?;
             inc_graph_stat(&conn, "observations", -removed)?;
 
-            self.meta_update(entity_name, |m| m.obs_count = m.obs_count.saturating_sub(removed));
+            self.meta_update(entity_name, |m| {
+                m.obs_count = m.obs_count.saturating_sub(removed)
+            });
         }
 
         Ok(())
@@ -1405,9 +1441,7 @@ impl GraphHandle {
                 if !to_add.is_empty() {
                     self.add_observations(&entity.name, &to_add)?;
                 }
-                let updated = self
-                    .get_entity(&entity.name)?
-                    .unwrap_or(entity.clone());
+                let updated = self.get_entity(&entity.name)?.unwrap_or(entity.clone());
                 results.push(updated);
             } else {
                 let c = self.create_entities(std::slice::from_ref(entity))?;
@@ -1426,7 +1460,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Source entity '{source}' not found"
-                )))
+                )));
             }
         };
         let (tgt_id, _, _, _) = match self.get_entity_id(&conn, target)? {
@@ -1434,7 +1468,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Target entity '{target}' not found"
-                )))
+                )));
             }
         };
 
@@ -1586,7 +1620,9 @@ impl GraphHandle {
         let mut results = Vec::new();
         let mut count: usize = 0;
         for eid in candidates {
-            let Some(entity) = by_id.remove(&eid) else { continue };
+            let Some(entity) = by_id.remove(&eid) else {
+                continue;
+            };
             if let Some(ft) = filter_type
                 && !ft.is_empty()
                 && entity.entity_type != ft
@@ -1636,7 +1672,9 @@ impl GraphHandle {
         let mut returned: usize = 0;
         let mut has_more = false;
         for eid in candidates {
-            let Some((name, etype, oc)) = by_id.get(&eid) else { continue };
+            let Some((name, etype, oc)) = by_id.get(&eid) else {
+                continue;
+            };
             if let Some(f) = ft
                 && etype != f
             {
@@ -1814,7 +1852,13 @@ impl GraphHandle {
                     |row| row.get::<_, i64>(0),
                 )
                 .map(Some)
-                .or_else(|e| if is_not_found(&e) { Ok(None) } else { Err(sqlite_err(e)) })
+                .or_else(|e| {
+                    if is_not_found(&e) {
+                        Ok(None)
+                    } else {
+                        Err(sqlite_err(e))
+                    }
+                })
             {
                 entity_ids.push(id);
             }
@@ -1864,7 +1908,11 @@ impl GraphHandle {
             let all_params: Vec<&dyn rusqlite::types::ToSql> = entity_ids
                 .iter()
                 .map(|id| id as &dyn rusqlite::types::ToSql)
-                .chain(entity_ids.iter().map(|id| id as &dyn rusqlite::types::ToSql))
+                .chain(
+                    entity_ids
+                        .iter()
+                        .map(|id| id as &dyn rusqlite::types::ToSql),
+                )
                 .collect();
             let mut stmt = conn.prepare(&sql).unwrap();
             stmt.query_row(all_params.as_slice(), |row| row.get::<_, String>(0))
@@ -1904,7 +1952,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Entity '{name}' not found"
-                )))
+                )));
             }
         };
         Ok(match direction {
@@ -1963,13 +2011,18 @@ impl GraphHandle {
                      JOIN type_dict t ON t.id = r.type_id
                      WHERE r.from_id = ?1 AND r.to_id = ?2 AND r.type_id = ?3
                        AND e1.flags = 0 AND e2.flags = 0
-                     ORDER BY r.from_id, r.to_id"
-                )
-                    && let Ok(rows) = stmt.query_map(params![fid, tid, tpid], |row| {
-                        Ok(Relation { from: row.get(0)?, to: row.get(1)?, relation_type: row.get(2)? })
-                    }) {
-                        for row in rows.flatten() { results.push(row); }
+                     ORDER BY r.from_id, r.to_id",
+                ) && let Ok(rows) = stmt.query_map(params![fid, tid, tpid], |row| {
+                    Ok(Relation {
+                        from: row.get(0)?,
+                        to: row.get(1)?,
+                        relation_type: row.get(2)?,
+                    })
+                }) {
+                    for row in rows.flatten() {
+                        results.push(row);
                     }
+                }
             }
             (Some(fid), Some(tid), None) => {
                 if let Ok(mut stmt) = conn.prepare_cached(
@@ -1980,13 +2033,18 @@ impl GraphHandle {
                      JOIN type_dict t ON t.id = r.type_id
                      WHERE r.from_id = ?1 AND r.to_id = ?2
                        AND e1.flags = 0 AND e2.flags = 0
-                     ORDER BY r.from_id, r.to_id"
-                )
-                    && let Ok(rows) = stmt.query_map(params![fid, tid], |row| {
-                        Ok(Relation { from: row.get(0)?, to: row.get(1)?, relation_type: row.get(2)? })
-                    }) {
-                        for row in rows.flatten() { results.push(row); }
+                     ORDER BY r.from_id, r.to_id",
+                ) && let Ok(rows) = stmt.query_map(params![fid, tid], |row| {
+                    Ok(Relation {
+                        from: row.get(0)?,
+                        to: row.get(1)?,
+                        relation_type: row.get(2)?,
+                    })
+                }) {
+                    for row in rows.flatten() {
+                        results.push(row);
                     }
+                }
             }
             (Some(fid), None, Some(tpid)) => {
                 if let Ok(mut stmt) = conn.prepare_cached(
@@ -1997,13 +2055,18 @@ impl GraphHandle {
                      JOIN type_dict t ON t.id = r.type_id
                      WHERE r.from_id = ?1 AND r.type_id = ?2
                        AND e1.flags = 0 AND e2.flags = 0
-                     ORDER BY r.from_id, r.to_id"
-                )
-                    && let Ok(rows) = stmt.query_map(params![fid, tpid], |row| {
-                        Ok(Relation { from: row.get(0)?, to: row.get(1)?, relation_type: row.get(2)? })
-                    }) {
-                        for row in rows.flatten() { results.push(row); }
+                     ORDER BY r.from_id, r.to_id",
+                ) && let Ok(rows) = stmt.query_map(params![fid, tpid], |row| {
+                    Ok(Relation {
+                        from: row.get(0)?,
+                        to: row.get(1)?,
+                        relation_type: row.get(2)?,
+                    })
+                }) {
+                    for row in rows.flatten() {
+                        results.push(row);
                     }
+                }
             }
             (None, Some(tid), Some(tpid)) => {
                 if let Ok(mut stmt) = conn.prepare_cached(
@@ -2014,13 +2077,18 @@ impl GraphHandle {
                      JOIN type_dict t ON t.id = r.type_id
                      WHERE r.to_id = ?1 AND r.type_id = ?2
                        AND e1.flags = 0 AND e2.flags = 0
-                     ORDER BY r.from_id, r.to_id"
-                )
-                    && let Ok(rows) = stmt.query_map(params![tid, tpid], |row| {
-                        Ok(Relation { from: row.get(0)?, to: row.get(1)?, relation_type: row.get(2)? })
-                    }) {
-                        for row in rows.flatten() { results.push(row); }
+                     ORDER BY r.from_id, r.to_id",
+                ) && let Ok(rows) = stmt.query_map(params![tid, tpid], |row| {
+                    Ok(Relation {
+                        from: row.get(0)?,
+                        to: row.get(1)?,
+                        relation_type: row.get(2)?,
+                    })
+                }) {
+                    for row in rows.flatten() {
+                        results.push(row);
                     }
+                }
             }
             (Some(fid), None, None) => {
                 if let Ok(mut stmt) = conn.prepare_cached(
@@ -2031,13 +2099,18 @@ impl GraphHandle {
                      JOIN type_dict t ON t.id = r.type_id
                      WHERE r.from_id = ?1
                        AND e1.flags = 0 AND e2.flags = 0
-                     ORDER BY r.from_id, r.to_id"
-                )
-                    && let Ok(rows) = stmt.query_map(params![fid], |row| {
-                        Ok(Relation { from: row.get(0)?, to: row.get(1)?, relation_type: row.get(2)? })
-                    }) {
-                        for row in rows.flatten() { results.push(row); }
+                     ORDER BY r.from_id, r.to_id",
+                ) && let Ok(rows) = stmt.query_map(params![fid], |row| {
+                    Ok(Relation {
+                        from: row.get(0)?,
+                        to: row.get(1)?,
+                        relation_type: row.get(2)?,
+                    })
+                }) {
+                    for row in rows.flatten() {
+                        results.push(row);
                     }
+                }
             }
             (None, Some(tid), None) => {
                 if let Ok(mut stmt) = conn.prepare_cached(
@@ -2048,13 +2121,18 @@ impl GraphHandle {
                      JOIN type_dict t ON t.id = r.type_id
                      WHERE r.to_id = ?1
                        AND e1.flags = 0 AND e2.flags = 0
-                     ORDER BY r.from_id, r.to_id"
-                )
-                    && let Ok(rows) = stmt.query_map(params![tid], |row| {
-                        Ok(Relation { from: row.get(0)?, to: row.get(1)?, relation_type: row.get(2)? })
-                    }) {
-                        for row in rows.flatten() { results.push(row); }
+                     ORDER BY r.from_id, r.to_id",
+                ) && let Ok(rows) = stmt.query_map(params![tid], |row| {
+                    Ok(Relation {
+                        from: row.get(0)?,
+                        to: row.get(1)?,
+                        relation_type: row.get(2)?,
+                    })
+                }) {
+                    for row in rows.flatten() {
+                        results.push(row);
                     }
+                }
             }
             (None, None, Some(tpid)) => {
                 if let Ok(mut stmt) = conn.prepare_cached(
@@ -2065,13 +2143,18 @@ impl GraphHandle {
                      JOIN type_dict t ON t.id = r.type_id
                      WHERE r.type_id = ?1
                        AND e1.flags = 0 AND e2.flags = 0
-                     ORDER BY r.from_id, r.to_id"
-                )
-                    && let Ok(rows) = stmt.query_map(params![tpid], |row| {
-                        Ok(Relation { from: row.get(0)?, to: row.get(1)?, relation_type: row.get(2)? })
-                    }) {
-                        for row in rows.flatten() { results.push(row); }
+                     ORDER BY r.from_id, r.to_id",
+                ) && let Ok(rows) = stmt.query_map(params![tpid], |row| {
+                    Ok(Relation {
+                        from: row.get(0)?,
+                        to: row.get(1)?,
+                        relation_type: row.get(2)?,
+                    })
+                }) {
+                    for row in rows.flatten() {
+                        results.push(row);
                     }
+                }
             }
             (None, None, None) => {
                 if let Ok(mut stmt) = conn.prepare_cached(
@@ -2081,13 +2164,18 @@ impl GraphHandle {
                      JOIN entity e2 ON e2.id = r.to_id
                      JOIN type_dict t ON t.id = r.type_id
                      WHERE e1.flags = 0 AND e2.flags = 0
-                     ORDER BY r.from_id, r.to_id"
-                )
-                    && let Ok(rows) = stmt.query_map([], |row| {
-                        Ok(Relation { from: row.get(0)?, to: row.get(1)?, relation_type: row.get(2)? })
-                    }) {
-                        for row in rows.flatten() { results.push(row); }
+                     ORDER BY r.from_id, r.to_id",
+                ) && let Ok(rows) = stmt.query_map([], |row| {
+                    Ok(Relation {
+                        from: row.get(0)?,
+                        to: row.get(1)?,
+                        relation_type: row.get(2)?,
+                    })
+                }) {
+                    for row in rows.flatten() {
+                        results.push(row);
                     }
+                }
             }
         }
         if let Some(lim) = limit {
@@ -2103,7 +2191,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Source entity '{from}' not found"
-                )))
+                )));
             }
         };
         let (to_id, _, _, _) = match self.get_entity_id(&conn, to)? {
@@ -2111,7 +2199,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Target entity '{to}' not found"
-                )))
+                )));
             }
         };
 
@@ -2133,25 +2221,27 @@ impl GraphHandle {
             // Fetch out-neighbors.
             if let Ok(mut stmt) =
                 conn.prepare_cached("SELECT to_id FROM relation WHERE from_id = ?1")
-                && let Ok(rows) = stmt.query_map(params![cur], |row| row.get::<_, i64>(0)) {
-                    for row in rows.flatten() {
-                        if visited.insert(row) {
-                            parent.insert(row, cur);
-                            queue.push_back(row);
-                        }
+                && let Ok(rows) = stmt.query_map(params![cur], |row| row.get::<_, i64>(0))
+            {
+                for row in rows.flatten() {
+                    if visited.insert(row) {
+                        parent.insert(row, cur);
+                        queue.push_back(row);
                     }
                 }
+            }
             // Also check in-neighbors (undirected traversal).
             if let Ok(mut stmt) =
                 conn.prepare_cached("SELECT from_id FROM relation WHERE to_id = ?1")
-                && let Ok(rows) = stmt.query_map(params![cur], |row| row.get::<_, i64>(0)) {
-                    for row in rows.flatten() {
-                        if visited.insert(row) {
-                            parent.insert(row, cur);
-                            queue.push_back(row);
-                        }
+                && let Ok(rows) = stmt.query_map(params![cur], |row| row.get::<_, i64>(0))
+            {
+                for row in rows.flatten() {
+                    if visited.insert(row) {
+                        parent.insert(row, cur);
+                        queue.push_back(row);
                     }
                 }
+            }
         }
 
         if !parent.contains_key(&to_id) && to_id != from_id {
@@ -2176,23 +2266,26 @@ impl GraphHandle {
             placeholders.join(",")
         );
         let name_map: FxHashMap<i64, String> = if let Ok(mut stmt) = conn.prepare(&sql)
-            && let Ok(rows) = stmt.query_map(
-                rusqlite::params_from_iter(&path),
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            ) {
+            && let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(&path), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            }) {
             rows.flatten().collect()
         } else {
             FxHashMap::default()
         };
 
-        let name_path: Vec<String> = path.iter().filter_map(|id| name_map.get(id).cloned()).collect();
+        let name_path: Vec<String> = path
+            .iter()
+            .filter_map(|id| name_map.get(id).cloned())
+            .collect();
 
         Ok(Some(name_path))
     }
 
     pub fn compact(&self) -> Result<()> {
         let conn = self.writer.lock();
-        conn.execute_batch("PRAGMA incremental_vacuum;").map_err(sqlite_err)?;
+        conn.execute_batch("PRAGMA incremental_vacuum;")
+            .map_err(sqlite_err)?;
         Ok(())
     }
 
@@ -2206,11 +2299,7 @@ impl GraphHandle {
         self._traverse(name, direction, rtype, depth, true)
     }
 
-    pub fn extract_subgraph(
-        &self,
-        names: &[String],
-        depth: u32,
-    ) -> Result<String> {
+    pub fn extract_subgraph(&self, names: &[String], depth: u32) -> Result<String> {
         if names.is_empty() {
             return Ok(r#"{"entities":[],"relations":[]}"#.to_string());
         }
@@ -2230,7 +2319,13 @@ impl GraphHandle {
                     |row| row.get::<_, i64>(0),
                 )
                 .map(Some)
-                .or_else(|e| if is_not_found(&e) { Ok(None) } else { Err(sqlite_err(e)) })
+                .or_else(|e| {
+                    if is_not_found(&e) {
+                        Ok(None)
+                    } else {
+                        Err(sqlite_err(e))
+                    }
+                })
             {
                 all_entity_ids.insert(id);
                 frontier.insert(id);
@@ -2250,16 +2345,15 @@ impl GraphHandle {
                 let in_clause = placeholders.join(",");
 
                 // Forward: from_id IN chunk.
-                if let Ok(mut stmt) = conn.prepare(
-                    &format!(
-                        "SELECT from_id, to_id, type_id FROM relation WHERE from_id IN ({in_clause})",
-                    )
-                )
-                    && let Ok(rows) = stmt.query_map(
-                        rusqlite::params_from_iter(chunk),
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
-                    )
-                {
+                if let Ok(mut stmt) = conn.prepare(&format!(
+                    "SELECT from_id, to_id, type_id FROM relation WHERE from_id IN ({in_clause})",
+                )) && let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(chunk), |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                }) {
                     for row in rows.flatten() {
                         let (from_id, to_id, type_id) = row;
                         all_rel_pairs.insert((from_id, to_id, type_id));
@@ -2270,16 +2364,15 @@ impl GraphHandle {
                 }
 
                 // Backward: to_id IN chunk.
-                if let Ok(mut stmt) = conn.prepare(
-                    &format!(
-                        "SELECT from_id, to_id, type_id FROM relation WHERE to_id IN ({in_clause})",
-                    )
-                )
-                    && let Ok(rows) = stmt.query_map(
-                        rusqlite::params_from_iter(chunk),
-                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
-                    )
-                {
+                if let Ok(mut stmt) = conn.prepare(&format!(
+                    "SELECT from_id, to_id, type_id FROM relation WHERE to_id IN ({in_clause})",
+                )) && let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(chunk), |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                }) {
                     for row in rows.flatten() {
                         let (from_id, to_id, type_id) = row;
                         all_rel_pairs.insert((from_id, to_id, type_id));
@@ -2400,7 +2493,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Source entity '{from}' not found"
-                )))
+                )));
             }
         };
         let (to_id, _, _, _) = match self.get_entity_id(&conn, to)? {
@@ -2408,7 +2501,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Target entity '{to}' not found"
-                )))
+                )));
             }
         };
 
@@ -2434,52 +2527,54 @@ impl GraphHandle {
             // Out-neighbors.
             if let Ok(mut stmt) =
                 conn.prepare_cached("SELECT to_id FROM relation WHERE from_id = ?1")
-                && let Ok(rows) = stmt.query_map(params![cur], |row| row.get::<_, i64>(0)) {
-                    for next_id in rows.flatten() {
-                        if next_id == to_id {
-                            let mut full_path = path.clone();
-                            full_path.push(next_id);
-                            all_paths.push(full_path);
-                            if all_paths.len() >= max_paths {
-                                break;
-                            }
-                        } else if !path.contains(&next_id) && path.len() < max_depth {
-                            if queue.len() >= MAX_QUEUE_SIZE {
-                                return Err(MCSError::InvalidParams(
+                && let Ok(rows) = stmt.query_map(params![cur], |row| row.get::<_, i64>(0))
+            {
+                for next_id in rows.flatten() {
+                    if next_id == to_id {
+                        let mut full_path = path.clone();
+                        full_path.push(next_id);
+                        all_paths.push(full_path);
+                        if all_paths.len() >= max_paths {
+                            break;
+                        }
+                    } else if !path.contains(&next_id) && path.len() < max_depth {
+                        if queue.len() >= MAX_QUEUE_SIZE {
+                            return Err(MCSError::InvalidParams(
                                     "Path exploration queue exceeded limit (too many paths on highly connected graph)".to_string()
                                 ));
-                            }
-                            let mut new_path = path.clone();
-                            new_path.push(next_id);
-                            queue.push_back((next_id, new_path));
                         }
+                        let mut new_path = path.clone();
+                        new_path.push(next_id);
+                        queue.push_back((next_id, new_path));
                     }
                 }
+            }
 
             // In-neighbors (undirected).
             if let Ok(mut stmt) =
                 conn.prepare_cached("SELECT from_id FROM relation WHERE to_id = ?1")
-                && let Ok(rows) = stmt.query_map(params![cur], |row| row.get::<_, i64>(0)) {
-                    for next_id in rows.flatten() {
-                        if next_id == to_id {
-                            let mut full_path = path.clone();
-                            full_path.push(next_id);
-                            all_paths.push(full_path);
-                            if all_paths.len() >= max_paths {
-                                break;
-                            }
-                        } else if !path.contains(&next_id) && path.len() < max_depth {
-                            if queue.len() >= MAX_QUEUE_SIZE {
-                                return Err(MCSError::InvalidParams(
+                && let Ok(rows) = stmt.query_map(params![cur], |row| row.get::<_, i64>(0))
+            {
+                for next_id in rows.flatten() {
+                    if next_id == to_id {
+                        let mut full_path = path.clone();
+                        full_path.push(next_id);
+                        all_paths.push(full_path);
+                        if all_paths.len() >= max_paths {
+                            break;
+                        }
+                    } else if !path.contains(&next_id) && path.len() < max_depth {
+                        if queue.len() >= MAX_QUEUE_SIZE {
+                            return Err(MCSError::InvalidParams(
                                     "Path exploration queue exceeded limit (too many paths on highly connected graph)".to_string()
                                 ));
-                            }
-                            let mut new_path = path.clone();
-                            new_path.push(next_id);
-                            queue.push_back((next_id, new_path));
                         }
+                        let mut new_path = path.clone();
+                        new_path.push(next_id);
+                        queue.push_back((next_id, new_path));
                     }
                 }
+            }
         }
 
         // Convert ids to names — one batch query instead of N lookups per path.
@@ -2494,10 +2589,10 @@ impl GraphHandle {
                 placeholders.join(",")
             );
             if let Ok(mut stmt) = conn.prepare(&sql)
-                && let Ok(rows) = stmt.query_map(
-                    rusqlite::params_from_iter(&id_list),
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-                ) {
+                && let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(&id_list), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+            {
                 rows.flatten().collect()
             } else {
                 FxHashMap::default()
@@ -2506,7 +2601,10 @@ impl GraphHandle {
 
         let mut named_paths: Vec<Vec<String>> = Vec::with_capacity(all_paths.len());
         for path_ids in all_paths {
-            let named: Vec<String> = path_ids.iter().filter_map(|id| name_map.get(id).cloned()).collect();
+            let named: Vec<String> = path_ids
+                .iter()
+                .filter_map(|id| name_map.get(id).cloned())
+                .collect();
             named_paths.push(named);
         }
 
@@ -2627,7 +2725,7 @@ impl GraphHandle {
             None => {
                 return Err(MCSError::InvalidParams(format!(
                     "Entity '{name}' not found"
-                )))
+                )));
             }
         };
 
@@ -2648,13 +2746,15 @@ impl GraphHandle {
 
         // Pre-compile all four possible queries outside the loop.
         let mut q_out_t = conn.prepare_cached(
-            "SELECT to_id, type_id FROM relation WHERE from_id = ?1 AND type_id = ?2");
-        let mut q_out   = conn.prepare_cached(
-            "SELECT to_id, type_id FROM relation WHERE from_id = ?1");
-        let mut q_in_t  = conn.prepare_cached(
-            "SELECT from_id, type_id FROM relation WHERE to_id = ?1 AND type_id = ?2");
-        let mut q_in    = conn.prepare_cached(
-            "SELECT from_id, type_id FROM relation WHERE to_id = ?1");
+            "SELECT to_id, type_id FROM relation WHERE from_id = ?1 AND type_id = ?2",
+        );
+        let mut q_out =
+            conn.prepare_cached("SELECT to_id, type_id FROM relation WHERE from_id = ?1");
+        let mut q_in_t = conn.prepare_cached(
+            "SELECT from_id, type_id FROM relation WHERE to_id = ?1 AND type_id = ?2",
+        );
+        let mut q_in =
+            conn.prepare_cached("SELECT from_id, type_id FROM relation WHERE to_id = ?1");
 
         let mut cur_depth = 0u32;
         while cur_depth < depth && !frontier.is_empty() {
@@ -2666,23 +2766,29 @@ impl GraphHandle {
                         if let Ok(ref mut stmt) = q_out_t
                             && let Ok(rows) = stmt.query_map(params![fid, tid], |row| {
                                 Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                            }) {
-                                for row in rows.flatten() {
-                                    let (to_id, t_id) = row;
-                                    all_rels.insert((fid, to_id, t_id));
-                                    if all_ids.insert(to_id) { next_frontier.insert(to_id); }
-                                }
-                            }
-                    } else if let Ok(ref mut stmt) = q_out
-                        && let Ok(rows) = stmt.query_map(params![fid], |row| {
-                            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                        }) {
+                            })
+                        {
                             for row in rows.flatten() {
                                 let (to_id, t_id) = row;
                                 all_rels.insert((fid, to_id, t_id));
-                                if all_ids.insert(to_id) { next_frontier.insert(to_id); }
+                                if all_ids.insert(to_id) {
+                                    next_frontier.insert(to_id);
+                                }
                             }
                         }
+                    } else if let Ok(ref mut stmt) = q_out
+                        && let Ok(rows) = stmt.query_map(params![fid], |row| {
+                            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                        })
+                    {
+                        for row in rows.flatten() {
+                            let (to_id, t_id) = row;
+                            all_rels.insert((fid, to_id, t_id));
+                            if all_ids.insert(to_id) {
+                                next_frontier.insert(to_id);
+                            }
+                        }
+                    }
                 }
 
                 if direction == Direction::Incoming || direction == Direction::Both {
@@ -2690,23 +2796,29 @@ impl GraphHandle {
                         if let Ok(ref mut stmt) = q_in_t
                             && let Ok(rows) = stmt.query_map(params![fid, tid], |row| {
                                 Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                            }) {
-                                for row in rows.flatten() {
-                                    let (from_id, t_id) = row;
-                                    all_rels.insert((from_id, fid, t_id));
-                                    if all_ids.insert(from_id) { next_frontier.insert(from_id); }
-                                }
-                            }
-                    } else if let Ok(ref mut stmt) = q_in
-                        && let Ok(rows) = stmt.query_map(params![fid], |row| {
-                            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                        }) {
+                            })
+                        {
                             for row in rows.flatten() {
                                 let (from_id, t_id) = row;
                                 all_rels.insert((from_id, fid, t_id));
-                                if all_ids.insert(from_id) { next_frontier.insert(from_id); }
+                                if all_ids.insert(from_id) {
+                                    next_frontier.insert(from_id);
+                                }
                             }
                         }
+                    } else if let Ok(ref mut stmt) = q_in
+                        && let Ok(rows) = stmt.query_map(params![fid], |row| {
+                            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                        })
+                    {
+                        for row in rows.flatten() {
+                            let (from_id, t_id) = row;
+                            all_rels.insert((from_id, fid, t_id));
+                            if all_ids.insert(from_id) {
+                                next_frontier.insert(from_id);
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2812,7 +2924,14 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("kg_test_{}_{}.db", std::process::id(), n));
         cleanup_db(&path);
-        let kg = GraphHandle::new(&path, Durability::Async, SqliteTuning::default(), NonZeroUsize::new(10000).unwrap(), 4).expect("create KG");
+        let kg = GraphHandle::new(
+            &path,
+            Durability::Async,
+            SqliteTuning::default(),
+            NonZeroUsize::new(10000).unwrap(),
+            4,
+        )
+        .expect("create KG");
         TestKg(kg, path)
     }
 
@@ -2863,7 +2982,9 @@ mod tests {
         }])
         .unwrap();
 
-        let added = kg.add_observations("obs_test", &["b".into(), "c".into()]).unwrap();
+        let added = kg
+            .add_observations("obs_test", &["b".into(), "c".into()])
+            .unwrap();
         assert_eq!(added.len(), 2);
 
         let ent = kg.get_entity("obs_test").unwrap().unwrap();
@@ -2932,15 +3053,37 @@ mod tests {
     fn test_find_path() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "A".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "B".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "C".into(), entity_type: "n".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "A".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "C".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         kg.create_relations(&[
-            Relation { from: "A".into(), to: "B".into(), relation_type: "e".into() },
-            Relation { from: "B".into(), to: "C".into(), relation_type: "e".into() },
-        ]).unwrap();
+            Relation {
+                from: "A".into(),
+                to: "B".into(),
+                relation_type: "e".into(),
+            },
+            Relation {
+                from: "B".into(),
+                to: "C".into(),
+                relation_type: "e".into(),
+            },
+        ])
+        .unwrap();
 
         let path = kg.find_path("A", "C").unwrap().unwrap();
         assert_eq!(path, vec!["A", "B", "C"]);
@@ -2950,15 +3093,37 @@ mod tests {
     fn test_degree() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "A".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "B".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "C".into(), entity_type: "n".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "A".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "C".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         kg.create_relations(&[
-            Relation { from: "A".into(), to: "B".into(), relation_type: "e".into() },
-            Relation { from: "A".into(), to: "C".into(), relation_type: "e".into() },
-        ]).unwrap();
+            Relation {
+                from: "A".into(),
+                to: "B".into(),
+                relation_type: "e".into(),
+            },
+            Relation {
+                from: "A".into(),
+                to: "C".into(),
+                relation_type: "e".into(),
+            },
+        ])
+        .unwrap();
 
         assert_eq!(kg.degree("A", Direction::Outgoing).unwrap(), 2);
         assert_eq!(kg.degree("A", Direction::Incoming).unwrap(), 0);
@@ -2969,13 +3134,25 @@ mod tests {
     fn test_neighbors() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "A".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "B".into(), entity_type: "n".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "A".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         kg.create_relations(&[Relation {
-            from: "A".into(), to: "B".into(), relation_type: "e".into(),
-        }]).unwrap();
+            from: "A".into(),
+            to: "B".into(),
+            relation_type: "e".into(),
+        }])
+        .unwrap();
 
         let result = kg.neighbors("A", Direction::Outgoing, None, 1).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
@@ -2987,13 +3164,25 @@ mod tests {
     fn test_open_nodes() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "X".into(), entity_type: "n".into(), observations: vec!["obs_x".into()] },
-            Entity { name: "Y".into(), entity_type: "n".into(), observations: vec!["obs_y".into()] },
-        ]).unwrap();
+            Entity {
+                name: "X".into(),
+                entity_type: "n".into(),
+                observations: vec!["obs_x".into()],
+            },
+            Entity {
+                name: "Y".into(),
+                entity_type: "n".into(),
+                observations: vec!["obs_y".into()],
+            },
+        ])
+        .unwrap();
 
         kg.create_relations(&[Relation {
-            from: "X".into(), to: "Y".into(), relation_type: "e".into(),
-        }]).unwrap();
+            from: "X".into(),
+            to: "Y".into(),
+            relation_type: "e".into(),
+        }])
+        .unwrap();
 
         let result = kg.open_nodes(&["X".into()]);
         let v: Value = serde_json::from_str(&result).unwrap();
@@ -3005,10 +3194,15 @@ mod tests {
     fn test_entities_exist() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "exists".into(), entity_type: "t".into(), observations: vec![],
-        }]).unwrap();
+            name: "exists".into(),
+            entity_type: "t".into(),
+            observations: vec![],
+        }])
+        .unwrap();
 
-        let res = kg.entities_exist(&["exists".into(), "missing".into()]).unwrap();
+        let res = kg
+            .entities_exist(&["exists".into(), "missing".into()])
+            .unwrap();
         assert_eq!(res, vec![true, false]);
     }
 
@@ -3016,8 +3210,11 @@ mod tests {
     fn test_describe_entity() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "desc".into(), entity_type: "t".into(), observations: vec!["o".into()],
-        }]).unwrap();
+            name: "desc".into(),
+            entity_type: "t".into(),
+            observations: vec!["o".into()],
+        }])
+        .unwrap();
 
         let entity = kg.describe_entity("desc").unwrap();
         assert_eq!(entity.name, "desc");
@@ -3027,10 +3224,23 @@ mod tests {
     fn test_entity_type_counts() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "a".into(), entity_type: "person".into(), observations: vec![] },
-            Entity { name: "b".into(), entity_type: "person".into(), observations: vec![] },
-            Entity { name: "c".into(), entity_type: "place".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "a".into(),
+                entity_type: "person".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "b".into(),
+                entity_type: "person".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "c".into(),
+                entity_type: "place".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         let counts = kg.entity_type_counts();
         let map: FxHashMap<_, _> = counts.into_iter().collect();
@@ -3042,15 +3252,37 @@ mod tests {
     fn test_relation_type_counts() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "a".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "b".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "c".into(), entity_type: "n".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "a".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "b".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "c".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         kg.create_relations(&[
-            Relation { from: "a".into(), to: "b".into(), relation_type: "knows".into() },
-            Relation { from: "a".into(), to: "c".into(), relation_type: "knows".into() },
-        ]).unwrap();
+            Relation {
+                from: "a".into(),
+                to: "b".into(),
+                relation_type: "knows".into(),
+            },
+            Relation {
+                from: "a".into(),
+                to: "c".into(),
+                relation_type: "knows".into(),
+            },
+        ])
+        .unwrap();
 
         let counts = kg.relation_type_counts();
         let map: FxHashMap<_, _> = counts.into_iter().collect();
@@ -3061,13 +3293,19 @@ mod tests {
     fn test_upsert_entities() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "u".into(), entity_type: "old".into(), observations: vec!["existing".into()],
-        }]).unwrap();
+            name: "u".into(),
+            entity_type: "old".into(),
+            observations: vec!["existing".into()],
+        }])
+        .unwrap();
 
         // Upsert with new type and additional observation.
         kg.upsert_entities(&[Entity {
-            name: "u".into(), entity_type: "new".into(), observations: vec!["existing".into(), "added".into()],
-        }]).unwrap();
+            name: "u".into(),
+            entity_type: "new".into(),
+            observations: vec!["existing".into(), "added".into()],
+        }])
+        .unwrap();
 
         let ent = kg.get_entity("u").unwrap().unwrap();
         assert_eq!(ent.entity_type, "new");
@@ -3079,13 +3317,25 @@ mod tests {
     fn test_merge_entities() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "source".into(), entity_type: "t".into(), observations: vec!["src_obs".into()] },
-            Entity { name: "target".into(), entity_type: "t".into(), observations: vec!["tgt_obs".into()] },
-        ]).unwrap();
+            Entity {
+                name: "source".into(),
+                entity_type: "t".into(),
+                observations: vec!["src_obs".into()],
+            },
+            Entity {
+                name: "target".into(),
+                entity_type: "t".into(),
+                observations: vec!["tgt_obs".into()],
+            },
+        ])
+        .unwrap();
 
         kg.create_relations(&[Relation {
-            from: "source".into(), to: "target".into(), relation_type: "e".into(),
-        }]).unwrap();
+            from: "source".into(),
+            to: "target".into(),
+            relation_type: "e".into(),
+        }])
+        .unwrap();
 
         let merged = kg.merge_entities("source", "target").unwrap();
         assert_eq!(merged.name, "target");
@@ -3096,16 +3346,42 @@ mod tests {
     fn test_find_all_paths() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "A".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "B".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "C".into(), entity_type: "n".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "A".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "C".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         kg.create_relations(&[
-            Relation { from: "A".into(), to: "B".into(), relation_type: "e".into() },
-            Relation { from: "B".into(), to: "C".into(), relation_type: "e".into() },
-            Relation { from: "A".into(), to: "C".into(), relation_type: "e".into() },
-        ]).unwrap();
+            Relation {
+                from: "A".into(),
+                to: "B".into(),
+                relation_type: "e".into(),
+            },
+            Relation {
+                from: "B".into(),
+                to: "C".into(),
+                relation_type: "e".into(),
+            },
+            Relation {
+                from: "A".into(),
+                to: "C".into(),
+                relation_type: "e".into(),
+            },
+        ])
+        .unwrap();
 
         let paths = kg.find_all_paths("A", "C", 5, 10).unwrap();
         assert!(paths.len() >= 2);
@@ -3115,9 +3391,18 @@ mod tests {
     fn test_batch_get_entities() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "a".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "b".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "a".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "b".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         let results = kg.batch_get_entities(&["a".into(), "missing".into(), "b".into()]);
         assert_eq!(results.len(), 3);
@@ -3130,8 +3415,11 @@ mod tests {
     fn test_export_graph() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "exp".into(), entity_type: "t".into(), observations: vec!["o".into()],
-        }]).unwrap();
+            name: "exp".into(),
+            entity_type: "t".into(),
+            observations: vec!["o".into()],
+        }])
+        .unwrap();
 
         let exported = kg.export("json", i64::MAX).unwrap();
         assert!(exported.contains("exp"));
@@ -3145,8 +3433,11 @@ mod tests {
         assert_eq!(kg.get_relation_count().unwrap(), 0);
 
         kg.create_entities(&[Entity {
-            name: "s".into(), entity_type: "t".into(), observations: vec![],
-        }]).unwrap();
+            name: "s".into(),
+            entity_type: "t".into(),
+            observations: vec![],
+        }])
+        .unwrap();
 
         assert_eq!(kg.get_entity_count().unwrap(), 1);
     }
@@ -3155,9 +3446,18 @@ mod tests {
     fn test_read_graph_filtered() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "p1".into(), entity_type: "person".into(), observations: vec![] },
-            Entity { name: "p2".into(), entity_type: "place".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "p1".into(),
+                entity_type: "person".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "p2".into(),
+                entity_type: "place".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         let out = kg.read_graph_filtered(Some("person"), 0, 10).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -3169,8 +3469,11 @@ mod tests {
     fn test_wipe() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "w".into(), entity_type: "t".into(), observations: vec!["o".into()],
-        }]).unwrap();
+            name: "w".into(),
+            entity_type: "t".into(),
+            observations: vec!["o".into()],
+        }])
+        .unwrap();
         assert_eq!(kg.get_entity_count().unwrap(), 1);
 
         kg.wipe().unwrap();
@@ -3199,12 +3502,13 @@ mod tests {
     #[test]
     fn test_create_entities_skip_empty_name() {
         let kg = new_kg();
-        let created = kg.create_entities(&[Entity {
-            name: "".into(),
-            entity_type: "t".into(),
-            observations: vec![],
-        }])
-        .unwrap();
+        let created = kg
+            .create_entities(&[Entity {
+                name: "".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            }])
+            .unwrap();
         assert!(created.is_empty());
         assert_eq!(kg.get_entity_count().unwrap(), 0);
     }
@@ -3227,16 +3531,36 @@ mod tests {
     #[test]
     fn test_create_entities_partial_duplicates() {
         let kg = new_kg();
-        let created = kg.create_entities(&[
-            Entity { name: "a".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "b".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
+        let created = kg
+            .create_entities(&[
+                Entity {
+                    name: "a".into(),
+                    entity_type: "t".into(),
+                    observations: vec![],
+                },
+                Entity {
+                    name: "b".into(),
+                    entity_type: "t".into(),
+                    observations: vec![],
+                },
+            ])
+            .unwrap();
         assert_eq!(created.len(), 2);
 
-        let second = kg.create_entities(&[
-            Entity { name: "b".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "c".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
+        let second = kg
+            .create_entities(&[
+                Entity {
+                    name: "b".into(),
+                    entity_type: "t".into(),
+                    observations: vec![],
+                },
+                Entity {
+                    name: "c".into(),
+                    entity_type: "t".into(),
+                    observations: vec![],
+                },
+            ])
+            .unwrap();
         assert_eq!(second.len(), 1); // only c created
         assert_eq!(second[0].name, "c");
         assert_eq!(kg.get_entity_count().unwrap(), 3);
@@ -3245,11 +3569,25 @@ mod tests {
     #[test]
     fn test_create_entities_mixed_empty_and_valid() {
         let kg = new_kg();
-        let created = kg.create_entities(&[
-            Entity { name: "".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "valid".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
+        let created = kg
+            .create_entities(&[
+                Entity {
+                    name: "".into(),
+                    entity_type: "t".into(),
+                    observations: vec![],
+                },
+                Entity {
+                    name: "valid".into(),
+                    entity_type: "t".into(),
+                    observations: vec![],
+                },
+                Entity {
+                    name: "".into(),
+                    entity_type: "t".into(),
+                    observations: vec![],
+                },
+            ])
+            .unwrap();
         assert_eq!(created.len(), 1);
         assert_eq!(created[0].name, "valid");
         assert_eq!(kg.get_entity_count().unwrap(), 1);
@@ -3258,10 +3596,20 @@ mod tests {
     #[test]
     fn test_create_entities_same_name_in_batch() {
         let kg = new_kg();
-        let created = kg.create_entities(&[
-            Entity { name: "dup_in_batch".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "dup_in_batch".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
+        let created = kg
+            .create_entities(&[
+                Entity {
+                    name: "dup_in_batch".into(),
+                    entity_type: "t".into(),
+                    observations: vec![],
+                },
+                Entity {
+                    name: "dup_in_batch".into(),
+                    entity_type: "t".into(),
+                    observations: vec![],
+                },
+            ])
+            .unwrap();
         assert_eq!(created.len(), 1);
         assert_eq!(kg.get_entity_count().unwrap(), 1);
     }
@@ -3279,12 +3627,19 @@ mod tests {
     fn test_create_relations_nonexistent_from() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "B".into(), entity_type: "t".into(), observations: vec![],
-        }]).unwrap();
+            name: "B".into(),
+            entity_type: "t".into(),
+            observations: vec![],
+        }])
+        .unwrap();
 
-        let rels = kg.create_relations(&[Relation {
-            from: "A".into(), to: "B".into(), relation_type: "e".into(),
-        }]).unwrap();
+        let rels = kg
+            .create_relations(&[Relation {
+                from: "A".into(),
+                to: "B".into(),
+                relation_type: "e".into(),
+            }])
+            .unwrap();
         assert!(rels.is_empty());
         assert_eq!(kg.get_relation_count().unwrap(), 0);
     }
@@ -3293,12 +3648,19 @@ mod tests {
     fn test_create_relations_nonexistent_to() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "A".into(), entity_type: "t".into(), observations: vec![],
-        }]).unwrap();
+            name: "A".into(),
+            entity_type: "t".into(),
+            observations: vec![],
+        }])
+        .unwrap();
 
-        let rels = kg.create_relations(&[Relation {
-            from: "A".into(), to: "B".into(), relation_type: "e".into(),
-        }]).unwrap();
+        let rels = kg
+            .create_relations(&[Relation {
+                from: "A".into(),
+                to: "B".into(),
+                relation_type: "e".into(),
+            }])
+            .unwrap();
         assert!(rels.is_empty());
         assert_eq!(kg.get_relation_count().unwrap(), 0);
     }
@@ -3306,9 +3668,13 @@ mod tests {
     #[test]
     fn test_create_relations_both_nonexistent() {
         let kg = new_kg();
-        let rels = kg.create_relations(&[Relation {
-            from: "A".into(), to: "B".into(), relation_type: "e".into(),
-        }]).unwrap();
+        let rels = kg
+            .create_relations(&[Relation {
+                from: "A".into(),
+                to: "B".into(),
+                relation_type: "e".into(),
+            }])
+            .unwrap();
         assert!(rels.is_empty());
     }
 
@@ -3316,12 +3682,19 @@ mod tests {
     fn test_create_relations_self_loop() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "self".into(), entity_type: "t".into(), observations: vec![],
-        }]).unwrap();
+            name: "self".into(),
+            entity_type: "t".into(),
+            observations: vec![],
+        }])
+        .unwrap();
 
-        let rels = kg.create_relations(&[Relation {
-            from: "self".into(), to: "self".into(), relation_type: "loop".into(),
-        }]).unwrap();
+        let rels = kg
+            .create_relations(&[Relation {
+                from: "self".into(),
+                to: "self".into(),
+                relation_type: "loop".into(),
+            }])
+            .unwrap();
         assert_eq!(rels.len(), 1);
         assert_eq!(kg.get_relation_count().unwrap(), 1);
         assert_eq!(kg.degree("self", Direction::Outgoing).unwrap(), 1);
@@ -3332,12 +3705,23 @@ mod tests {
     fn test_create_relations_duplicate() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "A".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "B".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "A".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         let r = Relation {
-            from: "A".into(), to: "B".into(), relation_type: "e".into(),
+            from: "A".into(),
+            to: "B".into(),
+            relation_type: "e".into(),
         };
         let first = kg.create_relations(std::slice::from_ref(&r)).unwrap();
         assert_eq!(first.len(), 1);
@@ -3351,13 +3735,26 @@ mod tests {
     fn test_create_relations_new_type_auto_created() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "A".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "B".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "A".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
-        let rels = kg.create_relations(&[Relation {
-            from: "A".into(), to: "B".into(), relation_type: "brand_new_type".into(),
-        }]).unwrap();
+        let rels = kg
+            .create_relations(&[Relation {
+                from: "A".into(),
+                to: "B".into(),
+                relation_type: "brand_new_type".into(),
+            }])
+            .unwrap();
         assert_eq!(rels.len(), 1);
 
         let counts = kg.relation_type_counts();
@@ -3369,15 +3766,37 @@ mod tests {
     fn test_create_relations_degree_updates() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "A".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "B".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "C".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "A".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "C".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         kg.create_relations(&[
-            Relation { from: "A".into(), to: "B".into(), relation_type: "e".into() },
-            Relation { from: "A".into(), to: "C".into(), relation_type: "e".into() },
-        ]).unwrap();
+            Relation {
+                from: "A".into(),
+                to: "B".into(),
+                relation_type: "e".into(),
+            },
+            Relation {
+                from: "A".into(),
+                to: "C".into(),
+                relation_type: "e".into(),
+            },
+        ])
+        .unwrap();
 
         assert_eq!(kg.degree("A", Direction::Outgoing).unwrap(), 2);
         assert_eq!(kg.degree("A", Direction::Incoming).unwrap(), 0);
@@ -3390,12 +3809,23 @@ mod tests {
     fn test_create_relations_delete_and_recreate() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "A".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "B".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
+            Entity {
+                name: "A".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
 
         let r = Relation {
-            from: "A".into(), to: "B".into(), relation_type: "e".into(),
+            from: "A".into(),
+            to: "B".into(),
+            relation_type: "e".into(),
         };
         kg.create_relations(std::slice::from_ref(&r)).unwrap();
         assert_eq!(kg.get_relation_count().unwrap(), 1);
@@ -3415,12 +3845,24 @@ mod tests {
     fn test_create_entities_then_relations_then_delete_entity_with_relations() {
         let kg = new_kg();
         kg.create_entities(&[
-            Entity { name: "A".into(), entity_type: "t".into(), observations: vec![] },
-            Entity { name: "B".into(), entity_type: "t".into(), observations: vec![] },
-        ]).unwrap();
-        kg.create_relations(&[
-            Relation { from: "A".into(), to: "B".into(), relation_type: "e".into() },
-        ]).unwrap();
+            Entity {
+                name: "A".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
+        kg.create_relations(&[Relation {
+            from: "A".into(),
+            to: "B".into(),
+            relation_type: "e".into(),
+        }])
+        .unwrap();
 
         assert_eq!(kg.get_relation_count().unwrap(), 1);
 
@@ -3434,9 +3876,11 @@ mod tests {
     fn test_graph_stats_after_entity_with_observations() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "stat".into(), entity_type: "t".into(),
+            name: "stat".into(),
+            entity_type: "t".into(),
             observations: vec!["o1".into(), "o2".into(), "o3".into()],
-        }]).unwrap();
+        }])
+        .unwrap();
 
         let ecount = kg.get_entity_count().unwrap();
         // graph_stat for observations is tracked but there's no public getter for it
@@ -3634,12 +4078,26 @@ mod tests {
     fn test_read_graph_filtered_by_type() {
         let kg = new_kg_with_pool(2);
         kg.create_entities(&[
-            Entity { name: "p1".into(), entity_type: "person".into(), observations: vec![] },
-            Entity { name: "q1".into(), entity_type: "place".into(), observations: vec![] },
-            Entity { name: "p2".into(), entity_type: "person".into(), observations: vec![] },
+            Entity {
+                name: "p1".into(),
+                entity_type: "person".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "q1".into(),
+                entity_type: "place".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "p2".into(),
+                entity_type: "person".into(),
+                observations: vec![],
+            },
         ])
         .unwrap();
-        let g = kg.read_graph_filtered(Some("person"), 0, usize::MAX).unwrap();
+        let g = kg
+            .read_graph_filtered(Some("person"), 0, usize::MAX)
+            .unwrap();
         assert_eq!(count_entities(&g), 2);
         assert!(g.contains("\"p1\""));
         assert!(g.contains("\"p2\""));
@@ -3792,17 +4250,39 @@ mod tests {
     fn test_neighbors_existing_type_filters() {
         let kg = new_kg_with_pool(2);
         kg.create_entities(&[
-            Entity { name: "a".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "b".into(), entity_type: "n".into(), observations: vec![] },
-            Entity { name: "c".into(), entity_type: "n".into(), observations: vec![] },
+            Entity {
+                name: "a".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "b".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "c".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+            },
         ])
         .unwrap();
         kg.create_relations(&[
-            Relation { from: "a".into(), to: "b".into(), relation_type: "knows".into() },
-            Relation { from: "a".into(), to: "c".into(), relation_type: "likes".into() },
+            Relation {
+                from: "a".into(),
+                to: "b".into(),
+                relation_type: "knows".into(),
+            },
+            Relation {
+                from: "a".into(),
+                to: "c".into(),
+                relation_type: "likes".into(),
+            },
         ])
         .unwrap();
-        let json = kg.neighbors("a", Direction::Outgoing, Some("knows"), 1).unwrap();
+        let json = kg
+            .neighbors("a", Direction::Outgoing, Some("knows"), 1)
+            .unwrap();
         assert!(json.contains("\"b\""));
         assert!(!json.contains("\"c\""));
         assert_eq!(count_relations(&json), 1);
@@ -3821,8 +4301,14 @@ mod tests {
             ..SqliteTuning::default()
         };
         let kg = TestKg(
-            GraphHandle::new(&path, Durability::Async, tuning, NonZeroUsize::new(64).unwrap(), 2)
-                .expect("create KG"),
+            GraphHandle::new(
+                &path,
+                Durability::Async,
+                tuning,
+                NonZeroUsize::new(64).unwrap(),
+                2,
+            )
+            .expect("create KG"),
             path.clone(),
         );
         kg.create_entities(&[Entity {
@@ -3835,11 +4321,17 @@ mod tests {
         // page_size (fresh-DB only) and auto_vacuum=INCREMENTAL must have taken
         // effect, and journal_mode must be WAL.
         let probe = Connection::open(&path).unwrap();
-        let page_size: i64 = probe.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+        let page_size: i64 = probe
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(page_size, 8192);
-        let auto_vacuum: i64 = probe.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).unwrap();
+        let auto_vacuum: i64 = probe
+            .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(auto_vacuum, 2, "expected INCREMENTAL auto_vacuum");
-        let journal: String = probe.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let journal: String = probe
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(journal.to_lowercase(), "wal");
     }
 

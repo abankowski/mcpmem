@@ -318,7 +318,15 @@ fn setup() -> Client {
     let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
         .unwrap_or_else(|_| "target/debug/mcp-memory".into());
     let mut child = Command::new(&bin)
-        .args(["-f", &db_path, "--enable-code", "--transport", "stdio", "--log-level", "error"])
+        .args([
+            "-f",
+            &db_path,
+            "--enable-code",
+            "--transport",
+            "stdio",
+            "--log-level",
+            "error",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -344,12 +352,21 @@ fn code_index_then_search_get_outline() {
     let dir = c.src_dir.to_string_lossy().to_string();
 
     // Index the fixture tree.
-    let idx = c.call_json("code_index", &serde_json::json!({ "path": dir, "project": "test" }));
+    let idx = c.call_json(
+        "code_index",
+        &serde_json::json!({ "path": dir, "project": "test" }),
+    );
     assert_eq!(idx["files_indexed"], 6, "indexed all 6 files: {idx}");
-    assert!(idx["symbols"].as_u64().unwrap() >= 5, "expected >=5 symbols: {idx}");
+    assert!(
+        idx["symbols"].as_u64().unwrap() >= 5,
+        "expected >=5 symbols: {idx}"
+    );
 
     // Search finds a symbol with location + signature.
-    let res = c.call_json("code_search", &serde_json::json!({ "query": "alpha", "project": "test" }));
+    let res = c.call_json(
+        "code_search",
+        &serde_json::json!({ "query": "alpha", "project": "test" }),
+    );
     let rows = res["results"].as_array().unwrap();
     let alpha = rows
         .iter()
@@ -359,10 +376,15 @@ fn code_index_then_search_get_outline() {
     assert!(alpha["signature"].as_str().unwrap().contains("fn alpha"));
 
     // get_symbol: beta is called by alpha (caller edge resolved).
-    let beta = c.call_json("code_get_symbol", &serde_json::json!({ "name": "beta", "project": "test" }));
+    let beta = c.call_json(
+        "code_get_symbol",
+        &serde_json::json!({ "name": "beta", "project": "test" }),
+    );
     let callers = beta["callers"].as_array().unwrap();
     assert!(
-        callers.iter().any(|c| c.as_str().unwrap().ends_with("::alpha")),
+        callers
+            .iter()
+            .any(|c| c.as_str().unwrap().ends_with("::alpha")),
         "alpha should call beta: {beta}"
     );
 
@@ -380,7 +402,10 @@ fn code_index_then_search_get_outline() {
     assert!(names.contains(&"alpha"), "outline missing alpha: {outline}");
     assert!(names.contains(&"beta"), "outline missing beta: {outline}");
     assert!(names.contains(&"Thing"), "outline missing Thing: {outline}");
-    assert!(names.contains(&"Walker"), "outline missing Walker trait: {outline}");
+    assert!(
+        names.contains(&"Walker"),
+        "outline missing Walker trait: {outline}"
+    );
     // Thing's range should span more than one line (struct body).
     let thing = outline["symbols"]
         .as_array()
@@ -390,7 +415,10 @@ fn code_index_then_search_get_outline() {
         .unwrap();
     let lines = thing["lines"].as_str().unwrap();
     let (a, b) = lines.split_once('-').unwrap();
-    assert!(b.parse::<u32>().unwrap() > a.parse::<u32>().unwrap(), "multi-line span: {lines}");
+    assert!(
+        b.parse::<u32>().unwrap() > a.parse::<u32>().unwrap(),
+        "multi-line span: {lines}"
+    );
 }
 
 #[test]
@@ -403,11 +431,17 @@ fn code_index_snippets_embed_and_semantic_search() {
         "code_index",
         &serde_json::json!({ "path": dir, "project": "sem", "snippets": true }),
     );
-    assert!(idx["symbols"].as_u64().unwrap() >= 2, "expected symbols: {idx}");
+    assert!(
+        idx["symbols"].as_u64().unwrap() >= 2,
+        "expected symbols: {idx}"
+    );
 
     // Resolve two fully-qualified symbol names and confirm snippets are stored.
     let qualified = |c: &mut Client, q: &str, suffix: &str| -> String {
-        let res = c.call_json("code_search", &serde_json::json!({ "query": q, "project": "sem" }));
+        let res = c.call_json(
+            "code_search",
+            &serde_json::json!({ "query": q, "project": "sem" }),
+        );
         let row = res["results"]
             .as_array()
             .unwrap()
@@ -451,7 +485,10 @@ fn code_index_snippets_embed_and_semantic_search() {
         &serde_json::json!({ "project": "sem", "embedding": unit(0), "limit": 5 }),
     );
     let rows = search["results"].as_array().unwrap();
-    assert!(!rows.is_empty(), "semantic search returned nothing: {search}");
+    assert!(
+        !rows.is_empty(),
+        "semantic search returned nothing: {search}"
+    );
     assert!(
         rows[0]["name"].as_str().unwrap().ends_with("::alpha"),
         "alpha should be the nearest hit: {search}"
@@ -464,16 +501,25 @@ fn code_index_is_incremental() {
     let mut c = setup();
     let dir = c.src_dir.to_string_lossy().to_string();
 
-    let first = c.call_json("code_index", &serde_json::json!({ "path": dir, "project": "test" }));
+    let first = c.call_json(
+        "code_index",
+        &serde_json::json!({ "path": dir, "project": "test" }),
+    );
     assert_eq!(first["files_indexed"], 6);
 
     // Nothing changed → everything skipped on the second run.
-    let second = c.call_json("code_index", &serde_json::json!({ "path": dir, "project": "test" }));
+    let second = c.call_json(
+        "code_index",
+        &serde_json::json!({ "path": dir, "project": "test" }),
+    );
     assert_eq!(second["files_indexed"], 0, "no re-index expected: {second}");
     assert_eq!(second["files_skipped"], 6, "all 6 skipped: {second}");
 
     // force re-parses regardless of hash.
-    let forced = c.call_json("code_index", &serde_json::json!({ "path": dir, "project": "test", "force": true }));
+    let forced = c.call_json(
+        "code_index",
+        &serde_json::json!({ "path": dir, "project": "test", "force": true }),
+    );
     assert_eq!(forced["files_indexed"], 6, "force reindexes: {forced}");
 }
 
@@ -488,7 +534,15 @@ fn code_tools_present_when_enabled() {
     let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
         .unwrap_or_else(|_| "target/debug/mcp-memory".into());
     let mut child = Command::new(&bin)
-        .args(["-f", &db_path, "--enable-code", "--transport", "stdio", "--log-level", "error"])
+        .args([
+            "-f",
+            &db_path,
+            "--enable-code",
+            "--transport",
+            "stdio",
+            "--log-level",
+            "error",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -535,12 +589,20 @@ fn code_index_c_language_e2e() {
     let dir = c.src_dir.to_string_lossy().to_string();
 
     // Index and search for a C symbol.
-    let idx = c.call_json("code_index", &serde_json::json!({ "path": dir, "project": "test" }));
+    let idx = c.call_json(
+        "code_index",
+        &serde_json::json!({ "path": dir, "project": "test" }),
+    );
     assert!(idx["files_indexed"].as_u64().unwrap() >= 1);
 
-    let res = c.call_json("code_search", &serde_json::json!({ "query": "add", "lang": "c", "project": "test" }));
+    let res = c.call_json(
+        "code_search",
+        &serde_json::json!({ "query": "add", "lang": "c", "project": "test" }),
+    );
     let rows = res["results"].as_array().unwrap();
-    let add = rows.iter().find(|r| r["name"].as_str().unwrap().ends_with("::add"));
+    let add = rows
+        .iter()
+        .find(|r| r["name"].as_str().unwrap().ends_with("::add"));
     assert!(add.is_some(), "C add function should be found: {res}");
     assert_eq!(add.unwrap()["kind"], "function");
 
@@ -556,10 +618,22 @@ fn code_index_c_language_e2e() {
         .map(|s| s["name"].as_str().unwrap().rsplit("::").next().unwrap())
         .collect();
     assert!(names.contains(&"add"), "C outline missing add: {outline}");
-    assert!(names.contains(&"Point"), "C outline missing Point: {outline}");
-    assert!(names.contains(&"greet"), "C outline missing greet: {outline}");
-    assert!(names.contains(&"Buffer"), "C outline missing Buffer typedef: {outline}");
-    assert!(names.contains(&"max"), "C outline missing max inline: {outline}");
+    assert!(
+        names.contains(&"Point"),
+        "C outline missing Point: {outline}"
+    );
+    assert!(
+        names.contains(&"greet"),
+        "C outline missing greet: {outline}"
+    );
+    assert!(
+        names.contains(&"Buffer"),
+        "C outline missing Buffer typedef: {outline}"
+    );
+    assert!(
+        names.contains(&"max"),
+        "C outline missing max inline: {outline}"
+    );
 }
 
 #[test]
@@ -567,13 +641,21 @@ fn code_index_cpp_language_e2e() {
     let mut c = setup();
     let dir = c.src_dir.to_string_lossy().to_string();
 
-    let idx = c.call_json("code_index", &serde_json::json!({ "path": dir, "project": "test" }));
+    let idx = c.call_json(
+        "code_index",
+        &serde_json::json!({ "path": dir, "project": "test" }),
+    );
     assert!(idx["files_indexed"].as_u64().unwrap() >= 1);
 
     // Search for C++ class and methods.
-    let res = c.call_json("code_search", &serde_json::json!({ "query": "Calculator", "lang": "cpp", "project": "test" }));
+    let res = c.call_json(
+        "code_search",
+        &serde_json::json!({ "query": "Calculator", "lang": "cpp", "project": "test" }),
+    );
     let rows = res["results"].as_array().unwrap();
-    let calc = rows.iter().find(|r| r["name"].as_str().unwrap().ends_with("::Calculator"));
+    let calc = rows
+        .iter()
+        .find(|r| r["name"].as_str().unwrap().ends_with("::Calculator"));
     assert!(calc.is_some(), "Calculator class should be found: {res}");
     assert_eq!(calc.unwrap()["kind"], "class");
 
@@ -587,12 +669,30 @@ fn code_index_cpp_language_e2e() {
         .iter()
         .map(|s| s["name"].as_str().unwrap().rsplit("::").next().unwrap())
         .collect();
-    assert!(names.contains(&"Calculator"), "C++ outline missing Calculator: {outline}");
-    assert!(names.contains(&"add"), "C++ outline missing add method: {outline}");
-    assert!(names.contains(&"multiply"), "C++ outline missing multiply: {outline}");
-    assert!(names.contains(&"AdvancedCalc"), "C++ outline missing AdvancedCalc: {outline}");
-    assert!(names.contains(&"power"), "C++ outline missing power: {outline}");
-    assert!(names.contains(&"Vector"), "C++ outline missing Vector template: {outline}");
+    assert!(
+        names.contains(&"Calculator"),
+        "C++ outline missing Calculator: {outline}"
+    );
+    assert!(
+        names.contains(&"add"),
+        "C++ outline missing add method: {outline}"
+    );
+    assert!(
+        names.contains(&"multiply"),
+        "C++ outline missing multiply: {outline}"
+    );
+    assert!(
+        names.contains(&"AdvancedCalc"),
+        "C++ outline missing AdvancedCalc: {outline}"
+    );
+    assert!(
+        names.contains(&"power"),
+        "C++ outline missing power: {outline}"
+    );
+    assert!(
+        names.contains(&"Vector"),
+        "C++ outline missing Vector template: {outline}"
+    );
 }
 
 #[test]
@@ -600,12 +700,20 @@ fn code_index_ruby_language_e2e() {
     let mut c = setup();
     let dir = c.src_dir.to_string_lossy().to_string();
 
-    let idx = c.call_json("code_index", &serde_json::json!({ "path": dir, "project": "test" }));
+    let idx = c.call_json(
+        "code_index",
+        &serde_json::json!({ "path": dir, "project": "test" }),
+    );
     assert!(idx["files_indexed"].as_u64().unwrap() >= 1);
 
-    let res = c.call_json("code_search", &serde_json::json!({ "query": "add", "lang": "ruby", "project": "test" }));
+    let res = c.call_json(
+        "code_search",
+        &serde_json::json!({ "query": "add", "lang": "ruby", "project": "test" }),
+    );
     let rows = res["results"].as_array().unwrap();
-    let add = rows.iter().find(|r| r["name"].as_str().unwrap().ends_with("::add"));
+    let add = rows
+        .iter()
+        .find(|r| r["name"].as_str().unwrap().ends_with("::add"));
     assert!(add.is_some(), "Ruby add method should be found: {res}");
 
     let outline = c.call_json(
@@ -618,12 +726,30 @@ fn code_index_ruby_language_e2e() {
         .iter()
         .map(|s| s["name"].as_str().unwrap().rsplit("::").next().unwrap())
         .collect();
-    assert!(names.contains(&"add"), "Ruby outline missing add: {outline}");
-    assert!(names.contains(&"Greeter"), "Ruby outline missing Greeter: {outline}");
-    assert!(names.contains(&"hello"), "Ruby outline missing hello: {outline}");
-    assert!(names.contains(&"AdminGreeter"), "Ruby outline missing AdminGreeter: {outline}");
-    assert!(names.contains(&"MathOps"), "Ruby outline missing MathOps: {outline}");
-    assert!(names.contains(&"handler"), "Ruby outline missing handler: {outline}");
+    assert!(
+        names.contains(&"add"),
+        "Ruby outline missing add: {outline}"
+    );
+    assert!(
+        names.contains(&"Greeter"),
+        "Ruby outline missing Greeter: {outline}"
+    );
+    assert!(
+        names.contains(&"hello"),
+        "Ruby outline missing hello: {outline}"
+    );
+    assert!(
+        names.contains(&"AdminGreeter"),
+        "Ruby outline missing AdminGreeter: {outline}"
+    );
+    assert!(
+        names.contains(&"MathOps"),
+        "Ruby outline missing MathOps: {outline}"
+    );
+    assert!(
+        names.contains(&"handler"),
+        "Ruby outline missing handler: {outline}"
+    );
 }
 
 #[test]
@@ -631,12 +757,20 @@ fn code_index_php_language_e2e() {
     let mut c = setup();
     let dir = c.src_dir.to_string_lossy().to_string();
 
-    let idx = c.call_json("code_index", &serde_json::json!({ "path": dir, "project": "test" }));
+    let idx = c.call_json(
+        "code_index",
+        &serde_json::json!({ "path": dir, "project": "test" }),
+    );
     assert!(idx["files_indexed"].as_u64().unwrap() >= 1);
 
-    let res = c.call_json("code_search", &serde_json::json!({ "query": "UserService", "lang": "php", "project": "test" }));
+    let res = c.call_json(
+        "code_search",
+        &serde_json::json!({ "query": "UserService", "lang": "php", "project": "test" }),
+    );
     let rows = res["results"].as_array().unwrap();
-    let svc = rows.iter().find(|r| r["name"].as_str().unwrap().ends_with("::UserService"));
+    let svc = rows
+        .iter()
+        .find(|r| r["name"].as_str().unwrap().ends_with("::UserService"));
     assert!(svc.is_some(), "UserService class should be found: {res}");
 
     let outline = c.call_json(
@@ -649,12 +783,30 @@ fn code_index_php_language_e2e() {
         .iter()
         .map(|s| s["name"].as_str().unwrap().rsplit("::").next().unwrap())
         .collect();
-    assert!(names.contains(&"UserService"), "PHP outline missing UserService: {outline}");
-    assert!(names.contains(&"find"), "PHP outline missing find method: {outline}");
-    assert!(names.contains(&"helper_sort"), "PHP outline missing helper_sort: {outline}");
-    assert!(names.contains(&"CacheInterface"), "PHP outline missing CacheInterface: {outline}");
-    assert!(names.contains(&"Timestampable"), "PHP outline missing Timestampable: {outline}");
-    assert!(names.contains(&"createDefault"), "PHP outline missing createDefault: {outline}");
+    assert!(
+        names.contains(&"UserService"),
+        "PHP outline missing UserService: {outline}"
+    );
+    assert!(
+        names.contains(&"find"),
+        "PHP outline missing find method: {outline}"
+    );
+    assert!(
+        names.contains(&"helper_sort"),
+        "PHP outline missing helper_sort: {outline}"
+    );
+    assert!(
+        names.contains(&"CacheInterface"),
+        "PHP outline missing CacheInterface: {outline}"
+    );
+    assert!(
+        names.contains(&"Timestampable"),
+        "PHP outline missing Timestampable: {outline}"
+    );
+    assert!(
+        names.contains(&"createDefault"),
+        "PHP outline missing createDefault: {outline}"
+    );
 }
 
 #[test]
@@ -662,17 +814,29 @@ fn code_index_filter_by_kind_and_lang() {
     let mut c = setup();
     let dir = c.src_dir.to_string_lossy().to_string();
 
-    let _idx = c.call_json("code_index", &serde_json::json!({ "path": dir, "project": "test" }));
+    let _idx = c.call_json(
+        "code_index",
+        &serde_json::json!({ "path": dir, "project": "test" }),
+    );
 
     // Search only for classes.
-    let res = c.call_json("code_search", &serde_json::json!({ "query": "a", "kind": "class", "project": "test" }));
+    let res = c.call_json(
+        "code_search",
+        &serde_json::json!({ "query": "a", "kind": "class", "project": "test" }),
+    );
     let rows = res["results"].as_array().unwrap();
     for row in rows {
-        assert_eq!(row["kind"], "class", "filtered results should only be classes: {res}");
+        assert_eq!(
+            row["kind"], "class",
+            "filtered results should only be classes: {res}"
+        );
     }
 
     // Search only for functions in C.
-    let res = c.call_json("code_search", &serde_json::json!({ "query": "a", "kind": "function", "lang": "c", "project": "test" }));
+    let res = c.call_json(
+        "code_search",
+        &serde_json::json!({ "query": "a", "kind": "function", "lang": "c", "project": "test" }),
+    );
     for row in res["results"].as_array().unwrap() {
         assert_eq!(row["kind"], "function", "should be function: {res}");
         assert_eq!(row["lang"].as_str(), Some("c"), "should be C: {res}");
@@ -701,7 +865,10 @@ fn code_index_outline_all_languages() {
             &serde_json::json!({ "file": file_name(&c, leaf) }),
         );
         let n = outline["symbols"].as_array().map(|a| a.len()).unwrap_or(0);
-        assert!(n > 0, "{leaf} outline should have >=1 symbol, got {outline}");
+        assert!(
+            n > 0,
+            "{leaf} outline should have >=1 symbol, got {outline}"
+        );
     }
 }
 
@@ -716,9 +883,18 @@ fn code_index_get_symbol_across_languages() {
     for name in &["Thing", "Point", "Calculator", "UserService", "helper_sort"] {
         let result = c.call_json("code_get_symbol", &serde_json::json!({ "name": name }));
         // The symbol should have kind, file, signature fields (single match).
-        assert!(result.get("kind").is_some(), "get_symbol({name}) should have kind: {result}");
-        assert!(result.get("file").is_some(), "get_symbol({name}) should have file: {result}");
-        assert!(result.get("signature").is_some(), "get_symbol({name}) should have signature: {result}");
+        assert!(
+            result.get("kind").is_some(),
+            "get_symbol({name}) should have kind: {result}"
+        );
+        assert!(
+            result.get("file").is_some(),
+            "get_symbol({name}) should have file: {result}"
+        );
+        assert!(
+            result.get("signature").is_some(),
+            "get_symbol({name}) should have signature: {result}"
+        );
     }
 }
 
@@ -752,7 +928,10 @@ fn code_watch_reindexes_on_change_and_delete() {
     let dir = c.src_dir.to_string_lossy().to_string();
 
     // Start watching; the initial index runs synchronously before returning.
-    let w = c.call_json("code_watch", &serde_json::json!({ "path": dir, "project": "watch" }));
+    let w = c.call_json(
+        "code_watch",
+        &serde_json::json!({ "path": dir, "project": "watch" }),
+    );
     assert_eq!(w["status"], "watching", "watch should start: {w}");
 
     // helper_sort (from service.php) is indexed up front.
@@ -764,13 +943,15 @@ fn code_watch_reindexes_on_change_and_delete() {
     // Edit a file to add a brand-new symbol → the debounced watcher re-indexes
     // the batch and the symbol becomes searchable.
     let new_fn = "\npub fn gamma_unique_xyz(n: i32) -> i32 { n + 7 }\n";
-    std::fs::write(
-        c.src_dir.join("lib.rs"),
-        format!("{RUST_SRC}{new_fn}"),
-    )
-    .unwrap();
+    std::fs::write(c.src_dir.join("lib.rs"), format!("{RUST_SRC}{new_fn}")).unwrap();
     assert!(
-        poll_search(&mut c, "watch", "gamma_unique_xyz", "::gamma_unique_xyz", true),
+        poll_search(
+            &mut c,
+            "watch",
+            "gamma_unique_xyz",
+            "::gamma_unique_xyz",
+            true
+        ),
         "watcher should pick up the added symbol"
     );
 

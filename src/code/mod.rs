@@ -82,8 +82,8 @@ fn normalize_def_kind(raw: &str) -> &str {
     match raw {
         "function" | "macro" => "function",
         "method" | "delegate" => "method",
-        "class" | "interface" | "struct" | "type" | "enum" | "trait"
-            | "union" | "concept" | "object" | "annotation" | "typealias" => "class",
+        "class" | "interface" | "struct" | "type" | "enum" | "trait" | "union" | "concept"
+        | "object" | "annotation" | "typealias" => "class",
         "module" | "namespace" => "module",
         "constant" => "constant",
         other => other,
@@ -97,7 +97,9 @@ fn first_line(source: &[u8], start: usize) -> String {
         .position(|&b| b == b'\n')
         .map(|p| start + p)
         .unwrap_or(source.len());
-    let mut s = String::from_utf8_lossy(&source[start..end]).trim().to_string();
+    let mut s = String::from_utf8_lossy(&source[start..end])
+        .trim()
+        .to_string();
     if s.chars().count() > MAX_SIGNATURE_CHARS {
         s = s.chars().take(MAX_SIGNATURE_CHARS).collect::<String>() + "…";
     }
@@ -158,7 +160,13 @@ pub fn parse_source_opts(lang: Lang, source: &[u8], want_snippet: bool) -> Parse
     // `tag.range` spans the whole definition node (body included), while
     // `tag.span` is only the name; we derive the def's line range from `range`.
     let line_starts: Vec<usize> = std::iter::once(0)
-        .chain(source.iter().enumerate().filter(|&(_, &b)| b == b'\n').map(|(i, _)| i + 1))
+        .chain(
+            source
+                .iter()
+                .enumerate()
+                .filter(|&(_, &b)| b == b'\n')
+                .map(|(i, _)| i + 1),
+        )
         .collect();
     let line_of = |byte: usize| line_starts.partition_point(|&s| s <= byte).max(1);
 
@@ -205,7 +213,9 @@ pub fn walk(root: &Path, max_bytes: u64) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if root.is_file() {
         if detect(root).is_some()
-            && std::fs::metadata(root).map(|m| m.len() <= max_bytes).unwrap_or(false)
+            && std::fs::metadata(root)
+                .map(|m| m.len() <= max_bytes)
+                .unwrap_or(false)
         {
             files.push(root.to_path_buf());
         }
@@ -222,7 +232,10 @@ pub fn walk(root: &Path, max_bytes: u64) -> Vec<PathBuf> {
             // Belt-and-suspenders: skip common build/vendor dirs even when no
             // .gitignore is present.
             let name = e.file_name().to_string_lossy();
-            !matches!(name.as_ref(), "target" | "node_modules" | ".git" | "dist" | "build")
+            !matches!(
+                name.as_ref(),
+                "target" | "node_modules" | ".git" | "dist" | "build"
+            )
         })
         .build();
 
@@ -234,7 +247,10 @@ pub fn walk(root: &Path, max_bytes: u64) -> Vec<PathBuf> {
         if !path.is_file() || detect(path).is_none() {
             continue;
         }
-        if std::fs::metadata(path).map(|m| m.len() > max_bytes).unwrap_or(true) {
+        if std::fs::metadata(path)
+            .map(|m| m.len() > max_bytes)
+            .unwrap_or(true)
+        {
             continue;
         }
         files.push(path.to_path_buf());
@@ -299,7 +315,9 @@ trait Foo { fn bar(&self); }
 fn beta() -> i32 { 1 }
 fn gamma() -> i32 { 2 }";
         let parsed = parse_source(Lang::Rust, src);
-        let call_refs: Vec<&str> = parsed.refs.iter()
+        let call_refs: Vec<&str> = parsed
+            .refs
+            .iter()
             .filter(|r| r.kind == "call")
             .map(|r| r.name.as_str())
             .collect();
@@ -552,13 +570,22 @@ function helper_sort(array &$arr): void {
 ";
         let parsed = parse_source(Lang::Php, src);
         // PHP: class, interface, trait + methods
-        assert!(find_def(&parsed, "UserService").is_some(), "UserService class");
+        assert!(
+            find_def(&parsed, "UserService").is_some(),
+            "UserService class"
+        );
         assert!(find_def(&parsed, "Logger").is_some(), "Logger interface");
-        assert!(find_def(&parsed, "Timestampable").is_some(), "Timestampable trait");
+        assert!(
+            find_def(&parsed, "Timestampable").is_some(),
+            "Timestampable trait"
+        );
         assert!(find_def(&parsed, "find").is_some(), "find method");
         assert!(find_def(&parsed, "validate").is_some(), "validate method");
         assert!(find_def(&parsed, "log").is_some(), "log method");
-        assert!(find_def(&parsed, "helper_sort").is_some(), "helper_sort function");
+        assert!(
+            find_def(&parsed, "helper_sort").is_some(),
+            "helper_sort function"
+        );
 
         let svc = find_def(&parsed, "UserService").unwrap();
         assert_eq!(svc.kind, "class");
@@ -609,7 +636,9 @@ macro_rules! vec_of {
         assert!(find_def(&parsed, "new").is_some(), "Pair::new method");
         assert!(find_def(&parsed, "first").is_some(), "Pair::first method");
         // References (calls inside handler)
-        let call_refs: Vec<&str> = parsed.refs.iter()
+        let call_refs: Vec<&str> = parsed
+            .refs
+            .iter()
             .filter(|r| r.kind == "call")
             .map(|r| r.name.as_str())
             .collect();
@@ -648,11 +677,26 @@ def compute(items: List[int]) -> int:
     return sum(filter(None, map(lambda x: x * 2, items)))
 ";
         let parsed = parse_source(Lang::Python, src);
-        assert!(find_def(&parsed, "Repository").is_some(), "Repository class");
-        assert!(find_def(&parsed, "UserService").is_some(), "UserService class");
-        assert!(find_def(&parsed, "find").is_some(), "find method (both classes)");
-        assert!(find_def(&parsed, "default").is_some(), "default classmethod");
-        assert!(find_def(&parsed, "version").is_some(), "version staticmethod");
+        assert!(
+            find_def(&parsed, "Repository").is_some(),
+            "Repository class"
+        );
+        assert!(
+            find_def(&parsed, "UserService").is_some(),
+            "UserService class"
+        );
+        assert!(
+            find_def(&parsed, "find").is_some(),
+            "find method (both classes)"
+        );
+        assert!(
+            find_def(&parsed, "default").is_some(),
+            "default classmethod"
+        );
+        assert!(
+            find_def(&parsed, "version").is_some(),
+            "version staticmethod"
+        );
         assert!(find_def(&parsed, "compute").is_some(), "compute function");
         assert!(find_def(&parsed, "__init__").is_some(), "__init__ method");
         // Should have at least these functions/methods
@@ -680,12 +724,24 @@ function compute(arr) {
 }
 ";
         let parsed = parse_source(Lang::JavaScript, src);
-        assert!(find_def(&parsed, "Repository").is_some(), "Repository class");
-        assert!(find_def(&parsed, "UserService").is_some(), "UserService class");
+        assert!(
+            find_def(&parsed, "Repository").is_some(),
+            "Repository class"
+        );
+        assert!(
+            find_def(&parsed, "UserService").is_some(),
+            "UserService class"
+        );
         assert!(find_def(&parsed, "find").is_some(), "find method");
-        assert!(find_def(&parsed, "default").is_some(), "default static method");
+        assert!(
+            find_def(&parsed, "default").is_some(),
+            "default static method"
+        );
         assert!(find_def(&parsed, "compute").is_some(), "compute function");
-        assert!(find_def(&parsed, "default").is_some(), "default static method");
+        assert!(
+            find_def(&parsed, "default").is_some(),
+            "default static method"
+        );
     }
 
     // ── Go (interfaces, methods on structs, variadic functions) ────────────
@@ -724,7 +780,10 @@ func sum(vals ...int) int {
         assert!(find_def(&parsed, "Walker").is_some(), "Walker interface");
         assert!(find_def(&parsed, "Thing").is_some(), "Thing struct");
         assert!(find_def(&parsed, "Walk").is_some(), "Walk method");
-        assert!(find_def(&parsed, "NewThing").is_some(), "NewThing constructor");
+        assert!(
+            find_def(&parsed, "NewThing").is_some(),
+            "NewThing constructor"
+        );
         assert!(find_def(&parsed, "sum").is_some(), "sum variadic function");
     }
 
@@ -757,8 +816,14 @@ interface Cache<K, V> {
 }
 ";
         let parsed = parse_source(Lang::Java, src);
-        assert!(find_def(&parsed, "Repository").is_some(), "Repository generic class");
-        assert!(find_def(&parsed, "UserService").is_some(), "UserService class");
+        assert!(
+            find_def(&parsed, "Repository").is_some(),
+            "Repository generic class"
+        );
+        assert!(
+            find_def(&parsed, "UserService").is_some(),
+            "UserService class"
+        );
         assert!(find_def(&parsed, "Cache").is_some(), "Cache interface");
         assert!(find_def(&parsed, "find").is_some(), "find method");
         assert!(find_def(&parsed, "findAll").is_some(), "findAll method");
@@ -792,11 +857,17 @@ int process(Buffer *buf) {
         let parsed = parse_source(Lang::C, src);
         assert!(find_def(&parsed, "Buffer").is_some(), "Buffer struct");
         assert!(find_def(&parsed, "max").is_some(), "max inline function");
-        assert!(find_def(&parsed, "internal_cleanup").is_some(), "internal_cleanup static");
+        assert!(
+            find_def(&parsed, "internal_cleanup").is_some(),
+            "internal_cleanup static"
+        );
         assert!(find_def(&parsed, "process").is_some(), "process function");
         // Struct + typedef produce class-kind defs
         let types = count_defs_of_kind(&parsed, "class");
-        assert!(types >= 1, "should have at least Buffer struct, got {types}");
+        assert!(
+            types >= 1,
+            "should have at least Buffer struct, got {types}"
+        );
     }
 
     // ── C++ (virtual inheritance, operator overloads, lambdas, constexpr) ──
@@ -842,7 +913,10 @@ namespace detail {
         let parsed = parse_source(Lang::Cpp, src);
         assert!(find_def(&parsed, "Base").is_some(), "Base abstract class");
         assert!(find_def(&parsed, "Derived").is_some(), "Derived class");
-        assert!(find_def(&parsed, "ScopedPtr").is_some(), "ScopedPtr template class");
+        assert!(
+            find_def(&parsed, "ScopedPtr").is_some(),
+            "ScopedPtr template class"
+        );
         assert!(find_def(&parsed, "compute").is_some(), "compute method");
     }
 
@@ -884,8 +958,14 @@ class User < BaseRecord
 end
 ";
         let parsed = parse_source(Lang::Ruby, src);
-        assert!(find_def(&parsed, "Persistence").is_some(), "Persistence module");
-        assert!(find_def(&parsed, "BaseRecord").is_some(), "BaseRecord class");
+        assert!(
+            find_def(&parsed, "Persistence").is_some(),
+            "Persistence module"
+        );
+        assert!(
+            find_def(&parsed, "BaseRecord").is_some(),
+            "BaseRecord class"
+        );
         assert!(find_def(&parsed, "User").is_some(), "User class");
         assert!(find_def(&parsed, "save").is_some(), "save method");
         assert!(find_def(&parsed, "initialize").is_some(), "initialize");
@@ -941,13 +1021,22 @@ class UserService implements CacheInterface
 }
 ";
         let parsed = parse_source(Lang::Php, src);
-        assert!(find_def(&parsed, "CacheInterface").is_some(), "CacheInterface");
+        assert!(
+            find_def(&parsed, "CacheInterface").is_some(),
+            "CacheInterface"
+        );
         assert!(find_def(&parsed, "Loggable").is_some(), "Loggable trait");
-        assert!(find_def(&parsed, "UserService").is_some(), "UserService class");
+        assert!(
+            find_def(&parsed, "UserService").is_some(),
+            "UserService class"
+        );
         assert!(find_def(&parsed, "get").is_some(), "get method");
         assert!(find_def(&parsed, "set").is_some(), "set method");
         assert!(find_def(&parsed, "log").is_some(), "log method");
-        assert!(find_def(&parsed, "createDefault").is_some(), "createDefault static");
+        assert!(
+            find_def(&parsed, "createDefault").is_some(),
+            "createDefault static"
+        );
     }
 
     // ── Edge cases ────────────────────────────────────────────────────────
@@ -957,8 +1046,16 @@ class UserService implements CacheInterface
         let src = b"";
         for lang in Lang::all() {
             let parsed = parse_source(lang, src);
-            assert!(parsed.defs.is_empty(), "{:?} should produce no defs from empty input", lang);
-            assert!(parsed.refs.is_empty(), "{:?} should produce no refs from empty input", lang);
+            assert!(
+                parsed.defs.is_empty(),
+                "{:?} should produce no defs from empty input",
+                lang
+            );
+            assert!(
+                parsed.refs.is_empty(),
+                "{:?} should produce no refs from empty input",
+                lang
+            );
         }
     }
 
@@ -966,7 +1063,11 @@ class UserService implements CacheInterface
     fn test_parse_whitespace_only() {
         for lang in Lang::all() {
             let parsed = parse_source(lang, b"\n\n   \n\t\n");
-            assert!(parsed.defs.is_empty(), "{:?} whitespace should produce no defs", lang);
+            assert!(
+                parsed.defs.is_empty(),
+                "{:?} whitespace should produce no defs",
+                lang
+            );
         }
     }
 
@@ -994,8 +1095,11 @@ fn fine() {}
         }
         let parsed = parse_source(Lang::Rust, src.as_bytes());
         // Should parse all defs without crashing
-        assert!(parsed.defs.len() > MAX_SYMBOLS_PER_FILE,
-            "should parse more than cap without truncation, got {}", parsed.defs.len());
+        assert!(
+            parsed.defs.len() > MAX_SYMBOLS_PER_FILE,
+            "should parse more than cap without truncation, got {}",
+            parsed.defs.len()
+        );
     }
 
     #[test]
@@ -1004,7 +1108,10 @@ fn fine() {}
             (Lang::Rust, b"fn foo() {}\nconst X: i32 = 1;\n"),
             (Lang::Python, b"def foo(): pass\nX = 1\n"),
             (Lang::JavaScript, b"function foo() {}\nconst X = 1;\n"),
-            (Lang::TypeScript, b"abstract class Foo {}\ninterface Bar {}\n"),
+            (
+                Lang::TypeScript,
+                b"abstract class Foo {}\ninterface Bar {}\n",
+            ),
             (Lang::Tsx, b"abstract class Foo {}\ninterface Bar {}\n"),
             (Lang::Go, b"func foo() {}\nconst X = 1\n"),
             (Lang::Java, b"class Foo {}\n"),
@@ -1015,8 +1122,11 @@ fn fine() {}
         ];
         for (lang, src) in samples {
             let parsed = parse_source(lang, src);
-            assert!(!parsed.defs.is_empty(),
-                "{:?} should produce at least one def", lang);
+            assert!(
+                !parsed.defs.is_empty(),
+                "{:?} should produce at least one def",
+                lang
+            );
         }
     }
 
@@ -1039,7 +1149,10 @@ void free_buffer(Buffer *buf);
 ";
         let parsed = parse_source(Lang::C, src);
         assert!(find_def(&parsed, "process").is_some(), "process function");
-        assert!(find_def(&parsed, "free_buffer").is_some(), "free_buffer function");
+        assert!(
+            find_def(&parsed, "free_buffer").is_some(),
+            "free_buffer function"
+        );
         assert!(find_def(&parsed, "Buffer").is_some(), "Buffer struct");
     }
 
@@ -1062,7 +1175,10 @@ public:
 };
 ";
         let parsed = parse_source(Lang::Cpp, src);
-        assert!(find_def(&parsed, "Vector").is_some(), "Vector template class");
+        assert!(
+            find_def(&parsed, "Vector").is_some(),
+            "Vector template class"
+        );
         assert!(find_def(&parsed, "push").is_some(), "push method");
         assert!(find_def(&parsed, "pop").is_some(), "pop method");
     }
@@ -1091,6 +1207,9 @@ end
 ";
         let parsed = parse_source(Lang::Ruby, src);
         assert!(find_def(&parsed, "bar").is_some(), "self.bar method");
-        assert!(find_def(&parsed, "instance_method").is_some(), "instance_method");
+        assert!(
+            find_def(&parsed, "instance_method").is_some(),
+            "instance_method"
+        );
     }
 }

@@ -77,9 +77,8 @@ where
     buf.clear();
     out.clear();
     let finish = |buf: &[u8], out: &mut String| -> std::io::Result<LineRead> {
-        let s = std::str::from_utf8(buf).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "Non-UTF-8 input")
-        })?;
+        let s = std::str::from_utf8(buf)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Non-UTF-8 input"))?;
         out.push_str(s);
         Ok(LineRead::Line)
     };
@@ -226,9 +225,8 @@ impl MCPServer {
     /// ignored otherwise.
     pub fn new(config: Config, vec_config: VectorConfig) -> Result<Self> {
         let path = Path::new(&config.memory_file_path);
-        let lru_cache = NonZeroUsize::new(config.lru_cache_size).unwrap_or_else(|| {
-            NonZeroUsize::new(10000).expect("10000 > 0")
-        });
+        let lru_cache = NonZeroUsize::new(config.lru_cache_size)
+            .unwrap_or_else(|| NonZeroUsize::new(10000).expect("10000 > 0"));
         let kg = Arc::new(GraphHandle::new(
             path,
             config.durability,
@@ -250,7 +248,9 @@ impl MCPServer {
             std::sync::atomic::Ordering::Relaxed,
         );
         GRAPH_WRITE_ENABLED.store(
-            config.enabled_categories.contains(&ToolCategory::GraphWrite),
+            config
+                .enabled_categories
+                .contains(&ToolCategory::GraphWrite),
             std::sync::atomic::Ordering::Relaxed,
         );
 
@@ -597,9 +597,9 @@ fn handle_tools_list(vectors_enabled: bool) -> Value {
     let mut all: Vec<Value> = base_tools()
         .iter()
         .filter(|t| {
-            t.get("name").and_then(Value::as_str).is_some_and(|n| {
-                if tools::is_write_tool(n) { write } else { read }
-            })
+            t.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| if tools::is_write_tool(n) { write } else { read })
         })
         .cloned()
         .collect();
@@ -661,21 +661,16 @@ fn handle_tools_call(
                 vector_actions::handle_vector_delete_embedding(vs, kg, tool_args)
                     .map(HandlerResult::Value)
             }
-            "hybrid_search" => {
-                vector_actions::handle_hybrid_search(vs, kg, tool_args).map(HandlerResult::RawResult)
-            }
+            "hybrid_search" => vector_actions::handle_hybrid_search(vs, kg, tool_args)
+                .map(HandlerResult::RawResult),
             "vector_refresh_graph_cache" => {
                 vector_actions::handle_refresh_graph_cache(vs, kg, tool_args)
                     .map(HandlerResult::Value)
             }
-            "vector_store_stats" => {
-                vector_actions::handle_vector_store_stats(vs, kg, tool_args)
-                    .map(HandlerResult::Value)
-            }
-            "vector_batch_upsert" => {
-                vector_actions::handle_vector_batch_upsert(vs, kg, tool_args)
-                    .map(HandlerResult::Value)
-            }
+            "vector_store_stats" => vector_actions::handle_vector_store_stats(vs, kg, tool_args)
+                .map(HandlerResult::Value),
+            "vector_batch_upsert" => vector_actions::handle_vector_batch_upsert(vs, kg, tool_args)
+                .map(HandlerResult::Value),
             "vector_get_embedding" => {
                 vector_actions::handle_vector_get_embedding(vs, kg, tool_args)
                     .map(HandlerResult::Value)
@@ -684,14 +679,10 @@ fn handle_tools_call(
                 vector_actions::handle_vector_search_by_entity(vs, kg, tool_args)
                     .map(HandlerResult::RawResult)
             }
-            "vector_recommend" => {
-                vector_actions::handle_vector_recommend(vs, kg, tool_args)
-                    .map(HandlerResult::RawResult)
-            }
-            "vector_mmr_search" => {
-                vector_actions::handle_vector_mmr_search(vs, kg, tool_args)
-                    .map(HandlerResult::RawResult)
-            }
+            "vector_recommend" => vector_actions::handle_vector_recommend(vs, kg, tool_args)
+                .map(HandlerResult::RawResult),
+            "vector_mmr_search" => vector_actions::handle_vector_mmr_search(vs, kg, tool_args)
+                .map(HandlerResult::RawResult),
             "vector_reindex" => {
                 vector_actions::handle_vector_reindex(vs, kg, tool_args).map(HandlerResult::Value)
             }
@@ -780,9 +771,14 @@ fn handle_tools_call(
             let r = memory::handle_delete_entities(kg, tool_args);
             if r.is_ok()
                 && let Some(vs) = vs
-                && let Some(args) = tool_args.and_then(|a| a.get("entityNames")).and_then(|v| v.as_array())
+                && let Some(args) = tool_args
+                    .and_then(|a| a.get("entityNames"))
+                    .and_then(|v| v.as_array())
             {
-                let names: Vec<String> = args.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                let names: Vec<String> = args
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
                 vs.invalidate_entity_cache(&names);
             }
             r.map(HandlerResult::Value)
@@ -831,5 +827,3 @@ fn handle_tools_call(
         HandlerResult::Value(tool_error(&e.to_string()))
     }))
 }
-
-

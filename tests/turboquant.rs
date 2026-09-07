@@ -8,7 +8,7 @@
 
 use mcp_memory::ivf::Metric;
 use mcp_memory::turboquant::{
-    gaussian_quantizer_mse, lloyd_max_gaussian, TurboQuantIndex, TurboQuantMse, TurboQuantProd,
+    TurboQuantIndex, TurboQuantMse, TurboQuantProd, gaussian_quantizer_mse, lloyd_max_gaussian,
 };
 
 // ── tiny seeded RNG (tests only; the crate's RNG is private) ───────────────
@@ -294,8 +294,14 @@ fn reconstruction_cosine_improves_with_bits() {
         prev_mse = cos_mse;
         prev_prod = cos_prod;
     }
-    assert!(prev_mse > 0.995, "6-bit mse reconstruction cosine {prev_mse}");
-    assert!(prev_prod > 0.98, "6-bit prod reconstruction cosine {prev_prod}");
+    assert!(
+        prev_mse > 0.995,
+        "6-bit mse reconstruction cosine {prev_mse}"
+    );
+    assert!(
+        prev_prod > 0.98,
+        "6-bit prod reconstruction cosine {prev_prod}"
+    );
 }
 
 /// Norms are stored exactly, so reconstruction error is purely directional
@@ -381,10 +387,7 @@ fn search_quality(dim: usize, n: usize, queries: usize, bits: u32, k: usize) -> 
             / k as f64;
         gap_sum += best - got_true;
     }
-    (
-        hits as f64 / (queries * k) as f64,
-        gap_sum / queries as f64,
-    )
+    (hits as f64 / (queries * k) as f64, gap_sum / queries as f64)
 }
 
 /// Search quality against exact brute force on clustered unit vectors.
@@ -397,12 +400,25 @@ fn search_quality(dim: usize, n: usize, queries: usize, bits: u32, k: usize) -> 
 fn retrieved_neighbors_are_near_optimal() {
     let (r2, gap2) = search_quality(128, 400, 40, 2, 10);
     let (r4, gap4) = search_quality(128, 400, 40, 4, 10);
-    eprintln!("2 bits: recall {r2:.3}, quality gap {gap2:.4}; 4 bits: recall {r4:.3}, gap {gap4:.4}");
+    eprintln!(
+        "2 bits: recall {r2:.3}, quality gap {gap2:.4}; 4 bits: recall {r4:.3}, gap {gap4:.4}"
+    );
     let sigma2 = (0.56f64 / 128.0).sqrt();
     let sigma4 = (0.047f64 / 128.0).sqrt();
-    assert!(gap2 < 2.0 * sigma2, "2-bit quality gap {gap2:.4} above 2σ = {:.4}", 2.0 * sigma2);
-    assert!(gap4 < 2.0 * sigma4, "4-bit quality gap {gap4:.4} above 2σ = {:.4}", 2.0 * sigma4);
-    assert!(gap4 < gap2, "more bits must improve quality: {gap2:.4} → {gap4:.4}");
+    assert!(
+        gap2 < 2.0 * sigma2,
+        "2-bit quality gap {gap2:.4} above 2σ = {:.4}",
+        2.0 * sigma2
+    );
+    assert!(
+        gap4 < 2.0 * sigma4,
+        "4-bit quality gap {gap4:.4} above 2σ = {:.4}",
+        2.0 * sigma4
+    );
+    assert!(
+        gap4 < gap2,
+        "more bits must improve quality: {gap2:.4} → {gap4:.4}"
+    );
     assert!(r4 > r2, "more bits must improve recall: {r2:.3} → {r4:.3}");
 }
 

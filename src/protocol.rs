@@ -41,10 +41,12 @@ impl JsonRpcResponse {
         Self {
             jsonrpc: "2.0".into(),
             result: None,
-            error: Some(JsonRpcError { code, message, data: None }),
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data: None,
+            }),
             id,
         }
     }
 }
-
-

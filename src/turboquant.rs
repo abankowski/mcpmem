@@ -261,8 +261,8 @@ pub fn gaussian_quantizer_mse(c: &[f64]) -> f64 {
         };
         let mass = big_phi(b) - big_phi(a);
         // ∫(x-c)²φ over [a,b] = (1+c²)·mass − (bφ(b)−aφ(a)) − 2c(φ(a)−φ(b))
-        total += (1.0 + c[i] * c[i]) * mass - (xphi(b) - xphi(a))
-            - 2.0 * c[i] * (phi_at(a) - phi_at(b));
+        total +=
+            (1.0 + c[i] * c[i]) * mass - (xphi(b) - xphi(a)) - 2.0 * c[i] * (phi_at(a) - phi_at(b));
     }
     total
 }
@@ -446,10 +446,7 @@ impl TurboQuantMse {
             .into_iter()
             .map(|c| (c * scale) as f32)
             .collect();
-        let boundaries = centroids
-            .windows(2)
-            .map(|w| 0.5 * (w[0] + w[1]))
-            .collect();
+        let boundaries = centroids.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect();
         Self {
             rotation,
             bits,
@@ -1017,7 +1014,10 @@ unsafe fn axpy_neon(y: &mut [f32], s: f32, p: &[f32]) {
     let vs = vdupq_n_f32(s);
     let mut i = 0usize;
     while i + 4 <= n {
-        vst1q_f32(py.add(i), vfmaq_f32(vld1q_f32(py.add(i)), vs, vld1q_f32(pp.add(i))));
+        vst1q_f32(
+            py.add(i),
+            vfmaq_f32(vld1q_f32(py.add(i)), vs, vld1q_f32(pp.add(i))),
+        );
         i += 4;
     }
     while i < n {
@@ -1038,7 +1038,11 @@ unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
     let mut i = 0usize;
     while i + 16 <= n {
         a0 = _mm256_fmadd_ps(_mm256_loadu_ps(pa.add(i)), _mm256_loadu_ps(pb.add(i)), a0);
-        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(pa.add(i + 8)), _mm256_loadu_ps(pb.add(i + 8)), a1);
+        a1 = _mm256_fmadd_ps(
+            _mm256_loadu_ps(pa.add(i + 8)),
+            _mm256_loadu_ps(pb.add(i + 8)),
+            a1,
+        );
         i += 16;
     }
     while i + 8 <= n {
@@ -1067,7 +1071,10 @@ unsafe fn dot_sse2(a: &[f32], b: &[f32]) -> f32 {
     let mut a1 = _mm_setzero_ps();
     let mut i = 0usize;
     while i + 8 <= n {
-        a0 = _mm_add_ps(a0, _mm_mul_ps(_mm_loadu_ps(pa.add(i)), _mm_loadu_ps(pb.add(i))));
+        a0 = _mm_add_ps(
+            a0,
+            _mm_mul_ps(_mm_loadu_ps(pa.add(i)), _mm_loadu_ps(pb.add(i))),
+        );
         a1 = _mm_add_ps(
             a1,
             _mm_mul_ps(_mm_loadu_ps(pa.add(i + 4)), _mm_loadu_ps(pb.add(i + 4))),
@@ -1120,7 +1127,10 @@ unsafe fn axpy_sse2(y: &mut [f32], s: f32, p: &[f32]) {
     while i + 4 <= n {
         _mm_storeu_ps(
             py.add(i),
-            _mm_add_ps(_mm_loadu_ps(py.add(i)), _mm_mul_ps(vs, _mm_loadu_ps(pp.add(i)))),
+            _mm_add_ps(
+                _mm_loadu_ps(py.add(i)),
+                _mm_mul_ps(vs, _mm_loadu_ps(pp.add(i))),
+            ),
         );
         i += 4;
     }
@@ -1215,7 +1225,14 @@ impl TurboQuantIndex {
     pub fn memory_bytes(&self) -> usize {
         let g = self.inner.read();
         let fixed = self.quant.proj.len() * 4
-            + self.quant.mse.rotation.signs.iter().map(|s| s.len() * 4).sum::<usize>()
+            + self
+                .quant
+                .mse
+                .rotation
+                .signs
+                .iter()
+                .map(|s| s.len() * 4)
+                .sum::<usize>()
             + self.quant.mse.centroids.len() * 4;
         fixed
             + g.codes.len()
@@ -1308,8 +1325,9 @@ impl TurboQuantIndex {
                 (g.ids[pos], dist)
             })
             .collect();
-        let cmp =
-            |a: &(u64, f32), b: &(u64, f32)| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal);
+        let cmp = |a: &(u64, f32), b: &(u64, f32)| {
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+        };
         // Partial selection: O(n) to isolate the top_k, then sort only those.
         if scored.len() > top_k {
             scored.select_nth_unstable_by(top_k - 1, cmp);
@@ -1559,7 +1577,13 @@ mod tests {
                 let want: f32 = sq
                     .iter()
                     .enumerate()
-                    .map(|(i, &s)| if bits[i / 8] >> (i % 8) & 1 == 1 { s } else { -s })
+                    .map(|(i, &s)| {
+                        if bits[i / 8] >> (i % 8) & 1 == 1 {
+                            s
+                        } else {
+                            -s
+                        }
+                    })
                     .sum();
                 let got = qjl_sign_dot(&sq, &bits);
                 assert!(
@@ -1759,11 +1783,7 @@ mod tests {
         for bits in 1..=6u32 {
             let q = TurboQuantMse::new(128, bits, SEED);
             let x_hat = q.decode(&q.encode(&x));
-            let err: f32 = x
-                .iter()
-                .zip(&x_hat)
-                .map(|(a, b)| (a - b) * (a - b))
-                .sum();
+            let err: f32 = x.iter().zip(&x_hat).map(|(a, b)| (a - b) * (a - b)).sum();
             assert!(
                 err < prev_err,
                 "bits={bits}: error {err} did not improve on {prev_err}"
@@ -1811,9 +1831,7 @@ mod tests {
                 .centroids
                 .iter()
                 .enumerate()
-                .min_by(|a, b| {
-                    (a.1 - y).abs().partial_cmp(&(b.1 - y).abs()).unwrap()
-                })
+                .min_by(|a, b| (a.1 - y).abs().partial_cmp(&(b.1 - y).abs()).unwrap())
                 .unwrap()
                 .0;
             let tie = (q.centroids[idx] - y).abs() - (q.centroids[best] - y).abs();
@@ -1949,7 +1967,11 @@ mod tests {
         assert_eq!(idx.len(), 1);
         let r = idx.search(&b, 1).unwrap();
         assert_eq!(r[0].0, 1);
-        assert!(r[0].1 < 0.1, "distance to (quantized) self should be ~0, got {}", r[0].1);
+        assert!(
+            r[0].1 < 0.1,
+            "distance to (quantized) self should be ~0, got {}",
+            r[0].1
+        );
     }
 
     #[test]
@@ -2026,8 +2048,16 @@ mod tests {
         idx.upsert(2, &far).unwrap();
         let r = idx.search(&q, 2).unwrap();
         assert_eq!(r[0].0, 1);
-        assert!(r[0].1.abs() < 0.05, "self distance should be ~0: {}", r[0].1);
-        assert!((r[1].1 - 1.0).abs() < 0.1, "‖2q−q‖² should be ~1: {}", r[1].1);
+        assert!(
+            r[0].1.abs() < 0.05,
+            "self distance should be ~0: {}",
+            r[0].1
+        );
+        assert!(
+            (r[1].1 - 1.0).abs() < 0.1,
+            "‖2q−q‖² should be ~1: {}",
+            r[1].1
+        );
     }
 
     #[test]
@@ -2037,7 +2067,10 @@ mod tests {
         idx.upsert(2, &[1.0; 8]).unwrap();
         let r = idx.search(&[1.0; 8], 2).unwrap();
         assert_eq!(r.len(), 2);
-        assert_eq!(r[0].0, 2, "the non-zero vector must rank above the zero vector");
+        assert_eq!(
+            r[0].0, 2,
+            "the non-zero vector must rank above the zero vector"
+        );
     }
 
     #[test]

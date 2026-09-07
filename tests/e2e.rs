@@ -88,9 +88,7 @@ impl McpClient {
         let resp = self.call_tool(name, args);
         resp["result"]["content"][0]["text"]
             .as_str()
-            .unwrap_or_else(|| {
-                panic!("expected result.content[0].text, got: {resp}")
-            })
+            .unwrap_or_else(|| panic!("expected result.content[0].text, got: {resp}"))
             .to_string()
     }
 }
@@ -110,7 +108,10 @@ fn e2e_create_and_read_graph() {
     let text = c.tool_text("read_graph", &serde_json::json!({}));
     assert!(text.contains("Ada"), "read_graph missing Ada: {text}");
 
-    let text = c.tool_text("search_nodes", &serde_json::json!({"query": "mathematician"}));
+    let text = c.tool_text(
+        "search_nodes",
+        &serde_json::json!({"query": "mathematician"}),
+    );
     assert!(text.contains("Ada"), "search_nodes missing Ada: {text}");
 
     let text = c.tool_text("open_nodes", &serde_json::json!({"names": ["Ada"]}));
@@ -177,7 +178,10 @@ fn e2e_relations_and_paths() {
 
     let text = c.tool_text("find_path", &serde_json::json!({"from": "A", "to": "C"}));
     assert!(!text.contains("error"), "find_path failed: {text}");
-    assert!(text.contains("A") && text.contains("C"), "find_path: {text}");
+    assert!(
+        text.contains("A") && text.contains("C"),
+        "find_path: {text}"
+    );
 
     let text = c.tool_text("graph_stats", &serde_json::json!({}));
     assert!(text.contains("\"entities\":3"), "graph_stats: {text}");
@@ -197,10 +201,16 @@ fn e2e_search_filtered() {
     );
 
     let text = c.tool_text("search_nodes", &serde_json::json!({"query": "math"}));
-    assert!(text.contains("E1") && text.contains("E2"), "search both: {text}");
+    assert!(
+        text.contains("E1") && text.contains("E2"),
+        "search both: {text}"
+    );
 
     let text = c.tool_text("open_nodes", &serde_json::json!({"names": ["E1", "E2"]}));
-    assert!(text.contains("E1") && text.contains("E2"), "open both: {text}");
+    assert!(
+        text.contains("E1") && text.contains("E2"),
+        "open both: {text}"
+    );
 }
 
 #[test]
@@ -208,15 +218,21 @@ fn e2e_delete_and_stats() {
     let mut c = spawn_server();
 
     // Create 3 entities + relations.
-    c.tool_text("create_entities", &serde_json::json!({"entities": [
-        {"name": "X", "entityType": "alpha", "observations": ["x-obs"]},
-        {"name": "Y", "entityType": "beta",  "observations": ["y-obs"]},
-        {"name": "Z", "entityType": "alpha", "observations": []}
-    ]}));
-    c.tool_text("create_relations", &serde_json::json!({"relations": [
-        {"from": "X", "to": "Y", "relationType": "linked"},
-        {"from": "Y", "to": "Z", "relationType": "linked"}
-    ]}));
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "X", "entityType": "alpha", "observations": ["x-obs"]},
+            {"name": "Y", "entityType": "beta",  "observations": ["y-obs"]},
+            {"name": "Z", "entityType": "alpha", "observations": []}
+        ]}),
+    );
+    c.tool_text(
+        "create_relations",
+        &serde_json::json!({"relations": [
+            {"from": "X", "to": "Y", "relationType": "linked"},
+            {"from": "Y", "to": "Z", "relationType": "linked"}
+        ]}),
+    );
 
     // Verify initial stats.
     let st = c.tool_text("graph_stats", &serde_json::json!({}));
@@ -227,18 +243,27 @@ fn e2e_delete_and_stats() {
     assert!(types.contains("\"count\":2"), "alpha has 2: {types}");
 
     // entity_exists.
-    let exist = c.tool_text("entity_exists", &serde_json::json!({"names": ["X","Y","Missing"]}));
+    let exist = c.tool_text(
+        "entity_exists",
+        &serde_json::json!({"names": ["X","Y","Missing"]}),
+    );
     assert_eq!(exist, "[true,true,false]", "entity_exists: {exist}");
 
     // Delete one relation, verify.
-    c.tool_text("delete_relations", &serde_json::json!({"relations": [
-        {"from": "X", "to": "Y", "relationType": "linked"}
-    ]}));
+    c.tool_text(
+        "delete_relations",
+        &serde_json::json!({"relations": [
+            {"from": "X", "to": "Y", "relationType": "linked"}
+        ]}),
+    );
     let st = c.tool_text("graph_stats", &serde_json::json!({}));
     assert!(st.contains("\"relations\":1"), "1 relation remains: {st}");
 
     // Delete entity Y (should cascade relations) + entity Z.
-    c.tool_text("delete_entities", &serde_json::json!({"entityNames": ["Y", "Z"]}));
+    c.tool_text(
+        "delete_entities",
+        &serde_json::json!({"entityNames": ["Y", "Z"]}),
+    );
     let st = c.tool_text("graph_stats", &serde_json::json!({}));
     assert!(st.contains("\"entities\":1"), "1 entity left: {st}");
     assert!(st.contains("\"relations\":0"), "0 relations: {st}");
@@ -250,7 +275,10 @@ fn e2e_delete_and_stats() {
     // Relation type count still reflects the cascade (delete_entities does not
     // decrement relation type counts — the type entry persists in type_dict).
     let rtypes = c.tool_text("list_relation_types", &serde_json::json!({}));
-    assert!(rtypes.contains("\"type\":\"linked\""), "linked type exists: {rtypes}");
+    assert!(
+        rtypes.contains("\"type\":\"linked\""),
+        "linked type exists: {rtypes}"
+    );
 }
 
 #[test]
@@ -258,22 +286,31 @@ fn e2e_upsert_merge_and_wipe() {
     let mut c = spawn_server();
 
     // Create entities.
-    c.tool_text("create_entities", &serde_json::json!({"entities": [
-        {"name": "Src", "entityType": "old", "observations": ["a", "b"]},
-        {"name": "Tgt", "entityType": "old", "observations": ["c"]}
-    ]}));
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "Src", "entityType": "old", "observations": ["a", "b"]},
+            {"name": "Tgt", "entityType": "old", "observations": ["c"]}
+        ]}),
+    );
 
     // Upsert — change type and add obs.
-    c.tool_text("upsert_entities", &serde_json::json!({"entities": [
-        {"name": "Tgt", "entityType": "new", "observations": ["c", "d"]}
-    ]}));
+    c.tool_text(
+        "upsert_entities",
+        &serde_json::json!({"entities": [
+            {"name": "Tgt", "entityType": "new", "observations": ["c", "d"]}
+        ]}),
+    );
     let open = c.tool_text("open_nodes", &serde_json::json!({"names": ["Tgt"]}));
     assert!(open.contains("new"), "type changed: {open}");
     assert!(open.contains("\"c\""), "c preserved: {open}");
     assert!(open.contains("\"d\""), "d added: {open}");
 
     // Merge Src → Tgt.
-    c.tool_text("merge_entities", &serde_json::json!({"source": "Src", "target": "Tgt"}));
+    c.tool_text(
+        "merge_entities",
+        &serde_json::json!({"source": "Src", "target": "Tgt"}),
+    );
     let st = c.tool_text("graph_stats", &serde_json::json!({}));
     assert!(st.contains("\"entities\":1"), "only Tgt remains: {st}");
 
@@ -296,16 +333,22 @@ fn e2e_upsert_merge_and_wipe() {
 fn e2e_relations_and_describe() {
     let mut c = spawn_server();
 
-    c.tool_text("create_entities", &serde_json::json!({"entities": [
-        {"name": "A", "entityType": "t", "observations": []},
-        {"name": "B", "entityType": "t", "observations": []},
-        {"name": "C", "entityType": "t", "observations": []}
-    ]}));
-    c.tool_text("create_relations", &serde_json::json!({"relations": [
-        {"from": "A", "to": "B", "relationType": "knows"},
-        {"from": "B", "to": "C", "relationType": "knows"},
-        {"from": "A", "to": "C", "relationType": "likes"}
-    ]}));
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "A", "entityType": "t", "observations": []},
+            {"name": "B", "entityType": "t", "observations": []},
+            {"name": "C", "entityType": "t", "observations": []}
+        ]}),
+    );
+    c.tool_text(
+        "create_relations",
+        &serde_json::json!({"relations": [
+            {"from": "A", "to": "B", "relationType": "knows"},
+            {"from": "B", "to": "C", "relationType": "knows"},
+            {"from": "A", "to": "C", "relationType": "likes"}
+        ]}),
+    );
 
     // search_relations by from.
     let r = c.tool_text("search_relations", &serde_json::json!({"from": "A"}));
@@ -313,7 +356,10 @@ fn e2e_relations_and_describe() {
     assert!(r.contains("likes"), "A→C likes: {r}");
 
     // search_relations by from + type.
-    let r = c.tool_text("search_relations", &serde_json::json!({"from": "A", "relationType": "likes"}));
+    let r = c.tool_text(
+        "search_relations",
+        &serde_json::json!({"from": "A", "relationType": "likes"}),
+    );
     assert!(!r.contains("knows"), "filtered knows out: {r}");
     assert!(r.contains("likes"), "filtered likes in: {r}");
 
@@ -323,12 +369,18 @@ fn e2e_relations_and_describe() {
     assert!(r.contains("likes"), "A→C likes: {r}");
 
     // get_neighbors (depth 1, outgoing).
-    let n = c.tool_text("get_neighbors", &serde_json::json!({"name": "A", "direction": "OUTGOING"}));
+    let n = c.tool_text(
+        "get_neighbors",
+        &serde_json::json!({"name": "A", "direction": "OUTGOING"}),
+    );
     assert!(n.contains("B"), "A neighbor B: {n}");
     assert!(n.contains("C"), "A neighbor C: {n}");
 
     // get_neighbors (depth 1, incoming for C).
-    let n = c.tool_text("get_neighbors", &serde_json::json!({"name": "C", "direction": "INCOMING"}));
+    let n = c.tool_text(
+        "get_neighbors",
+        &serde_json::json!({"name": "C", "direction": "INCOMING"}),
+    );
     assert!(n.contains("A"), "C incoming A: {n}");
     assert!(n.contains("B"), "C incoming B: {n}");
 
@@ -341,49 +393,86 @@ fn e2e_relations_and_describe() {
     assert!(deg.contains("\"degree\":2"), "A degree 2: {deg}");
 
     // degree (both for B = 2, 1 in + 1 out).
-    let deg = c.tool_text("degree", &serde_json::json!({"name": "B", "direction": "BOTH"}));
+    let deg = c.tool_text(
+        "degree",
+        &serde_json::json!({"name": "B", "direction": "BOTH"}),
+    );
     assert!(deg.contains("\"degree\":2"), "B degree 2: {deg}");
 
     // degree (incoming for A = 0).
-    let deg = c.tool_text("degree", &serde_json::json!({"name": "A", "direction": "INCOMING"}));
+    let deg = c.tool_text(
+        "degree",
+        &serde_json::json!({"name": "A", "direction": "INCOMING"}),
+    );
     assert!(deg.contains("\"degree\":0"), "A incoming 0: {deg}");
 
     // find_all_paths A→C.
-    let p = c.tool_text("find_all_paths", &serde_json::json!({"from": "A", "to": "C"}));
+    let p = c.tool_text(
+        "find_all_paths",
+        &serde_json::json!({"from": "A", "to": "C"}),
+    );
     assert!(p.contains("A"), "paths include A: {p}");
     assert!(p.contains("C"), "paths include C: {p}");
 
     // batch_get_entities for A, B, C.
-    let bg = c.tool_text("batch_get_entities", &serde_json::json!({"names": ["A", "B", "C"]}));
-    assert!(bg.contains("A") && bg.contains("B") && bg.contains("C"), "batch get all: {bg}");
+    let bg = c.tool_text(
+        "batch_get_entities",
+        &serde_json::json!({"names": ["A", "B", "C"]}),
+    );
+    assert!(
+        bg.contains("A") && bg.contains("B") && bg.contains("C"),
+        "batch get all: {bg}"
+    );
 }
 
 #[test]
 fn e2e_read_graph_relations_scoped_to_page() {
     let mut c = spawn_server();
 
-    c.tool_text("create_entities", &serde_json::json!({"entities": [
-        {"name": "A", "entityType": "n", "observations": []},
-        {"name": "B", "entityType": "n", "observations": []},
-        {"name": "C", "entityType": "n", "observations": []}
-    ]}));
-    c.tool_text("create_relations", &serde_json::json!({"relations": [
-        {"from": "A", "to": "B", "relationType": "edge"},
-        {"from": "B", "to": "C", "relationType": "edge"}
-    ]}));
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "A", "entityType": "n", "observations": []},
+            {"name": "B", "entityType": "n", "observations": []},
+            {"name": "C", "entityType": "n", "observations": []}
+        ]}),
+    );
+    c.tool_text(
+        "create_relations",
+        &serde_json::json!({"relations": [
+            {"from": "A", "to": "B", "relationType": "edge"},
+            {"from": "B", "to": "C", "relationType": "edge"}
+        ]}),
+    );
 
     // Full read_graph: both edges present.
     let full = c.tool_text("read_graph", &serde_json::json!({}));
     let v: serde_json::Value = serde_json::from_str(&full).unwrap();
-    assert_eq!(v["entities"].as_array().unwrap().len(), 3, "all entities: {full}");
-    assert_eq!(v["relations"].as_array().unwrap().len(), 2, "both edges: {full}");
+    assert_eq!(
+        v["entities"].as_array().unwrap().len(),
+        3,
+        "all entities: {full}"
+    );
+    assert_eq!(
+        v["relations"].as_array().unwrap().len(),
+        2,
+        "both edges: {full}"
+    );
 
     // First-entity page (A): its edge A->B straddles the page boundary, so no
     // relations are returned.
     let page = c.tool_text("read_graph", &serde_json::json!({"limit": 1}));
     let v: serde_json::Value = serde_json::from_str(&page).unwrap();
-    assert_eq!(v["entities"].as_array().unwrap().len(), 1, "one entity: {page}");
-    assert_eq!(v["relations"].as_array().unwrap().len(), 0, "no scoped edges: {page}");
+    assert_eq!(
+        v["entities"].as_array().unwrap().len(),
+        1,
+        "one entity: {page}"
+    );
+    assert_eq!(
+        v["relations"].as_array().unwrap().len(),
+        0,
+        "no scoped edges: {page}"
+    );
 }
 
 #[test]
@@ -400,11 +489,17 @@ fn e2e_search_edge_cases() {
     ]}));
 
     // Search with filter type.
-    let s = c.tool_text("search_nodes", &serde_json::json!({"query": "likes", "entityType": "person"}));
+    let s = c.tool_text(
+        "search_nodes",
+        &serde_json::json!({"query": "likes", "entityType": "person"}),
+    );
     assert!(s.contains("Alice"), "filtered search Alice: {s}");
 
     // Search with offset/limit.
-    let s = c.tool_text("search_nodes", &serde_json::json!({"query": "likes", "offset": 1, "limit": 1}));
+    let s = c.tool_text(
+        "search_nodes",
+        &serde_json::json!({"query": "likes", "offset": 1, "limit": 1}),
+    );
     assert!(!s.contains("Alice"), "offset skips Alice: {s}");
     assert!(s.contains("Bob"), "limit includes Bob: {s}");
 
@@ -495,7 +590,11 @@ fn e2e_pipelined_requests_all_answered_and_correlated() {
         assert!(v.get("result").is_some(), "id {id} errored: {line}");
         assert!(seen.insert(id), "duplicate response for id {id}");
     }
-    assert_eq!(seen.len(), 60, "every pipelined request must be answered once");
+    assert_eq!(
+        seen.len(),
+        60,
+        "every pipelined request must be answered once"
+    );
 }
 
 #[test]
@@ -509,9 +608,18 @@ fn e2e_strict_ordering_with_concurrency_one() {
     let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
         .unwrap_or_else(|_| "target/debug/mcp-memory".into());
     let mut child = Command::new(&bin)
-        .args(["-f", &db_path, "--transport", "stdio", "--log-level", "error",
-               "--enable-graph-read", "--enable-graph-write",
-               "--stdio-concurrency", "1"])
+        .args([
+            "-f",
+            &db_path,
+            "--transport",
+            "stdio",
+            "--log-level",
+            "error",
+            "--enable-graph-read",
+            "--enable-graph-write",
+            "--stdio-concurrency",
+            "1",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -545,7 +653,10 @@ fn e2e_strict_ordering_with_concurrency_one() {
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(v["id"].as_u64(), Some(expect_id), "order violated: {line}");
         let is_err = v["result"]["isError"].as_bool().unwrap_or(false);
-        assert!(v.get("result").is_some() && !is_err, "id {expect_id} failed: {line}");
+        assert!(
+            v.get("result").is_some() && !is_err,
+            "id {expect_id} failed: {line}"
+        );
     }
 
     let _ = child.kill();

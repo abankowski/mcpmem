@@ -33,7 +33,9 @@ fn parse_embedding(val: &Value) -> Result<Vec<f64>> {
         .as_array()
         .ok_or_else(|| MCSError::InvalidParams("'embedding' must be an array of numbers".into()))?;
     if arr.is_empty() {
-        return Err(MCSError::InvalidParams("Embedding must not be empty".into()));
+        return Err(MCSError::InvalidParams(
+            "Embedding must not be empty".into(),
+        ));
     }
     if arr.len() > MAX_EMBEDDING_DIMS {
         return Err(MCSError::InvalidParams(format!(
@@ -62,9 +64,9 @@ fn opt_usize(params: &Value, key: &str, default: usize) -> Result<usize> {
 fn opt_f64(params: &Value, key: &str, default: f64) -> Result<f64> {
     match params.get(key) {
         None | Some(Value::Null) => Ok(default),
-        Some(v) => v.as_f64().ok_or_else(|| {
-            MCSError::InvalidParams(format!("'{key}' must be a number"))
-        }),
+        Some(v) => v
+            .as_f64()
+            .ok_or_else(|| MCSError::InvalidParams(format!("'{key}' must be a number"))),
     }
 }
 
@@ -104,10 +106,7 @@ pub fn handle_vector_upsert_embedding(
             .ok_or_else(|| MCSError::InvalidParams("Missing 'embedding' parameter".into()))?,
     )?;
 
-    let model = params
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("");
 
     with_scratch(|buf| {
         buf.reserve(embedding.len());
@@ -138,8 +137,7 @@ pub fn handle_vector_search_entities(
             .ok_or_else(|| MCSError::InvalidParams("Missing 'embedding' parameter".into()))?,
     )?;
 
-    let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?
-        .clamp(1, MAX_TOP_K);
+    let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?.clamp(1, MAX_TOP_K);
 
     let entity_type = params
         .get("entityType")
@@ -191,16 +189,14 @@ pub fn handle_hybrid_search(
         .and_then(|v| v.as_str())
         .ok_or_else(|| MCSError::InvalidParams("Missing 'queryText' parameter".into()))?;
 
-    let query_embedding = parse_embedding(
-        params
-            .get("queryEmbedding")
-            .ok_or_else(|| MCSError::InvalidParams("Missing 'queryEmbedding' parameter".into()))?,
-    )?;
+    let query_embedding =
+        parse_embedding(params.get("queryEmbedding").ok_or_else(|| {
+            MCSError::InvalidParams("Missing 'queryEmbedding' parameter".into())
+        })?)?;
 
     let text_weight = opt_f64(params, "textWeight", 0.5)?;
     let vec_weight = opt_f64(params, "vecWeight", 0.5)?;
-    let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?
-        .clamp(1, MAX_TOP_K);
+    let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?.clamp(1, MAX_TOP_K);
 
     let results = with_scratch(|buf| {
         buf.reserve(query_embedding.len());
@@ -251,7 +247,10 @@ fn perform_hybrid_search(
     let mut text_matches: Vec<EntityIdAndName> = Vec::with_capacity(kg_results.len());
     for entity in &kg_results {
         if let Ok(Some(_)) = vs.get_entity_type(
-            vs.name_to_id.get(&entity.name).map(|r| *r.value()).unwrap_or(-1),
+            vs.name_to_id
+                .get(&entity.name)
+                .map(|r| *r.value())
+                .unwrap_or(-1),
         ) {
             let id = vs.name_to_id.get(&entity.name).map(|r| *r.value());
             text_matches.push(EntityIdAndName {
@@ -303,7 +302,11 @@ fn perform_hybrid_search(
     }
 
     let mut scored: Vec<AggScore> = score_map.into_values().collect();
-    scored.sort_unstable_by(|a, b| b.total.partial_cmp(&a.total).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_unstable_by(|a, b| {
+        b.total
+            .partial_cmp(&a.total)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     if vs.graph_node_count() > 0 {
         let g = vs.graph.read();
@@ -316,7 +319,11 @@ fn perform_hybrid_search(
                 }
             }
         }
-        scored.sort_unstable_by(|a, b| b.total.partial_cmp(&a.total).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_unstable_by(|a, b| {
+            b.total
+                .partial_cmp(&a.total)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     let conn = vs.db.lock();
@@ -468,7 +475,9 @@ pub fn handle_vector_batch_upsert(
         let name = match item.get("entityName").and_then(|v| v.as_str()) {
             Some(n) if !n.is_empty() && n.len() <= MAX_NAME_BYTES => n,
             _ => {
-                errors.push(json!({"entityName": item.get("entityName"), "error": "invalid entityName"}));
+                errors.push(
+                    json!({"entityName": item.get("entityName"), "error": "invalid entityName"}),
+                );
                 continue;
             }
         };
@@ -563,9 +572,9 @@ pub fn handle_vector_search_by_entity(
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let (id, emb, _model) = vs.get_embedding_by_name(name)?.ok_or_else(|| {
-        MCSError::InvalidParams(format!("Entity '{name}' has no embedding"))
-    })?;
+    let (id, emb, _model) = vs
+        .get_embedding_by_name(name)?
+        .ok_or_else(|| MCSError::InvalidParams(format!("Entity '{name}' has no embedding")))?;
 
     let mut exclude = std::collections::HashSet::new();
     if exclude_self {
@@ -697,7 +706,12 @@ pub fn handle_vector_mmr_search(
         }
         if let Some(emb) = vs.get_embedding_by_id(id)? {
             let rel = cosine_sim(&query, &emb);
-            cands.push(MmrCand { name, etype, emb, rel });
+            cands.push(MmrCand {
+                name,
+                etype,
+                emb,
+                rel,
+            });
         }
     }
 

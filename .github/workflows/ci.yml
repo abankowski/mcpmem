@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Lint every feature combination
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace --all-targets -- --test-threads=1
+      - name: Test runtime role feature matrix
+        run: |
+          cargo test --test role_composition --no-default-features
+          cargo test --test role_composition --features indexer
+          cargo test --test role_composition --features webhooks
+          cargo test --test role_composition --features indexer,webhooks
+      - name: Keep graph-only build free of HTTP and AWS clients
+        run: |
+          if cargo tree --no-default-features -e normal | rg -q '(^| )(reqwest|aws-[a-z0-9-]+|aws_sdk_[a-z0-9_]+) v'; then
+            echo 'graph-only build unexpectedly includes an HTTP or AWS client'
+            exit 1
+          fi

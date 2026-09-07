@@ -11,14 +11,15 @@ pub mod http;
 pub mod ivf;
 pub mod kg;
 pub mod protocol;
+pub mod runtime;
 pub mod server;
 pub mod tls;
 pub mod tools;
 pub mod turboquant;
 pub mod types;
-pub mod watcher;
 pub mod vector_actions;
 pub mod vector_store;
+pub mod watcher;
 
 use clap::{Parser, ValueEnum};
 use usearch::{MetricKind, ScalarKind};
@@ -125,6 +126,11 @@ pub struct Args {
     /// Log level
     #[arg(short, long, default_value = "info")]
     pub log_level: String,
+
+    /// Runtime roles to start in this process. Repeat the flag or separate roles with commas.
+    /// Defaults to `mcp`, preserving the existing single-server behavior.
+    #[arg(long = "role", value_delimiter = ',', value_name = "ROLE")]
+    pub roles: Vec<String>,
 
     /// Bearer token required on the `http` (`Authorization` header) transport.
     /// Overrides `--auth-token-file` and the `MCP_MEMORY_AUTH_TOKEN` env var.

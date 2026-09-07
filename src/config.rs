@@ -1,5 +1,6 @@
 use crate::Transport;
 use crate::errors::{MCSError, Result};
+use crate::runtime::RoleSet;
 use crate::tools::ToolCategory;
 use std::sync::Arc;
 
@@ -116,6 +117,8 @@ pub struct Config {
     /// Tool categories exposed by this server. Empty (the default) means no
     /// tools are advertised or callable until enabled with `--enable-*`.
     pub enabled_categories: Vec<ToolCategory>,
+    /// Runtime roles selected for this process. Defaults to the existing MCP server.
+    pub roles: RoleSet,
 }
 
 /// Resolve the read-only connection-pool size. `0` means "auto": scale to the
@@ -207,6 +210,12 @@ impl Config {
         }
 
         let enabled_categories = args.enabled_categories();
+        let roles = if args.roles.is_empty() {
+            RoleSet::mcp_only()
+        } else {
+            RoleSet::parse_csv(&args.roles.join(","))
+                .map_err(|error| MCSError::InvalidParams(error.to_string()))?
+        };
 
         Ok(Config {
             memory_file_path,
@@ -228,6 +237,7 @@ impl Config {
             code_enabled: enabled_categories.contains(&ToolCategory::Code),
             code_embedding_dims: args.code_embedding_dims,
             enabled_categories,
+            roles,
         })
     }
 }
@@ -254,6 +264,7 @@ impl Default for Config {
             code_enabled: false,
             code_embedding_dims: 768,
             enabled_categories: Vec::new(),
+            roles: RoleSet::mcp_only(),
         }
     }
 }

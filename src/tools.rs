@@ -83,32 +83,110 @@ impl ToolMeta {
 }
 
 pub const ALL_TOOLS: &[ToolMeta] = &[
-    ToolMeta { name: "create_entities",    write: true  },
-    ToolMeta { name: "create_relations",   write: true  },
-    ToolMeta { name: "add_observations",   write: true  },
-    ToolMeta { name: "delete_entities",    write: true  },
-    ToolMeta { name: "delete_observations",write: true  },
-    ToolMeta { name: "delete_relations",   write: true  },
-    ToolMeta { name: "read_graph",         write: false },
-    ToolMeta { name: "search_nodes",       write: false },
-    ToolMeta { name: "open_nodes",         write: false },
-    ToolMeta { name: "get_entity",         write: false },
-    ToolMeta { name: "graph_stats",        write: false },
-    ToolMeta { name: "search_relations",   write: false },
-    ToolMeta { name: "find_path",          write: false },
-    ToolMeta { name: "compact",            write: true  },
-    ToolMeta { name: "get_neighbors",      write: false },
-    ToolMeta { name: "describe_entity",    write: false },
-    ToolMeta { name: "list_entity_types",  write: false },
-    ToolMeta { name: "list_relation_types",write: false },
-    ToolMeta { name: "upsert_entities",    write: true  },
-    ToolMeta { name: "export_graph",       write: false },
-    ToolMeta { name: "merge_entities",    write: true  },
-    ToolMeta { name: "extract_subgraph",  write: false },
-    ToolMeta { name: "batch_get_entities",write: false },
-    ToolMeta { name: "find_all_paths",    write: false },
-    ToolMeta { name: "entity_exists",     write: false },
-    ToolMeta { name: "degree",            write: false },
+    ToolMeta {
+        name: "create_entities",
+        write: true,
+    },
+    ToolMeta {
+        name: "create_relations",
+        write: true,
+    },
+    ToolMeta {
+        name: "add_observations",
+        write: true,
+    },
+    ToolMeta {
+        name: "delete_entities",
+        write: true,
+    },
+    ToolMeta {
+        name: "delete_observations",
+        write: true,
+    },
+    ToolMeta {
+        name: "delete_relations",
+        write: true,
+    },
+    ToolMeta {
+        name: "read_graph",
+        write: false,
+    },
+    ToolMeta {
+        name: "search_nodes",
+        write: false,
+    },
+    ToolMeta {
+        name: "open_nodes",
+        write: false,
+    },
+    ToolMeta {
+        name: "get_entity",
+        write: false,
+    },
+    ToolMeta {
+        name: "graph_stats",
+        write: false,
+    },
+    ToolMeta {
+        name: "search_relations",
+        write: false,
+    },
+    ToolMeta {
+        name: "find_path",
+        write: false,
+    },
+    ToolMeta {
+        name: "compact",
+        write: true,
+    },
+    ToolMeta {
+        name: "get_neighbors",
+        write: false,
+    },
+    ToolMeta {
+        name: "describe_entity",
+        write: false,
+    },
+    ToolMeta {
+        name: "list_entity_types",
+        write: false,
+    },
+    ToolMeta {
+        name: "list_relation_types",
+        write: false,
+    },
+    ToolMeta {
+        name: "upsert_entities",
+        write: true,
+    },
+    ToolMeta {
+        name: "export_graph",
+        write: false,
+    },
+    ToolMeta {
+        name: "merge_entities",
+        write: true,
+    },
+    ToolMeta {
+        name: "extract_subgraph",
+        write: false,
+    },
+    ToolMeta {
+        name: "batch_get_entities",
+        write: false,
+    },
+    ToolMeta {
+        name: "find_all_paths",
+        write: false,
+    },
+    ToolMeta {
+        name: "entity_exists",
+        write: false,
+    },
+    ToolMeta {
+        name: "degree",
+        write: false,
+    },
 ];
 
 /// Names of the vector-search tools (manifest: `vector_tools.json`).
@@ -145,7 +223,11 @@ pub fn tool_exists(name: &str) -> bool {
 
 #[inline]
 pub fn is_write_tool(name: &str) -> bool {
-    ALL_TOOLS.iter().find(|t| t.name == name).map(|t| t.write).unwrap_or(false)
+    ALL_TOOLS
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.write)
+        .unwrap_or(false)
 }
 
 /// `true` for the vector-specific tool names (`vector_*` plus `hybrid_search`).
@@ -204,7 +286,10 @@ mod tests {
     #[test]
     fn test_categories() {
         assert_eq!(category_of("read_graph"), Some(ToolCategory::GraphRead));
-        assert_eq!(category_of("create_entities"), Some(ToolCategory::GraphWrite));
+        assert_eq!(
+            category_of("create_entities"),
+            Some(ToolCategory::GraphWrite)
+        );
         assert_eq!(category_of("hybrid_search"), Some(ToolCategory::Vectors));
         assert_eq!(category_of("code_index"), Some(ToolCategory::Code));
         assert_eq!(category_of("nope"), None);
@@ -214,8 +299,14 @@ mod tests {
     fn test_is_tool_available_gating() {
         assert!(!is_tool_available("read_graph", &[]));
         assert!(is_tool_available("read_graph", &[ToolCategory::GraphRead]));
-        assert!(!is_tool_available("create_entities", &[ToolCategory::GraphRead]));
-        assert!(is_tool_available("create_entities", &[ToolCategory::GraphWrite]));
+        assert!(!is_tool_available(
+            "create_entities",
+            &[ToolCategory::GraphRead]
+        ));
+        assert!(is_tool_available(
+            "create_entities",
+            &[ToolCategory::GraphWrite]
+        ));
         assert!(!is_tool_available("nope", ToolCategory::ALL));
     }
 

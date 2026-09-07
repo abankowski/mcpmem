@@ -145,7 +145,10 @@ fn test_http_auth_rejects_missing_token() {
 fn test_http_auth_rejects_wrong_token() {
     let srv = spawn_http_server(Some("s3cret"));
     let (status, _body) = post_mcp(srv.port, INIT_BODY, Some("wrong"));
-    assert_eq!(status, 401, "request with wrong bearer token must be rejected");
+    assert_eq!(
+        status, 401,
+        "request with wrong bearer token must be rejected"
+    );
 }
 
 #[test]

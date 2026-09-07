@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use mcp_memory::{config, server};
+use mcp_memory::{config, runtime, server};
 use std::sync::Arc;
 use tracing::info;
 
@@ -36,19 +36,18 @@ async fn inner_main() -> Result<()> {
         info!("Tool categories enabled: {}", slugs.join(", "));
     }
 
-    let mcp_server = server::MCPServer::new((*config).clone(), args.vector_config())?;
+    let mcp_server = Arc::new(server::MCPServer::new(
+        (*config).clone(),
+        args.vector_config(),
+    )?);
     info!("Server initialized successfully");
 
-    match args.transport {
-        mcp_memory::Transport::Stdio => {
-            info!("Running in stdio mode");
-            mcp_server.run_stdio().await?;
-        }
-        mcp_memory::Transport::Http => {
-            info!("Running in HTTP mode on {}", config.bind_addr);
-            mcp_server.run_http(&config.bind_addr).await?;
-        }
-    }
+    let transport =
+        runtime::McpTransportService::new(mcp_server, config.transport, config.bind_addr.clone());
+    let services = Arc::new(runtime::AppServices::new(Arc::new(transport)));
+    let running_roles = runtime::RuntimeComposition::start(config.roles.clone(), services)?;
+    info!(roles = ?running_roles.lifecycle(), "Runtime roles started");
+    running_roles.wait_for_shutdown().await?;
 
     info!("Server shutdown complete");
     Ok(())

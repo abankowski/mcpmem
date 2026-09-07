@@ -13,7 +13,14 @@ fn main() {
         let _ = std::fs::remove_file(&p);
     }
 
-    let kg = GraphHandle::new(path, Durability::Async, SqliteTuning::default(), NonZeroUsize::new(10000).unwrap(), 4).expect("create KG");
+    let kg = GraphHandle::new(
+        path,
+        Durability::Async,
+        SqliteTuning::default(),
+        NonZeroUsize::new(10000).unwrap(),
+        4,
+    )
+    .expect("create KG");
 
     // ── Seed ──────────────────────────────────────────────────────────
     const N: usize = 1000;
@@ -53,8 +60,10 @@ fn main() {
                 total += start.elapsed();
             }
             let avg = total / $n as u32;
-            println!("  {:30} {:>8} runs  avg {:>10?}  total {:>10?}",
-                $name, $n, avg, total);
+            println!(
+                "  {:30} {:>8} runs  avg {:>10?}  total {:>10?}",
+                $name, $n, avg, total
+            );
         }};
     }
 
@@ -72,9 +81,7 @@ fn main() {
 
     measure!("create_entities", 1, { kg.create_entities(&entities) });
 
-    measure!("get_entity (cache hit)", N, {
-        kg.get_entity("entity_0")
-    });
+    measure!("get_entity (cache hit)", N, { kg.get_entity("entity_0") });
 
     // Flush entity seq
     let _ = kg.get_entity_count();

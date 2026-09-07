@@ -25,7 +25,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -107,7 +107,9 @@ pub async fn run(
             .await
             .map_err(MCSError::IoError)?;
         let socket_addr = resolve_addr(addr)?;
-        info!("Listening for HTTPS (Streamable) MCP on https://{socket_addr}/mcp (TLS, auth {auth})");
+        info!(
+            "Listening for HTTPS (Streamable) MCP on https://{socket_addr}/mcp (TLS, auth {auth})"
+        );
         axum_server::bind_rustls(socket_addr, tls)
             .serve(router(state).into_make_service())
             .await
@@ -156,7 +158,11 @@ fn authorized(state: &HttpState, headers: &HeaderMap) -> bool {
     }
 }
 
-async fn post_handler(State(state): State<HttpState>, headers: HeaderMap, body: String) -> Response {
+async fn post_handler(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
@@ -164,10 +170,9 @@ async fn post_handler(State(state): State<HttpState>, headers: HeaderMap, body: 
     let vs = state.vs;
     // The dispatch path locks the graph and may perform a blocking fsync, so
     // run it off the async worker pool (keeps the HTTP reactor responsive).
-    let result = tokio::task::spawn_blocking(move || {
-        server::dispatch_http_body(&body, &kg, vs.as_deref())
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || server::dispatch_http_body(&body, &kg, vs.as_deref()))
+            .await;
 
     let outcome = match result {
         Ok(inner) => inner,
@@ -241,17 +246,16 @@ async fn ui_handler() -> Response {
 
 /// `GET /ui/graph.css` — the viewer stylesheet (static asset, no auth).
 async fn ui_css_handler() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        UI_CSS,
-    )
-        .into_response()
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], UI_CSS).into_response()
 }
 
 /// `GET /ui/graph.js` — the viewer application script (static asset, no auth).
 async fn ui_js_handler() -> Response {
     (
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
         UI_JS,
     )
         .into_response()
@@ -281,7 +285,10 @@ fn ui_data_gate(
 }
 
 fn parse_usize(params: &HashMap<String, String>, key: &str, default: usize) -> usize {
-    params.get(key).and_then(|s| s.parse().ok()).unwrap_or(default)
+    params
+        .get(key)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Run a blocking JSON-payload builder off the async reactor (the graph lock may
@@ -340,7 +347,10 @@ async fn ui_search_handler(
     if let Some(resp) = ui_data_gate(&state, &headers, &params) {
         return resp;
     }
-    let query = params.get("q").map(|s| s.trim().to_string()).unwrap_or_default();
+    let query = params
+        .get("q")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     let entity_type = params.get("entityType").filter(|s| !s.is_empty()).cloned();
     let offset = parse_usize(&params, "offset", 0);
     let limit = parse_usize(&params, "limit", 100).clamp(1, MAX_UI_NODES);
@@ -446,7 +456,10 @@ fn build_graph_payload(
     let (mut graph, returned) = kg.read_graph_filtered_lite(entity_type, offset, limit)?;
     let (type_counts, entities_total, relations_total) = kg.ui_meta();
     let scope_total = match entity_type {
-        Some(t) if !t.is_empty() => type_counts.iter().find(|(n, _)| n == t).map_or(0, |(_, c)| *c),
+        Some(t) if !t.is_empty() => type_counts
+            .iter()
+            .find(|(n, _)| n == t)
+            .map_or(0, |(_, c)| *c),
         _ => entities_total,
     };
     let has_more = offset.saturating_add(returned) < scope_total;
@@ -473,7 +486,11 @@ fn build_graph_payload(
 fn fts_query(raw: &str) -> String {
     let tokens: Vec<String> = raw
         .split_whitespace()
-        .map(|t| t.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>())
+        .map(|t| {
+            t.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<String>()
+        })
         .filter(|t| !t.is_empty())
         .collect();
     let n = tokens.len();
@@ -547,23 +564,15 @@ async fn ui_expand_handler(
         .unwrap_or(1)
         .clamp(1, MAX_UI_EXPAND_DEPTH);
     // `Direction::parse` expects the uppercase MCP spelling; default is `Both`.
-    let direction = crate::kg::Direction::parse(
-        params
-            .get("direction")
-            .map(|s| s.to_uppercase())
-            .as_deref(),
-    );
+    let direction =
+        crate::kg::Direction::parse(params.get("direction").map(|s| s.to_uppercase()).as_deref());
 
     let kg = state.kg;
     let result =
         tokio::task::spawn_blocking(move || kg.neighbors(&name, direction, None, depth)).await;
 
     match result {
-        Ok(Ok(json)) => (
-            [(header::CONTENT_TYPE, "application/json")],
-            json,
-        )
-            .into_response(),
+        Ok(Ok(json)) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
         // An unknown entity is a client error (bad `name`), not a server fault.
         Ok(Err(MCSError::InvalidParams(msg))) => (StatusCode::NOT_FOUND, msg).into_response(),
         Ok(Err(e)) => {
@@ -576,5 +585,3 @@ async fn ui_expand_handler(
         }
     }
 }
-
-

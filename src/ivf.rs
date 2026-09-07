@@ -296,7 +296,9 @@ impl IvfFlatIndex {
         let candidates: Vec<usize> = if g.centroids.is_empty() {
             (0..g.ids.len()).collect()
         } else {
-            let nprobe = nprobe_override.unwrap_or(self.nprobe).clamp(1, g.lists.len());
+            let nprobe = nprobe_override
+                .unwrap_or(self.nprobe)
+                .clamp(1, g.lists.len());
             // Rank centroids by distance, take the nearest `nprobe`.
             let mut cd: Vec<(usize, f32)> = (0..g.lists.len())
                 .map(|c| (c, g.dist_to_centroid(query, q_norm, c)))
@@ -428,7 +430,10 @@ impl IvfFlatIndex {
 
     /// Replace the entire contents in one shot (used for the initial bulk load).
     /// Does not train; call [`IvfFlatIndex::train`] afterwards.
-    pub fn bulk_load(&self, items: impl IntoIterator<Item = (u64, Vec<f32>)>) -> Result<(), String> {
+    pub fn bulk_load(
+        &self,
+        items: impl IntoIterator<Item = (u64, Vec<f32>)>,
+    ) -> Result<(), String> {
         let mut g = self.inner.write();
         for (id, v) in items {
             if v.len() != self.dims {
@@ -551,7 +556,8 @@ mod tests {
             idx.upsert(i, &v(&[i as f32 * 0.01, 0.0])).unwrap();
         }
         for i in 10..20 {
-            idx.upsert(i, &v(&[100.0 + i as f32 * 0.01, 100.0])).unwrap();
+            idx.upsert(i, &v(&[100.0 + i as f32 * 0.01, 100.0]))
+                .unwrap();
         }
         idx.train().unwrap();
         assert!(idx.is_trained());

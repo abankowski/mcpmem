@@ -21,5 +21,3 @@ pub struct KnowledgeGraphOut {
     pub entities: Vec<Entity>,
     pub relations: Vec<Relation>,
 }
-
-

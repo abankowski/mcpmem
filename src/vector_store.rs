@@ -1,13 +1,13 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
+use petgraph::Directed;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;
-use petgraph::Directed;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -73,10 +73,7 @@ impl SearchGate {
 /// not branch on the index kind at every call site. Distances follow usearch's
 /// convention (smaller = closer) for all backends.
 enum AnnIndex {
-    Hnsw {
-        index: Arc<Index>,
-        gate: SearchGate,
-    },
+    Hnsw { index: Arc<Index>, gate: SearchGate },
     Ivf(Box<IvfFlatIndex>),
     Turbo(Box<TurboQuantIndex>),
 }
@@ -135,7 +132,12 @@ impl AnnIndex {
     }
 
     /// Nearest `top_k` ids with distances (ascending). `nprobe` applies to IVF only.
-    fn search(&self, query: &[f32], top_k: usize, nprobe: Option<usize>) -> Result<Vec<(u64, f32)>> {
+    fn search(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        nprobe: Option<usize>,
+    ) -> Result<Vec<(u64, f32)>> {
         match self {
             AnnIndex::Hnsw { index, gate } => gate.run(|| {
                 let m = index
@@ -144,7 +146,9 @@ impl AnnIndex {
                 let cap = m.keys.len().min(m.distances.len());
                 Ok((0..cap).map(|j| (m.keys[j], m.distances[j])).collect())
             }),
-            AnnIndex::Ivf(i) => i.search(query, top_k, nprobe).map_err(MCSError::MemoryError),
+            AnnIndex::Ivf(i) => i
+                .search(query, top_k, nprobe)
+                .map_err(MCSError::MemoryError),
             AnnIndex::Turbo(i) => i.search(query, top_k).map_err(MCSError::MemoryError),
         }
     }
@@ -322,9 +326,8 @@ fn serialize_embedding(emb: &[f32]) -> Vec<u8> {
     let header = BlobHeader {
         dims: emb.len() as u32,
     };
-    let f32_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(emb.as_ptr() as *const u8, emb.len() * 4)
-    };
+    let f32_bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(emb.as_ptr() as *const u8, emb.len() * 4) };
     let mut bytes = Vec::with_capacity(4 + f32_bytes.len());
     bytes.extend_from_slice(header.as_bytes());
     bytes.extend_from_slice(f32_bytes);
@@ -422,7 +425,9 @@ impl VectorStore {
 
         let name_to_id = Arc::new(DashMap::new());
         let id_to_name = Arc::new(DashMap::new());
-        let graph = Arc::new(RwLock::new(StableGraph::<EntityId, (), Directed, u32>::new()));
+        let graph = Arc::new(RwLock::new(
+            StableGraph::<EntityId, (), Directed, u32>::new(),
+        ));
         let node_map = Arc::new(DashMap::new());
         let db = Mutex::new(conn);
 
@@ -449,8 +454,7 @@ impl VectorStore {
             .query_row("SELECT COUNT(*) FROM vector_embedding", [], |r| {
                 r.get::<_, i64>(0)
             })
-            .map_err(sqlite_err)?
-            as usize;
+            .map_err(sqlite_err)? as usize;
 
         if count == 0 {
             return Ok(());
@@ -510,7 +514,11 @@ impl VectorStore {
         Ok(())
     }
 
-    fn get_entity_id_and_name(&self, conn: &Connection, entity_name: &str) -> Result<Option<(EntityId, String)>> {
+    fn get_entity_id_and_name(
+        &self,
+        conn: &Connection,
+        entity_name: &str,
+    ) -> Result<Option<(EntityId, String)>> {
         if let Some(entry) = self.name_to_id.get(entity_name) {
             let id = *entry;
             let name = entity_name.to_string();
@@ -537,7 +545,12 @@ impl VectorStore {
         }
     }
 
-    pub fn upsert_embedding(&self, entity_name: &str, embedding: &[f32], model: &str) -> Result<()> {
+    pub fn upsert_embedding(
+        &self,
+        entity_name: &str,
+        embedding: &[f32],
+        model: &str,
+    ) -> Result<()> {
         let conn = self.db.lock();
         self.upsert_one(&conn, entity_name, embedding, model)
     }
@@ -608,9 +621,10 @@ impl VectorStore {
             }
         }
         if write_error.is_none()
-            && let Err(e) = tx.commit() {
-                write_error = Some(format!("commit batch transaction: {e}"));
-            }
+            && let Err(e) = tx.commit()
+        {
+            write_error = Some(format!("commit batch transaction: {e}"));
+        }
         if let Some(msg) = write_error {
             for &i in &ok_indices {
                 results[i] = Err(MCSError::MemoryError(msg.clone()));
@@ -654,8 +668,7 @@ impl VectorStore {
         let existed = self.index.remove(entity_id as u64).unwrap_or(false);
         self.index.add(entity_id as u64, embedding)?;
 
-        self.name_to_id
-            .insert(entity_name.to_string(), entity_id);
+        self.name_to_id.insert(entity_name.to_string(), entity_id);
         self.id_to_name.insert(entity_id, entity_name.to_string());
 
         if !existed {
@@ -717,11 +730,7 @@ impl VectorStore {
         Ok(true)
     }
 
-    pub fn search_embeddings(
-        &self,
-        query: &[f32],
-        top_k: usize,
-    ) -> Result<Vec<(EntityId, f32)>> {
+    pub fn search_embeddings(&self, query: &[f32], top_k: usize) -> Result<Vec<(EntityId, f32)>> {
         if self.count.load(Ordering::Relaxed) == 0 {
             return Ok(Vec::new());
         }
@@ -853,7 +862,8 @@ impl VectorStore {
                 );
                 let mut rel_stmt = conn.prepare(&sql).map_err(sqlite_err)?;
 
-                let mut param_values: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len() * 2);
+                let mut param_values: Vec<&dyn rusqlite::types::ToSql> =
+                    Vec::with_capacity(chunk.len() * 2);
                 for id in chunk {
                     param_values.push(id as &dyn rusqlite::types::ToSql);
                 }
@@ -1077,8 +1087,8 @@ fn write_f32(buf: &mut String, val: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kg::GraphHandle;
     use crate::config::{Durability, SqliteTuning};
+    use crate::kg::GraphHandle;
     use crate::types::Entity;
     use std::num::NonZeroUsize;
 
@@ -1092,46 +1102,37 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let lru = NonZeroUsize::new(10000).unwrap();
-        let kg = GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
+        let kg =
+            GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
         let vs = VectorStore::new(&db_path, dims).unwrap();
-        TestEnv {
-            kg,
-            vs,
-            _dir: dir,
-        }
+        TestEnv { kg, vs, _dir: dir }
     }
 
     fn setup_ivf(dims: u32) -> TestEnv {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let lru = NonZeroUsize::new(10000).unwrap();
-        let kg = GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
+        let kg =
+            GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
         let mut cfg = VectorConfig::new(dims);
         cfg.index_kind = IndexKind::Ivf;
         cfg.ivf_nlist = 4;
         cfg.ivf_nprobe = 4;
         let vs = VectorStore::with_config(&db_path, &cfg).unwrap();
-        TestEnv {
-            kg,
-            vs,
-            _dir: dir,
-        }
+        TestEnv { kg, vs, _dir: dir }
     }
 
     fn setup_turbo(dims: u32, bits: u32) -> TestEnv {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let lru = NonZeroUsize::new(10000).unwrap();
-        let kg = GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
+        let kg =
+            GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
         let mut cfg = VectorConfig::new(dims);
         cfg.index_kind = IndexKind::TurboQuant;
         cfg.tq_bits = bits;
         let vs = VectorStore::with_config(&db_path, &cfg).unwrap();
-        TestEnv {
-            kg,
-            vs,
-            _dir: dir,
-        }
+        TestEnv { kg, vs, _dir: dir }
     }
 
     fn create_test_entity(kg: &GraphHandle, name: &str, etype: &str) {
@@ -1155,8 +1156,12 @@ mod tests {
 
         let emb_a = make_embedding(4, 1.0);
         let emb_b = make_embedding(4, 0.1);
-        env.vs.upsert_embedding("alice", &emb_a, "test-model").unwrap();
-        env.vs.upsert_embedding("bob", &emb_b, "test-model").unwrap();
+        env.vs
+            .upsert_embedding("alice", &emb_a, "test-model")
+            .unwrap();
+        env.vs
+            .upsert_embedding("bob", &emb_b, "test-model")
+            .unwrap();
 
         let query = make_embedding(4, 1.0);
         let results = env.vs.search_embeddings(&query, 10).unwrap();
@@ -1168,21 +1173,28 @@ mod tests {
     fn test_vector_delete_embedding() {
         let env = setup(4);
         create_test_entity(&env.kg, "alice", "person");
-        env.vs.upsert_embedding("alice", &make_embedding(4, 1.0), "").unwrap();
+        env.vs
+            .upsert_embedding("alice", &make_embedding(4, 1.0), "")
+            .unwrap();
         assert_eq!(env.vs.count(), 1);
 
         let deleted = env.vs.delete_embedding("alice").unwrap();
         assert!(deleted);
         assert_eq!(env.vs.count(), 0);
 
-        let results = env.vs.search_embeddings(&make_embedding(4, 1.0), 10).unwrap();
+        let results = env
+            .vs
+            .search_embeddings(&make_embedding(4, 1.0), 10)
+            .unwrap();
         assert!(results.is_empty());
     }
 
     #[test]
     fn test_vector_upsert_nonexistent_entity() {
         let env = setup(4);
-        let err = env.vs.upsert_embedding("nonexistent", &make_embedding(4, 1.0), "");
+        let err = env
+            .vs
+            .upsert_embedding("nonexistent", &make_embedding(4, 1.0), "");
         assert!(err.is_err());
     }
 
@@ -1190,7 +1202,9 @@ mod tests {
     fn test_vector_dimension_mismatch() {
         let env = setup(4);
         create_test_entity(&env.kg, "alice", "person");
-        let err = env.vs.upsert_embedding("alice", &make_embedding(8, 1.0), "");
+        let err = env
+            .vs
+            .upsert_embedding("alice", &make_embedding(8, 1.0), "");
         assert!(err.is_err());
     }
 
@@ -1199,10 +1213,14 @@ mod tests {
         let env = setup(4);
         for i in 0..5 {
             create_test_entity(&env.kg, &format!("e{i}"), "test");
-            env.vs.upsert_embedding(&format!("e{i}"), &make_embedding(4, i as f32 * 0.2), "")
+            env.vs
+                .upsert_embedding(&format!("e{i}"), &make_embedding(4, i as f32 * 0.2), "")
                 .unwrap();
         }
-        let results = env.vs.search_embeddings(&make_embedding(4, 0.0), 3).unwrap();
+        let results = env
+            .vs
+            .search_embeddings(&make_embedding(4, 0.0), 3)
+            .unwrap();
         assert_eq!(results.len(), 3);
     }
 
@@ -1211,10 +1229,17 @@ mod tests {
         let env = setup(4);
         create_test_entity(&env.kg, "alice", "person");
         create_test_entity(&env.kg, "acme", "organization");
-        env.vs.upsert_embedding("alice", &make_embedding(4, 1.0), "").unwrap();
-        env.vs.upsert_embedding("acme", &make_embedding(4, 0.95), "").unwrap();
+        env.vs
+            .upsert_embedding("alice", &make_embedding(4, 1.0), "")
+            .unwrap();
+        env.vs
+            .upsert_embedding("acme", &make_embedding(4, 0.95), "")
+            .unwrap();
 
-        let json = env.vs.search_entities_json(&make_embedding(4, 1.0), 10, Some("person")).unwrap();
+        let json = env
+            .vs
+            .search_entities_json(&make_embedding(4, 1.0), 10, Some("person"))
+            .unwrap();
         assert!(json.contains("alice"));
         assert!(!json.contains("acme"));
     }
@@ -1251,9 +1276,15 @@ mod tests {
         create_test_entity(&env.kg, "bob", "person");
         create_test_entity(&env.kg, "charlie", "person");
 
-        env.vs.upsert_embedding("alice", &make_embedding(4, 1.0), "").unwrap();
-        env.vs.upsert_embedding("bob", &make_embedding(4, 0.5), "").unwrap();
-        env.vs.upsert_embedding("charlie", &make_embedding(4, 0.0), "").unwrap();
+        env.vs
+            .upsert_embedding("alice", &make_embedding(4, 1.0), "")
+            .unwrap();
+        env.vs
+            .upsert_embedding("bob", &make_embedding(4, 0.5), "")
+            .unwrap();
+        env.vs
+            .upsert_embedding("charlie", &make_embedding(4, 0.0), "")
+            .unwrap();
 
         env.kg
             .create_relations(&[crate::types::Relation {
@@ -1272,13 +1303,24 @@ mod tests {
     fn test_vector_upsert_replace() {
         let env = setup(4);
         create_test_entity(&env.kg, "alice", "person");
-        env.vs.upsert_embedding("alice", &make_embedding(4, 1.0), "").unwrap();
-        env.vs.upsert_embedding("alice", &make_embedding(4, 0.5), "").unwrap();
+        env.vs
+            .upsert_embedding("alice", &make_embedding(4, 1.0), "")
+            .unwrap();
+        env.vs
+            .upsert_embedding("alice", &make_embedding(4, 0.5), "")
+            .unwrap();
         assert_eq!(env.vs.count(), 1);
 
-        let results = env.vs.search_embeddings(&make_embedding(4, 0.5), 10).unwrap();
+        let results = env
+            .vs
+            .search_embeddings(&make_embedding(4, 0.5), 10)
+            .unwrap();
         assert_eq!(results.len(), 1);
-        let name = env.vs.id_to_name.get(&results[0].0).map(|r| r.value().clone());
+        let name = env
+            .vs
+            .id_to_name
+            .get(&results[0].0)
+            .map(|r| r.value().clone());
         assert_eq!(name.as_deref(), Some("alice"));
     }
 
@@ -1291,7 +1333,9 @@ mod tests {
         // First insert reserves at least a full 1024 chunk up front (usearch may
         // over-allocate beyond that, but it must not reserve just one slot).
         create_test_entity(&env.kg, "e0", "t");
-        env.vs.upsert_embedding("e0", &make_embedding(4, 0.0), "").unwrap();
+        env.vs
+            .upsert_embedding("e0", &make_embedding(4, 0.0), "")
+            .unwrap();
         let cap_after_first = env.vs.index_capacity();
         assert!(cap_after_first >= 1024, "capacity {cap_after_first} < 1024");
 
@@ -1299,13 +1343,21 @@ mod tests {
         for i in 1..50 {
             let name = format!("e{i}");
             create_test_entity(&env.kg, &name, "t");
-            env.vs.upsert_embedding(&name, &make_embedding(4, i as f32 * 0.01), "").unwrap();
+            env.vs
+                .upsert_embedding(&name, &make_embedding(4, i as f32 * 0.01), "")
+                .unwrap();
         }
         assert_eq!(env.vs.count(), 50);
-        assert_eq!(env.vs.index_capacity(), cap_after_first, "capacity changed mid-chunk");
+        assert_eq!(
+            env.vs.index_capacity(),
+            cap_after_first,
+            "capacity changed mid-chunk"
+        );
 
         // Overwriting an existing entity never grows capacity.
-        env.vs.upsert_embedding("e0", &make_embedding(4, 0.5), "").unwrap();
+        env.vs
+            .upsert_embedding("e0", &make_embedding(4, 0.5), "")
+            .unwrap();
         assert_eq!(env.vs.count(), 50);
         assert_eq!(env.vs.index_capacity(), cap_after_first);
 
@@ -1318,7 +1370,10 @@ mod tests {
     #[test]
     fn test_vector_empty_store_search() {
         let env = setup(4);
-        let json = env.vs.search_entities_json(&make_embedding(4, 1.0), 10, None).unwrap();
+        let json = env
+            .vs
+            .search_entities_json(&make_embedding(4, 1.0), 10, None)
+            .unwrap();
         assert_eq!(json, r#"{"results":[],"count":0}"#);
     }
 
@@ -1328,7 +1383,8 @@ mod tests {
         let db_path = dir.path().join("persist.db");
         let lru = NonZeroUsize::new(10000).unwrap();
 
-        let kg = GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
+        let kg =
+            GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
         kg.create_entities(&[Entity {
             name: "alice".into(),
             entity_type: "person".into(),
@@ -1337,12 +1393,14 @@ mod tests {
         .unwrap();
 
         let vs1 = VectorStore::new(&db_path, 4).unwrap();
-        vs1.upsert_embedding("alice", &make_embedding(4, 1.0), "").unwrap();
+        vs1.upsert_embedding("alice", &make_embedding(4, 1.0), "")
+            .unwrap();
         assert_eq!(vs1.count(), 1);
         drop(vs1);
         drop(kg);
 
-        let kg2 = GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
+        let kg2 =
+            GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
         let vs2 = VectorStore::new(&db_path, 4).unwrap();
         assert_eq!(vs2.count(), 1);
 
@@ -1356,9 +1414,14 @@ mod tests {
     fn test_vector_search_json_format() {
         let env = setup(4);
         create_test_entity(&env.kg, "alice", "person");
-        env.vs.upsert_embedding("alice", &make_embedding(4, 1.0), "").unwrap();
+        env.vs
+            .upsert_embedding("alice", &make_embedding(4, 1.0), "")
+            .unwrap();
 
-        let json = env.vs.search_entities_json(&make_embedding(4, 1.0), 10, None).unwrap();
+        let json = env
+            .vs
+            .search_entities_json(&make_embedding(4, 1.0), 10, None)
+            .unwrap();
         assert!(json.contains("alice"));
         assert!(json.contains("person"));
         assert!(json.contains("score"));
@@ -1399,19 +1462,33 @@ mod tests {
         assert_eq!(env.vs.index_kind(), IndexKind::Ivf);
         create_test_entity(&env.kg, "alice", "person");
         create_test_entity(&env.kg, "bob", "person");
-        env.vs.upsert_embedding("alice", &make_embedding(4, 1.0), "m").unwrap();
-        env.vs.upsert_embedding("bob", &make_embedding(4, 0.1), "m").unwrap();
+        env.vs
+            .upsert_embedding("alice", &make_embedding(4, 1.0), "m")
+            .unwrap();
+        env.vs
+            .upsert_embedding("bob", &make_embedding(4, 0.1), "m")
+            .unwrap();
         assert_eq!(env.vs.count(), 2);
 
-        let results = env.vs.search_embeddings(&make_embedding(4, 1.0), 10).unwrap();
+        let results = env
+            .vs
+            .search_embeddings(&make_embedding(4, 1.0), 10)
+            .unwrap();
         assert_eq!(results.len(), 2);
         // alice (all 1.0) is the closest match to the all-ones query.
-        let top_name = env.vs.id_to_name.get(&results[0].0).map(|r| r.value().clone());
+        let top_name = env
+            .vs
+            .id_to_name
+            .get(&results[0].0)
+            .map(|r| r.value().clone());
         assert_eq!(top_name.as_deref(), Some("alice"));
 
         assert!(env.vs.delete_embedding("alice").unwrap());
         assert_eq!(env.vs.count(), 1);
-        let results = env.vs.search_embeddings(&make_embedding(4, 1.0), 10).unwrap();
+        let results = env
+            .vs
+            .search_embeddings(&make_embedding(4, 1.0), 10)
+            .unwrap();
         assert_eq!(results.len(), 1);
     }
 
@@ -1420,7 +1497,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("ivf.db");
         let lru = NonZeroUsize::new(10000).unwrap();
-        let kg = GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
+        let kg =
+            GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
         let mut cfg = VectorConfig::new(4);
         cfg.index_kind = IndexKind::Ivf;
         cfg.ivf_nlist = 3;
@@ -1431,7 +1509,8 @@ mod tests {
             for i in 0..12 {
                 let name = format!("e{i}");
                 create_test_entity(&kg, &name, "t");
-                vs.upsert_embedding(&name, &make_embedding(4, i as f32 * 0.1), "").unwrap();
+                vs.upsert_embedding(&name, &make_embedding(4, i as f32 * 0.1), "")
+                    .unwrap();
             }
             vs.reindex().unwrap();
             assert_eq!(vs.count(), 12);
@@ -1467,7 +1546,11 @@ mod tests {
 
         let results = env.vs.search_embeddings(&emb_a, 10).unwrap();
         assert_eq!(results.len(), 2);
-        let top_name = env.vs.id_to_name.get(&results[0].0).map(|r| r.value().clone());
+        let top_name = env
+            .vs
+            .id_to_name
+            .get(&results[0].0)
+            .map(|r| r.value().clone());
         assert_eq!(top_name.as_deref(), Some("alice"));
         assert!(results[0].1 < results[1].1);
 
@@ -1481,8 +1564,12 @@ mod tests {
     fn test_turbo_store_replace_and_memory_accounting() {
         let env = setup_turbo(384, 2);
         create_test_entity(&env.kg, "alice", "person");
-        env.vs.upsert_embedding("alice", &make_embedding(384, 1.0), "").unwrap();
-        env.vs.upsert_embedding("alice", &make_embedding(384, 0.5), "").unwrap();
+        env.vs
+            .upsert_embedding("alice", &make_embedding(384, 1.0), "")
+            .unwrap();
+        env.vs
+            .upsert_embedding("alice", &make_embedding(384, 0.5), "")
+            .unwrap();
         assert_eq!(env.vs.count(), 1);
         // Codes-only backend: memory is reported, no graph component.
         assert!(env.vs.index_memory_bytes() > 0);
@@ -1546,18 +1633,31 @@ mod tests {
 
         let results = env.vs.upsert_embeddings_batch(&items);
         assert_eq!(results.len(), 7);
-        assert!(results[..5].iter().all(Result::is_ok), "valid items must succeed");
+        assert!(
+            results[..5].iter().all(Result::is_ok),
+            "valid items must succeed"
+        );
         assert!(results[5].is_err(), "unknown entity must fail its slot");
         assert!(results[6].is_err(), "dim mismatch must fail its slot");
         assert_eq!(env.vs.count(), 5, "count reflects only successful items");
 
         // Batch replaces existing rows without inflating the count.
-        let again: Vec<(&str, Vec<f32>, &str)> =
-            names.iter().map(|n| (n.as_str(), make_embedding(8, 0.9), "m2")).collect();
-        assert!(env.vs.upsert_embeddings_batch(&again).iter().all(Result::is_ok));
+        let again: Vec<(&str, Vec<f32>, &str)> = names
+            .iter()
+            .map(|n| (n.as_str(), make_embedding(8, 0.9), "m2"))
+            .collect();
+        assert!(
+            env.vs
+                .upsert_embeddings_batch(&again)
+                .iter()
+                .all(Result::is_ok)
+        );
         assert_eq!(env.vs.count(), 5);
 
-        let results = env.vs.search_embeddings(&make_embedding(8, 0.9), 10).unwrap();
+        let results = env
+            .vs
+            .search_embeddings(&make_embedding(8, 0.9), 10)
+            .unwrap();
         assert_eq!(results.len(), 5, "all batch rows must be searchable");
     }
 
@@ -1569,7 +1669,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("chunks.db");
         let lru = NonZeroUsize::new(10000).unwrap();
-        let kg = GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
+        let kg =
+            GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
         let cfg = VectorConfig::new(8);
         let names: Vec<String> = (0..n).map(|i| format!("m{i}")).collect();
         {
@@ -1601,7 +1702,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("batch.db");
         let lru = NonZeroUsize::new(10000).unwrap();
-        let kg = GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
+        let kg =
+            GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
         let cfg = VectorConfig::new(8);
         {
             let vs = VectorStore::with_config(&db_path, &cfg).unwrap();
@@ -1662,7 +1764,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db_path = dir.path().join("turbo.db");
         let lru = NonZeroUsize::new(10000).unwrap();
-        let kg = GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
+        let kg =
+            GraphHandle::new(&db_path, Durability::Async, SqliteTuning::default(), lru, 4).unwrap();
         let mut cfg = VectorConfig::new(384);
         cfg.index_kind = IndexKind::TurboQuant;
         cfg.tq_bits = 4;
@@ -1718,22 +1821,34 @@ mod tests {
         create_test_entity(&env.kg, "a", "doc");
         create_test_entity(&env.kg, "b", "doc");
         create_test_entity(&env.kg, "c", "note");
-        env.vs.upsert_embedding("a", &make_embedding(4, 1.0), "").unwrap();
-        env.vs.upsert_embedding("b", &make_embedding(4, 0.9), "").unwrap();
-        env.vs.upsert_embedding("c", &make_embedding(4, 0.95), "").unwrap();
+        env.vs
+            .upsert_embedding("a", &make_embedding(4, 1.0), "")
+            .unwrap();
+        env.vs
+            .upsert_embedding("b", &make_embedding(4, 0.9), "")
+            .unwrap();
+        env.vs
+            .upsert_embedding("c", &make_embedding(4, 0.95), "")
+            .unwrap();
 
         let id_a = env.vs.entity_id_of("a").unwrap().unwrap();
         let mut exclude = std::collections::HashSet::new();
         exclude.insert(id_a);
 
         // Exclude "a"; without a type filter we expect b and c.
-        let rows = env.vs.search_resolved(&make_embedding(4, 1.0), 10, None, &exclude).unwrap();
+        let rows = env
+            .vs
+            .search_resolved(&make_embedding(4, 1.0), 10, None, &exclude)
+            .unwrap();
         let names: Vec<&str> = rows.iter().map(|(_, n, _, _)| n.as_str()).collect();
         assert!(!names.contains(&"a"));
         assert!(names.contains(&"b") && names.contains(&"c"));
 
         // Now filter to type "doc": only "b" remains (a excluded, c is a note).
-        let rows = env.vs.search_resolved(&make_embedding(4, 1.0), 10, Some("doc"), &exclude).unwrap();
+        let rows = env
+            .vs
+            .search_resolved(&make_embedding(4, 1.0), 10, Some("doc"), &exclude)
+            .unwrap();
         let names: Vec<&str> = rows.iter().map(|(_, n, _, _)| n.as_str()).collect();
         assert_eq!(names, vec!["b"]);
     }

@@ -1,6 +1,6 @@
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Once;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 static DB_COUNTER: AtomicU32 = AtomicU32::new(0);
 static CLEANUP: Once = Once::new();
@@ -12,9 +12,13 @@ fn cleanup_orphaned_dbs() {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                    && name.starts_with("vec_e2e_") && (name.ends_with(".db") || name.ends_with(".db-wal") || name.ends_with(".db-shm")) {
-                        let _ = std::fs::remove_file(&path);
-                    }
+                    && name.starts_with("vec_e2e_")
+                    && (name.ends_with(".db")
+                        || name.ends_with(".db-wal")
+                        || name.ends_with(".db-shm"))
+                {
+                    let _ = std::fs::remove_file(&path);
+                }
             }
         }
     });
@@ -121,14 +125,15 @@ impl VecClient {
             .as_str()
             .unwrap_or_else(|| {
                 if let Some(is_err) = resp["result"]["isError"].as_bool()
-                    && is_err {
-                        panic!(
-                            "Tool '{name}' returned isError: {}",
-                            resp["result"]["content"][0]["text"]
-                                .as_str()
-                                .unwrap_or("unknown error")
-                        );
-                    }
+                    && is_err
+                {
+                    panic!(
+                        "Tool '{name}' returned isError: {}",
+                        resp["result"]["content"][0]["text"]
+                            .as_str()
+                            .unwrap_or("unknown error")
+                    );
+                }
                 panic!("expected result.content[0].text, got: {resp}")
             })
             .to_string()
@@ -144,10 +149,7 @@ impl VecClient {
             r#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25"},"id":1}"#,
         );
         let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        assert!(
-            v.get("result").is_some(),
-            "initialize failed: {resp}"
-        );
+        assert!(v.get("result").is_some(), "initialize failed: {resp}");
     }
 
     fn assert_tools_list(&mut self) {
@@ -156,10 +158,7 @@ impl VecClient {
         let tools = v["result"]["tools"]
             .as_array()
             .expect("tools/list should return array");
-        let names: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(
             names.contains(&"create_entities"),
             "missing KG tool: {names:?}"
@@ -248,7 +247,10 @@ fn test_vector_e2e_upsert_and_search() {
     );
     assert!(text.contains("alice"), "search should find alice: {text}");
     assert!(text.contains("bob"), "search should find bob: {text}");
-    assert!(text.contains("score"), "search should include scores: {text}");
+    assert!(
+        text.contains("score"),
+        "search should include scores: {text}"
+    );
 }
 
 #[test]
@@ -275,7 +277,10 @@ fn test_vector_e2e_delete_embedding() {
         "vector_delete_embedding",
         &serde_json::json!({"entityName": "alice"}),
     );
-    assert!(text.contains(r#""deleted":true"#), "should be deleted: {text}");
+    assert!(
+        text.contains(r#""deleted":true"#),
+        "should be deleted: {text}"
+    );
 
     // Search should be empty
     let text = c.tool_text(
@@ -429,9 +434,15 @@ fn test_vector_e2e_hybrid_search() {
             "topK": 5
         }),
     );
-    assert!(text.contains("Einstein"), "hybrid should find Einstein: {text}");
+    assert!(
+        text.contains("Einstein"),
+        "hybrid should find Einstein: {text}"
+    );
     assert!(text.contains("Newton"), "hybrid should find Newton: {text}");
-    assert!(text.contains("score"), "hybrid should include scores: {text}");
+    assert!(
+        text.contains("score"),
+        "hybrid should include scores: {text}"
+    );
 }
 
 #[test]
@@ -467,7 +478,10 @@ fn test_vector_e2e_refresh_graph_cache() {
 
     // Refresh graph cache
     let text = c.tool_text("vector_refresh_graph_cache", &serde_json::json!({}));
-    assert!(text.contains("\"nodes\""), "refresh should return node count: {text}");
+    assert!(
+        text.contains("\"nodes\""),
+        "refresh should return node count: {text}"
+    );
 }
 
 #[test]
@@ -475,7 +489,10 @@ fn test_vector_e2e_store_stats() {
     let mut c = spawn_vec_server();
 
     let text = c.tool_text("vector_store_stats", &serde_json::json!({}));
-    assert!(text.contains("embeddingCount"), "stats should show count: {text}");
+    assert!(
+        text.contains("embeddingCount"),
+        "stats should show count: {text}"
+    );
     assert!(text.contains("dims"), "stats should show dims: {text}");
 }
 
@@ -517,7 +534,10 @@ fn test_vector_e2e_search_top_k() {
             "topK": 3
         }),
     );
-    assert!(text.contains(r#""count":3"#), "should return exactly 3: {text}");
+    assert!(
+        text.contains(r#""count":3"#),
+        "should return exactly 3: {text}"
+    );
 }
 
 #[test]
@@ -661,7 +681,10 @@ fn test_vector_e2e_topk_clamped() {
         "vector_search_entities",
         &serde_json::json!({"embedding": make_embedding(4, 1.0), "topK": 100000}),
     );
-    assert!(text.contains("alice"), "clamped search should find alice: {text}");
+    assert!(
+        text.contains("alice"),
+        "clamped search should find alice: {text}"
+    );
 }
 
 #[test]
@@ -701,7 +724,10 @@ fn test_vector_e2e_custom_index_config() {
         "vector_search_entities",
         &serde_json::json!({"embedding": make_varied_embedding(4, 1.0), "topK": 5}),
     );
-    assert!(text.contains("alice"), "custom-config search should work: {text}");
+    assert!(
+        text.contains("alice"),
+        "custom-config search should work: {text}"
+    );
 }
 
 #[test]
@@ -728,7 +754,10 @@ fn test_vector_e2e_stats_after_data() {
         text.contains(r#""embeddingCount":2"#),
         "stats should report 2 embeddings: {text}"
     );
-    assert!(text.contains(r#""dims":4"#), "stats should report dims=4: {text}");
+    assert!(
+        text.contains(r#""dims":4"#),
+        "stats should report dims=4: {text}"
+    );
 }
 
 // ─── Modern AI workload tools ─────────────────────────────────────────────
@@ -739,13 +768,19 @@ fn seed(c: &mut VecClient, names: &[(&str, &str)]) {
         .iter()
         .map(|(n, t)| serde_json::json!({"name": n, "entityType": t, "observations": []}))
         .collect();
-    c.tool_text("create_entities", &serde_json::json!({"entities": entities}));
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": entities}),
+    );
 }
 
 #[test]
 fn test_vector_e2e_batch_upsert() {
     let mut c = spawn_vec_server();
-    seed(&mut c, &[("a", "doc"), ("b", "doc"), ("missing_entity_ok", "doc")]);
+    seed(
+        &mut c,
+        &[("a", "doc"), ("b", "doc"), ("missing_entity_ok", "doc")],
+    );
 
     // One item targets a non-existent entity → reported in errors, not fatal.
     let text = c.tool_text(
@@ -756,7 +791,10 @@ fn test_vector_e2e_batch_upsert() {
             {"entityName": "ghost", "embedding": make_embedding(4, 0.3)}
         ]}),
     );
-    assert!(text.contains(r#""upserted":2"#), "expected 2 upserted: {text}");
+    assert!(
+        text.contains(r#""upserted":2"#),
+        "expected 2 upserted: {text}"
+    );
     assert!(text.contains(r#""failed":1"#), "expected 1 failed: {text}");
 
     // Both successful embeddings are now searchable.
@@ -764,7 +802,10 @@ fn test_vector_e2e_batch_upsert() {
         "vector_search_entities",
         &serde_json::json!({"embedding": make_embedding(4, 1.0), "topK": 5}),
     );
-    assert!(s.contains("\"a\"") && s.contains("\"b\""), "search after batch: {s}");
+    assert!(
+        s.contains("\"a\"") && s.contains("\"b\""),
+        "search after batch: {s}"
+    );
 }
 
 #[test]
@@ -776,40 +817,88 @@ fn test_vector_e2e_get_embedding() {
         &serde_json::json!({"entityName": "a", "embedding": [0.1, 0.2, 0.3, 0.4], "model": "m1"}),
     );
 
-    let text = c.tool_text("vector_get_embedding", &serde_json::json!({"entityName": "a"}));
-    assert!(text.contains(r#""model":"m1""#), "get_embedding model: {text}");
-    assert!(text.contains("0.1") && text.contains("0.4"), "get_embedding values: {text}");
+    let text = c.tool_text(
+        "vector_get_embedding",
+        &serde_json::json!({"entityName": "a"}),
+    );
+    assert!(
+        text.contains(r#""model":"m1""#),
+        "get_embedding model: {text}"
+    );
+    assert!(
+        text.contains("0.1") && text.contains("0.4"),
+        "get_embedding values: {text}"
+    );
 
-    let missing = c.tool_text("vector_get_embedding", &serde_json::json!({"entityName": "nobody"}));
-    assert!(missing.contains(r#""found":false"#), "missing embedding: {missing}");
+    let missing = c.tool_text(
+        "vector_get_embedding",
+        &serde_json::json!({"entityName": "nobody"}),
+    );
+    assert!(
+        missing.contains(r#""found":false"#),
+        "missing embedding: {missing}"
+    );
 }
 
 #[test]
 fn test_vector_e2e_search_by_entity() {
     let mut c = spawn_vec_server();
     seed(&mut c, &[("a", "doc"), ("b", "doc"), ("c", "doc")]);
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "a", "embedding": make_embedding(4, 1.0)}));
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "b", "embedding": make_embedding(4, 0.98)}));
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "c", "embedding": make_embedding(4, 0.1)}));
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "a", "embedding": make_embedding(4, 1.0)}),
+    );
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "b", "embedding": make_embedding(4, 0.98)}),
+    );
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "c", "embedding": make_embedding(4, 0.1)}),
+    );
 
     // "More like a": should return b/c but not a itself (excludeSelf default).
-    let text = c.tool_text("vector_search_by_entity", &serde_json::json!({"entityName": "a", "topK": 5}));
+    let text = c.tool_text(
+        "vector_search_by_entity",
+        &serde_json::json!({"entityName": "a", "topK": 5}),
+    );
     assert!(!text.contains("\"a\""), "should exclude self: {text}");
     assert!(text.contains("\"b\""), "should include similar b: {text}");
 
     // With excludeSelf=false, a appears (and is the closest to itself).
-    let text2 = c.tool_text("vector_search_by_entity", &serde_json::json!({"entityName": "a", "topK": 5, "excludeSelf": false}));
-    assert!(text2.contains("\"a\""), "should include self when excludeSelf=false: {text2}");
+    let text2 = c.tool_text(
+        "vector_search_by_entity",
+        &serde_json::json!({"entityName": "a", "topK": 5, "excludeSelf": false}),
+    );
+    assert!(
+        text2.contains("\"a\""),
+        "should include self when excludeSelf=false: {text2}"
+    );
 }
 
 #[test]
 fn test_vector_e2e_recommend() {
     let mut c = spawn_vec_server();
-    seed(&mut c, &[("a", "doc"), ("b", "doc"), ("c", "doc"), ("d", "doc")]);
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "a", "embedding": [1.0, 0.0, 0.0, 0.0]}));
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "b", "embedding": [0.9, 0.1, 0.0, 0.0]}));
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "c", "embedding": [0.0, 1.0, 0.0, 0.0]}));
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "d", "embedding": [0.85, 0.15, 0.0, 0.0]}));
+    seed(
+        &mut c,
+        &[("a", "doc"), ("b", "doc"), ("c", "doc"), ("d", "doc")],
+    );
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "a", "embedding": [1.0, 0.0, 0.0, 0.0]}),
+    );
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "b", "embedding": [0.9, 0.1, 0.0, 0.0]}),
+    );
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "c", "embedding": [0.0, 1.0, 0.0, 0.0]}),
+    );
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "d", "embedding": [0.85, 0.15, 0.0, 0.0]}),
+    );
 
     // Liking a & b (the "first axis" cluster) should surface d, not c, and
     // exclude the example entities themselves.
@@ -817,13 +906,16 @@ fn test_vector_e2e_recommend() {
         "vector_recommend",
         &serde_json::json!({"positive": ["a", "b"], "topK": 5}),
     );
-    assert!(!text.contains("\"a\"") && !text.contains("\"b\""), "examples excluded: {text}");
+    assert!(
+        !text.contains("\"a\"") && !text.contains("\"b\""),
+        "examples excluded: {text}"
+    );
     assert!(text.contains("\"d\""), "should recommend d: {text}");
 
     // Empty positive → error.
     let resp = c.call_tool("vector_recommend", &serde_json::json!({"positive": []}));
-    let is_err = resp.get("error").is_some()
-        || resp["result"]["isError"].as_bool().unwrap_or(false);
+    let is_err =
+        resp.get("error").is_some() || resp["result"]["isError"].as_bool().unwrap_or(false);
     assert!(is_err, "empty positive should error: {resp}");
 }
 
@@ -832,16 +924,28 @@ fn test_vector_e2e_mmr_search() {
     let mut c = spawn_vec_server();
     seed(&mut c, &[("a", "doc"), ("a2", "doc"), ("b", "doc")]);
     // a and a2 are near-duplicates; b is different.
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "a", "embedding": [1.0, 0.0, 0.0, 0.0]}));
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "a2", "embedding": [0.99, 0.01, 0.0, 0.0]}));
-    c.tool_text("vector_upsert_embedding", &serde_json::json!({"entityName": "b", "embedding": [0.0, 1.0, 0.0, 0.0]}));
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "a", "embedding": [1.0, 0.0, 0.0, 0.0]}),
+    );
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "a2", "embedding": [0.99, 0.01, 0.0, 0.0]}),
+    );
+    c.tool_text(
+        "vector_upsert_embedding",
+        &serde_json::json!({"entityName": "b", "embedding": [0.0, 1.0, 0.0, 0.0]}),
+    );
 
     // Pure relevance (lambda=1) for a query near a: top-2 are the duplicates.
     let rel = c.tool_text(
         "vector_mmr_search",
         &serde_json::json!({"embedding": [1.0, 0.0, 0.0, 0.0], "topK": 2, "lambda": 1.0}),
     );
-    assert!(rel.contains("\"a\"") && rel.contains("\"a2\""), "relevance picks duplicates: {rel}");
+    assert!(
+        rel.contains("\"a\"") && rel.contains("\"a2\""),
+        "relevance picks duplicates: {rel}"
+    );
 
     // Diversity-leaning (lambda=0.2): after picking a, the near-duplicate a2 is
     // penalised so the dissimilar b is preferred for the second slot.
@@ -855,13 +959,26 @@ fn test_vector_e2e_mmr_search() {
 #[test]
 fn test_vector_e2e_ivf_backend_end_to_end() {
     // Run the whole flow against the IVF-Flat backend.
-    let mut c = spawn_vec_server_with(&["--vec-index", "ivf", "--ivf-nlist", "2", "--ivf-nprobe", "2"]);
+    let mut c = spawn_vec_server_with(&[
+        "--vec-index",
+        "ivf",
+        "--ivf-nlist",
+        "2",
+        "--ivf-nprobe",
+        "2",
+    ]);
     c.initialize();
 
     let stats0 = c.tool_text("vector_store_stats", &serde_json::json!({}));
-    assert!(stats0.contains(r#""indexKind":"ivf""#), "should report ivf: {stats0}");
+    assert!(
+        stats0.contains(r#""indexKind":"ivf""#),
+        "should report ivf: {stats0}"
+    );
 
-    seed(&mut c, &[("a", "doc"), ("b", "doc"), ("c", "doc"), ("d", "doc")]);
+    seed(
+        &mut c,
+        &[("a", "doc"), ("b", "doc"), ("c", "doc"), ("d", "doc")],
+    );
     c.tool_text(
         "vector_batch_upsert",
         &serde_json::json!({"items": [
@@ -883,7 +1000,10 @@ fn test_vector_e2e_ivf_backend_end_to_end() {
         &serde_json::json!({"embedding": [1.0, 1.0, 0.0, 0.0], "topK": 2}),
     );
     assert!(s.contains("\"a\""), "ivf search should find a: {s}");
-    assert!(!s.contains("\"c\"") && !s.contains("\"d\""), "ivf search should not return far cluster: {s}");
+    assert!(
+        !s.contains("\"c\"") && !s.contains("\"d\""),
+        "ivf search should not return far cluster: {s}"
+    );
 }
 
 #[test]
@@ -902,7 +1022,10 @@ fn test_vector_e2e_turboquant_backend_end_to_end() {
     c.initialize();
 
     let stats0 = c.tool_text("vector_store_stats", &serde_json::json!({}));
-    assert!(stats0.contains(r#""indexKind":"turboquant""#), "should report turboquant: {stats0}");
+    assert!(
+        stats0.contains(r#""indexKind":"turboquant""#),
+        "should report turboquant: {stats0}"
+    );
 
     // Two well-separated direction clusters in 384 dims.
     let emb = |hot: [usize; 2], warm: f32| {
@@ -911,7 +1034,10 @@ fn test_vector_e2e_turboquant_backend_end_to_end() {
         v[hot[1]] = warm;
         v
     };
-    seed(&mut c, &[("a", "doc"), ("b", "doc"), ("c", "doc"), ("d", "doc")]);
+    seed(
+        &mut c,
+        &[("a", "doc"), ("b", "doc"), ("c", "doc"), ("d", "doc")],
+    );
     c.tool_text(
         "vector_batch_upsert",
         &serde_json::json!({"items": [
@@ -925,7 +1051,10 @@ fn test_vector_e2e_turboquant_backend_end_to_end() {
     // Reindex is a no-op for the data-oblivious quantizer but must succeed.
     let re = c.tool_text("vector_reindex", &serde_json::json!({}));
     assert!(re.contains(r#""reindexed":true"#), "reindex: {re}");
-    assert!(re.contains(r#""indexKind":"turboquant""#), "reindex kind: {re}");
+    assert!(
+        re.contains(r#""indexKind":"turboquant""#),
+        "reindex kind: {re}"
+    );
 
     // Search near the {a,b} cluster returns those, not the far {c,d} cluster.
     let s = c.tool_text(
@@ -933,14 +1062,26 @@ fn test_vector_e2e_turboquant_backend_end_to_end() {
         &serde_json::json!({"embedding": emb([0, 1], 1.0), "topK": 2}),
     );
     assert!(s.contains("\"a\""), "turboquant search should find a: {s}");
-    assert!(!s.contains("\"c\"") && !s.contains("\"d\""), "turboquant search should not return far cluster: {s}");
+    assert!(
+        !s.contains("\"c\"") && !s.contains("\"d\""),
+        "turboquant search should not return far cluster: {s}"
+    );
 
     // Deletion works against the quantized store.
-    let del = c.tool_text("vector_delete_embedding", &serde_json::json!({"entityName": "a"}));
-    assert!(del.contains("true") || del.contains("deleted"), "delete: {del}");
+    let del = c.tool_text(
+        "vector_delete_embedding",
+        &serde_json::json!({"entityName": "a"}),
+    );
+    assert!(
+        del.contains("true") || del.contains("deleted"),
+        "delete: {del}"
+    );
     let s2 = c.tool_text(
         "vector_search_entities",
         &serde_json::json!({"embedding": emb([0, 1], 1.0), "topK": 4}),
     );
-    assert!(!s2.contains("\"a\""), "deleted entity must not be returned: {s2}");
+    assert!(
+        !s2.contains("\"a\""),
+        "deleted entity must not be returned: {s2}"
+    );
 }

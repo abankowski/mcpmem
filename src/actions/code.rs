@@ -84,7 +84,10 @@ fn obs_val<'a>(entity: &'a Entity, key: &str) -> Option<&'a str> {
 
 /// Strip the `code:` prefix from an entity type for display.
 fn kind_of(entity: &Entity) -> &str {
-    entity.entity_type.strip_prefix("code:").unwrap_or(&entity.entity_type)
+    entity
+        .entity_type
+        .strip_prefix("code:")
+        .unwrap_or(&entity.entity_type)
 }
 
 fn is_code_entity(entity: &Entity) -> bool {
@@ -131,8 +134,14 @@ enum Outcome {
 /// Read + hash + (incrementally) parse one file. CPU-bound and independent per
 /// file, so this runs on the parse thread pool. Reads use the graph's
 /// concurrent read pool; no writes happen here.
-fn parse_one(kg: &GraphHandle, path: &Path, base: &Path,
-             force: bool, want_snippet: bool, total_symbols: &AtomicUsize) -> Outcome {
+fn parse_one(
+    kg: &GraphHandle,
+    path: &Path,
+    base: &Path,
+    force: bool,
+    want_snippet: bool,
+    total_symbols: &AtomicUsize,
+) -> Outcome {
     let Some(lang) = code::detect(path) else {
         return Outcome::Unsupported;
     };
@@ -194,8 +203,14 @@ pub fn handle_code_index(args: Option<&Value>) -> Result<Value> {
     let project = project_of(params)?;
     let kg = crate::code_registry::resolve(&project)?;
     let kg = kg.as_ref();
-    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-    let snippets = params.get("snippets").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = params
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let snippets = params
+        .get("snippets")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let root = Path::new(path);
     if !root.exists() {
@@ -283,7 +298,14 @@ pub(crate) fn index_paths(
                         if total_symbols.load(Ordering::Relaxed) >= MAX_TOTAL_SYMBOLS {
                             continue;
                         }
-                        local.push(parse_one(kg, &files[i], base, force, snippets, &total_symbols));
+                        local.push(parse_one(
+                            kg,
+                            &files[i],
+                            base,
+                            force,
+                            snippets,
+                            &total_symbols,
+                        ));
                     }
                     local
                 })
@@ -382,7 +404,9 @@ pub(crate) fn index_paths(
             relation_count += 1;
         }
         for r in &fw.refs {
-            let Some(targets) = def_index.get(&r.name) else { continue };
+            let Some(targets) = def_index.get(&r.name) else {
+                continue;
+            };
             if targets.len() != 1 {
                 continue; // ambiguous or unresolved — drop (no false edges)
             }
@@ -393,7 +417,11 @@ pub(crate) fn index_paths(
             if &caller == callee {
                 continue;
             }
-            let rtype: &'static str = if r.kind == "call" { "calls" } else { "references" };
+            let rtype: &'static str = if r.kind == "call" {
+                "calls"
+            } else {
+                "references"
+            };
             if !rel_seen.insert((caller.clone(), callee.clone(), rtype)) {
                 continue;
             }
@@ -450,7 +478,12 @@ pub fn handle_code_outline(args: Option<&Value>) -> Result<Value> {
     // already repo-relative (matches the stored name); an absolute path is
     // canonicalized + based exactly as the indexer does.
     let lookup = lookup_file_name(&file);
-    let defines = kg.search_relations(Some(&lookup), None, Some("defines"), Some(MAX_SYMBOLS_PER_FILE));
+    let defines = kg.search_relations(
+        Some(&lookup),
+        None,
+        Some("defines"),
+        Some(MAX_SYMBOLS_PER_FILE),
+    );
     let names: Vec<String> = defines.into_iter().map(|r| r.to).collect();
     if names.is_empty() {
         return to_json(&json!({
@@ -487,8 +520,14 @@ pub fn handle_code_search(args: Option<&Value>) -> Result<Value> {
         .get("query")
         .and_then(|v| v.as_str())
         .ok_or_else(|| MCSError::InvalidParams("Missing 'query' parameter".into()))?;
-    let kind = params.get("kind").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-    let lang = params.get("lang").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let kind = params
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let lang = params
+        .get("lang")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let project = project_of(params)?;
     let kg = crate::code_registry::resolve(&project)?;
     let kg = kg.as_ref();
@@ -559,10 +598,12 @@ pub fn handle_code_get_symbol(args: Option<&Value>) -> Result<Value> {
             let mut callers: Vec<String> = Vec::new();
             let mut callees: Vec<String> = Vec::new();
             for t in edge_types {
-                for r in kg.search_relations(None, Some(&e.name), Some(t), Some(MAX_EDGES_RETURNED)) {
+                for r in kg.search_relations(None, Some(&e.name), Some(t), Some(MAX_EDGES_RETURNED))
+                {
                     callers.push(r.from);
                 }
-                for r in kg.search_relations(Some(&e.name), None, Some(t), Some(MAX_EDGES_RETURNED)) {
+                for r in kg.search_relations(Some(&e.name), None, Some(t), Some(MAX_EDGES_RETURNED))
+                {
                     callees.push(r.to);
                 }
             }
@@ -595,7 +636,9 @@ fn parse_embedding_f32(val: &Value) -> Result<Vec<f32>> {
         .as_array()
         .ok_or_else(|| MCSError::InvalidParams("'embedding' must be an array of numbers".into()))?;
     if arr.is_empty() {
-        return Err(MCSError::InvalidParams("embedding must not be empty".into()));
+        return Err(MCSError::InvalidParams(
+            "embedding must not be empty".into(),
+        ));
     }
     arr.iter()
         .map(|v| {
@@ -674,8 +717,14 @@ pub fn handle_code_semantic_search(args: Option<&Value>) -> Result<Value> {
             .get("embedding")
             .ok_or_else(|| MCSError::InvalidParams("Missing 'embedding' parameter".into()))?,
     )?;
-    let kind = params.get("kind").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-    let lang = params.get("lang").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let kind = params
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let lang = params
+        .get("lang")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let limit = params
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -734,8 +783,14 @@ pub fn handle_code_watch(args: Option<&Value>) -> Result<Value> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| MCSError::InvalidParams("Missing 'path' parameter".into()))?;
     let project = project_of(params)?;
-    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-    let snippets = params.get("snippets").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = params
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let snippets = params
+        .get("snippets")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let root = std::path::PathBuf::from(path);
     if !root.exists() {

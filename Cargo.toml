@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/memory-core", "crates/memory-runtime"]
+resolver = "3"
+
 [package]
 name = "mcp-memory"
 version = "5.2.1"
@@ -39,6 +43,8 @@ dashmap = "6"
 petgraph = "0.7"
 usearch = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
+memory-core = { path = "crates/memory-core" }
+memory-runtime = { path = "crates/memory-runtime" }
 
 # --- Code-symbol indexing (feature = "code") ---------------------------------
 # Tree-sitter parsing + the `tags` extractor drive the code knowledge graph.
@@ -63,6 +69,9 @@ notify = { version = "8", optional = true }
 
 [features]
 default = ["code"]
+indexer = ["memory-runtime/indexer"]
+webhooks = ["memory-runtime/webhooks"]
+bedrock = ["indexer"]
 # Tree-sitter code-symbol indexing: the `code_*` MCP tools + indexer.
 code = [
     "dep:tree-sitter",
@@ -107,7 +116,7 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
-[lints.clippy]
+[workspace.lints.clippy]
 large_stack_frames = "warn"
 large_enum_variant = "warn"
 boxed_local = "warn"
@@ -132,3 +141,6 @@ manual_find_map = "warn"
 manual_filter_map = "warn"
 mutex_atomic = "warn"
 option_option = "warn"
+
+[lints]
+workspace = true

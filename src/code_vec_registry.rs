@@ -66,7 +66,10 @@ pub fn init(base: PathBuf, dims: u32) {
 /// The configured embedding dimension, or the default if the registry is not
 /// initialized (e.g. code disabled).
 pub fn embedding_dims() -> u32 {
-    CONFIG.get().map(|c| c.dims).unwrap_or(DEFAULT_CODE_EMBEDDING_DIMS)
+    CONFIG
+        .get()
+        .map(|c| c.dims)
+        .unwrap_or(DEFAULT_CODE_EMBEDDING_DIMS)
 }
 
 /// Resolve the (lazily opened) HNSW vector index for `project`, opening it if
@@ -93,7 +96,10 @@ pub fn resolve(project: &str) -> Result<Arc<VectorStore>> {
     g.live.retain(|_, w| w.strong_count() > 0);
 
     let path = cfg.base.join(format!("{project}.code.db"));
-    let store = Arc::new(VectorStore::with_config(&path, &VectorConfig::new(cfg.dims))?);
+    let store = Arc::new(VectorStore::with_config(
+        &path,
+        &VectorConfig::new(cfg.dims),
+    )?);
     g.live.insert(project.to_string(), Arc::downgrade(&store));
     g.warm.put(project.to_string(), Arc::clone(&store));
     Ok(store)

@@ -106,7 +106,9 @@ pub fn validate_project(project: &str) -> Result<()> {
 pub fn resolve(project: &str) -> Result<Arc<GraphHandle>> {
     validate_project(project)?;
     let cfg = CONFIG.get().ok_or_else(|| {
-        MCSError::InvalidParams("code registry not initialized (start the server with --code)".into())
+        MCSError::InvalidParams(
+            "code registry not initialized (start the server with --code)".into(),
+        )
     })?;
     let inner = INNER.get().expect("registry inner set alongside config");
 

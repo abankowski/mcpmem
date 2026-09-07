@@ -170,10 +170,19 @@ fn test_ui_shell_served_as_html() {
         headers.to_lowercase().contains("content-type: text/html"),
         "viewer must be served as HTML, headers: {headers}"
     );
-    assert!(body.contains("<title>"), "expected an HTML document: {body:.120}");
+    assert!(
+        body.contains("<title>"),
+        "expected an HTML document: {body:.120}"
+    );
     // The shell references its split CSS/JS assets by absolute path.
-    assert!(body.contains("/ui/graph.css"), "shell should link the stylesheet");
-    assert!(body.contains("/ui/graph.js"), "shell should load the script");
+    assert!(
+        body.contains("/ui/graph.css"),
+        "shell should link the stylesheet"
+    );
+    assert!(
+        body.contains("/ui/graph.js"),
+        "shell should load the script"
+    );
 }
 
 #[test]
@@ -195,7 +204,10 @@ fn test_ui_assets_served_with_content_types() {
         "JS must be served with a javascript content-type, headers: {headers}"
     );
     // The script drives traversal via the /ui/expand endpoint.
-    assert!(body.contains("/ui/expand"), "viewer should call /ui/expand to traverse");
+    assert!(
+        body.contains("/ui/expand"),
+        "viewer should call /ui/expand to traverse"
+    );
 }
 
 #[test]
@@ -207,7 +219,9 @@ fn test_ui_expand_returns_neighborhood() {
     let (status, headers, body) = get(srv.port, "/ui/expand?name=Alice", None);
     assert_eq!(status, 200, "GET /ui/expand should succeed: {body}");
     assert!(
-        headers.to_lowercase().contains("content-type: application/json"),
+        headers
+            .to_lowercase()
+            .contains("content-type: application/json"),
         "expand data must be JSON, headers: {headers}"
     );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -217,8 +231,17 @@ fn test_ui_expand_returns_neighborhood() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"Alice") && names.contains(&"Acme"), "got {names:?}");
-    assert!(v["relations"].as_array().unwrap().iter().any(|r| r["relationType"] == "works_at"));
+    assert!(
+        names.contains(&"Alice") && names.contains(&"Acme"),
+        "got {names:?}"
+    );
+    assert!(
+        v["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["relationType"] == "works_at")
+    );
 }
 
 #[test]
@@ -250,14 +273,34 @@ fn test_ui_graph_returns_entities_and_relations() {
     let (status, headers, body) = get(srv.port, "/ui/graph", None);
     assert_eq!(status, 200, "GET /ui/graph should succeed: {body}");
     assert!(
-        headers.to_lowercase().contains("content-type: application/json"),
+        headers
+            .to_lowercase()
+            .contains("content-type: application/json"),
         "graph data must be JSON, headers: {headers}"
     );
     let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON payload");
-    assert!(v["entities"].as_array().unwrap().iter().any(|e| e["name"] == "Alice"));
-    assert!(v["relations"].as_array().unwrap().iter().any(|r| r["relationType"] == "works_at"));
+    assert!(
+        v["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "Alice")
+    );
+    assert!(
+        v["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["relationType"] == "works_at")
+    );
     // Legend + stats are injected by the handler on top of read_graph's shape.
-    assert!(v["entityTypes"].as_array().unwrap().iter().any(|t| t["type"] == "person"));
+    assert!(
+        v["entityTypes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["type"] == "person")
+    );
     assert_eq!(v["stats"]["entities"], 2);
     assert_eq!(v["stats"]["relations"], 1);
     // Pagination cursor drives the viewer's Prev/Next controls.
@@ -280,7 +323,11 @@ fn test_ui_graph_entity_type_filter() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["Acme"], "filter should return only company entities");
+    assert_eq!(
+        names,
+        vec!["Acme"],
+        "filter should return only company entities"
+    );
 }
 
 #[test]
@@ -311,7 +358,10 @@ fn test_ui_graph_auth_gate() {
     // Correct token via the ?token= query fallback → 200.
     let (status, _, body) = get(srv.port, "/ui/graph?token=s3cret", None);
     assert_eq!(status, 200, "query-param token should be accepted: {body}");
-    assert!(body.contains("Alice"), "authed graph should have data: {body}");
+    assert!(
+        body.contains("Alice"),
+        "authed graph should have data: {body}"
+    );
 
     // Correct token via the Authorization header → 200.
     let (status, _, _) = get(srv.port, "/ui/graph", Some("s3cret"));
@@ -325,7 +375,11 @@ fn test_ui_graph_auth_gate() {
 /// Create `n` entities named `person_0000`..`person_(n-1)` in one batch.
 fn seed_many(port: u16, n: usize) {
     let ents: Vec<String> = (0..n)
-        .map(|i| format!(r#"{{"name":"person_{i:04}","entityType":"person","observations":["note {i}"]}}"#))
+        .map(|i| {
+            format!(
+                r#"{{"name":"person_{i:04}","entityType":"person","observations":["note {i}"]}}"#
+            )
+        })
         .collect();
     let body = format!(
         r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"entities":[{}]}}}},"id":9}}"#,
@@ -364,11 +418,17 @@ fn test_ui_search_paginated_nodes_only() {
     let (status, headers, body) = get(srv.port, "/ui/search?q=person&limit=10&offset=0", None);
     assert_eq!(status, 200, "search should succeed: {body}");
     assert!(
-        headers.to_lowercase().contains("content-type: application/json"),
+        headers
+            .to_lowercase()
+            .contains("content-type: application/json"),
         "search data must be JSON, headers: {headers}"
     );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["entities"].as_array().unwrap().len(), 10, "first search page");
+    assert_eq!(
+        v["entities"].as_array().unwrap().len(),
+        10,
+        "first search page"
+    );
     assert_eq!(v["page"]["hasMore"], true, "25 matches → more pages");
     // Search returns matched nodes only; the user expands for relationships.
     assert_eq!(v["relations"].as_array().unwrap().len(), 0);
@@ -395,7 +455,10 @@ fn test_ui_search_prefix_and_permission() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"Acme"), "prefix search should find Acme, got {names:?}");
+    assert!(
+        names.contains(&"Acme"),
+        "prefix search should find Acme, got {names:?}"
+    );
     drop(srv);
 
     // Same graph-read gate as the rest of the viewer.
@@ -419,7 +482,10 @@ fn test_ui_graph_omits_observation_bodies() {
         .find(|e| e["name"] == "Alice")
         .expect("Alice present");
     // The list payload carries a count, not the bodies — those lazy-load via /ui/node.
-    assert_eq!(alice["obsCount"], 1, "Alice's observation count should be present");
+    assert_eq!(
+        alice["obsCount"], 1,
+        "Alice's observation count should be present"
+    );
     assert!(
         alice.get("observations").is_none(),
         "list payload must omit observation bodies: {alice}"
@@ -434,15 +500,26 @@ fn test_ui_node_lazy_loads_observations() {
     let (status, headers, body) = get(srv.port, "/ui/node?name=Alice", None);
     assert_eq!(status, 200, "node fetch should succeed: {body}");
     assert!(
-        headers.to_lowercase().contains("content-type: application/json"),
+        headers
+            .to_lowercase()
+            .contains("content-type: application/json"),
         "node data must be JSON, headers: {headers}"
     );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["name"], "Alice");
     assert_eq!(v["entityType"], "person");
     // The single-node endpoint carries the full observation bodies.
-    let obs: Vec<&str> = v["observations"].as_array().unwrap().iter().map(|o| o.as_str().unwrap()).collect();
-    assert_eq!(obs, vec!["likes hiking"], "node fetch should return observation bodies");
+    let obs: Vec<&str> = v["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        obs,
+        vec!["likes hiking"],
+        "node fetch should return observation bodies"
+    );
 
     // Unknown entity → 404.
     let (status, _, _) = get(srv.port, "/ui/node?name=DoesNotExist", None);
