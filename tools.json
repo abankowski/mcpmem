@@ -275,7 +275,7 @@
   },
   {
     "name": "upsert_entities",
-    "description": "Create-or-merge entities idempotently. Entities that do not exist are created; existing entities keep their type and gain any new (deduplicated) observations. Use this to safely re-assert facts without losing new observations. entityType is only applied on creation.",
+    "description": "Create-or-merge entities idempotently. Entities that do not exist are created; existing exact-name entities are retyped when `entityType` differs; observations are added only when new. Use this to safely re-assert facts without losing new observations.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -285,7 +285,7 @@
             "type": "object",
             "properties": {
               "name": { "type": "string", "description": "The unique name of the entity" },
-              "entityType": { "type": "string", "description": "The type of the entity (applied only when creating)" },
+                "entityType": { "type": "string", "description": "The type of the entity (applied when creating and when retyping an existing exact-name entity)" },
               "observations": { "type": "array", "items": { "type": "string" }, "description": "Observations to add (new ones are merged in)" }
             },
             "required": ["name", "entityType", "observations"]

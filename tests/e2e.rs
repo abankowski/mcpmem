@@ -281,6 +281,15 @@ fn e2e_delete_and_stats() {
 fn e2e_upsert_merge_and_wipe() {
     let mut c = spawn_server();
 
+    c.send(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#);
+    let tools = c.recv();
+    assert!(
+        tools.contains(
+            "existing exact-name entities are retyped when `entityType` differs; observations are added only when new."
+        ),
+        "upsert_entities contract is exposed through tools/list: {tools}"
+    );
+
     // Create entities.
     c.tool_text(
         "create_entities",
@@ -291,12 +300,15 @@ fn e2e_upsert_merge_and_wipe() {
     );
 
     // Upsert — change type and add obs.
-    c.tool_text(
+    let upsert = c.tool_text(
         "upsert_entities",
         &serde_json::json!({"entities": [
             {"name": "Tgt", "entityType": "new", "observations": ["c", "d"]}
         ]}),
     );
+    assert!(upsert.contains("new"), "upsert retyped Tgt: {upsert}");
+    assert!(upsert.contains("\"c\""), "upsert retained c: {upsert}");
+    assert!(upsert.contains("\"d\""), "upsert added d: {upsert}");
     let open = c.tool_text("open_nodes", &serde_json::json!({"names": ["Tgt"]}));
     assert!(open.contains("new"), "type changed: {open}");
     assert!(open.contains("\"c\""), "c preserved: {open}");

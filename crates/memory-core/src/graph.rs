@@ -2510,24 +2510,43 @@ mod tests {
     fn test_upsert_entities() {
         let kg = new_kg();
         kg.create_entities(&[Entity {
-            name: "u".into(),
-            entity_type: "old".into(),
-            observations: vec!["existing".into()],
+            name: "A".into(),
+            entity_type: "OldType".into(),
+            observations: vec!["old".into()],
+        }])
+        .unwrap();
+        kg.create_relations(&[Relation {
+            from: "A".into(),
+            to: "A".into(),
+            relation_type: "self".into(),
         }])
         .unwrap();
 
-        // Upsert with new type and additional observation.
+        // Upsert retypes an exact-name entity and only adds novel observations.
         kg.upsert_entities(&[Entity {
-            name: "u".into(),
-            entity_type: "new".into(),
-            observations: vec!["existing".into(), "added".into()],
+            name: "A".into(),
+            entity_type: "NewType".into(),
+            observations: vec!["old".into(), "new".into()],
         }])
         .unwrap();
 
-        let ent = kg.get_entity("u").unwrap().unwrap();
-        assert_eq!(ent.entity_type, "new");
-        assert!(ent.observations.contains(&"added".into()));
-        assert!(ent.observations.contains(&"existing".into()));
+        assert_eq!(kg.get_entity_count().unwrap(), 1);
+        let ent = kg.get_entity("A").unwrap().unwrap();
+        assert_eq!(ent.entity_type, "NewType");
+        assert_eq!(ent.observations, ["old", "new"]);
+
+        let type_counts: FxHashMap<_, _> = kg.entity_type_counts().into_iter().collect();
+        assert_eq!(type_counts.get("OldType"), None);
+        assert_eq!(type_counts.get("NewType"), Some(&1));
+
+        assert_eq!(
+            kg.search_relations(Some("A"), Some("A"), Some("self"), None),
+            [Relation {
+                from: "A".into(),
+                to: "A".into(),
+                relation_type: "self".into(),
+            }]
+        );
     }
 
     #[test]
