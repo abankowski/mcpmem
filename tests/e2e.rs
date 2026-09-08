@@ -342,7 +342,8 @@ fn e2e_relations_and_describe() {
         &serde_json::json!({"relations": [
             {"from": "A", "to": "B", "relationType": "knows"},
             {"from": "B", "to": "C", "relationType": "knows"},
-            {"from": "A", "to": "C", "relationType": "likes"}
+            {"from": "A", "to": "C", "relationType": "likes"},
+            {"from": "B", "to": "A", "relationType": "references"}
         ]}),
     );
 
@@ -380,27 +381,61 @@ fn e2e_relations_and_describe() {
     assert!(n.contains("A"), "C incoming A: {n}");
     assert!(n.contains("B"), "C incoming B: {n}");
 
-    // describe_entity returns the entity with its observations.
+    // describe_entity exposes one consistent graph read model: all incident
+    // relations, stable unique neighbors, and directional degree.
     let d = c.tool_text("describe_entity", &serde_json::json!({"name": "A"}));
-    assert!(d.contains("\"name\":\"A\""), "desc has A: {d}");
+    let description: serde_json::Value = serde_json::from_str(&d).expect("describe_entity JSON");
+    assert_eq!(description["name"], "A", "desc has A: {d}");
+    assert_eq!(description["entityType"], "t", "desc type: {d}");
+    assert_eq!(
+        description["observations"],
+        serde_json::json!([]),
+        "desc observations: {d}"
+    );
+    assert_eq!(
+        description["neighbors"],
+        serde_json::json!(["B", "C"]),
+        "desc neighbors: {d}"
+    );
+    assert_eq!(
+        description["degree"],
+        serde_json::json!({"in": 1, "out": 2}),
+        "desc degree: {d}"
+    );
+    let expected_relations = [
+        serde_json::json!({"from": "A", "to": "B", "relationType": "knows"}),
+        serde_json::json!({"from": "A", "to": "C", "relationType": "likes"}),
+        serde_json::json!({"from": "B", "to": "A", "relationType": "references"}),
+    ];
+    let relations = description["relations"]
+        .as_array()
+        .expect("describe_entity relations array");
+    assert_eq!(
+        relations.len(),
+        expected_relations.len(),
+        "desc relations: {d}"
+    );
+    for relation in expected_relations {
+        assert!(relations.contains(&relation), "missing {relation} in {d}");
+    }
 
-    // degree (outgoing for A = 2).
+    // degree (both directions for A = 3, 1 in + 2 out).
     let deg = c.tool_text("degree", &serde_json::json!({"name": "A"}));
-    assert!(deg.contains("\"degree\":2"), "A degree 2: {deg}");
+    assert!(deg.contains("\"degree\":3"), "A degree 3: {deg}");
 
-    // degree (both for B = 2, 1 in + 1 out).
+    // degree (both for B = 3, 1 in + 2 out).
     let deg = c.tool_text(
         "degree",
         &serde_json::json!({"name": "B", "direction": "BOTH"}),
     );
-    assert!(deg.contains("\"degree\":2"), "B degree 2: {deg}");
+    assert!(deg.contains("\"degree\":3"), "B degree 3: {deg}");
 
-    // degree (incoming for A = 0).
+    // degree (incoming for A = 1).
     let deg = c.tool_text(
         "degree",
         &serde_json::json!({"name": "A", "direction": "INCOMING"}),
     );
-    assert!(deg.contains("\"degree\":0"), "A incoming 0: {deg}");
+    assert!(deg.contains("\"degree\":1"), "A incoming 1: {deg}");
 
     // find_all_paths A→C.
     let p = c.tool_text(

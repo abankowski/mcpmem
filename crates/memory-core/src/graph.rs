@@ -13,7 +13,7 @@ use crate::mutation::{
     MutationContext, MutationRequest, MutationResult, MutationService, ObservationUpdate,
 };
 use crate::storage::{Durability, SqliteTuning};
-use crate::types::{Entity, Relation};
+use crate::types::{Degree, Entity, EntityDescription, Relation};
 
 /// Cap on entities/relations collected in a single traversal (DoS guard).
 /// Prevents a dense graph at high depth from allocating unbounded memory.
@@ -1556,9 +1556,48 @@ impl GraphHandle {
         Ok(out)
     }
 
-    pub fn describe_entity(&self, name: &str) -> Result<Entity> {
-        self.get_entity(name)?
-            .ok_or_else(|| MCSError::InvalidParams(format!("Entity '{name}' not found")))
+    pub fn describe_entity(&self, name: &str) -> Result<EntityDescription> {
+        let conn = self.readers.get();
+        // Keep the entity, its observations, incident relations, and degree in
+        // one WAL snapshot so a concurrent graph mutation cannot split this
+        // public read model across commits.
+        let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
+        let entity = crate::mutation::read_entity(&tx, name)?
+            .ok_or_else(|| MCSError::InvalidParams(format!("Entity '{name}' not found")))?;
+        let relations = crate::mutation::relations_for(&tx, name)?;
+        let mut neighbors: Vec<String> = relations
+            .iter()
+            .map(|relation| {
+                if relation.from == name {
+                    relation.to.clone()
+                } else {
+                    relation.from.clone()
+                }
+            })
+            .collect();
+        neighbors.sort();
+        neighbors.dedup();
+        // The counters on `entity` are a denormalized cache. Derive the public
+        // degree from this response's incident relations so legacy counter
+        // drift cannot make one snapshot internally inconsistent.
+        let incoming = relations
+            .iter()
+            .filter(|relation| relation.to == name)
+            .count() as i64;
+        let outgoing = relations
+            .iter()
+            .filter(|relation| relation.from == name)
+            .count() as i64;
+        tx.commit().map_err(sqlite_err)?;
+
+        Ok(EntityDescription {
+            name: entity.name,
+            entity_type: entity.entity_type,
+            observations: entity.observations,
+            relations,
+            neighbors,
+            degree: Degree { incoming, outgoing },
+        })
     }
 
     pub fn entity_type_counts(&self) -> Vec<(String, usize)> {
@@ -2305,15 +2344,97 @@ mod tests {
     #[test]
     fn test_describe_entity() {
         let kg = new_kg();
-        kg.create_entities(&[Entity {
-            name: "desc".into(),
-            entity_type: "t".into(),
-            observations: vec!["o".into()],
-        }])
+        kg.create_entities(&[
+            Entity {
+                name: "A".into(),
+                entity_type: "t".into(),
+                observations: vec!["o".into()],
+            },
+            Entity {
+                name: "B".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "C".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+            },
+        ])
         .unwrap();
 
-        let entity = kg.describe_entity("desc").unwrap();
-        assert_eq!(entity.name, "desc");
+        kg.create_relations(&[
+            Relation {
+                from: "B".into(),
+                to: "A".into(),
+                relation_type: "inbound".into(),
+            },
+            Relation {
+                from: "A".into(),
+                to: "B".into(),
+                relation_type: "outbound".into(),
+            },
+            Relation {
+                from: "A".into(),
+                to: "C".into(),
+                relation_type: "other".into(),
+            },
+            Relation {
+                from: "A".into(),
+                to: "A".into(),
+                relation_type: "self".into(),
+            },
+        ])
+        .unwrap();
+
+        let entity = kg.describe_entity("A").unwrap();
+        assert_eq!(entity.name, "A");
+        assert_eq!(entity.entity_type, "t");
+        assert_eq!(entity.observations, ["o"]);
+        assert_eq!(entity.relations.len(), 4);
+        assert_eq!(
+            entity.relations,
+            vec![
+                Relation {
+                    from: "A".into(),
+                    to: "A".into(),
+                    relation_type: "self".into(),
+                },
+                Relation {
+                    from: "A".into(),
+                    to: "B".into(),
+                    relation_type: "outbound".into(),
+                },
+                Relation {
+                    from: "A".into(),
+                    to: "C".into(),
+                    relation_type: "other".into(),
+                },
+                Relation {
+                    from: "B".into(),
+                    to: "A".into(),
+                    relation_type: "inbound".into(),
+                },
+            ]
+        );
+        assert_eq!(entity.neighbors, ["A", "B", "C"]);
+        assert_eq!(entity.degree.incoming, 2);
+        assert_eq!(entity.degree.outgoing, 3);
+
+        // `out_deg` and `in_deg` are a denormalized legacy cache. The public
+        // describe response must describe the returned relation set even when
+        // a pre-existing database carries stale cache values.
+        kg.writer
+            .lock()
+            .execute(
+                "UPDATE entity SET out_deg = 99, in_deg = 88 WHERE name = 'A'",
+                [],
+            )
+            .unwrap();
+        let entity = kg.describe_entity("A").unwrap();
+        assert_eq!(entity.degree.incoming, 2);
+        assert_eq!(entity.degree.outgoing, 3);
+        assert!(kg.describe_entity("missing").is_err());
     }
 
     #[test]

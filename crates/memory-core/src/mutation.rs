@@ -336,9 +336,9 @@ fn require_entity(conn: &Connection, name: &str) -> Result<EntitySnapshot> {
         .ok_or_else(|| MCSError::InvalidParams(format!("Entity '{name}' not found")))
 }
 
-fn relations_for(conn: &Connection, name: &str) -> Result<Vec<Relation>> {
+pub(crate) fn relations_for(conn: &Connection, name: &str) -> Result<Vec<Relation>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT f.name, t.name, d.name FROM relation r JOIN entity f ON f.id=r.from_id JOIN entity t ON t.id=r.to_id JOIN type_dict d ON d.id=r.type_id WHERE f.flags=0 AND t.flags=0 AND (r.from_id IN (SELECT id FROM entity WHERE name_hash=?1 AND name=?2 AND flags=0) OR r.to_id IN (SELECT id FROM entity WHERE name_hash=?1 AND name=?2 AND flags=0))"
+        "SELECT f.name, t.name, d.name FROM relation r JOIN entity f ON f.id=r.from_id JOIN entity t ON t.id=r.to_id JOIN type_dict d ON d.id=r.type_id WHERE f.flags=0 AND t.flags=0 AND (r.from_id IN (SELECT id FROM entity WHERE name_hash=?1 AND name=?2 AND flags=0) OR r.to_id IN (SELECT id FROM entity WHERE name_hash=?1 AND name=?2 AND flags=0)) ORDER BY f.name, t.name, d.name"
     ).map_err(sql_error)?;
     stmt.query_map(params![name_hash(name), name], |row| {
         Ok(Relation {
