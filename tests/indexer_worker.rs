@@ -228,6 +228,19 @@ fn provider_registry_rejects_unknown_profile_kind() {
 }
 
 #[test]
+#[cfg(not(feature = "bedrock"))]
+fn provider_registry_rejects_bedrock_without_the_bedrock_feature() {
+    let registry = indexer_worker::ProviderRegistry::new(None, None);
+    let mut bedrock = profile();
+    bedrock.provider_kind = "bedrock".into();
+    let error = registry.embed(&bedrock, &[]).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "provider request failed: unsupported embedding provider 'bedrock'"
+    );
+}
+
+#[test]
 fn search_keeps_serving_snapshot_until_candidate_activation() {
     use memory_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
     let dir = tempfile::tempdir().unwrap();

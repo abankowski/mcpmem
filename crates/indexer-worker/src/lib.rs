@@ -1,9 +1,13 @@
 //! Bounded durable embedding worker. Network embedding happens outside the
 //! fenced SQLite completion transaction.
+#[cfg(feature = "bedrock")]
+mod bedrock;
 mod ollama;
 mod openai;
 mod provider;
 
+#[cfg(feature = "bedrock")]
+pub use bedrock::{AwsBedrockTransport, BedrockEmbeddingProvider, BedrockTransport};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiCompatibleProvider;
 pub use provider::{CanonicalDocument, EmbeddingProvider, ProviderError};
@@ -45,6 +49,8 @@ pub struct IndexerWorker<P> {
 pub struct ProviderRegistry {
     ollama: Option<Arc<OllamaProvider>>,
     openai: Option<Arc<OpenAiCompatibleProvider>>,
+    #[cfg(feature = "bedrock")]
+    bedrock: Option<Arc<BedrockEmbeddingProvider>>,
 }
 
 impl ProviderRegistry {
@@ -52,7 +58,18 @@ impl ProviderRegistry {
         ollama: Option<Arc<OllamaProvider>>,
         openai: Option<Arc<OpenAiCompatibleProvider>>,
     ) -> Self {
-        Self { ollama, openai }
+        Self {
+            ollama,
+            openai,
+            #[cfg(feature = "bedrock")]
+            bedrock: None,
+        }
+    }
+
+    #[cfg(feature = "bedrock")]
+    pub fn with_bedrock(mut self, bedrock: Arc<BedrockEmbeddingProvider>) -> Self {
+        self.bedrock = Some(bedrock);
+        self
     }
 
     pub fn from_environment(timeout: Duration) -> Result<Self, ProviderError> {
@@ -75,7 +92,12 @@ impl ProviderRegistry {
                 ));
             }
         };
-        Ok(Self { ollama, openai })
+        let registry = Self::new(ollama, openai);
+        #[cfg(feature = "bedrock")]
+        let registry = registry.with_bedrock(Arc::new(
+            BedrockEmbeddingProvider::from_standard_chain(timeout)?,
+        ));
+        Ok(registry)
     }
 }
 
@@ -97,6 +119,12 @@ impl EmbeddingProvider for ProviderRegistry {
                 .ok_or_else(|| {
                     ProviderError::Request("OpenAI-compatible provider is not configured".into())
                 })?
+                .embed(profile, documents),
+            #[cfg(feature = "bedrock")]
+            "bedrock" => self
+                .bedrock
+                .as_ref()
+                .ok_or_else(|| ProviderError::Request("Bedrock provider is not configured".into()))?
                 .embed(profile, documents),
             kind => Err(ProviderError::Request(format!(
                 "unsupported embedding provider '{kind}'"

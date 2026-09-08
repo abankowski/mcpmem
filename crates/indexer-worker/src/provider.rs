@@ -35,3 +35,13 @@ pub trait EmbeddingProvider: Send + Sync {
         documents: &[CanonicalDocument],
     ) -> Result<Vec<Vec<f32>>, ProviderError>;
 }
+
+impl<T: EmbeddingProvider + ?Sized> EmbeddingProvider for std::sync::Arc<T> {
+    fn embed(
+        &self,
+        profile: &IndexProfile,
+        documents: &[CanonicalDocument],
+    ) -> Result<Vec<Vec<f32>>, ProviderError> {
+        (**self).embed(profile, documents)
+    }
+}

@@ -73,7 +73,7 @@ notify = { version = "8", optional = true }
 default = ["code"]
 indexer = ["memory-runtime/indexer", "dep:indexer-worker"]
 webhooks = ["memory-runtime/webhooks"]
-bedrock = ["indexer"]
+bedrock = ["indexer", "indexer-worker/bedrock"]
 # Tree-sitter code-symbol indexing: the `code_*` MCP tools + indexer.
 code = [
     "dep:tree-sitter",

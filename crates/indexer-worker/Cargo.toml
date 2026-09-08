@@ -6,12 +6,18 @@ license = "Apache-2.0"
 
 [dependencies]
 memory-core = { path = "../memory-core" }
+aws-config = { version = "1.12", optional = true }
+aws-sdk-bedrockruntime = { version = "1.143", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "time"] }
 url = "2"
+
+[features]
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
 
 [lints]
 workspace = true

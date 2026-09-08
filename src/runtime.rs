@@ -65,6 +65,7 @@ pub struct IndexerService {
     database: std::path::PathBuf,
     timeout: std::time::Duration,
     vectors: Option<Arc<crate::vector_store::VectorStore>>,
+    provider: Arc<indexer_worker::ProviderRegistry>,
 }
 
 #[cfg(feature = "indexer")]
@@ -73,11 +74,29 @@ impl IndexerService {
         database: impl Into<std::path::PathBuf>,
         vectors: Option<Arc<crate::vector_store::VectorStore>>,
     ) -> Result<Self, crate::errors::MCSError> {
-        Ok(Self {
-            database: database.into(),
-            timeout: std::time::Duration::from_secs(10),
+        let timeout = std::time::Duration::from_secs(10);
+        let provider = indexer_worker::ProviderRegistry::from_environment(timeout)
+            .map_err(|error| crate::errors::MCSError::MemoryError(error.to_string()))?;
+        Ok(Self::with_provider(
+            database,
             vectors,
-        })
+            Arc::new(provider),
+            timeout,
+        ))
+    }
+
+    fn with_provider(
+        database: impl Into<std::path::PathBuf>,
+        vectors: Option<Arc<crate::vector_store::VectorStore>>,
+        provider: Arc<indexer_worker::ProviderRegistry>,
+        timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            database: database.into(),
+            timeout,
+            vectors,
+            provider,
+        }
     }
 }
 
@@ -87,6 +106,7 @@ impl RoleService for IndexerService {
         let database = self.database.clone();
         let timeout = self.timeout;
         let vectors = self.vectors.clone();
+        let provider = self.provider.clone();
         Box::pin(async move {
             loop {
                 let now = std::time::SystemTime::now()
@@ -96,9 +116,8 @@ impl RoleService for IndexerService {
                     .min(i64::MAX as u128) as i64;
                 let database = database.clone();
                 let vectors = vectors.clone();
+                let provider = provider.clone();
                 tokio::task::spawn_blocking(move || {
-                    let provider = indexer_worker::ProviderRegistry::from_environment(timeout)
-                        .map_err(|error| error.to_string())?;
                     let worker = indexer_worker::IndexerWorker::new(database, provider, timeout);
                     worker.run_once(now).map_err(|error| error.to_string())?;
                     if let Some(vectors) = vectors {
@@ -120,5 +139,26 @@ impl RoleService for IndexerService {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         })
+    }
+}
+
+#[cfg(all(test, feature = "indexer"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indexer_service_reuses_its_provider_registry_across_polls() {
+        let provider = Arc::new(indexer_worker::ProviderRegistry::new(None, None));
+        let service = IndexerService::with_provider(
+            "memory.db",
+            None,
+            Arc::clone(&provider),
+            std::time::Duration::from_secs(1),
+        );
+
+        assert!(Arc::ptr_eq(&provider, &service.provider));
+        let first_poll = Arc::clone(&service.provider);
+        let second_poll = Arc::clone(&service.provider);
+        assert!(Arc::ptr_eq(&first_poll, &second_poll));
     }
 }
