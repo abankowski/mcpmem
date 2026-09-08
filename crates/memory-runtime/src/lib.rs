@@ -114,11 +114,23 @@ pub trait RoleService: Send + Sync {
 #[derive(Clone)]
 pub struct AppServices {
     mcp: Arc<dyn RoleService>,
+    #[cfg(feature = "indexer")]
+    indexer: Arc<dyn RoleService>,
 }
 
 impl AppServices {
     pub fn new(mcp: Arc<dyn RoleService>) -> Self {
-        Self { mcp }
+        Self {
+            mcp,
+            #[cfg(feature = "indexer")]
+            indexer: Arc::new(NoopService),
+        }
+    }
+
+    #[cfg(feature = "indexer")]
+    pub fn with_indexer(mut self, indexer: Arc<dyn RoleService>) -> Self {
+        self.indexer = indexer;
+        self
     }
 }
 
@@ -138,14 +150,22 @@ pub struct RuntimeComposition;
 impl RuntimeComposition {
     pub fn start(roles: RoleSet, services: Arc<AppServices>) -> Result<RunningRoles, RuntimeError> {
         let RoleSet(roles) = roles;
-        let AppServices { mcp } = Arc::unwrap_or_clone(services);
+        let AppServices {
+            mcp,
+            #[cfg(feature = "indexer")]
+            indexer,
+        } = Arc::unwrap_or_clone(services);
         let mut tasks = JoinSet::new();
         let lifecycle = roles
             .into_iter()
             .map(|role| {
                 let service: Arc<dyn RoleService> = match role {
                     RuntimeRole::Mcp => mcp.clone(),
-                    RuntimeRole::Indexer | RuntimeRole::Webhooks => Arc::new(NoopService),
+                    #[cfg(feature = "indexer")]
+                    RuntimeRole::Indexer => indexer.clone(),
+                    #[cfg(not(feature = "indexer"))]
+                    RuntimeRole::Indexer => Arc::new(NoopService),
+                    RuntimeRole::Webhooks => Arc::new(NoopService),
                 };
                 tasks.spawn(async move { (role, service.run().await) });
                 RoleLifecycle {

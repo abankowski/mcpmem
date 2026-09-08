@@ -15,6 +15,9 @@ use crate::errors::{MCSError, Result};
 use crate::ivf::{IvfFlatIndex, Metric as IvfMetric};
 use crate::kg::push_json_str;
 use crate::turboquant::TurboQuantIndex;
+use memory_core::jobs::{
+    AnnGenerationRepository, DistanceMetric, IndexProfileRegistry, StoreState,
+};
 
 pub type EntityId = i64;
 
@@ -279,6 +282,17 @@ pub struct VectorStore {
     ivf_nprobe: usize,
 
     pub db_path: std::path::PathBuf,
+    /// Profile-owned vectors are immutable snapshots. Readers clone this Arc
+    /// before searching, so a completed rebuild never exposes a half-built
+    /// candidate generation.
+    managed_snapshot: RwLock<Option<Arc<ManagedSnapshot>>>,
+}
+
+struct ManagedSnapshot {
+    profile: uuid::Uuid,
+    durable_generation: i64,
+    metric: DistanceMetric,
+    vectors: Vec<(EntityId, Vec<f32>)>,
 }
 
 fn sqlite_err(e: rusqlite::Error) -> MCSError {
@@ -304,6 +318,23 @@ fn now_micros() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as i64
+}
+
+fn managed_distance(metric: DistanceMetric, left: &[f32], right: &[f32]) -> f32 {
+    match metric {
+        DistanceMetric::L2Squared => left.iter().zip(right).map(|(a, b)| (a - b).powi(2)).sum(),
+        DistanceMetric::InnerProduct => -left.iter().zip(right).map(|(a, b)| a * b).sum::<f32>(),
+        DistanceMetric::Cosine => {
+            let dot: f32 = left.iter().zip(right).map(|(a, b)| a * b).sum();
+            let left_norm = left.iter().map(|value| value.powi(2)).sum::<f32>().sqrt();
+            let right_norm = right.iter().map(|value| value.powi(2)).sum::<f32>().sqrt();
+            if left_norm == 0.0 || right_norm == 0.0 {
+                1.0
+            } else {
+                1.0 - dot / (left_norm * right_norm)
+            }
+        }
+    }
 }
 
 /// `INSERT OR REPLACE … VALUES (?,?,?,?,?),(…),…` with `rows` tuples. Full
@@ -442,6 +473,7 @@ impl VectorStore {
             count: AtomicUsize::new(0),
             ivf_nprobe: cfg.ivf_nprobe,
             db_path: db_path.to_path_buf(),
+            managed_snapshot: RwLock::new(None),
         };
         store.load_existing()?;
 
@@ -552,6 +584,7 @@ impl VectorStore {
         model: &str,
     ) -> Result<()> {
         let conn = self.db.lock();
+        IndexProfileRegistry::new(&conn).ensure_legacy_writes("default")?;
         self.upsert_one(&conn, entity_name, embedding, model)
     }
 
@@ -573,6 +606,12 @@ impl VectorStore {
         use rusqlite::types::Value as SqlValue;
 
         let mut conn = self.db.lock();
+        if let Err(error) = IndexProfileRegistry::new(&conn).ensure_legacy_writes("default") {
+            return items
+                .iter()
+                .map(|_| Err(MCSError::InvalidParams(error.to_string())))
+                .collect();
+        }
         let tx = match conn.transaction() {
             Ok(tx) => tx,
             Err(e) => {
@@ -700,6 +739,7 @@ impl VectorStore {
 
     pub fn delete_embedding(&self, entity_name: &str) -> Result<bool> {
         let conn = self.db.lock();
+        IndexProfileRegistry::new(&conn).ensure_legacy_writes("default")?;
         let entity_id = match self.name_to_id.get(entity_name) {
             Some(entry) => *entry,
             None => {
@@ -731,6 +771,26 @@ impl VectorStore {
     }
 
     pub fn search_embeddings(&self, query: &[f32], top_k: usize) -> Result<Vec<(EntityId, f32)>> {
+        if let Some(snapshot) = self.managed_snapshot.read().clone() {
+            if query.len()
+                != snapshot
+                    .vectors
+                    .first()
+                    .map_or(query.len(), |(_, vector)| vector.len())
+            {
+                return Err(MCSError::InvalidParams(
+                    "query dimensions do not match active index profile".into(),
+                ));
+            }
+            let mut matches: Vec<_> = snapshot
+                .vectors
+                .iter()
+                .map(|(id, vector)| (*id, managed_distance(snapshot.metric, query, vector)))
+                .collect();
+            matches.sort_by(|left, right| left.1.total_cmp(&right.1));
+            matches.truncate(top_k.clamp(1, 100));
+            return Ok(matches);
+        }
         if self.count.load(Ordering::Relaxed) == 0 {
             return Ok(Vec::new());
         }
@@ -740,6 +800,89 @@ impl VectorStore {
             .into_iter()
             .map(|(id, dist)| (id as EntityId, dist))
             .collect())
+    }
+
+    /// Rebuild and atomically publish a managed reader from a durable profile
+    /// generation. This is worker-only; MCP searches never invoke it.
+    pub fn reconcile_managed_snapshot(&self) -> Result<()> {
+        let conn = self.db.lock();
+        let registry = IndexProfileRegistry::new(&conn);
+        let state = registry.state("default")?;
+        let candidate = matches!(&state, StoreState::Rebuilding { .. });
+        let active = match state {
+            StoreState::Active(profile) => Some((
+                profile,
+                AnnGenerationRepository::new(&conn)
+                    .get(profile)?
+                    .durable_generation,
+            )),
+            StoreState::Rebuilding { candidate, .. } => Some((
+                candidate,
+                AnnGenerationRepository::new(&conn)
+                    .get(candidate)?
+                    .durable_generation,
+            )),
+            StoreState::Failed { .. } => self
+                .managed_snapshot
+                .read()
+                .as_ref()
+                .map(|snapshot| (snapshot.profile, snapshot.durable_generation)),
+            StoreState::LegacyCompat => None,
+        };
+        if self
+            .managed_snapshot
+            .read()
+            .as_ref()
+            .map(|snapshot| (snapshot.profile, snapshot.durable_generation))
+            == active
+        {
+            return Ok(());
+        }
+        let Some((profile_id, durable_generation)) = active else {
+            *self.managed_snapshot.write() = None;
+            return Ok(());
+        };
+        let profile = registry.get(profile_id)?;
+        let mut statement = conn
+            .prepare(
+                "SELECT entity_id,blob FROM profile_vector WHERE profile_id=?1 ORDER BY entity_id",
+            )
+            .map_err(sqlite_err)?;
+        let vectors = statement
+            .query_map([profile_id.to_string()], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(sqlite_err)?
+            .map(|row| {
+                let (id, blob) = row.map_err(sqlite_err)?;
+                if blob.len() != profile.dimensions as usize * std::mem::size_of::<f32>() {
+                    return Err(MCSError::MemoryError(
+                        "managed profile vector has invalid byte length".into(),
+                    ));
+                }
+                let (chunks, _) = blob.as_chunks::<4>();
+                let vector = chunks
+                    .iter()
+                    .map(|bytes| f32::from_le_bytes(*bytes))
+                    .collect::<Vec<_>>();
+                profile.validate_vector(&vector)?;
+                Ok((id, vector))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !AnnGenerationRepository::new(&conn).mark_published(profile_id, durable_generation)? {
+            return Ok(());
+        }
+        if candidate {
+            AnnGenerationRepository::new(&conn).verify_full_scan(profile_id)?;
+            registry.activate(profile_id)?;
+        }
+        *self.managed_snapshot.write() = Some(Arc::new(ManagedSnapshot {
+            profile: profile_id,
+            durable_generation,
+            metric: profile.distance_metric,
+            vectors,
+        }));
+        Ok(())
     }
 
     pub fn search_entities_json(
@@ -1187,6 +1330,37 @@ mod tests {
             .search_embeddings(&make_embedding(4, 1.0), 10)
             .unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn direct_writes_are_rejected_while_a_profile_rebuilds() {
+        use memory_core::jobs::{
+            DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization,
+        };
+        use uuid::Uuid;
+
+        let env = setup(4);
+        create_test_entity(&env.kg, "alice", "person");
+        let profile = IndexProfile {
+            id: Uuid::new_v4(),
+            store_key: "default".into(),
+            provider_kind: "test".into(),
+            model: "test".into(),
+            dimensions: 4,
+            representation_version: "v1".into(),
+            normalization: Normalization::None,
+            distance_metric: DistanceMetric::Cosine,
+            vector_encoding_version: "f32le-v1".into(),
+        };
+        let conn = rusqlite::Connection::open(&env.vs.db_path).unwrap();
+        IndexProfileRegistry::new(&conn)
+            .begin_rebuild(&profile)
+            .unwrap();
+        let error = env
+            .vs
+            .upsert_embedding("alice", &make_embedding(4, 1.0), "test")
+            .unwrap_err();
+        assert!(error.to_string().contains("direct_vector_writes_disabled"));
     }
 
     #[test]

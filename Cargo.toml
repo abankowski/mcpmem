@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/memory-core", "crates/memory-runtime"]
+members = [".", "crates/memory-core", "crates/memory-runtime", "crates/indexer-worker"]
 resolver = "3"
 
 [package]
@@ -45,6 +45,8 @@ usearch = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
 memory-core = { path = "crates/memory-core" }
 memory-runtime = { path = "crates/memory-runtime" }
+indexer-worker = { path = "crates/indexer-worker", optional = true }
+uuid = { version = "1" }
 
 # --- Code-symbol indexing (feature = "code") ---------------------------------
 # Tree-sitter parsing + the `tags` extractor drive the code knowledge graph.
@@ -69,7 +71,7 @@ notify = { version = "8", optional = true }
 
 [features]
 default = ["code"]
-indexer = ["memory-runtime/indexer"]
+indexer = ["memory-runtime/indexer", "dep:indexer-worker"]
 webhooks = ["memory-runtime/webhooks"]
 bedrock = ["indexer"]
 # Tree-sitter code-symbol indexing: the `code_*` MCP tools + indexer.
@@ -93,7 +95,6 @@ code = [
 
 [dev-dependencies]
 tempfile = "3"
-uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1.41", features = ["process"] }
 
 [[bin]]

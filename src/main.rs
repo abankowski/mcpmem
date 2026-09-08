@@ -42,9 +42,16 @@ async fn inner_main() -> Result<()> {
     )?);
     info!("Server initialized successfully");
 
+    let vector_store = mcp_server.vector_store();
     let transport =
         runtime::McpTransportService::new(mcp_server, config.transport, config.bind_addr.clone());
-    let services = Arc::new(runtime::AppServices::new(Arc::new(transport)));
+    let services = runtime::AppServices::new(Arc::new(transport));
+    #[cfg(feature = "indexer")]
+    let services = services.with_indexer(Arc::new(runtime::IndexerService::from_environment(
+        config.memory_file_path.clone(),
+        vector_store,
+    )?));
+    let services = Arc::new(services);
     let running_roles = runtime::RuntimeComposition::start(config.roles.clone(), services)?;
     info!(roles = ?running_roles.lifecycle(), "Runtime roles started");
     running_roles.wait_for_shutdown().await?;
