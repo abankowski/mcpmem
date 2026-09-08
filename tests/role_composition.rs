@@ -86,6 +86,16 @@ fn rejects_webhooks_when_the_feature_is_not_compiled() {
 struct ImmediateMcpService;
 
 #[cfg(all(feature = "indexer", feature = "webhooks"))]
+struct ImmediateWebhookService;
+
+#[cfg(all(feature = "indexer", feature = "webhooks"))]
+impl RoleService for ImmediateWebhookService {
+    fn run(&self) -> RoleFuture {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[cfg(all(feature = "indexer", feature = "webhooks"))]
 impl RoleService for ImmediateMcpService {
     fn run(&self) -> RoleFuture {
         Box::pin(async { Ok(()) })
@@ -96,7 +106,10 @@ impl RoleService for ImmediateMcpService {
 #[tokio::test]
 async fn supervises_selected_roles_and_stops_with_mcp() {
     let roles = RoleSet::parse_csv("mcp,indexer,webhooks").expect("features are compiled");
-    let services = Arc::new(AppServices::new(Arc::new(ImmediateMcpService)));
+    let services = Arc::new(
+        AppServices::new(Arc::new(ImmediateMcpService))
+            .with_webhooks(Arc::new(ImmediateWebhookService)),
+    );
 
     let running = RuntimeComposition::start(roles, services).expect("roles start");
     assert_eq!(

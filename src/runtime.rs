@@ -60,6 +60,50 @@ impl RoleService for McpTransportService {
     }
 }
 
+#[cfg(feature = "webhooks")]
+pub struct WebhookService {
+    worker: Option<Arc<dyn webhook_worker::WorkerPoll>>,
+}
+
+#[cfg(feature = "webhooks")]
+impl WebhookService {
+    pub const fn disabled() -> Self {
+        Self { worker: None }
+    }
+    pub fn new(worker: Arc<dyn webhook_worker::WorkerPoll>) -> Self {
+        Self {
+            worker: Some(worker),
+        }
+    }
+}
+
+#[cfg(feature = "webhooks")]
+impl RoleService for WebhookService {
+    fn run(&self) -> memory_runtime::RoleFuture {
+        let worker = self.worker.clone();
+        Box::pin(async move {
+            let worker = worker.ok_or_else(|| RuntimeError::RoleFailed {
+                role: RuntimeRole::Webhooks,
+                message: "webhook role selected without configured worker ports".into(),
+            })?;
+            loop {
+                let worker = worker.clone();
+                tokio::task::spawn_blocking(move || worker.poll(memory_core::events::now_us()))
+                    .await
+                    .map_err(|error| RuntimeError::RoleFailed {
+                        role: RuntimeRole::Webhooks,
+                        message: error.to_string(),
+                    })?
+                    .map_err(|error| RuntimeError::RoleFailed {
+                        role: RuntimeRole::Webhooks,
+                        message: error.to_string(),
+                    })?;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        })
+    }
+}
+
 #[cfg(feature = "indexer")]
 pub struct IndexerService {
     database: std::path::PathBuf,
@@ -160,5 +204,21 @@ mod tests {
         let first_poll = Arc::clone(&service.provider);
         let second_poll = Arc::clone(&service.provider);
         assert!(Arc::ptr_eq(&first_poll, &second_poll));
+    }
+}
+
+#[cfg(all(test, feature = "webhooks"))]
+mod webhook_tests {
+    use super::*;
+    #[tokio::test]
+    async fn selected_service_fails_observably_without_worker_ports() {
+        let result = WebhookService::disabled().run().await;
+        assert!(matches!(
+            result,
+            Err(RuntimeError::RoleFailed {
+                role: RuntimeRole::Webhooks,
+                ..
+            })
+        ));
     }
 }

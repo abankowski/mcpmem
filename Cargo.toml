@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/memory-core", "crates/memory-runtime", "crates/indexer-worker"]
+members = [".", "crates/memory-core", "crates/memory-runtime", "crates/indexer-worker", "crates/webhook-worker"]
 resolver = "3"
 
 [package]
@@ -46,6 +46,7 @@ zerocopy = { version = "0.8", features = ["derive"] }
 memory-core = { path = "crates/memory-core" }
 memory-runtime = { path = "crates/memory-runtime" }
 indexer-worker = { path = "crates/indexer-worker", optional = true }
+webhook-worker = { path = "crates/webhook-worker", optional = true }
 uuid = { version = "1" }
 
 # --- Code-symbol indexing (feature = "code") ---------------------------------
@@ -72,7 +73,7 @@ notify = { version = "8", optional = true }
 [features]
 default = ["code"]
 indexer = ["memory-runtime/indexer", "dep:indexer-worker"]
-webhooks = ["memory-runtime/webhooks"]
+webhooks = ["memory-runtime/webhooks", "dep:webhook-worker"]
 bedrock = ["indexer", "indexer-worker/bedrock"]
 # Tree-sitter code-symbol indexing: the `code_*` MCP tools + indexer.
 code = [
@@ -94,8 +95,11 @@ code = [
 ]
 
 [dev-dependencies]
+hmac = "0.12"
+sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1.41", features = ["process"] }
+webhook-worker = { path = "crates/webhook-worker" }
 
 [[bin]]
 name = "mcp-memory"

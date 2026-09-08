@@ -107,9 +107,16 @@ fn startup_rejects_changed_migration_and_preserves_legacy_vector_rows() {
     drop(graph(&path));
     assert_eq!(count(&conn, "vector_embedding"), 1);
     assert_eq!(count(&conn, "profile_vector"), 0);
-    assert_eq!(count(&conn, "schema_migration"), 1);
+    let versions: Vec<i64> = conn
+        .prepare("SELECT version FROM schema_migration ORDER BY version")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(versions, [1, 2]);
     drop(graph(&path));
-    assert_eq!(count(&conn, "schema_migration"), 1);
+    assert_eq!(count(&conn, "schema_migration"), 2);
     conn.execute("UPDATE schema_migration SET checksum='tampered'", [])
         .unwrap();
     assert!(

@@ -48,6 +48,16 @@ async fn inner_main() -> Result<()> {
         config.bind_addr.clone(),
     );
     let services = runtime::AppServices::new(Arc::new(transport));
+    #[cfg(feature = "webhooks")]
+    let services = if config
+        .roles
+        .roles()
+        .contains(&runtime::RuntimeRole::Webhooks)
+    {
+        services.with_webhooks(Arc::new(runtime::WebhookService::disabled()))
+    } else {
+        services
+    };
     #[cfg(feature = "indexer")]
     let services = if config
         .roles

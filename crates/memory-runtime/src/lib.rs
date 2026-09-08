@@ -116,6 +116,8 @@ pub struct AppServices {
     mcp: Arc<dyn RoleService>,
     #[cfg(feature = "indexer")]
     indexer: Arc<dyn RoleService>,
+    #[cfg(feature = "webhooks")]
+    webhooks: Arc<dyn RoleService>,
 }
 
 impl AppServices {
@@ -124,7 +126,14 @@ impl AppServices {
             mcp,
             #[cfg(feature = "indexer")]
             indexer: Arc::new(NoopService),
+            #[cfg(feature = "webhooks")]
+            webhooks: Arc::new(NoopService),
         }
+    }
+    #[cfg(feature = "webhooks")]
+    pub fn with_webhooks(mut self, webhooks: Arc<dyn RoleService>) -> Self {
+        self.webhooks = webhooks;
+        self
     }
 
     #[cfg(feature = "indexer")]
@@ -154,6 +163,8 @@ impl RuntimeComposition {
             mcp,
             #[cfg(feature = "indexer")]
             indexer,
+            #[cfg(feature = "webhooks")]
+            webhooks,
         } = Arc::unwrap_or_clone(services);
         let mut tasks = JoinSet::new();
         let lifecycle = roles
@@ -165,6 +176,9 @@ impl RuntimeComposition {
                     RuntimeRole::Indexer => indexer.clone(),
                     #[cfg(not(feature = "indexer"))]
                     RuntimeRole::Indexer => Arc::new(NoopService),
+                    #[cfg(feature = "webhooks")]
+                    RuntimeRole::Webhooks => webhooks.clone(),
+                    #[cfg(not(feature = "webhooks"))]
                     RuntimeRole::Webhooks => Arc::new(NoopService),
                 };
                 tasks.spawn(async move { (role, service.run().await) });

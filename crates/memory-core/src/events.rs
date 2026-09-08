@@ -8,11 +8,11 @@ use crate::errors::{MCSError, Result};
 use crate::graph::TxGuard;
 use crate::mutation::{CommittedChangeSet, EntityChange, MutationContext};
 
-pub(crate) fn sql_error(error: rusqlite::Error) -> MCSError {
+pub fn sql_error(error: rusqlite::Error) -> MCSError {
     MCSError::IoError(std::io::Error::other(error))
 }
 
-pub(crate) fn now_us() -> i64 {
+pub fn now_us() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -40,10 +40,16 @@ pub fn request_fingerprint(method: &str, normalized_path: &str, raw_body: &[u8])
 pub fn migrate(conn: &Connection) -> Result<()> {
     let tx = TxGuard::begin(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;").map_err(sql_error)?;
-    let migrations = [(
-        1_i64,
-        include_str!("../../../migrations/0001_change_events.sql"),
-    )];
+    let migrations = [
+        (
+            1_i64,
+            include_str!("../../../migrations/0001_change_events.sql"),
+        ),
+        (
+            2_i64,
+            include_str!("../../../migrations/0002_webhook_subscriptions.sql"),
+        ),
+    ];
     let newest: i64 = conn
         .query_row(
             "SELECT coalesce(max(version),0) FROM schema_migration",
@@ -133,6 +139,7 @@ pub(crate) fn persist_changes(
         )
         .map_err(sql_error)?;
         crate::jobs::enqueue_change(conn, snapshot.entity_id, revision, deleted)?;
+        crate::subscriptions::SubscriptionRepository::new(conn).enqueue_matching(&event)?;
     }
     Ok(())
 }
