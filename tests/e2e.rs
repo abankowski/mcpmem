@@ -272,13 +272,9 @@ fn e2e_delete_and_stats() {
     let open = c.tool_text("open_nodes", &serde_json::json!({"names": ["X"]}));
     assert!(open.contains("x-obs"), "X obs remain: {open}");
 
-    // Relation type count still reflects the cascade (delete_entities does not
-    // decrement relation type counts — the type entry persists in type_dict).
+    // Cascading deletes also decrement live relation type counts.
     let rtypes = c.tool_text("list_relation_types", &serde_json::json!({}));
-    assert!(
-        rtypes.contains("\"type\":\"linked\""),
-        "linked type exists: {rtypes}"
-    );
+    assert_eq!(rtypes, "[]", "no live relation types remain: {rtypes}");
 }
 
 #[test]

@@ -1,3 +1,6 @@
+use memory_core::mutation::{
+    MutationContext, MutationRequest, MutationResult, MutationService, ObservationUpdate,
+};
 use serde_json::{Value, json};
 
 use crate::errors::{MCSError, Result};
@@ -61,6 +64,12 @@ fn build_content_response(inner_json: &str) -> String {
     out
 }
 
+fn apply_mutation(kg: &GraphHandle, request: MutationRequest) -> Result<MutationResult> {
+    MutationService::new(kg)
+        .apply_with_result(request, MutationContext::local())
+        .map(|(_, result)| result)
+}
+
 pub fn handle_read_graph(kg: &GraphHandle, args: Option<&Value>) -> Result<String> {
     let params = args.unwrap_or(&Value::Null);
     let filter_type = params
@@ -101,7 +110,15 @@ pub fn handle_create_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
         }
     }
 
-    let result = kg.create_entities(&input_entities)?;
+    let MutationResult::Entities(result) = apply_mutation(
+        kg,
+        MutationRequest::CreateEntities {
+            entities: input_entities,
+        },
+    )?
+    else {
+        unreachable!("entity mutation result")
+    };
     let text = serde_json::to_string(&result).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }
@@ -127,7 +144,15 @@ pub fn handle_create_relations(kg: &GraphHandle, args: Option<&Value>) -> Result
         validate_name(&rel.relation_type)?;
     }
 
-    let result = kg.create_relations(&input_relations)?;
+    let MutationResult::Relations(result) = apply_mutation(
+        kg,
+        MutationRequest::CreateRelations {
+            relations: input_relations,
+        },
+    )?
+    else {
+        unreachable!("relation mutation result")
+    };
     let text = serde_json::to_string(&result).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }
@@ -141,7 +166,7 @@ pub fn handle_add_observations(kg: &GraphHandle, args: Option<&Value>) -> Result
     let observations: Vec<Value> = serde_json::from_value(observations_val.clone())
         .map_err(|e| MCSError::InvalidParams(format!("Invalid observations: {e}")))?;
 
-    let mut results = Vec::new();
+    let mut updates = Vec::new();
 
     for obs in &observations {
         let entity_name = obs
@@ -169,13 +194,20 @@ pub fn handle_add_observations(kg: &GraphHandle, args: Option<&Value>) -> Result
             validate_observation(content)?;
         }
 
-        let added = kg.add_observations(entity_name, &contents)?;
-
-        results.push(json!({
-            "entityName": entity_name,
-            "addedObservations": added
-        }));
+        updates.push(ObservationUpdate {
+            entity_name: entity_name.into(),
+            contents,
+        });
     }
+    let MutationResult::Observations(results) = apply_mutation(
+        kg,
+        MutationRequest::AddObservations {
+            observations: updates,
+        },
+    )?
+    else {
+        unreachable!("observation mutation result")
+    };
     let text = serde_json::to_string(&json!({"results": results})).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }
@@ -195,7 +227,12 @@ pub fn handle_delete_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
         })?;
     entity_names.truncate(MAX_NAMES_PER_REQUEST);
 
-    kg.delete_entities(&entity_names)?;
+    apply_mutation(
+        kg,
+        MutationRequest::DeleteEntities {
+            names: entity_names,
+        },
+    )?;
 
     Ok(text_content!("Entities deleted successfully"))
 }
@@ -209,6 +246,7 @@ pub fn handle_delete_observations(kg: &GraphHandle, args: Option<&Value>) -> Res
             MCSError::InvalidParams("Missing or invalid 'deletions' parameter".into())
         })?;
 
+    let mut updates = Vec::new();
     for deletion in deletions.iter().take(MAX_NAMES_PER_REQUEST) {
         let entity_name = deletion
             .get("entityName")
@@ -224,8 +262,17 @@ pub fn handle_delete_observations(kg: &GraphHandle, args: Option<&Value>) -> Res
             })
             .unwrap_or_default();
 
-        kg.delete_observations(entity_name, &observations)?;
+        updates.push(ObservationUpdate {
+            entity_name: entity_name.into(),
+            contents: observations,
+        });
     }
+    apply_mutation(
+        kg,
+        MutationRequest::DeleteObservations {
+            observations: updates,
+        },
+    )?;
 
     Ok(text_content!("Observations deleted successfully"))
 }
@@ -241,7 +288,12 @@ pub fn handle_delete_relations(kg: &GraphHandle, args: Option<&Value>) -> Result
             .map_err(|e| MCSError::InvalidParams(format!("Invalid relation: {e}")))?;
     input_relations.truncate(MAX_RELATIONS_PER_REQUEST);
 
-    kg.delete_relations(&input_relations)?;
+    apply_mutation(
+        kg,
+        MutationRequest::DeleteRelations {
+            relations: input_relations,
+        },
+    )?;
 
     Ok(text_content!("Relations deleted successfully"))
 }
@@ -373,7 +425,7 @@ pub fn handle_find_path(kg: &GraphHandle, args: Option<&Value>) -> Result<Value>
 }
 
 pub fn handle_compact(kg: &GraphHandle) -> Result<Value> {
-    kg.compact()?;
+    apply_mutation(kg, MutationRequest::Compact)?;
     Ok(text_content!("Log compacted successfully"))
 }
 
@@ -470,7 +522,15 @@ pub fn handle_upsert_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
         }
     }
 
-    let results = kg.upsert_entities(&input_entities)?;
+    let MutationResult::Entities(results) = apply_mutation(
+        kg,
+        MutationRequest::UpsertEntities {
+            entities: input_entities,
+        },
+    )?
+    else {
+        unreachable!("upsert mutation result")
+    };
     let text =
         serde_json::to_string(&json!({ "results": results })).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
@@ -489,7 +549,16 @@ pub fn handle_merge_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<V
     validate_name(source)?;
     validate_name(target)?;
 
-    let result = kg.merge_entities(source, target)?;
+    let MutationResult::Entity(result) = apply_mutation(
+        kg,
+        MutationRequest::MergeEntities {
+            source: source.into(),
+            target: target.into(),
+        },
+    )?
+    else {
+        unreachable!("merge mutation result")
+    };
     let text = serde_json::to_string(&result).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }

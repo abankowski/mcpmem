@@ -6,7 +6,7 @@ pub mod code_registry;
 #[cfg(feature = "code")]
 pub mod code_vec_registry;
 pub mod config;
-pub mod errors;
+pub use memory_core::errors;
 pub mod http;
 pub mod ivf;
 pub mod kg;
@@ -16,7 +16,7 @@ pub mod server;
 pub mod tls;
 pub mod tools;
 pub mod turboquant;
-pub mod types;
+pub use memory_core::types;
 pub mod vector_actions;
 pub mod vector_store;
 pub mod watcher;
