@@ -1297,8 +1297,8 @@ mod tests {
         create_test_entity(&env.kg, "alice", "person");
         create_test_entity(&env.kg, "bob", "person");
 
-        let emb_a = make_embedding(4, 1.0);
-        let emb_b = make_embedding(4, 0.1);
+        let emb_a = vec![1.0, 0.0, 0.0, 0.0];
+        let emb_b = vec![0.0, 1.0, 0.0, 0.0];
         env.vs
             .upsert_embedding("alice", &emb_a, "test-model")
             .unwrap();
@@ -1306,9 +1306,15 @@ mod tests {
             .upsert_embedding("bob", &emb_b, "test-model")
             .unwrap();
 
-        let query = make_embedding(4, 1.0);
+        let query = vec![1.0, 0.0, 0.0, 0.0];
         let results = env.vs.search_embeddings(&query, 10).unwrap();
         assert_eq!(results.len(), 2);
+        let top_name = env
+            .vs
+            .id_to_name
+            .get(&results[0].0)
+            .map(|r| r.value().clone());
+        assert_eq!(top_name.as_deref(), Some("alice"));
         assert!(results[0].1 < results[1].1);
     }
 
