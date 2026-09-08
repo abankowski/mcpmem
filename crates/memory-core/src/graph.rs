@@ -428,6 +428,8 @@ impl GraphHandle {
         ))
         .map_err(sqlite_err)?;
 
+        crate::events::migrate(&conn)?;
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS entity (
                  id          INTEGER PRIMARY KEY,
@@ -573,6 +575,16 @@ impl GraphHandle {
 
     pub(crate) fn next_entity_id(&self) -> i64 {
         self.seq_entity.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Refresh while holding BEGIN IMMEDIATE; another process may have advanced
+    /// the durable counters since this handle opened its connection.
+    pub(crate) fn refresh_seqs(&self, conn: &Connection) -> Result<()> {
+        self.seq_entity
+            .fetch_max(read_graph_stat(conn, "entity_seq")?, Ordering::Relaxed);
+        self.seq_obs
+            .fetch_max(read_graph_stat(conn, "obs_seq")?, Ordering::Relaxed);
+        Ok(())
     }
 
     pub(crate) fn next_obs_id(&self) -> i64 {

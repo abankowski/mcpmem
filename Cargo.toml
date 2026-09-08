@@ -93,6 +93,7 @@ code = [
 
 [dev-dependencies]
 tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1.41", features = ["process"] }
 
 [[bin]]

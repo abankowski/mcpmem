@@ -151,7 +151,7 @@ pub struct CommittedChangeSet {
     pub changes: Vec<EntityChange>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservationResult {
     pub entity_name: String,
@@ -160,7 +160,7 @@ pub struct ObservationResult {
 
 /// Legacy response data is captured inside the same transaction, preventing
 /// an adapter from returning a concurrent writer's later state.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum MutationResult {
     Entities(Vec<Entity>),
     Relations(Vec<Relation>),
@@ -168,6 +168,13 @@ pub enum MutationResult {
     Entity(Entity),
     Count(usize),
     Unit,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MutationOutcome {
+    pub changes: CommittedChangeSet,
+    pub result: MutationResult,
+    pub replayed: bool,
 }
 
 pub struct MutationService<'a> {
@@ -193,9 +200,66 @@ impl<'a> MutationService<'a> {
         request: MutationRequest,
         context: MutationContext,
     ) -> Result<(CommittedChangeSet, MutationResult)> {
-        let _context = context.validate()?;
+        if context.idempotency_key.is_some() {
+            return Err(MCSError::InvalidParams(
+                "idempotent ingress requires a raw request fingerprint".into(),
+            ));
+        }
+        self.apply_inner(request, context, None)
+            .map(|outcome| (outcome.changes, outcome.result))
+    }
+
+    pub fn apply_idempotent(
+        &self,
+        request: MutationRequest,
+        context: MutationContext,
+        fingerprint: &str,
+    ) -> Result<MutationOutcome> {
+        if context.idempotency_key.is_none()
+            || fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(MCSError::InvalidParams(
+                "idempotent ingress requires a key and SHA-256 request fingerprint".into(),
+            ));
+        }
+        self.apply_inner(request, context, Some(fingerprint))
+    }
+
+    fn apply_inner(
+        &self,
+        request: MutationRequest,
+        context: MutationContext,
+        fingerprint: Option<&str>,
+    ) -> Result<MutationOutcome> {
+        let context = context.validate()?;
         let conn = self.graph.writer.lock();
         let tx = TxGuard::begin(&conn)?;
+        if let (Some(key), Some(fingerprint)) = (&context.idempotency_key, fingerprint) {
+            let prior: Option<(String,String)> = conn.query_row("SELECT request_fingerprint,response FROM idempotency_record WHERE principal_id=?1 AND idempotency_key=?2", params![context.actor,key], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(sql_error)?;
+            if let Some((saved_fingerprint, response)) = prior {
+                if saved_fingerprint != fingerprint {
+                    return Err(MCSError::InvalidParams("idempotency_conflict".into()));
+                }
+                let mut outcome: MutationOutcome = serde_json::from_str(&response)?;
+                outcome.replayed = true;
+                tx.commit()?;
+                return Ok(outcome);
+            }
+        }
+        if let Some(parent_id) = context.causation_id {
+            let parent = crate::events::EventRepository::new(&conn)
+                .get(parent_id)?
+                .ok_or_else(|| MCSError::InvalidParams("unknown causation event".into()))?;
+            if parent.provenance.correlation_id != context.correlation_id
+                || parent.provenance.hop_count.checked_add(1) != Some(context.hop_count)
+            {
+                return Err(MCSError::InvalidParams("invalid causation chain".into()));
+            }
+        }
+        self.graph.refresh_seqs(&conn)?;
         let names = affected_names(&conn, &request)?;
         let before = capture(&conn, &names)?;
         let result = execute(self.graph, &conn, request)?;
@@ -207,8 +271,27 @@ impl<'a> MutationService<'a> {
             transaction_id: Uuid::new_v4(),
             changes,
         };
+        crate::events::persist_changes(&conn, &committed, &context)?;
+        let outcome = MutationOutcome {
+            changes: committed,
+            result,
+            replayed: false,
+        };
+        if let (Some(key), Some(fingerprint)) = (&context.idempotency_key, fingerprint) {
+            conn.execute(
+                "INSERT INTO idempotency_record VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    context.actor,
+                    key,
+                    fingerprint,
+                    serde_json::to_string(&outcome)?,
+                    now_us()
+                ],
+            )
+            .map_err(sql_error)?;
+        }
         tx.commit()?;
-        Ok((committed, result))
+        Ok(outcome)
     }
 }
 
