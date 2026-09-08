@@ -339,6 +339,7 @@ fn affected_names(conn: &Connection, request: &MutationRequest) -> Result<BTreeS
 struct Snapshot {
     entities: BTreeMap<String, EntitySnapshot>,
     relations: BTreeSet<Relation>,
+    relation_rows: BTreeMap<Relation, i64>,
 }
 
 fn capture(conn: &Connection, names: &BTreeSet<String>) -> Result<Snapshot> {
@@ -347,7 +348,15 @@ fn capture(conn: &Connection, names: &BTreeSet<String>) -> Result<Snapshot> {
         if let Some(entity) = read_entity(conn, name)? {
             snapshot.entities.insert(name.clone(), entity);
         }
-        snapshot.relations.extend(relations_for(conn, name)?);
+        let mut relation_rows = BTreeMap::new();
+        for relation in relations_for(conn, name)? {
+            *relation_rows.entry(relation).or_default() += 1;
+        }
+        // Both endpoint queries return every physical row of the same relation.
+        // Replace the count rather than adding it twice; keep set semantics for
+        // committed deltas independently of legacy duplicate storage rows.
+        snapshot.relations.extend(relation_rows.keys().cloned());
+        snapshot.relation_rows.extend(relation_rows);
     }
     Ok(snapshot)
 }
@@ -635,6 +644,13 @@ fn execute(
                 .collect::<rusqlite::Result<Vec<String>>>()
                 .map_err(sql_error)?;
             delete_entities(conn, &names)?;
+            // External-content indexes may contain orphan postings left by
+            // legacy deletions. Reset the indexes inside this transaction too.
+            conn.execute_batch(
+                "INSERT INTO name_fts(name_fts) VALUES('delete-all');
+                 INSERT INTO obs_fts(obs_fts) VALUES('delete-all');",
+            )
+            .map_err(sql_error)?;
             Ok(MutationResult::Unit)
         }
     }
@@ -653,11 +669,11 @@ fn update_counters(
     for new in after.entities.values() {
         *type_deltas.entry((0, &new.entity_type)).or_default() += 1;
     }
-    for old in before.relations.difference(&after.relations) {
-        *type_deltas.entry((1, &old.relation_type)).or_default() -= 1;
+    for (old, count) in &before.relation_rows {
+        *type_deltas.entry((1, &old.relation_type)).or_default() -= count;
     }
-    for new in after.relations.difference(&before.relations) {
-        *type_deltas.entry((1, &new.relation_type)).or_default() += 1;
+    for (new, count) in &after.relation_rows {
+        *type_deltas.entry((1, &new.relation_type)).or_default() += count;
     }
     for ((kind, name), delta) in type_deltas {
         if delta != 0 {
@@ -682,7 +698,7 @@ fn update_counters(
         ),
         (
             "relations",
-            after.relations.len() as i64 - before.relations.len() as i64,
+            after.relation_rows.values().sum::<i64>() - before.relation_rows.values().sum::<i64>(),
         ),
         ("observations", observations(after) - observations(before)),
     ] {
@@ -695,9 +711,9 @@ fn update_counters(
         }
     }
     let mut degrees: BTreeMap<&str, (i64, i64)> = BTreeMap::new();
-    for relation in &after.relations {
-        degrees.entry(&relation.from).or_default().0 += 1;
-        degrees.entry(&relation.to).or_default().1 += 1;
+    for (relation, count) in &after.relation_rows {
+        degrees.entry(&relation.from).or_default().0 += count;
+        degrees.entry(&relation.to).or_default().1 += count;
     }
     for entity in changes.iter().filter_map(|change| change.after.as_ref()) {
         let (outgoing, incoming) = degrees

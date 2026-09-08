@@ -309,6 +309,14 @@ fn every_write_path_rolls_back_on_a_final_statement_failure() {
                 .unwrap(),
             2
         );
+        // Wipe's FTS reset must roll back along with the content tables.
+        for table in ["name_fts", "obs_fts"] {
+            probe
+                .execute_batch(&format!(
+                    "INSERT INTO {table}({table},rank) VALUES('integrity-check',1);"
+                ))
+                .unwrap();
+        }
         probe.execute_batch("DROP TRIGGER fail_final;").unwrap();
         graph.create_entities(&[entity("after-rollback")]).unwrap();
         assert_eq!(graph.get_entity_count().unwrap(), 3);
@@ -363,4 +371,140 @@ fn duplicate_relation_deletion_and_merge_keep_effective_counters() {
     graph.delete_entities(&["b".into(), "b".into()]).unwrap();
     assert_eq!(graph.get_entity_count().unwrap(), 1);
     assert!(graph.get_entity("b").unwrap().is_none());
+}
+
+#[test]
+fn wipe_clears_fts_postings_and_preserves_integrity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("needle")]).unwrap();
+    let probe = Connection::open(&path).unwrap();
+    for (table, term) in [("name_fts", "needle"), ("obs_fts", "original")] {
+        let count: i64 = probe
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?1"),
+                [term],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "non-empty {table} fixture");
+    }
+    graph.wipe().unwrap();
+    for (table, term) in [("name_fts", "needle"), ("obs_fts", "original")] {
+        let count: i64 = probe
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?1"),
+                [term],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} must not retain orphan postings");
+        probe
+            .execute_batch(&format!(
+                "INSERT INTO {table}({table},rank) VALUES('integrity-check',1);"
+            ))
+            .unwrap();
+    }
+}
+
+#[test]
+fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
+    use mcp_memory::types::Relation;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("a"), entity("b")]).unwrap();
+    let relation = Relation {
+        from: "a".into(),
+        to: "b".into(),
+        relation_type: "link".into(),
+    };
+    graph
+        .create_relations(std::slice::from_ref(&relation))
+        .unwrap();
+    let probe = Connection::open(&path).unwrap();
+    // Legacy storage permits repeated physical rows and counts each one.
+    probe
+        .execute_batch(
+            "INSERT INTO relation SELECT * FROM relation;
+         UPDATE graph_stat SET value=2 WHERE key='relations';
+         UPDATE type_dict SET count=2 WHERE kind=1 AND name='link';
+         UPDATE entity SET out_deg=2 WHERE name='a';
+         UPDATE entity SET in_deg=2 WHERE name='b';",
+        )
+        .unwrap();
+    assert_eq!(
+        probe
+            .query_row("SELECT COUNT(*) FROM relation", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(graph.get_relation_count().unwrap(), 2);
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::AddObservations {
+                observations: vec![ObservationUpdate {
+                    entity_name: "a".into(),
+                    contents: vec!["new".into()],
+                }],
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+    assert_eq!(
+        graph
+            .degree("a", mcp_memory::kg::Direction::Outgoing)
+            .unwrap(),
+        2
+    );
+    assert_eq!(graph.relation_type_counts(), [("link".into(), 2)]);
+    let committed = MutationService::new(&graph)
+        .apply(
+            MutationRequest::DeleteRelations {
+                relations: vec![relation.clone(), relation.clone()],
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+    assert_eq!(
+        probe
+            .query_row("SELECT COUNT(*) FROM relation", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(graph.get_relation_count().unwrap(), 0);
+    assert!(graph.relation_type_counts().is_empty());
+    assert_eq!(
+        graph
+            .degree("a", mcp_memory::kg::Direction::Outgoing)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        graph
+            .degree("b", mcp_memory::kg::Direction::Incoming)
+            .unwrap(),
+        0
+    );
+    assert_eq!(committed.changes.len(), 2);
+    for change in committed.changes {
+        let delta = change.relation_delta.unwrap();
+        assert!(delta.added.is_empty());
+        assert_eq!(delta.removed.as_slice(), std::slice::from_ref(&relation));
+    }
 }
