@@ -746,7 +746,8 @@ pub fn handle_code_semantic_search(args: Option<&Value>) -> Result<Value> {
     let mut dist_by_name: std::collections::HashMap<String, f32> =
         std::collections::HashMap::with_capacity(hits.len());
     for (id, dist) in hits {
-        if let Some(name) = vs.id_to_name().get(&id).map(|r| r.value().clone()) {
+        let (name, _) = vs.resolve_name_type(id);
+        if !name.is_empty() {
             dist_by_name.entry(name.clone()).or_insert(dist);
             names.push(name);
         }
