@@ -35,8 +35,12 @@ pub fn request_fingerprint(method: &str, normalized_path: &str, raw_body: &[u8])
     format!("{hash:x}", hash = hash.finalize())
 }
 
-/// Ordered startup migration entry point. The caller owns the first connection;
-/// it must call this before opening any role or reader connections.
+/// Apply all pending ordered migrations in one transaction, including their
+/// ledger entries. Any failure rolls the entire pending set back; historical
+/// checksums are verified even when no migrations remain to apply.
+///
+/// Startup callers use [`crate::schema::initialize_database`] to establish the
+/// legacy graph tables and statistics before these migrations can reference them.
 pub fn migrate(conn: &Connection) -> Result<()> {
     let tx = TxGuard::begin(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;").map_err(sql_error)?;

@@ -151,7 +151,7 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
     pub fn run_once(&self, now_us: i64) -> Result<RunReport, WorkerError> {
         let conn = Connection::open(&self.database)?;
         conn.busy_timeout(self.timeout)?;
-        memory_core::events::migrate(&conn)?;
+        memory_core::schema::initialize_database(&conn)?;
         let jobs = IndexJobRepository::new(&conn);
         let Some(job) = jobs.claim_due(now_us, self.lease_us)? else {
             return Ok(RunReport::default());

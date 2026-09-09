@@ -35,6 +35,194 @@ fn count(conn: &Connection, table: &str) -> i64 {
 }
 
 #[test]
+fn graph_bootstrap_precedes_migration_statements() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ordering.db");
+    let conn = Connection::open(&path).unwrap();
+    // Model a pending migration's dependency on the graph without changing
+    // append-only migration files: each ledger insert reads the prerequisite.
+    conn.execute_batch(
+        "CREATE TABLE schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;
+         CREATE TRIGGER require_graph BEFORE INSERT ON schema_migration BEGIN
+           SELECT count(*) FROM entity;
+           SELECT count(*) FROM observation;
+           SELECT count(*) FROM relation;
+           SELECT count(*) FROM name_fts;
+           SELECT count(*) FROM obs_fts;
+           SELECT CASE WHEN (SELECT count(*) FROM graph_stat) != 5
+             THEN RAISE(ABORT, 'graph statistics must be seeded before migrations') END;
+         END;",
+    ).unwrap();
+    let graph = graph(&path);
+    graph.create_entities(&[entity("ready")]).unwrap();
+    assert_eq!(graph.get_entity("ready").unwrap(), Some(entity("ready")));
+    assert_eq!(count(&conn, "schema_migration"), 2);
+}
+
+#[test]
+fn pending_migrations_roll_back_together_after_later_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollback.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;
+         CREATE TRIGGER reject_second BEFORE INSERT ON schema_migration
+           WHEN new.version=2 BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END;",
+    ).unwrap();
+    let error = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        1,
+    )
+    .err()
+    .expect("second migration must fail");
+    assert!(error.to_string().contains("injected migration failure"));
+    let observer = Connection::open(&path).unwrap();
+    assert_eq!(count(&observer, "schema_migration"), 0);
+    let pending_tables: i64 = observer.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name IN ('entity_revision','change_event','webhook_subscription')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(pending_tables, 0, "no earlier migration DDL may remain");
+    conn.execute_batch("DROP TRIGGER reject_second").unwrap();
+    drop(graph(&path));
+    assert_eq!(count(&observer, "schema_migration"), 2);
+}
+
+#[test]
+fn initializer_preserves_legacy_graph_without_migration_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-graph.db");
+    let conn = Connection::open(&path).unwrap();
+    // Independently construct the pre-ledger storage format with live rows.
+    conn.execute_batch(
+        "CREATE TABLE entity(id INTEGER PRIMARY KEY, name_hash INTEGER NOT NULL, name TEXT NOT NULL, type_id INTEGER NOT NULL,
+            obs_count INTEGER NOT NULL DEFAULT 0, out_deg INTEGER NOT NULL DEFAULT 0, in_deg INTEGER NOT NULL DEFAULT 0,
+            created_us INTEGER NOT NULL, updated_us INTEGER NOT NULL, flags INTEGER NOT NULL DEFAULT 0) STRICT;
+         CREATE TABLE observation(id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, idx INTEGER NOT NULL, body TEXT NOT NULL, created_us INTEGER NOT NULL) STRICT;
+         CREATE TABLE relation(from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, type_id INTEGER NOT NULL, created_us INTEGER NOT NULL) STRICT;
+         CREATE TABLE type_dict(id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0) STRICT;
+         CREATE TABLE graph_stat(key TEXT NOT NULL PRIMARY KEY, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;
+         INSERT INTO type_dict VALUES(1,0,'test',1);
+         INSERT INTO graph_stat VALUES('entities',1),('relations',0),('observations',1),('entity_seq',7),('obs_seq',9);
+         INSERT INTO observation VALUES(9,7,0,'original',11);",
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO entity VALUES(7,?1,'legacy',1,1,0,0,11,11,0)",
+        [memory_core::graph::name_hash("legacy")],
+    )
+    .unwrap();
+    assert_eq!(count(&conn, "entity"), 1);
+    assert_eq!(count(&conn, "observation"), 1);
+    memory_core::schema::initialize_database(&conn).unwrap();
+    memory_core::schema::initialize_database(&conn).unwrap();
+    let graph = graph(&path);
+    assert_eq!(graph.get_entity("legacy").unwrap(), Some(entity("legacy")));
+    graph.create_entities(&[entity("new")]).unwrap();
+    assert_eq!(count(&conn, "entity"), 2);
+    assert_eq!(count(&conn, "observation"), 2);
+    assert_eq!(
+        conn.query_row::<i64, _, _>("SELECT id FROM entity WHERE name='new'", [], |r| r.get(0))
+            .unwrap(),
+        8
+    );
+    assert_eq!(
+        conn.query_row::<i64, _, _>(
+            "SELECT value FROM graph_stat WHERE key='obs_seq'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        10
+    );
+    assert_eq!(
+        count(&conn, "change_event"),
+        1,
+        "startup does not invent legacy events"
+    );
+}
+
+#[test]
+fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_tuning() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA cache_size=-321; PRAGMA foreign_keys=ON;")
+        .unwrap();
+    memory_core::schema::initialize_database(&conn).unwrap();
+    let before: Vec<(i64, String, i64)> = conn
+        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration ORDER BY version")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(before.len(), 2);
+    assert_eq!(
+        before[0].1,
+        "a48def8b25e9ecf813d3fa27a785893ba5de346a8b82f012cc543af2fecd5af2"
+    );
+    assert_eq!(
+        before[1].1,
+        "2c267315d89203d5223895a845b275d8add904310d2c0a5a7a5b0d1873b984ec"
+    );
+    memory_core::schema::initialize_database(&conn).unwrap();
+    let after: Vec<(i64, String, i64)> = conn
+        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration ORDER BY version")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(after, before);
+    for (pragma, expected) in [
+        ("synchronous", 2),
+        ("cache_size", -321),
+        ("foreign_keys", 1),
+    ] {
+        assert_eq!(
+            conn.query_row::<i64, _, _>(&format!("PRAGMA {pragma}"), [], |r| r.get(0))
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(count(&conn, "graph_stat"), 5);
+}
+
+#[cfg(feature = "indexer")]
+#[test]
+fn indexer_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
+    struct UnusedProvider;
+    impl indexer_worker::EmbeddingProvider for UnusedProvider {
+        fn embed(
+            &self,
+            _: &memory_core::jobs::IndexProfile,
+            _: &[indexer_worker::CanonicalDocument],
+        ) -> Result<Vec<Vec<f32>>, indexer_worker::ProviderError> {
+            panic!("empty queue must not call provider")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.db");
+    let worker = indexer_worker::IndexerWorker::new(
+        &path,
+        UnusedProvider,
+        std::time::Duration::from_secs(5),
+    );
+    assert_eq!(worker.run_once(1).unwrap().claimed, 0);
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(count(&conn, "entity"), 0);
+    assert_eq!(count(&conn, "graph_stat"), 5);
+    let graph = graph(&path);
+    graph.create_entities(&[entity("retained")]).unwrap();
+    assert_eq!(worker.run_once(1).unwrap().claimed, 0);
+    assert_eq!(
+        graph.get_entity("retained").unwrap(),
+        Some(entity("retained"))
+    );
+}
+
+#[test]
 fn effective_changes_commit_events_and_coalesce_tombstones_without_deliveries() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");

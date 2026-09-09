@@ -282,7 +282,7 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
     }
     pub fn run_once(&self, now: i64) -> Result<DeliveryReport, WorkerError> {
         let conn = Connection::open(&self.database)?;
-        memory_core::events::migrate(&conn)?;
+        memory_core::schema::initialize_database(&conn)?;
         let events = EventRepository::new(&conn);
         let Some(delivery) = events.claim_due(now, self.lease_us)? else {
             return Ok(DeliveryReport::default());
