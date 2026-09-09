@@ -4,6 +4,7 @@ use mcp_memory::types::Entity;
 use memory_core::mutation::{
     ChangeOperation, MutationContext, MutationRequest, MutationService, ObservationUpdate,
 };
+use memory_core::schema::initialize_database;
 use rusqlite::Connection;
 use std::num::NonZeroUsize;
 
@@ -424,6 +425,21 @@ fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
     use mcp_memory::types::Relation;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
+    // Make relation predate bootstrap: fresh databases now reject duplicates,
+    // while an operator must still be able to inspect legacy duplicate rows.
+    let legacy = Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE relation(
+                 from_id INTEGER NOT NULL,
+                 to_id INTEGER NOT NULL,
+                 type_id INTEGER NOT NULL,
+                 created_us INTEGER NOT NULL
+             ) STRICT;",
+        )
+        .unwrap();
+    initialize_database(&legacy).unwrap();
+    drop(legacy);
     let graph = GraphHandle::new(
         &path,
         Durability::Sync,

@@ -14,6 +14,13 @@ use crate::graph::TxGuard;
 /// migration version. Call before readers or workers start using the database.
 pub fn initialize_database(conn: &Connection) -> Result<()> {
     let tx = TxGuard::begin(conn)?;
+    let relation_existed_before_bootstrap: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relation')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS entity (
              id          INTEGER PRIMARY KEY,
@@ -105,6 +112,13 @@ pub fn initialize_database(conn: &Connection) -> Result<()> {
          ) STRICT, WITHOUT ROWID;",
     )
     .map_err(sql_error)?;
+    if !relation_existed_before_bootstrap {
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX relation_unique_triple
+             ON relation(from_id, to_id, type_id);",
+        )
+        .map_err(sql_error)?;
+    }
     let has_stat: bool = conn
         .query_row("SELECT EXISTS(SELECT 1 FROM graph_stat)", [], |row| {
             row.get(0)

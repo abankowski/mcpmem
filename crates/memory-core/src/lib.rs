@@ -5,6 +5,7 @@ pub mod events;
 pub mod graph;
 pub mod jobs;
 pub mod mutation;
+pub mod relation_integrity;
 pub mod schema;
 pub mod storage;
 pub mod subscriptions;

@@ -518,6 +518,21 @@ fn empty_candidate_still_requires_an_explicit_reader_publication() {
 fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
+    // This test needs a physical duplicate to preserve legacy rename coverage.
+    // Make `relation` predate bootstrap so fresh-schema uniqueness remains
+    // enforced everywhere outside this explicit legacy fixture.
+    let legacy = Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE relation(
+                 from_id INTEGER NOT NULL,
+                 to_id INTEGER NOT NULL,
+                 type_id INTEGER NOT NULL,
+                 created_us INTEGER NOT NULL
+             ) STRICT;",
+        )
+        .unwrap();
+    drop(legacy);
     let graph = graph(&path);
     graph
         .create_entities(&[entity("old"), entity("incoming"), entity("outgoing")])
