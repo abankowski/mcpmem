@@ -61,6 +61,27 @@ fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient
     }
 }
 
+fn observation_write_envelopes() -> [(&'static str, &'static str); 4] {
+    [
+        (
+            "create_entities",
+            "/inputSchema/properties/entities/items/properties/observations/items/type",
+        ),
+        (
+            "upsert_entities",
+            "/inputSchema/properties/entities/items/properties/observations/items/type",
+        ),
+        (
+            "add_observations",
+            "/inputSchema/properties/observations/items/properties/contents/items/type",
+        ),
+        (
+            "delete_observations",
+            "/inputSchema/properties/deletions/items/properties/observations/items/type",
+        ),
+    ]
+}
+
 impl McpClient {
     fn send(&mut self, msg: &str) {
         use std::io::Write;
@@ -139,17 +160,19 @@ fn e2e_default_observation_manifest_is_structured_and_rejects_strings() {
     let mut c = spawn_server();
     c.send(r#"{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}"#);
     let listed: serde_json::Value = serde_json::from_str(&c.recv()).unwrap();
-    let create = listed["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "create_entities")
-        .unwrap();
-    assert_eq!(
-        create["inputSchema"]["properties"]["entities"]["items"]["properties"]["observations"]["items"]
-            ["type"],
-        "object"
-    );
+    for (name, pointer) in observation_write_envelopes() {
+        let tool = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"));
+        assert_eq!(
+            tool.pointer(pointer).and_then(serde_json::Value::as_str),
+            Some("object"),
+            "{name} uses the structured observation input"
+        );
+    }
     let rejected = c.call_tool(
         "create_entities",
         &serde_json::json!({"entities": [
@@ -164,17 +187,19 @@ fn e2e_legacy_observations_switches_only_the_mcp_boundary() {
     let mut c = spawn_server_with_legacy_observations(true);
     c.send(r#"{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}"#);
     let listed: serde_json::Value = serde_json::from_str(&c.recv()).unwrap();
-    let create = listed["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "create_entities")
-        .unwrap();
-    assert_eq!(
-        create["inputSchema"]["properties"]["entities"]["items"]["properties"]["observations"]["items"]
-            ["type"],
-        "string"
-    );
+    for (name, pointer) in observation_write_envelopes() {
+        let tool = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"));
+        assert_eq!(
+            tool.pointer(pointer).and_then(serde_json::Value::as_str),
+            Some("string"),
+            "{name} uses the legacy observation input"
+        );
+    }
 
     let created = c.tool_text(
         "create_entities",

@@ -286,7 +286,7 @@
             "properties": {
               "name": { "type": "string", "description": "The unique name of the entity" },
                 "entityType": { "type": "string", "description": "The type of the entity (applied when creating and when retyping an existing exact-name entity)" },
-              "observations": { "type": "array", "items": { "type": "string" }, "description": "Observations to add (new ones are merged in)" }
+              "observations": { "type": "array", "items": { "type": "object", "properties": { "body": { "type": "string" }, "occurredAtUs": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 } }, "required": ["body"], "additionalProperties": false }, "description": "Observations to add (new ones are merged in)" }
             },
             "required": ["name", "entityType", "observations"]
           }

@@ -5,7 +5,11 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ObservationInput {
     pub body: String,
-    #[serde(default, deserialize_with = "deserialize_occurred_at")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_occurred_at"
+    )]
     pub occurred_at_us: Option<i64>,
 }
 
@@ -33,6 +37,46 @@ impl From<String> for ObservationInput {
 impl From<&str> for ObservationInput {
     fn from(body: &str) -> Self {
         body.to_owned().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ObservationInput;
+
+    #[test]
+    fn observation_input_omits_absent_fact_time_on_the_wire() {
+        let input = ObservationInput::from("fact");
+        let encoded = serde_json::to_value(&input).expect("input serializes");
+        assert_eq!(encoded, serde_json::json!({"body":"fact"}));
+        assert_eq!(
+            serde_json::from_value::<ObservationInput>(encoded).expect("wire value decodes"),
+            input
+        );
+
+        let timed = serde_json::json!({"body":"fact","occurredAtUs":7});
+        assert_eq!(
+            serde_json::from_value::<ObservationInput>(timed.clone()).expect("timestamp decodes"),
+            ObservationInput {
+                body: "fact".into(),
+                occurred_at_us: Some(7),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(ObservationInput {
+                body: "fact".into(),
+                occurred_at_us: Some(7),
+            })
+            .expect("timestamp serializes"),
+            timed
+        );
+        assert!(
+            serde_json::from_value::<ObservationInput>(
+                serde_json::json!({"body":"fact","occurredAtUs":null})
+            )
+            .is_err(),
+            "an explicitly null fact time is not a valid write input"
+        );
     }
 }
 

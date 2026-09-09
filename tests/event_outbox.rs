@@ -107,6 +107,73 @@ fn pending_migrations_roll_back_together_after_later_failure() {
 }
 
 #[test]
+fn migration_three_rolls_back_its_columns_when_its_ledger_write_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("migration-three-rollback.db");
+    drop(graph(&path));
+    let conn = Connection::open(&path).unwrap();
+    let before: Vec<(i64, String, i64)> = conn
+        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration WHERE version < 3 ORDER BY version")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        before.len(),
+        2,
+        "fixture has the historical migration ledger"
+    );
+    conn.execute("DELETE FROM schema_migration WHERE version=3", [])
+        .unwrap();
+    conn.execute_batch(
+        "ALTER TABLE observation DROP COLUMN origin_entity_id;
+         ALTER TABLE observation DROP COLUMN origin_entity_name;
+         ALTER TABLE observation DROP COLUMN occurred_us;
+         CREATE TRIGGER reject_third BEFORE INSERT ON schema_migration
+           WHEN new.version=3 BEGIN SELECT RAISE(ABORT, 'injected migration three failure'); END;",
+    )
+    .unwrap();
+
+    let error = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        1,
+    )
+    .err()
+    .expect("migration three ledger write must fail after its SQL executes");
+    assert!(
+        error
+            .to_string()
+            .contains("injected migration three failure")
+    );
+
+    let after: Vec<(i64, String, i64)> = conn
+        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration ORDER BY version")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(after, before, "prior ledger rows survive unchanged");
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('observation') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for column in ["origin_entity_id", "origin_entity_name", "occurred_us"] {
+        assert!(
+            !columns.iter().any(|existing| existing == column),
+            "migration three column {column} was rolled back"
+        );
+    }
+}
+
+#[test]
 fn initializer_preserves_legacy_graph_without_migration_ledger() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy-graph.db");
