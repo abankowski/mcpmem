@@ -563,6 +563,33 @@ pub fn handle_merge_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<V
     Ok(text_content!(text))
 }
 
+pub fn handle_rename_entity(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+    let old_name = params
+        .get("oldName")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| MCSError::InvalidParams("Missing 'oldName' parameter".into()))?;
+    let new_name = params
+        .get("newName")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| MCSError::InvalidParams("Missing 'newName' parameter".into()))?;
+    validate_name(old_name)?;
+    validate_name(new_name)?;
+
+    let MutationResult::Entity(result) = apply_mutation(
+        kg,
+        MutationRequest::RenameEntity {
+            old_name: old_name.into(),
+            new_name: new_name.into(),
+        },
+    )?
+    else {
+        unreachable!("rename mutation result")
+    };
+    let text = serde_json::to_string(&result).map_err(MCSError::JsonError)?;
+    Ok(text_content!(text))
+}
+
 pub fn handle_extract_subgraph(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
     let names: Vec<String> = params

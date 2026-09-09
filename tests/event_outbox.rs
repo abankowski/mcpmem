@@ -1,9 +1,12 @@
 use memory_core::graph::GraphHandle;
-use memory_core::mutation::{MutationContext, MutationRequest, MutationService, ObservationUpdate};
+use memory_core::mutation::{
+    ChangeOperation, MutationContext, MutationRequest, MutationService, ObservationUpdate,
+};
 use memory_core::storage::{Durability, SqliteTuning};
-use memory_core::types::Entity;
+use memory_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
+use memory_core::types::{Entity, Relation};
 use rusqlite::Connection;
-use std::{num::NonZeroUsize, path::Path};
+use std::{collections::BTreeSet, num::NonZeroUsize, path::Path};
 
 fn graph(path: &Path) -> GraphHandle {
     GraphHandle::new(
@@ -321,6 +324,191 @@ fn empty_candidate_still_requires_an_explicit_reader_publication() {
     assert!(registry.activate(candidate.id).is_err());
     assert!(ann.mark_published(candidate.id, 0).unwrap());
     registry.activate(candidate.id).unwrap();
+}
+
+#[test]
+fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = graph(&path);
+    graph
+        .create_entities(&[entity("old"), entity("incoming"), entity("outgoing")])
+        .unwrap();
+    graph
+        .create_relations(&[
+            Relation {
+                from: "incoming".into(),
+                to: "old".into(),
+                relation_type: "in".into(),
+            },
+            Relation {
+                from: "old".into(),
+                to: "outgoing".into(),
+                relation_type: "out".into(),
+            },
+            Relation {
+                from: "old".into(),
+                to: "old".into(),
+                relation_type: "self".into(),
+            },
+        ])
+        .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO relation SELECT * FROM relation
+         WHERE from_id=(SELECT id FROM entity WHERE name='old')
+           AND to_id=(SELECT id FROM entity WHERE name='outgoing')
+           AND type_id=(SELECT id FROM type_dict WHERE kind=1 AND name='out');",
+    )
+    .unwrap();
+    let old_id: i64 = conn
+        .query_row("SELECT id FROM entity WHERE name='old'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let source_revision: i64 = conn
+        .query_row(
+            "SELECT revision FROM entity_revision WHERE entity_id=?1",
+            [old_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let neighbours: Vec<(i64, i64)> = conn
+        .prepare(
+            "SELECT entity_id, revision FROM entity_revision
+             WHERE entity_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
+             ORDER BY entity_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let neighbour_jobs: Vec<(i64, i64, String)> = conn
+        .prepare(
+            "SELECT entity_id, entity_revision, operation FROM index_job
+             WHERE entity_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
+             ORDER BY entity_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let subscribe = |event_operations| {
+        let subscription = WebhookSubscription {
+            subscription_id: uuid::Uuid::new_v4(),
+            endpoint: "https://hooks.example.test/rename".into(),
+            event_operations,
+            entity_types: vec![],
+            ignored_origins: vec![],
+            consumer_origin: "consumer".into(),
+            secret_ref: "vault://rename".into(),
+            enabled: true,
+        };
+        SubscriptionRepository::new(&conn)
+            .upsert(subscription.clone())
+            .unwrap();
+        subscription.subscription_id
+    };
+    let rename_subscription = subscribe(vec![ChangeOperation::Rename]);
+    let unfiltered_subscription = subscribe(vec![]);
+    let _create_subscription = subscribe(vec![ChangeOperation::Create]);
+    let _update_subscription = subscribe(vec![ChangeOperation::Update]);
+    let _delete_subscription = subscribe(vec![ChangeOperation::Delete]);
+    assert_eq!(
+        serde_json::from_str::<ChangeOperation>("\"rename\"").unwrap(),
+        ChangeOperation::Rename,
+        "operation filters accept exactly the rename value"
+    );
+    let before_events = count(&conn, "change_event");
+    let before_jobs = count(&conn, "index_job");
+
+    let committed = MutationService::new(&graph)
+        .apply(
+            MutationRequest::RenameEntity {
+                old_name: "old".into(),
+                new_name: "new".into(),
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+
+    assert_eq!(committed.changes.len(), 1, "rename has no neighbour events");
+    let change = &committed.changes[0];
+    assert_eq!(change.operation, ChangeOperation::Rename);
+    assert_eq!(change.old_name.as_deref(), Some("old"));
+    assert_eq!(change.new_name.as_deref(), Some("new"));
+    assert!(change.relation_delta.is_none());
+    assert_eq!(count(&conn, "change_event"), before_events + 1);
+    let durable_events: Vec<memory_core::events::ChangeEvent> = conn
+        .prepare("SELECT payload FROM change_event WHERE transaction_id=?1")
+        .unwrap()
+        .query_map([committed.transaction_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+        .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+        .collect();
+    assert_eq!(durable_events.len(), 1, "no durable neighbour events");
+    let event = &durable_events[0];
+    assert_eq!(event.entity_id, old_id, "rename keeps the stable entity id");
+    assert_eq!(event.entity_revision, source_revision + 1);
+    assert_eq!(event.change.operation, ChangeOperation::Rename);
+    assert_eq!(event.change.old_name.as_deref(), Some("old"));
+    assert_eq!(event.change.new_name.as_deref(), Some("new"));
+    assert_eq!(
+        count(&conn, "event_outbox"),
+        2,
+        "rename filter and an unfiltered subscription receive rename"
+    );
+    let recipients: BTreeSet<String> = conn
+        .prepare("SELECT subscription_id FROM event_outbox")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        recipients,
+        BTreeSet::from([
+            rename_subscription.to_string(),
+            unfiltered_subscription.to_string()
+        ]),
+        "create, update, and delete filters receive no rename delivery"
+    );
+    for (entity_id, revision) in neighbours {
+        assert_eq!(
+            conn.query_row(
+                "SELECT revision FROM entity_revision WHERE entity_id=?1",
+                [entity_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            revision,
+            "rename leaves neighbour revisions unchanged"
+        );
+    }
+    let neighbour_jobs_after: Vec<(i64, i64, String)> = conn
+        .prepare(
+            "SELECT entity_id, entity_revision, operation FROM index_job
+             WHERE entity_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
+             ORDER BY entity_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(neighbour_jobs_after, neighbour_jobs);
+    assert_eq!(
+        conn.query_row("SELECT operation FROM index_job", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "upsert",
+        "the coalesced current job remains an upsert"
+    );
+    assert_eq!(count(&conn, "index_job"), before_jobs);
 }
 
 #[test]

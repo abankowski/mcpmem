@@ -95,6 +95,10 @@ pub enum MutationRequest {
         source: String,
         target: String,
     },
+    RenameEntity {
+        old_name: String,
+        new_name: String,
+    },
     PurgeDefinedEntities {
         name: String,
     },
@@ -127,6 +131,7 @@ pub enum ChangeOperation {
     Create,
     Update,
     Delete,
+    Rename,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -142,6 +147,10 @@ pub struct EntityChange {
     pub before: Option<EntitySnapshot>,
     pub after: Option<EntitySnapshot>,
     pub relation_delta: Option<RelationDelta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -260,11 +269,22 @@ impl<'a> MutationService<'a> {
             }
         }
         self.graph.refresh_seqs(&conn)?;
+        let rename = match &request {
+            MutationRequest::RenameEntity { old_name, new_name } => {
+                Some((old_name.clone(), new_name.clone()))
+            }
+            _ => None,
+        };
         let names = affected_names(&conn, &request)?;
         let before = capture(&conn, &names)?;
         let result = execute(self.graph, &conn, request)?;
         let after = capture(&conn, &names)?;
-        let changes = effective_changes(&before, &after);
+        let changes = match rename {
+            Some((old_name, new_name)) if old_name != new_name => {
+                rename_changes(&before, &after, &old_name, &new_name)
+            }
+            _ => effective_changes(&before, &after),
+        };
         update_counters(&conn, &before, &after, &changes)?;
         self.graph.sync_seqs(&conn)?;
         let committed = CommittedChangeSet {
@@ -383,6 +403,9 @@ fn affected_names(conn: &Connection, request: &MutationRequest) -> Result<BTreeS
         MutationRequest::MergeEntities { source, target } => {
             [source.clone(), target.clone()].into()
         }
+        MutationRequest::RenameEntity { old_name, new_name } => {
+            [old_name.clone(), new_name.clone()].into()
+        }
         MutationRequest::PurgeDefinedEntities { name } => {
             defined_names(conn, name)?.into_iter().collect()
         }
@@ -403,6 +426,7 @@ fn affected_names(conn: &Connection, request: &MutationRequest) -> Result<BTreeS
         request,
         MutationRequest::DeleteEntities { .. }
             | MutationRequest::MergeEntities { .. }
+            | MutationRequest::RenameEntity { .. }
             | MutationRequest::PurgeDefinedEntities { .. }
     ) {
         let neighbours = names
@@ -488,9 +512,31 @@ fn effective_changes(before: &Snapshot, after: &Snapshot) -> Vec<EntityChange> {
                 before: old.cloned(),
                 after: new.cloned(),
                 relation_delta: has_delta.then_some(delta),
+                old_name: None,
+                new_name: None,
             })
         })
         .collect()
+}
+
+fn rename_changes(
+    before: &Snapshot,
+    after: &Snapshot,
+    old_name: &str,
+    new_name: &str,
+) -> Vec<EntityChange> {
+    let (Some(before), Some(after)) = (before.entities.get(old_name), after.entities.get(new_name))
+    else {
+        return Vec::new();
+    };
+    vec![EntityChange {
+        operation: ChangeOperation::Rename,
+        before: Some(before.clone()),
+        after: Some(after.clone()),
+        relation_delta: None,
+        old_name: Some(old_name.into()),
+        new_name: Some(new_name.into()),
+    }]
 }
 
 fn type_id(conn: &Connection, name: &str, kind: i64) -> Result<i64> {
@@ -707,6 +753,35 @@ fn execute(
                 require_entity(conn, &target)?.entity(),
             ))
         }
+        MutationRequest::RenameEntity { old_name, new_name } => {
+            let entity = require_entity(conn, &old_name)?;
+            if old_name == new_name {
+                return Ok(MutationResult::Entity(entity.entity()));
+            }
+            if read_entity(conn, &new_name)?.is_some() {
+                return Err(MCSError::InvalidParams(format!(
+                    "Entity '{new_name}' already exists"
+                )));
+            }
+            conn.execute(
+                "UPDATE entity SET name_hash=?1,name=?2 WHERE id=?3",
+                params![name_hash(&new_name), new_name, entity.entity_id],
+            )
+            .map_err(sql_error)?;
+            conn.execute(
+                "INSERT INTO name_fts(name_fts,rowid,name) VALUES('delete',?1,?2)",
+                params![entity.entity_id, old_name],
+            )
+            .map_err(sql_error)?;
+            conn.execute(
+                "INSERT INTO name_fts(rowid,name) VALUES(?1,?2)",
+                params![entity.entity_id, new_name],
+            )
+            .map_err(sql_error)?;
+            Ok(MutationResult::Entity(
+                require_entity(conn, &new_name)?.entity(),
+            ))
+        }
         MutationRequest::PurgeDefinedEntities { name } => {
             let names = defined_names(conn, &name)?;
             delete_entities(conn, &names)?;
@@ -798,7 +873,11 @@ fn update_counters(
         degrees.entry(&relation.from).or_default().0 += count;
         degrees.entry(&relation.to).or_default().1 += count;
     }
-    for entity in changes.iter().filter_map(|change| change.after.as_ref()) {
+    for entity in changes
+        .iter()
+        .filter(|change| change.operation != ChangeOperation::Rename)
+        .filter_map(|change| change.after.as_ref())
+    {
         let (outgoing, incoming) = degrees
             .get(entity.name.as_str())
             .copied()

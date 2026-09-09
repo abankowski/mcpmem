@@ -384,11 +384,13 @@ struct Envelope<'a> {
     correlation_id: String,
     causation_id: Option<String>,
     hop_count: u8,
+    old_name: Option<&'a str>,
+    new_name: Option<&'a str>,
 }
 fn envelope(delivery: &EventDelivery) -> Result<Vec<u8>, WorkerError> {
     let event = &delivery.event;
     let body = serde_json::to_vec(&Envelope {
-        version: 1,
+        version: 2,
         event_id: event.event_id.to_string(),
         transaction_id: event.transaction_id.to_string(),
         entity_id: event.entity_id,
@@ -399,6 +401,12 @@ fn envelope(delivery: &EventDelivery) -> Result<Vec<u8>, WorkerError> {
         correlation_id: event.provenance.correlation_id.to_string(),
         causation_id: event.provenance.causation_id.map(|id| id.to_string()),
         hop_count: event.provenance.hop_count,
+        old_name: (event.change.operation == memory_core::mutation::ChangeOperation::Rename)
+            .then_some(event.change.old_name.as_deref())
+            .flatten(),
+        new_name: (event.change.operation == memory_core::mutation::ChangeOperation::Rename)
+            .then_some(event.change.new_name.as_deref())
+            .flatten(),
     })
     .map_err(memory_core::errors::MCSError::from)?;
     if body.len() > MAX_BODY {

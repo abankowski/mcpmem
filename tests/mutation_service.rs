@@ -265,6 +265,10 @@ fn every_write_path_rolls_back_on_a_final_statement_failure() {
             source: "a".into(),
             target: "b".into(),
         },
+        MutationRequest::RenameEntity {
+            old_name: "a".into(),
+            new_name: "renamed".into(),
+        },
         MutationRequest::PurgeDefinedEntities { name: "a".into() },
         MutationRequest::Compact,
         MutationRequest::Wipe,
@@ -507,4 +511,198 @@ fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
         assert!(delta.added.is_empty());
         assert_eq!(delta.removed.as_slice(), std::slice::from_ref(&relation));
     }
+}
+
+#[test]
+fn rename_preserves_the_stable_entity_and_its_incident_graph() {
+    use mcp_memory::types::Relation;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph
+        .create_entities(&[entity("old"), entity("incoming"), entity("outgoing")])
+        .unwrap();
+    graph
+        .create_relations(&[
+            Relation {
+                from: "incoming".into(),
+                to: "old".into(),
+                relation_type: "in".into(),
+            },
+            Relation {
+                from: "old".into(),
+                to: "outgoing".into(),
+                relation_type: "out".into(),
+            },
+            Relation {
+                from: "old".into(),
+                to: "old".into(),
+                relation_type: "self".into(),
+            },
+        ])
+        .unwrap();
+    let probe = Connection::open(&path).unwrap();
+    let before: (i64, i64, i64, i64, i64, i64) = probe
+        .query_row(
+            "SELECT id, name_hash, type_id, obs_count, out_deg, in_deg FROM entity WHERE name='old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
+        .unwrap();
+    let updated_us: i64 = probe
+        .query_row(
+            "SELECT updated_us FROM entity WHERE id=?1",
+            [before.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let renamed = graph.rename_entity("old", "new").unwrap();
+
+    assert_eq!(
+        renamed,
+        Entity {
+            name: "new".into(),
+            ..entity("old")
+        }
+    );
+    assert!(graph.get_entity("old").unwrap().is_none());
+    assert_eq!(
+        graph.search_nodes_filtered("old", None, 0, 10),
+        Vec::<Entity>::new()
+    );
+    assert_eq!(
+        graph.search_nodes_filtered("new", None, 0, 10),
+        vec![renamed]
+    );
+    let after: (i64, i64, i64, i64, i64, i64, i64) = probe
+        .query_row(
+            "SELECT id, name_hash, type_id, obs_count, out_deg, in_deg, updated_us FROM entity WHERE name='new'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        )
+        .unwrap();
+    assert_eq!(after.0, before.0, "rename keeps the stable numeric id");
+    assert_ne!(after.1, before.1, "rename replaces name_hash");
+    assert_eq!(after.2, before.2, "rename keeps the entity type");
+    assert_eq!(after.3, before.3, "rename keeps observation counters");
+    assert_eq!(
+        (after.4, after.5),
+        (before.4, before.5),
+        "rename keeps degrees"
+    );
+    assert_eq!(after.6, updated_us, "rename does not update updated_us");
+    let relations: Vec<(String, String)> = probe
+        .prepare(
+            "SELECT source.name, target.name FROM relation \
+             JOIN entity source ON source.id=relation.from_id \
+             JOIN entity target ON target.id=relation.to_id \
+             ORDER BY source.name, target.name",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        relations,
+        [
+            ("incoming".into(), "new".into()),
+            ("new".into(), "new".into()),
+            ("new".into(), "outgoing".into())
+        ],
+        "incoming, outgoing, and self relations survive"
+    );
+}
+
+#[test]
+fn rename_rejects_a_distinct_existing_target_and_same_name_is_eventless_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph
+        .create_entities(&[entity("old"), entity("taken")])
+        .unwrap();
+    let probe = Connection::open(&path).unwrap();
+    let before_events: i64 = probe
+        .query_row("SELECT count(*) FROM change_event", [], |row| row.get(0))
+        .unwrap();
+    let before_jobs: i64 = probe
+        .query_row("SELECT count(*) FROM index_job", [], |row| row.get(0))
+        .unwrap();
+    let err = graph.rename_entity("old", "taken").unwrap_err();
+    assert!(matches!(
+        err,
+        memory_core::errors::MCSError::InvalidParams(message)
+            if message == "Entity 'taken' already exists"
+    ));
+    assert_eq!(graph.get_entity("old").unwrap(), Some(entity("old")));
+    assert_eq!(
+        probe
+            .query_row(
+                "SELECT count(*) FROM name_fts WHERE name_fts MATCH 'old'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1,
+        "collision leaves the old FTS posting intact"
+    );
+    assert_eq!(
+        probe
+            .query_row("SELECT count(*) FROM change_event", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        before_events
+    );
+    assert_eq!(
+        probe
+            .query_row("SELECT count(*) FROM index_job", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        before_jobs
+    );
+
+    let result = MutationService::new(&graph)
+        .apply(
+            MutationRequest::RenameEntity {
+                old_name: "old".into(),
+                new_name: "old".into(),
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+    assert!(
+        result.changes.is_empty(),
+        "same-name rename has no durable change"
+    );
+    assert_eq!(
+        probe
+            .query_row("SELECT count(*) FROM change_event", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        before_events
+    );
+    assert_eq!(
+        probe
+            .query_row("SELECT count(*) FROM index_job", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        before_jobs
+    );
 }

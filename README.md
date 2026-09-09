@@ -107,7 +107,7 @@ and rejected from `tools/call` as if they never existed — least privilege by d
 | Flag | Category | Tools |
 |------|----------|-------|
 | `--enable-graph-read` | **graph-read** | `read_graph`, `search_nodes`, `open_nodes`, `get_entity`, `graph_stats`, `search_relations`, `find_path`/`find_all_paths`, `get_neighbors`, `describe_entity`, `list_entity_types`, `list_relation_types`, `export_graph`, `extract_subgraph`, `batch_get_entities`, `entity_exists`, `degree` |
-| `--enable-graph-write` | **graph-write** | `create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `upsert_entities`, `merge_entities`, `compact` |
+| `--enable-graph-write` | **graph-write** | `create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `upsert_entities`, `merge_entities`, `rename_entity`, `compact` |
 | `--enable-vectors` | **vectors** | `vector_*` + `hybrid_search` (usearch HNSW or IVF-Flat) |
 | `--enable-code` | **code** | `code_index`, `code_outline`, `code_search`, `code_get_symbol`, `code_watch`, `code_embed`, `code_semantic_search` |
 | `--enable-all` | *(all)* | Every category. Overrides the individual flags. |
@@ -416,7 +416,8 @@ pre-populated, on a **MacBook Pro (Apple M1 Pro, 32 GB)**. Averages; run
 ### Knowledge-graph
 
 **Write:** `create_entities`, `create_relations`, `add_observations`, `delete_entities`,
-`delete_observations`, `delete_relations`, `upsert_entities`, `merge_entities`, `compact`.
+`delete_observations`, `delete_relations`, `upsert_entities`, `merge_entities`, `rename_entity`,
+`compact`.
 
 **Read:** `read_graph`, `search_nodes`, `open_nodes`, `batch_get_entities`, `get_entity`,
 `entity_exists`, `graph_stats`, `search_relations`, `describe_entity`, `degree`, `find_path`,

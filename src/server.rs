@@ -808,6 +808,7 @@ fn handle_tools_call(
         }
         "export_graph" => memory::handle_export_graph(kg, tool_args).map(HandlerResult::Value),
         "merge_entities" => memory::handle_merge_entities(kg, tool_args).map(HandlerResult::Value),
+        "rename_entity" => memory::handle_rename_entity(kg, tool_args).map(HandlerResult::Value),
         "extract_subgraph" => {
             memory::handle_extract_subgraph(kg, tool_args).map(HandlerResult::Value)
         }

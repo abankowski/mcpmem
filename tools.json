@@ -321,6 +321,19 @@
     "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false }
   },
   {
+    "name": "rename_entity",
+    "description": "Rename one entity while preserving its stable identity, observations, and all incident relations. Entity names are exact and case-sensitive; the destination name must not already exist.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "oldName": { "type": "string", "description": "Current exact entity name" },
+        "newName": { "type": "string", "description": "New exact entity name" }
+      },
+      "required": ["oldName", "newName"]
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false }
+  },
+  {
     "name": "extract_subgraph",
     "description": "BFS-based subgraph extraction from N seed nodes out to depth d. Builds adjacency map once (O(R)) then expands BFS queue (worst-case O(V + E) for the reached subgraph). Returns entities and only those relations whose both endpoints are in the reached set. Uses ahash-backed AHashMap/AHashSet for hashing (not SipHash) to minimize per-operation latency. Replaces N serial get_neighbors calls (each O(R) for adjacency) with a single O(R + V) pass.",
     "inputSchema": {

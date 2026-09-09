@@ -338,6 +338,50 @@ fn e2e_upsert_merge_and_wipe() {
 }
 
 #[test]
+fn e2e_rename_entity_is_a_graph_write_tool_with_exact_annotations() {
+    let mut c = spawn_server();
+    c.send(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#);
+    let list = c.recv();
+    let response: serde_json::Value = serde_json::from_str(&list).unwrap();
+    let tool = response["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "rename_entity")
+        .unwrap_or_else(|| panic!("rename_entity must be exposed by graph-write: {response}"));
+    assert_eq!(
+        tool["annotations"],
+        serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false
+        })
+    );
+
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "Old", "entityType": "note", "observations": ["kept"]}
+        ]}),
+    );
+    let renamed = c.tool_text(
+        "rename_entity",
+        &serde_json::json!({"oldName": "Old", "newName": "New"}),
+    );
+    assert!(
+        renamed.contains("\"name\":\"New\""),
+        "new entity result: {renamed}"
+    );
+    let old = c.tool_text("get_entity", &serde_json::json!({"name": "Old"}));
+    assert!(
+        old.contains("not found"),
+        "old name must be unreadable: {old}"
+    );
+    let new = c.tool_text("get_entity", &serde_json::json!({"name": "New"}));
+    assert!(new.contains("kept"), "new entity keeps observations: {new}");
+}
+
+#[test]
 fn e2e_relations_and_describe() {
     let mut c = spawn_server();
 

@@ -703,6 +703,16 @@ impl GraphHandle {
         }
     }
 
+    pub fn rename_entity(&self, old_name: &str, new_name: &str) -> Result<Entity> {
+        match self.mutate(MutationRequest::RenameEntity {
+            old_name: old_name.into(),
+            new_name: new_name.into(),
+        })? {
+            MutationResult::Entity(result) => Ok(result),
+            _ => unreachable!("rename_entity always returns an entity"),
+        }
+    }
+
     /// Delete a code file and all its defined symbols in the same transaction.
     pub fn code_purge_file(&self, rel_path: &str) -> Result<usize> {
         match self.mutate(MutationRequest::PurgeDefinedEntities {

@@ -183,6 +183,7 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
     let path = dir.path().join("memory.db");
     let graph = graph(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
+    graph.create_entities(&[entity("old")]).unwrap();
     SubscriptionRepository::new(&conn)
         .upsert(WebhookSubscription {
             subscription_id: uuid::Uuid::new_v4(),
@@ -199,10 +200,11 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
     context.origin = "producer".into();
     MutationService::new(&graph)
         .apply(
-            MutationRequest::CreateEntities {
-                entities: vec![entity("a")],
+            MutationRequest::RenameEntity {
+                old_name: "old".into(),
+                new_name: "new".into(),
             },
-            context,
+            context.clone(),
         )
         .unwrap();
     let connector = TestConnector::default();
@@ -218,7 +220,33 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
     assert_eq!(report.completed, 1);
     let request = connector.request.lock().unwrap().clone().unwrap();
     let body = String::from_utf8(request.body.clone()).unwrap();
-    assert!(body.contains("\"version\":1"));
+    let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(envelope["version"], 2);
+    assert_eq!(envelope["operation"], "rename");
+    assert_eq!(envelope["oldName"], "old");
+    assert_eq!(envelope["newName"], "new");
+    for field in [
+        "eventId",
+        "transactionId",
+        "entityId",
+        "entityRevision",
+        "occurredAtUs",
+        "origin",
+        "correlationId",
+        "causationId",
+        "hopCount",
+    ] {
+        assert!(envelope.get(field).is_some(), "preserves {field}");
+    }
+    assert_eq!(envelope["origin"], "producer");
+    assert_eq!(envelope["causationId"], serde_json::Value::Null);
+    assert_eq!(envelope["hopCount"], 0);
+    assert!(envelope.get("before").is_none(), "no entity snapshot");
+    assert!(envelope.get("after").is_none(), "no entity snapshot");
+    assert!(
+        envelope.get("observations").is_none(),
+        "no observation bodies"
+    );
     assert!(!body.contains("secret observation"));
     assert!(!body.contains("vault://not-in-body"));
     assert_eq!(request.event_id.len(), 36);
@@ -238,6 +266,38 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
+    );
+
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::CreateEntities {
+                entities: vec![entity("plain")],
+            },
+            context,
+        )
+        .unwrap();
+    let report = webhook_worker::WebhookWorker::new(
+        &path,
+        &connector,
+        TestSecrets,
+        BTreeSet::from(["hooks.example.test".into()]),
+        TestResolver(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]),
+    )
+    .run_once(i64::MAX / 2)
+    .unwrap();
+    assert_eq!(report.completed, 1);
+    let non_rename_request = connector.request.lock().unwrap().clone().unwrap();
+    let non_rename: serde_json::Value = serde_json::from_slice(&non_rename_request.body).unwrap();
+    assert_eq!(non_rename["operation"], "create");
+    assert_eq!(
+        non_rename.get("oldName"),
+        Some(&serde_json::Value::Null),
+        "non-rename envelope explicitly includes oldName: null"
+    );
+    assert_eq!(
+        non_rename.get("newName"),
+        Some(&serde_json::Value::Null),
+        "non-rename envelope explicitly includes newName: null"
     );
 }
 
