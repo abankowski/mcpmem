@@ -61,7 +61,7 @@ fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient
     }
 }
 
-fn observation_write_envelopes() -> [(&'static str, &'static str); 4] {
+const fn observation_write_envelopes() -> [(&'static str, &'static str); 4] {
     [
         (
             "create_entities",
