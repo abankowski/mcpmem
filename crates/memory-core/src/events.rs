@@ -53,6 +53,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             2_i64,
             include_str!("../../../migrations/0002_webhook_subscriptions.sql"),
         ),
+        (
+            3_i64,
+            include_str!("../../../migrations/0003_observation_metadata.sql"),
+        ),
     ];
     let newest: i64 = conn
         .query_row(

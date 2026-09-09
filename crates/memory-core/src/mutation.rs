@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::errors::{MCSError, Result};
 use crate::graph::{GraphHandle, TxGuard, name_hash};
-use crate::types::{Entity, Relation};
+use crate::types::{Entity, EntityInput, Observation, ObservationInput, Relation};
 
 pub type MutationError = MCSError;
 
@@ -64,17 +64,17 @@ impl MutationContext {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ObservationUpdate {
     pub entity_name: String,
-    pub contents: Vec<String>,
+    pub contents: Vec<ObservationInput>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MutationRequest {
     CreateEntities {
-        entities: Vec<Entity>,
+        entities: Vec<EntityInput>,
     },
     UpsertEntities {
-        entities: Vec<Entity>,
+        entities: Vec<EntityInput>,
     },
     DeleteEntities {
         names: Vec<String>,
@@ -112,7 +112,7 @@ pub struct EntitySnapshot {
     pub entity_id: i64,
     pub name: String,
     pub entity_type: String,
-    pub observations: Vec<String>,
+    pub observations: Vec<Observation>,
 }
 
 impl EntitySnapshot {
@@ -164,7 +164,7 @@ pub struct CommittedChangeSet {
 #[serde(rename_all = "camelCase")]
 pub struct ObservationResult {
     pub entity_name: String,
-    pub added_observations: Vec<String>,
+    pub added_observations: Vec<Observation>,
 }
 
 /// Legacy response data is captured inside the same transaction, preventing
@@ -334,12 +334,12 @@ pub(crate) fn read_entity(conn: &Connection, name: &str) -> Result<Option<Entity
     ).optional().map_err(sql_error)?;
     row.map(|(entity_id, name, entity_type)| {
         let mut stmt = conn
-            .prepare_cached("SELECT body FROM observation WHERE entity_id=?1 ORDER BY idx, id")
+            .prepare_cached("SELECT body,created_us,occurred_us,origin_entity_name FROM observation WHERE entity_id=?1 ORDER BY idx, id")
             .map_err(sql_error)?;
         let observations = stmt
-            .query_map([entity_id], |row| row.get(0))
+            .query_map([entity_id], |row| Ok(Observation { body: row.get(0)?, created_at_us: Some(row.get(1)?), occurred_at_us: row.get(2)?, origin_entity_name: row.get(3)? }))
             .map_err(sql_error)?
-            .collect::<rusqlite::Result<Vec<String>>>()
+            .collect::<rusqlite::Result<Vec<Observation>>>()
             .map_err(sql_error)?;
         Ok(EntitySnapshot {
             entity_id,
@@ -563,8 +563,8 @@ fn insert_observations(
     graph: &GraphHandle,
     conn: &Connection,
     id: i64,
-    contents: &[String],
-) -> Result<()> {
+    contents: &[ObservationInput],
+) -> Result<Vec<Observation>> {
     let idx: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(idx),-1) FROM observation WHERE entity_id=?1",
@@ -574,23 +574,37 @@ fn insert_observations(
         .map_err(sql_error)?;
     let mut stmt = conn
         .prepare_cached(
-            "INSERT INTO observation(id,entity_id,idx,body,created_us) VALUES(?1,?2,?3,?4,?5)",
+            "INSERT INTO observation(id,entity_id,idx,body,created_us,occurred_us) VALUES(?1,?2,?3,?4,?5,?6)",
         )
         .map_err(sql_error)?;
-    for (offset, body) in contents.iter().enumerate() {
+    let mut inserted = Vec::with_capacity(contents.len());
+    for (offset, observation) in contents.iter().enumerate() {
+        if observation.occurred_at_us.is_some_and(|time| time < 0) {
+            return Err(MCSError::InvalidParams(
+                "occurredAtUs must be non-negative".into(),
+            ));
+        }
+        let created_at_us = now_us();
         stmt.execute(params![
             graph.next_obs_id(),
             id,
             idx + offset as i64 + 1,
-            body,
-            now_us()
+            observation.body,
+            created_at_us,
+            observation.occurred_at_us
         ])
         .map_err(sql_error)?;
+        inserted.push(Observation {
+            body: observation.body.clone(),
+            created_at_us: Some(created_at_us),
+            occurred_at_us: observation.occurred_at_us,
+            origin_entity_name: None,
+        });
     }
-    Ok(())
+    Ok(inserted)
 }
 
-fn create_entity(graph: &GraphHandle, conn: &Connection, entity: &Entity) -> Result<bool> {
+fn create_entity(graph: &GraphHandle, conn: &Connection, entity: &EntityInput) -> Result<bool> {
     if entity.name.is_empty() || read_entity(conn, &entity.name)?.is_some() {
         return Ok(false);
     }
@@ -653,7 +667,7 @@ fn execute(
             let mut created = Vec::new();
             for entity in entities {
                 if create_entity(graph, conn, &entity)? {
-                    created.push(entity);
+                    created.push(require_entity(conn, &entity.name)?.entity());
                 }
             }
             Ok(MutationResult::Entities(created))
@@ -669,18 +683,21 @@ fn execute(
                         )
                         .map_err(sql_error)?;
                     }
-                    let mut seen: BTreeSet<&str> =
-                        existing.observations.iter().map(String::as_str).collect();
-                    let added: Vec<String> = entity
+                    let mut seen: BTreeSet<&str> = existing
                         .observations
                         .iter()
-                        .filter(|o| seen.insert(o.as_str()))
+                        .map(|o| o.body.as_str())
+                        .collect();
+                    let added: Vec<ObservationInput> = entity
+                        .observations
+                        .iter()
+                        .filter(|o| seen.insert(o.body.as_str()))
                         .cloned()
                         .collect();
                     insert_observations(graph, conn, existing.entity_id, &added)?;
                     result.push(require_entity(conn, &entity.name)?.entity());
                 } else if create_entity(graph, conn, &entity)? {
-                    result.push(entity);
+                    result.push(require_entity(conn, &entity.name)?.entity());
                 }
             }
             Ok(MutationResult::Entities(result))
@@ -708,10 +725,11 @@ fn execute(
             let mut result = Vec::new();
             for update in observations {
                 let entity = require_entity(conn, &update.entity_name)?;
-                insert_observations(graph, conn, entity.entity_id, &update.contents)?;
+                let inserted =
+                    insert_observations(graph, conn, entity.entity_id, &update.contents)?;
                 result.push(ObservationResult {
                     entity_name: update.entity_name,
-                    added_observations: update.contents,
+                    added_observations: inserted,
                 });
             }
             Ok(MutationResult::Observations(result))
@@ -725,7 +743,7 @@ fn execute(
                 for body in &update.contents {
                     conn.execute(
                         "DELETE FROM observation WHERE entity_id=?1 AND body=?2",
-                        params![entity.entity_id, body],
+                        params![entity.entity_id, body.body],
                     )
                     .map_err(sql_error)?;
                 }
@@ -736,7 +754,24 @@ fn execute(
             let old = require_entity(conn, &source)?;
             let into = require_entity(conn, &target)?;
             if source != target {
-                insert_observations(graph, conn, into.entity_id, &old.observations)?;
+                // Body remains the observation identity. Equal target bodies keep
+                // their metadata; newly copied rows retain the original fact/write
+                // times and record this merge's immediate source as audit origin.
+                let mut seen: BTreeSet<&str> =
+                    into.observations.iter().map(|o| o.body.as_str()).collect();
+                let mut idx: i64 = conn
+                    .query_row(
+                        "SELECT COALESCE(MAX(idx),-1) FROM observation WHERE entity_id=?1",
+                        [into.entity_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(sql_error)?;
+                for observation in &old.observations {
+                    if seen.insert(&observation.body) {
+                        idx += 1;
+                        conn.execute("INSERT INTO observation(id,entity_id,idx,body,created_us,occurred_us,origin_entity_id,origin_entity_name) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![graph.next_obs_id(),into.entity_id,idx,observation.body,observation.created_at_us,observation.occurred_at_us,old.entity_id,old.name]).map_err(sql_error)?;
+                    }
+                }
                 let relations = relations_for(conn, &source)?;
                 for mut relation in relations {
                     if relation.from == source {

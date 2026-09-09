@@ -3,7 +3,7 @@ use memory_core::{
     mutation::{MutationContext, MutationRequest, MutationService, ObservationUpdate},
     storage::{Durability, SqliteTuning},
     subscriptions::{SubscriptionRepository, WebhookSubscription},
-    types::Entity,
+    types::EntityInput as Entity,
 };
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -54,9 +54,19 @@ fn webhook_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
     let graph = graph(&path);
     graph.create_entities(&[entity("retained")]).unwrap();
     assert_eq!(worker.run_once(1).unwrap().claimed, 0);
+    let retained = graph
+        .get_entity("retained")
+        .unwrap()
+        .expect("retained entity");
+    assert_eq!(retained.name, "retained");
+    assert_eq!(retained.entity_type, "note");
     assert_eq!(
-        graph.get_entity("retained").unwrap(),
-        Some(entity("retained"))
+        retained
+            .observations
+            .iter()
+            .map(|observation| observation.body.as_str())
+            .collect::<Vec<_>>(),
+        ["secret observation"]
     );
 }
 
@@ -464,7 +474,7 @@ fn filters_and_migration_reopen_are_compatible() {
     assert_eq!(count(&conn, "event_outbox"), 0);
     drop(graph);
     memory_core::schema::initialize_database(&conn).unwrap();
-    assert_eq!(count(&conn, "schema_migration"), 2);
+    assert_eq!(count(&conn, "schema_migration"), 3);
     assert!(
         conn.query_row::<String, _, _>(
             "SELECT checksum FROM schema_migration WHERE version=1",
@@ -478,7 +488,7 @@ fn filters_and_migration_reopen_are_compatible() {
 }
 
 #[test]
-fn migration_from_a_real_0001_database_applies_only_0002() {
+fn migration_from_a_real_0001_database_applies_remaining_migrations() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -491,7 +501,7 @@ fn migration_from_a_real_0001_database_applies_only_0002() {
     )
     .unwrap();
     memory_core::schema::initialize_database(&conn).unwrap();
-    assert_eq!(count(&conn, "schema_migration"), 2);
+    assert_eq!(count(&conn, "schema_migration"), 3);
     assert_eq!(count(&conn, "entity"), 0);
     assert_eq!(count(&conn, "graph_stat"), 5);
     let historical: (String, i64) = conn

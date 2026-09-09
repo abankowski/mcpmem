@@ -164,7 +164,7 @@ fn test_http_auth_full_tool_flow() {
     let srv = spawn_http_server(Some("s3cret"));
 
     // Create an entity, attach an embedding, then search — all over authed HTTP.
-    let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_entities","arguments":{"entities":[{"name":"alice","entityType":"person","observations":["math"]}]}},"id":2}"#;
+    let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_entities","arguments":{"entities":[{"name":"alice","entityType":"person","observations":[{"body":"math"}]}]}},"id":2}"#;
     let (status, _) = post_mcp(srv.port, create, Some("s3cret"));
     assert_eq!(status, 200, "create_entities over HTTP should succeed");
 

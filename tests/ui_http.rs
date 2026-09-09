@@ -152,7 +152,7 @@ fn get(port: u16, path: &str, bearer: Option<&str>) -> (u16, String, String) {
 
 /// Populate a tiny graph over authed/unauthed HTTP so `/ui/graph` has content.
 fn seed_graph(port: u16, bearer: Option<&str>) {
-    let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_entities","arguments":{"entities":[{"name":"Alice","entityType":"person","observations":["likes hiking"]},{"name":"Acme","entityType":"company","observations":[]}]}},"id":2}"#;
+    let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_entities","arguments":{"entities":[{"name":"Alice","entityType":"person","observations":[{"body":"likes hiking"}]},{"name":"Acme","entityType":"company","observations":[]}]}},"id":2}"#;
     let (status, _, _) = request(port, "POST", "/mcp", Some(create), bearer);
     assert_eq!(status, 200, "seed create_entities should succeed");
 
@@ -377,7 +377,7 @@ fn seed_many(port: u16, n: usize) {
     let ents: Vec<String> = (0..n)
         .map(|i| {
             format!(
-                r#"{{"name":"person_{i:04}","entityType":"person","observations":["note {i}"]}}"#
+                r#"{{"name":"person_{i:04}","entityType":"person","observations":[{{"body":"note {i}"}}]}}"#
             )
         })
         .collect();
@@ -508,12 +508,13 @@ fn test_ui_node_lazy_loads_observations() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["name"], "Alice");
     assert_eq!(v["entityType"], "person");
-    // The single-node endpoint carries the full observation bodies.
+    // The UI consumes the canonical structured read model, independently of
+    // the MCP legacy adapter.
     let obs: Vec<&str> = v["observations"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|o| o.as_str().unwrap())
+        .map(|o| o["body"].as_str().unwrap())
         .collect();
     assert_eq!(
         obs,

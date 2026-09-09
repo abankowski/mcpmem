@@ -1232,7 +1232,7 @@ mod tests {
     use super::*;
     use crate::config::{Durability, SqliteTuning};
     use crate::kg::GraphHandle;
-    use crate::types::Entity;
+    use crate::types::EntityInput as Entity;
     use std::num::NonZeroUsize;
 
     struct TestEnv {

@@ -1,6 +1,6 @@
 use mcp_memory::config::{Durability, SqliteTuning};
 use mcp_memory::kg::GraphHandle;
-use mcp_memory::types::Entity;
+use mcp_memory::types::EntityInput as Entity;
 use memory_core::mutation::{
     ChangeOperation, MutationContext, MutationRequest, MutationService, ObservationUpdate,
 };
@@ -54,11 +54,25 @@ fn committed_changes_keep_tombstones_and_only_effective_updates() {
     assert_eq!(updated.changes.len(), 1);
     assert_eq!(updated.changes[0].operation, ChangeOperation::Update);
     assert_eq!(
-        updated.changes[0].before.as_ref().unwrap().observations,
+        updated.changes[0]
+            .before
+            .as_ref()
+            .unwrap()
+            .observations
+            .iter()
+            .map(|o| o.body.as_str())
+            .collect::<Vec<_>>(),
         ["original"]
     );
     assert_eq!(
-        updated.changes[0].after.as_ref().unwrap().observations,
+        updated.changes[0]
+            .after
+            .as_ref()
+            .unwrap()
+            .observations
+            .iter()
+            .map(|o| o.body.as_str())
+            .collect::<Vec<_>>(),
         ["original", "new"]
     );
     let relation = mcp_memory::types::Relation {
@@ -135,7 +149,7 @@ fn observation_batch_and_context_validation_are_atomic() {
         MutationContext::local(),
     );
     assert!(result.is_err());
-    assert_eq!(graph.get_entity("a").unwrap(), Some(entity("a")));
+    assert_original_entity(&graph, "a");
     let mut invalid = MutationContext::local();
     invalid.hop_count = 16;
     assert!(
@@ -148,7 +162,7 @@ fn observation_batch_and_context_validation_are_atomic() {
             )
             .is_err()
     );
-    assert_eq!(graph.get_entity("a").unwrap(), Some(entity("a")));
+    assert_original_entity(&graph, "a");
 }
 
 fn entity(name: &str) -> Entity {
@@ -157,6 +171,21 @@ fn entity(name: &str) -> Entity {
         entity_type: "test".into(),
         observations: vec!["original".into()],
     }
+}
+
+fn assert_original_entity(graph: &GraphHandle, name: &str) {
+    let actual = graph.get_entity(name).unwrap().expect("entity exists");
+    assert_eq!(actual.name, name);
+    assert_eq!(actual.entity_type, "test");
+    assert_eq!(
+        actual
+            .observations
+            .iter()
+            .map(|observation| observation.body.as_str())
+            .collect::<Vec<_>>(),
+        ["original"]
+    );
+    assert!(actual.observations[0].created_at_us.is_some());
 }
 
 #[test]
@@ -171,17 +200,20 @@ fn mcp_observation_batch_rejects_late_invalid_item_without_partial_write() {
     )
     .unwrap();
     graph.create_entities(&[entity("a")]).unwrap();
-    let args = serde_json::json!({"observations": [{"entityName":"a","contents":["partial"]}, {"contents":["invalid"]}]});
+    let args = serde_json::json!({"observations": [{"entityName":"a","contents":[{"body":"partial"}]}, {"contents":[{"body":"invalid"}]}]});
     assert!(mcp_memory::actions::memory::handle_add_observations(&graph, Some(&args)).is_err());
-    assert_eq!(graph.get_entity("a").unwrap(), Some(entity("a")));
-    let valid = serde_json::json!({"observations": [{"entityName":"a","contents":["committed"]}]});
+    assert_original_entity(&graph, "a");
+    let valid =
+        serde_json::json!({"observations": [{"entityName":"a","contents":[{"body":"committed"}]}]});
     let response =
         mcp_memory::actions::memory::handle_add_observations(&graph, Some(&valid)).unwrap();
     let text = response["content"][0]["text"].as_str().unwrap();
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(text).unwrap(),
-        serde_json::json!({"results":[{"entityName":"a","addedObservations":["committed"]}]})
-    );
+    let response: serde_json::Value = serde_json::from_str(text).unwrap();
+    let inserted = &response["results"][0]["addedObservations"][0];
+    assert_eq!(inserted["body"], "committed");
+    assert!(inserted["createdAtUs"].as_i64().is_some());
+    assert!(inserted["occurredAtUs"].is_null());
+    assert!(inserted["originEntityName"].is_null());
 }
 
 #[test]
@@ -214,7 +246,7 @@ fn late_entity_delete_failure_rolls_back_observations_and_stats() {
             .unwrap(),
         1
     );
-    assert_eq!(graph.get_entity("kept").unwrap(), Some(entity("kept")));
+    assert_original_entity(&graph, "kept");
     assert_eq!(graph.get_entity_count().unwrap(), 1);
 }
 
@@ -301,8 +333,8 @@ fn every_write_path_rolls_back_on_a_final_statement_failure() {
         let failed = MutationService::new(&graph).apply(request, MutationContext::local());
         assert!(failed.is_err());
         assert_eq!(graph.export("json", 100).unwrap(), before);
-        assert_eq!(graph.get_entity("a").unwrap(), Some(entity("a")));
-        assert_eq!(graph.get_entity("b").unwrap(), Some(entity("b")));
+        assert_original_entity(&graph, "a");
+        assert_original_entity(&graph, "b");
         assert_eq!(graph.get_entity_count().unwrap(), 2);
         assert_eq!(graph.get_relation_count().unwrap(), 1);
         assert_eq!(graph.entity_type_counts(), [("test".into(), 2)]);
@@ -583,17 +615,20 @@ fn rename_preserves_the_stable_entity_and_its_incident_graph() {
 
     let renamed = graph.rename_entity("old", "new").unwrap();
 
+    assert_eq!(renamed.name, "new");
+    assert_eq!(renamed.entity_type, "test");
     assert_eq!(
-        renamed,
-        Entity {
-            name: "new".into(),
-            ..entity("old")
-        }
+        renamed
+            .observations
+            .iter()
+            .map(|observation| observation.body.as_str())
+            .collect::<Vec<_>>(),
+        ["original"]
     );
     assert!(graph.get_entity("old").unwrap().is_none());
     assert_eq!(
         graph.search_nodes_filtered("old", None, 0, 10),
-        Vec::<Entity>::new()
+        Vec::<mcp_memory::types::Entity>::new()
     );
     assert_eq!(
         graph.search_nodes_filtered("new", None, 0, 10),
@@ -667,7 +702,7 @@ fn rename_rejects_a_distinct_existing_target_and_same_name_is_eventless_noop() {
         memory_core::errors::MCSError::InvalidParams(message)
             if message == "Entity 'taken' already exists"
     ));
-    assert_eq!(graph.get_entity("old").unwrap(), Some(entity("old")));
+    assert_original_entity(&graph, "old");
     assert_eq!(
         probe
             .query_row(

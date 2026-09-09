@@ -13,7 +13,12 @@ use crate::mutation::{
     MutationContext, MutationRequest, MutationResult, MutationService, ObservationUpdate,
 };
 use crate::storage::{Durability, SqliteTuning};
-use crate::types::{Degree, Entity, EntityDescription, Relation};
+use crate::types::{
+    Degree, Entity, EntityDescription, EntityInput, Observation, ObservationInput, Relation,
+};
+
+/// Single SQL projection for every full graph JSON read. Alias `o` is an observation row.
+const OBSERVATION_JSON: &str = "json_object('body',o.body,'createdAtUs',o.created_us,'occurredAtUs',o.occurred_us,'originEntityName',o.origin_entity_name)";
 
 /// Cap on entities/relations collected in a single traversal (DoS guard).
 /// Prevents a dense graph at high depth from allocating unbounded memory.
@@ -131,7 +136,7 @@ fn batch_entities_by_ids(conn: &Connection, ids: &[i64]) -> FxHashMap<i64, Entit
     }
     let sql = format!(
         "SELECT e.id, e.name, t.name,
-                COALESCE((SELECT json_group_array(o.body ORDER BY o.idx)
+                COALESCE((SELECT json_group_array({OBSERVATION_JSON} ORDER BY o.idx, o.id)
                           FROM observation o WHERE o.entity_id = e.id), '[]')
          FROM entity e JOIN type_dict t ON t.id = e.type_id
          WHERE e.id IN ({}) AND e.flags = 0",
@@ -148,7 +153,8 @@ fn batch_entities_by_ids(conn: &Connection, ids: &[i64]) -> FxHashMap<i64, Entit
         })
     {
         for (id, name, etype, obs_json) in rows.flatten() {
-            let observations: Vec<String> = serde_json::from_str(&obs_json).unwrap_or_default();
+            let observations: Vec<Observation> =
+                serde_json::from_str(&obs_json).unwrap_or_default();
             map.insert(
                 id,
                 Entity {
@@ -526,7 +532,7 @@ impl GraphHandle {
             .map(|(_, result)| result)
     }
 
-    pub fn create_entities(&self, entities: &[Entity]) -> Result<Vec<Entity>> {
+    pub fn create_entities(&self, entities: &[EntityInput]) -> Result<Vec<Entity>> {
         match self.mutate(MutationRequest::CreateEntities {
             entities: entities.to_vec(),
         })? {
@@ -535,7 +541,7 @@ impl GraphHandle {
         }
     }
 
-    pub fn upsert_entities(&self, entities: &[Entity]) -> Result<Vec<Entity>> {
+    pub fn upsert_entities(&self, entities: &[EntityInput]) -> Result<Vec<Entity>> {
         match self.mutate(MutationRequest::UpsertEntities {
             entities: entities.to_vec(),
         })? {
@@ -567,7 +573,11 @@ impl GraphHandle {
         .map(|_| ())
     }
 
-    pub fn add_observations(&self, entity_name: &str, contents: &[String]) -> Result<Vec<String>> {
+    pub fn add_observations(
+        &self,
+        entity_name: &str,
+        contents: &[ObservationInput],
+    ) -> Result<Vec<Observation>> {
         match self.mutate(MutationRequest::AddObservations {
             observations: vec![ObservationUpdate {
                 entity_name: entity_name.into(),
@@ -579,7 +589,11 @@ impl GraphHandle {
         }
     }
 
-    pub fn delete_observations(&self, entity_name: &str, observations: &[String]) -> Result<()> {
+    pub fn delete_observations(
+        &self,
+        entity_name: &str,
+        observations: &[ObservationInput],
+    ) -> Result<()> {
         self.mutate(MutationRequest::DeleteObservations {
             observations: vec![ObservationUpdate {
                 entity_name: entity_name.into(),
@@ -813,10 +827,10 @@ impl GraphHandle {
         // out); it ships `obsCount` instead. The MCP `read_graph` keeps the full
         // observations shape.
         let obs_field = if include_obs {
-            "'observations', COALESCE((SELECT json_group_array(o.body ORDER BY o.idx)
-                        FROM observation o WHERE o.entity_id = e.id), json('[]'))"
+            format!("'observations', COALESCE((SELECT json_group_array({OBSERVATION_JSON} ORDER BY o.idx, o.id)
+                        FROM observation o WHERE o.entity_id = e.id), json('[]'))")
         } else {
-            "'obsCount', e.obs_count"
+            "'obsCount', e.obs_count".to_owned()
         };
 
         let entities_json: String = {
@@ -899,7 +913,7 @@ impl GraphHandle {
                     'name', e.name,
                     'entityType', t.name,
                     'observations', COALESCE((
-                        SELECT json_group_array(o.body ORDER BY o.idx)
+                        SELECT json_group_array({OBSERVATION_JSON} ORDER BY o.idx, o.id)
                         FROM observation o WHERE o.entity_id = e.id
                     ), json('[]'))
                 ) ORDER BY e.id), json('[]'))
@@ -1419,7 +1433,7 @@ impl GraphHandle {
                     'name', e.name,
                     'entityType', t.name,
                     'observations', COALESCE((
-                        SELECT json_group_array(o.body ORDER BY o.idx)
+                        SELECT json_group_array({OBSERVATION_JSON} ORDER BY o.idx, o.id)
                         FROM observation o WHERE o.entity_id = e.id
                     ), json('[]'))
                 ) ORDER BY e.id), json('[]'))
@@ -1678,13 +1692,14 @@ impl GraphHandle {
         // Only JSON is supported; the format argument is accepted for forward
         // compatibility.
         conn.query_row(
-            "SELECT json_object(
+            &format!(
+                "SELECT json_object(
                 'entities', COALESCE((
                     SELECT json_group_array(json_object(
                         'name', e.name,
                         'entityType', t.name,
                         'observations', COALESCE((
-                            SELECT json_group_array(o.body ORDER BY o.idx)
+                            SELECT json_group_array({OBSERVATION_JSON} ORDER BY o.idx, o.id)
                             FROM observation o WHERE o.entity_id = e.id
                         ), json('[]'))
                     ) ORDER BY e.id)
@@ -1708,7 +1723,8 @@ impl GraphHandle {
                     JOIN type_dict t ON t.id = r.type_id
                     WHERE e1.flags = 0 AND e2.flags = 0
                 ), json('[]'))
-            )",
+            )"
+            ),
             params![max_rows],
             |row| row.get::<_, String>(0),
         )
@@ -1883,7 +1899,7 @@ impl GraphHandle {
                     'name', e.name,
                     'entityType', t.name,
                     'observations', COALESCE((
-                        SELECT json_group_array(o.body ORDER BY o.idx)
+                        SELECT json_group_array({OBSERVATION_JSON} ORDER BY o.idx, o.id)
                         FROM observation o WHERE o.entity_id = e.id
                     ), json('[]'))
                 ) ORDER BY e.id), json('[]'))
@@ -1932,6 +1948,7 @@ impl GraphHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::EntityInput as Entity;
     use serde_json::Value;
     use std::ops::Deref;
     use std::path::PathBuf;
@@ -1990,7 +2007,13 @@ mod tests {
         let got = kg.get_entity("test").unwrap().unwrap();
         assert_eq!(got.name, "test");
         assert_eq!(got.entity_type, "person");
-        assert_eq!(got.observations, vec!["obs1", "obs2"]);
+        assert_eq!(
+            got.observations
+                .iter()
+                .map(|o| o.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["obs1", "obs2"]
+        );
     }
 
     #[test]
@@ -2029,14 +2052,14 @@ mod tests {
         assert_eq!(added.len(), 2);
 
         let ent = kg.get_entity("obs_test").unwrap().unwrap();
-        assert!(ent.observations.contains(&"b".into()));
-        assert!(ent.observations.contains(&"c".into()));
+        assert!(ent.observations.iter().any(|o| o.body == "b"));
+        assert!(ent.observations.iter().any(|o| o.body == "c"));
 
         kg.delete_observations("obs_test", &["b".into()]).unwrap();
         let ent = kg.get_entity("obs_test").unwrap().unwrap();
-        assert!(!ent.observations.contains(&"b".into()));
-        assert!(ent.observations.contains(&"c".into()));
-        assert!(ent.observations.contains(&"a".into()));
+        assert!(!ent.observations.iter().any(|o| o.body == "b"));
+        assert!(ent.observations.iter().any(|o| o.body == "c"));
+        assert!(ent.observations.iter().any(|o| o.body == "a"));
     }
 
     #[test]
@@ -2296,7 +2319,14 @@ mod tests {
         let entity = kg.describe_entity("A").unwrap();
         assert_eq!(entity.name, "A");
         assert_eq!(entity.entity_type, "t");
-        assert_eq!(entity.observations, ["o"]);
+        assert_eq!(
+            entity
+                .observations
+                .iter()
+                .map(|o| o.body.as_str())
+                .collect::<Vec<_>>(),
+            ["o"]
+        );
         assert_eq!(entity.relations.len(), 4);
         assert_eq!(
             entity.relations,
@@ -2439,7 +2469,13 @@ mod tests {
         assert_eq!(kg.get_entity_count().unwrap(), 1);
         let ent = kg.get_entity("A").unwrap().unwrap();
         assert_eq!(ent.entity_type, "NewType");
-        assert_eq!(ent.observations, ["old", "new"]);
+        assert_eq!(
+            ent.observations
+                .iter()
+                .map(|o| o.body.as_str())
+                .collect::<Vec<_>>(),
+            ["old", "new"]
+        );
 
         let type_counts: FxHashMap<_, _> = kg.entity_type_counts().into_iter().collect();
         assert_eq!(type_counts.get("OldType"), None);
@@ -3057,7 +3093,7 @@ mod tests {
             .map(|i| Entity {
                 name: format!("n{i}"),
                 entity_type: "node".into(),
-                observations: vec![format!("obs of n{i}")],
+                observations: vec![format!("obs of n{i}").into()],
             })
             .collect();
         kg.create_entities(&entities).unwrap();
@@ -3108,7 +3144,13 @@ mod tests {
         .unwrap();
         // get_entity goes through the reader pool.
         let got = kg.get_entity("fresh").unwrap().unwrap();
-        assert_eq!(got.observations, vec!["v"]);
+        assert_eq!(
+            got.observations
+                .iter()
+                .map(|o| o.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v"]
+        );
     }
 
     #[test]
@@ -3137,7 +3179,7 @@ mod tests {
                     kg.create_entities(&[Entity {
                         name: format!("w{i}"),
                         entity_type: "node".into(),
-                        observations: vec![format!("w obs {i}")],
+                        observations: vec![format!("w obs {i}").into()],
                     }])
                     .unwrap();
                 }
@@ -3280,7 +3322,7 @@ mod tests {
             kg.create_entities(&[Entity {
                 name: format!("e{i}"),
                 entity_type: "t".into(),
-                observations: vec![format!("o{i}")],
+                observations: vec![format!("o{i}").into()],
             }])
             .unwrap();
         }

@@ -121,6 +121,17 @@ The database path is resolved in order:
 The same SQLite file works with or without `--enable-vectors`, so you can populate the graph
 plain and later serve it with vectors enabled.
 
+### Observation format (6.0)
+
+MCP observation writes use objects: `{ "body": "…", "occurredAtUs": 1780000000000000 }`.
+`occurredAtUs` is optional; the server always returns `createdAtUs` and
+`originEntityName` (both explicitly `null` when unknown). Search and embeddings index only
+`body`.
+
+`--legacy-observations` is a deprecated 6.x MCP-only compatibility adapter for clients that
+still send and receive string arrays. It is disabled by default, requires the `mcp` runtime
+role, and will be removed in 7.0.0. It does not change stored data or the web UI.
+
 ### Transports
 
 | Transport | Flag | Description |

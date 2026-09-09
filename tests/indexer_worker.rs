@@ -2,12 +2,13 @@
 
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use indexer_worker::{CanonicalDocument, EmbeddingProvider, IndexerWorker, ProviderError};
 use mcp_memory::config::{Durability, SqliteTuning};
 use mcp_memory::kg::GraphHandle;
-use mcp_memory::types::Entity;
+use mcp_memory::types::EntityInput as Entity;
 use mcp_memory::vector_store::VectorStore;
 use memory_core::jobs::{DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization};
 use uuid::Uuid;
@@ -20,6 +21,23 @@ impl EmbeddingProvider for FixedProvider {
         profile: &IndexProfile,
         documents: &[CanonicalDocument],
     ) -> Result<Vec<Vec<f32>>, ProviderError> {
+        Ok(documents
+            .iter()
+            .map(|_| vec![1.0; profile.dimensions as usize])
+            .collect())
+    }
+}
+
+#[derive(Clone)]
+struct RecordingProvider(Arc<Mutex<Vec<CanonicalDocument>>>);
+
+impl EmbeddingProvider for RecordingProvider {
+    fn embed(
+        &self,
+        profile: &IndexProfile,
+        documents: &[CanonicalDocument],
+    ) -> Result<Vec<Vec<f32>>, ProviderError> {
+        self.0.lock().unwrap().extend_from_slice(documents);
         Ok(documents
             .iter()
             .map(|_| vec![1.0; profile.dimensions as usize])
@@ -88,6 +106,41 @@ fn worker_commits_latest_canonical_revision() {
         .unwrap();
     assert_eq!(row.0, 1);
     assert_eq!(row.1.len(), 8);
+}
+
+#[test]
+fn worker_indexes_observation_bodies_without_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    graph
+        .create_entities(&[Entity {
+            name: "Ada".into(),
+            entity_type: "Person".into(),
+            observations: vec!["first programmer".into()],
+        }])
+        .unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    conn.execute(
+        "UPDATE observation SET occurred_us=123, origin_entity_name='legacy source'",
+        [],
+    )
+    .unwrap();
+    let profile = profile();
+    IndexProfileRegistry::new(&conn)
+        .begin_rebuild(&profile)
+        .unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let worker = IndexerWorker::new(
+        &database,
+        RecordingProvider(Arc::clone(&captured)),
+        Duration::from_secs(5),
+    );
+    assert_eq!(worker.run_once(now_us()).unwrap().committed, 1);
+    let documents = captured.lock().unwrap();
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].observations, ["first programmer"]);
+    assert_eq!(documents[0].text(), "Ada\nPerson\nfirst programmer");
 }
 
 #[test]

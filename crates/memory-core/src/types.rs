@@ -1,11 +1,93 @@
 use serde::{Deserialize, Serialize};
 
+/// Public write DTO. Server-owned metadata is deliberately not accepted here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Entity {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObservationInput {
+    pub body: String,
+    #[serde(default, deserialize_with = "deserialize_occurred_at")]
+    pub occurred_at_us: Option<i64>,
+}
+
+fn deserialize_occurred_at<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i64>, D::Error> {
+    let value = i64::deserialize(deserializer)?;
+    if value < 0 {
+        return Err(serde::de::Error::custom(
+            "occurredAtUs must be non-negative",
+        ));
+    }
+    Ok(Some(value))
+}
+
+impl From<String> for ObservationInput {
+    fn from(body: String) -> Self {
+        Self {
+            body,
+            occurred_at_us: None,
+        }
+    }
+}
+
+impl From<&str> for ObservationInput {
+    fn from(body: &str) -> Self {
+        body.to_owned().into()
+    }
+}
+
+/// Canonical read model. Unknown creation time is reserved for old durable payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Observation {
+    pub body: String,
+    pub created_at_us: Option<i64>,
+    pub occurred_at_us: Option<i64>,
+    pub origin_entity_name: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Observation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Structured {
+            body: String,
+            created_at_us: Option<i64>,
+            occurred_at_us: Option<i64>,
+            origin_entity_name: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Durable {
+            Structured(Structured),
+            Historical(String),
+        }
+        Ok(match Durable::deserialize(deserializer)? {
+            Durable::Structured(value) => Self {
+                body: value.body,
+                created_at_us: value.created_at_us,
+                occurred_at_us: value.occurred_at_us,
+                origin_entity_name: value.origin_entity_name,
+            },
+            Durable::Historical(body) => Self {
+                body,
+                created_at_us: None,
+                occurred_at_us: None,
+                origin_entity_name: None,
+            },
+        })
+    }
+}
+
+pub type EntityInput = Entity<ObservationInput>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Entity<O = Observation> {
     pub name: String,
     #[serde(rename = "entityType")]
     pub entity_type: String,
-    pub observations: Vec<String>,
+    pub observations: Vec<O>,
 }
 
 /// Read model returned by `describe_entity`.
@@ -18,7 +100,7 @@ pub struct EntityDescription {
     pub name: String,
     #[serde(rename = "entityType")]
     pub entity_type: String,
-    pub observations: Vec<String>,
+    pub observations: Vec<Observation>,
     pub relations: Vec<Relation>,
     pub neighbors: Vec<String>,
     pub degree: Degree,

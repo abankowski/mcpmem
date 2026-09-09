@@ -55,6 +55,8 @@ pub struct Config {
     pub enabled_categories: Vec<ToolCategory>,
     /// Runtime roles selected for this process. Defaults to the existing MCP server.
     pub roles: RoleSet,
+    /// MCP-only string observation adapter; deprecated and removed in 7.0.0.
+    pub legacy_observations: bool,
 }
 
 /// Resolve the read-only connection-pool size. `0` means "auto": scale to the
@@ -153,6 +155,12 @@ impl Config {
                 .map_err(|error| MCSError::InvalidParams(error.to_string()))?
         };
 
+        if args.legacy_observations && !roles.roles().contains(&crate::runtime::RuntimeRole::Mcp) {
+            return Err(MCSError::InvalidParams(
+                "--legacy-observations requires the mcp role".into(),
+            ));
+        }
+
         Ok(Config {
             memory_file_path,
             transport: args.transport,
@@ -174,6 +182,7 @@ impl Config {
             code_embedding_dims: args.code_embedding_dims,
             enabled_categories,
             roles,
+            legacy_observations: args.legacy_observations,
         })
     }
 }
@@ -201,6 +210,7 @@ impl Default for Config {
             code_embedding_dims: 768,
             enabled_categories: Vec::new(),
             roles: RoleSet::mcp_only(),
+            legacy_observations: false,
         }
     }
 }

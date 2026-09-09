@@ -604,7 +604,7 @@
       loadObservations(n);
     } else {
       const obs = n.obs || [];
-      obsHtml = obs.length ? obs.map((o) => `<div class="obs">${escapeHtml(o)}</div>`).join("") : `<div class="meta">No observations.</div>`;
+      obsHtml = obs.length ? obs.map((o) => `<div class="obs">${escapeHtml(o.body)}</div>`).join("") : `<div class="meta">No observations.</div>`;
     }
     $("insBody").innerHTML =
       `<span class="pill" style="background:${n.color}">${escapeHtml(n.type || "—")}</span>` +

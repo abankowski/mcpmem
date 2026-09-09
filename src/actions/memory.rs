@@ -89,8 +89,9 @@ pub fn handle_create_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
         .get("entities")
         .ok_or_else(|| MCSError::InvalidParams("Missing 'entities' parameter".into()))?;
 
-    let input_entities: Vec<crate::types::Entity> = serde_json::from_value(entities_val.clone())
-        .map_err(|e| MCSError::InvalidParams(format!("Invalid entity: {e}")))?;
+    let input_entities: Vec<crate::types::EntityInput> =
+        serde_json::from_value(entities_val.clone())
+            .map_err(|e| MCSError::InvalidParams(format!("Invalid entity: {e}")))?;
 
     if input_entities.len() > MAX_ENTITIES_PER_REQUEST {
         return Err(MCSError::InvalidParams(format!(
@@ -106,7 +107,7 @@ pub fn handle_create_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
             )));
         }
         for obs in &entity.observations {
-            validate_observation(obs)?;
+            validate_observation(&obs.body)?;
         }
     }
 
@@ -174,15 +175,12 @@ pub fn handle_add_observations(kg: &GraphHandle, args: Option<&Value>) -> Result
             .and_then(|v| v.as_str())
             .ok_or_else(|| MCSError::InvalidParams("Missing 'entityName' in observation".into()))?;
 
-        let contents: Vec<String> = obs
-            .get("contents")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let contents: Vec<crate::types::ObservationInput> = serde_json::from_value(
+            obs.get("contents")
+                .cloned()
+                .ok_or_else(|| MCSError::InvalidParams("Missing 'contents'".into()))?,
+        )
+        .map_err(|e| MCSError::InvalidParams(format!("Invalid observations: {e}")))?;
 
         validate_name(entity_name)?;
         if contents.len() > MAX_OBSERVATIONS_PER_ENTITY {
@@ -191,7 +189,7 @@ pub fn handle_add_observations(kg: &GraphHandle, args: Option<&Value>) -> Result
             )));
         }
         for content in &contents {
-            validate_observation(content)?;
+            validate_observation(&content.body)?;
         }
 
         updates.push(ObservationUpdate {
@@ -247,20 +245,32 @@ pub fn handle_delete_observations(kg: &GraphHandle, args: Option<&Value>) -> Res
         })?;
 
     let mut updates = Vec::new();
-    for deletion in deletions.iter().take(MAX_NAMES_PER_REQUEST) {
+    if deletions.len() > MAX_NAMES_PER_REQUEST {
+        return Err(MCSError::InvalidParams(format!(
+            "Too many deletions (max {MAX_NAMES_PER_REQUEST})"
+        )));
+    }
+    for deletion in deletions {
         let entity_name = deletion
             .get("entityName")
             .and_then(|v| v.as_str())
             .ok_or_else(|| MCSError::InvalidParams("Missing 'entityName' in deletion".into()))?;
-        let observations: Vec<String> = deletion
-            .get("observations")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let observations: Vec<crate::types::ObservationInput> = serde_json::from_value(
+            deletion
+                .get("observations")
+                .cloned()
+                .ok_or_else(|| MCSError::InvalidParams("Missing 'observations'".into()))?,
+        )
+        .map_err(|e| MCSError::InvalidParams(format!("Invalid observations: {e}")))?;
+        validate_name(entity_name)?;
+        if observations.len() > MAX_OBSERVATIONS_PER_ENTITY {
+            return Err(MCSError::InvalidParams(format!(
+                "Too many observations per entity (max {MAX_OBSERVATIONS_PER_ENTITY})"
+            )));
+        }
+        for observation in &observations {
+            validate_observation(&observation.body)?;
+        }
 
         updates.push(ObservationUpdate {
             entity_name: entity_name.into(),
@@ -501,8 +511,9 @@ pub fn handle_upsert_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
         .get("entities")
         .ok_or_else(|| MCSError::InvalidParams("Missing 'entities' parameter".into()))?;
 
-    let input_entities: Vec<crate::types::Entity> = serde_json::from_value(entities_val.clone())
-        .map_err(|e| MCSError::InvalidParams(format!("Invalid entity: {e}")))?;
+    let input_entities: Vec<crate::types::EntityInput> =
+        serde_json::from_value(entities_val.clone())
+            .map_err(|e| MCSError::InvalidParams(format!("Invalid entity: {e}")))?;
 
     if input_entities.len() > MAX_ENTITIES_PER_REQUEST {
         return Err(MCSError::InvalidParams(format!(
@@ -518,7 +529,7 @@ pub fn handle_upsert_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
             )));
         }
         for obs in &entity.observations {
-            validate_observation(obs)?;
+            validate_observation(&obs.body)?;
         }
     }
 

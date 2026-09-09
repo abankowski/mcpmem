@@ -4,7 +4,7 @@ use memory_core::mutation::{
 };
 use memory_core::storage::{Durability, SqliteTuning};
 use memory_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
-use memory_core::types::{Entity, Relation};
+use memory_core::types::{EntityInput as Entity, Relation};
 use rusqlite::Connection;
 use std::{collections::BTreeSet, num::NonZeroUsize, path::Path};
 
@@ -25,6 +25,21 @@ fn entity(name: &str) -> Entity {
         entity_type: "test".into(),
         observations: vec!["original".into()],
     }
+}
+
+fn assert_original_entity(graph: &GraphHandle, name: &str) {
+    let actual = graph.get_entity(name).unwrap().expect("entity exists");
+    assert_eq!(actual.name, name);
+    assert_eq!(actual.entity_type, "test");
+    assert_eq!(
+        actual
+            .observations
+            .iter()
+            .map(|observation| observation.body.as_str())
+            .collect::<Vec<_>>(),
+        ["original"]
+    );
+    assert!(actual.observations[0].created_at_us.is_some());
 }
 
 fn count(conn: &Connection, table: &str) -> i64 {
@@ -55,8 +70,8 @@ fn graph_bootstrap_precedes_migration_statements() {
     ).unwrap();
     let graph = graph(&path);
     graph.create_entities(&[entity("ready")]).unwrap();
-    assert_eq!(graph.get_entity("ready").unwrap(), Some(entity("ready")));
-    assert_eq!(count(&conn, "schema_migration"), 2);
+    assert_original_entity(&graph, "ready");
+    assert_eq!(count(&conn, "schema_migration"), 3);
 }
 
 #[test]
@@ -88,7 +103,7 @@ fn pending_migrations_roll_back_together_after_later_failure() {
     assert_eq!(pending_tables, 0, "no earlier migration DDL may remain");
     conn.execute_batch("DROP TRIGGER reject_second").unwrap();
     drop(graph(&path));
-    assert_eq!(count(&observer, "schema_migration"), 2);
+    assert_eq!(count(&observer, "schema_migration"), 3);
 }
 
 #[test]
@@ -119,7 +134,7 @@ fn initializer_preserves_legacy_graph_without_migration_ledger() {
     memory_core::schema::initialize_database(&conn).unwrap();
     memory_core::schema::initialize_database(&conn).unwrap();
     let graph = graph(&path);
-    assert_eq!(graph.get_entity("legacy").unwrap(), Some(entity("legacy")));
+    assert_original_entity(&graph, "legacy");
     graph.create_entities(&[entity("new")]).unwrap();
     assert_eq!(count(&conn, "entity"), 2);
     assert_eq!(count(&conn, "observation"), 2);
@@ -157,7 +172,7 @@ fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_t
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(before.len(), 2);
+    assert_eq!(before.len(), 3);
     assert_eq!(
         before[0].1,
         "a48def8b25e9ecf813d3fa27a785893ba5de346a8b82f012cc543af2fecd5af2"
@@ -216,10 +231,7 @@ fn indexer_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
     let graph = graph(&path);
     graph.create_entities(&[entity("retained")]).unwrap();
     assert_eq!(worker.run_once(1).unwrap().claimed, 0);
-    assert_eq!(
-        graph.get_entity("retained").unwrap(),
-        Some(entity("retained"))
-    );
+    assert_original_entity(&graph, "retained");
 }
 
 #[test]
@@ -282,7 +294,14 @@ fn failed_mutation_rolls_back_graph_events_and_jobs() {
     );
     assert!(result.is_err());
     assert_eq!(
-        graph.get_entity("a").unwrap().unwrap().observations,
+        graph
+            .get_entity("a")
+            .unwrap()
+            .unwrap()
+            .observations
+            .iter()
+            .map(|observation| observation.body.as_str())
+            .collect::<Vec<_>>(),
         ["original"]
     );
     assert_eq!(count(&conn, "change_event"), 1);
@@ -305,9 +324,9 @@ fn startup_rejects_changed_migration_and_preserves_legacy_vector_rows() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(versions, [1, 2]);
+    assert_eq!(versions, [1, 2, 3]);
     drop(graph(&path));
-    assert_eq!(count(&conn, "schema_migration"), 2);
+    assert_eq!(count(&conn, "schema_migration"), 3);
     conn.execute("UPDATE schema_migration SET checksum='tampered'", [])
         .unwrap();
     assert!(

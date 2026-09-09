@@ -132,6 +132,10 @@ pub struct Args {
     #[arg(long = "role", value_delimiter = ',', value_name = "ROLE")]
     pub roles: Vec<String>,
 
+    /// Deprecated MCP string observations adapter (6.x only; removed in 7.0.0).
+    #[arg(long)]
+    pub legacy_observations: bool,
+
     /// Bearer token required on the `http` (`Authorization` header) transport.
     /// Overrides `--auth-token-file` and the `MCP_MEMORY_AUTH_TOKEN` env var.
     /// stdio is never authenticated.

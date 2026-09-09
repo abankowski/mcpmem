@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "mcp-memory"
-version = "5.2.1"
+version = "6.0.0"
 edition = "2024"
 authors = ["Piyush"]
 description = "MCP server giving LLM agents persistent memory: a SQLite knowledge graph with FTS5 search, tree-sitter code indexing (10 languages) with semantic code search, and optional vector + hybrid search (usearch HNSW or IVF-Flat) with batch upsert, more-like-this, recommendations, and MMR diversification"
