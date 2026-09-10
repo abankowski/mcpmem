@@ -1300,6 +1300,14 @@ git commit -m "feat: add OAuth storage with digest-only tokens"
 
 ### Task 4: Discovery documents and the 401 challenge
 
+> **Superseded code, 2026-09-10.** Task 4 is complete. Five review rounds
+> reshaped the test fixture and the routes. Every code block in this task is the
+> state before those rounds: it still names `support::oauth_router`,
+> `oauth_router_with`, a positional `HttpState::for_test`, and one
+> protected-resource route. Do not copy from this task. Read
+> `tests/support/mod.rs` and `src/oauth_routes.rs`, and read the frozen-interface
+> rules in Task 5. The steps below stay as the record of what was asked.
+
 **Files:**
 - Create: `crates/mcpmem-oauth/src/metadata.rs`
 - Create: `src/oauth_routes.rs`
