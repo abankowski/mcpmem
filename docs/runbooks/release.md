@@ -39,14 +39,21 @@ that flag and fails when they disagree.
 
 ## Prepare a release
 
-1. Set the new version in all five manifests: `Cargo.toml` and
-   `crates/mcpmem-*/Cargo.toml`. Set the same version in each `path`
-   dependency's `version` field.
-2. Run the gate and the tests locally:
+1. Set the new version with one command. It edits all five `[package]` blocks
+   and every path dependency requirement, refreshes `Cargo.lock`, and runs the
+   gate:
 
    ```sh
-   scripts/check-release-version.sh --registry v1.1.0
+   scripts/set-version.sh 1.1.0
+   ```
+
+   Do not edit the manifests by hand. `v1.0.0-rc.2` failed its release gate
+   because the tag moved and the workspace did not.
+2. Run the tests and the packaging check locally:
+
+   ```sh
    cargo test --workspace --all-targets --locked -- --test-threads=1
+   cargo package -p mcpmem-core --locked
    ```
 
 3. Merge to `main` through a pull request.
