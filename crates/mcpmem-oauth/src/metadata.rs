@@ -6,11 +6,17 @@
 
 use serde_json::{Value, json};
 
-/// RFC 9728 protected resource metadata. `public_url` carries no trailing slash.
-pub fn protected_resource(public_url: &str, scopes: &[&str]) -> Value {
+/// RFC 9728 protected resource metadata.
+///
+/// `resource` is the resource identifier this document describes. RFC 9728
+/// section 3.3 requires it to be identical to the identifier the client built
+/// the request URL from, so the caller derives it from the request and passes
+/// it in; this function never guesses it. `authorization_server` is the issuer
+/// identifier, and carries no trailing slash.
+pub fn protected_resource(resource: &str, authorization_server: &str, scopes: &[&str]) -> Value {
     json!({
-        "resource": format!("{public_url}/mcp"),
-        "authorization_servers": [public_url],
+        "resource": resource,
+        "authorization_servers": [authorization_server],
         "scopes_supported": scopes,
         "bearer_methods_supported": ["header"]
     })

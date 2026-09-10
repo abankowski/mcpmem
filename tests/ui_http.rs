@@ -481,6 +481,26 @@ fn test_ui_graph_requires_graph_read() {
     );
 }
 
+/// The static bearer's scopes and the server's enabled categories are two
+/// lists of the same type, wired side by side in `HttpRunConfig`. Here every
+/// category is enabled, so the viewer's category gate passes, but the
+/// credential holds only `vectors`, so the scope gate must refuse. Swap the two
+/// fields and the credential silently holds every category, and this case
+/// answers 200.
+#[test]
+fn test_ui_graph_honours_static_bearer_scopes_not_enabled_categories() {
+    let srv = spawn_http_server(&["--enable-all", "--static-bearer-scopes", "vectors"], None);
+    let (status, _, body) = get(srv.port, "/ui/graph", None);
+    assert_eq!(
+        status, 403,
+        "a credential without graph-read must be refused: {body}"
+    );
+    assert!(
+        body.contains("does not hold the graph-read scope"),
+        "the refusal must come from the scope gate, not the category gate: {body}"
+    );
+}
+
 #[test]
 fn test_ui_graph_auth_gate() {
     let srv = spawn_http_server(&["--enable-all"], Some("s3cret"));

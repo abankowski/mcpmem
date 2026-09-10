@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Path as UrlPath, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, http::StatusCode};
@@ -50,13 +50,30 @@ impl OauthState {
         db_path: &Path,
         busy_timeout_ms: u64,
     ) -> Result<OauthState> {
+        Self::open_with_clock(
+            config,
+            db_path,
+            busy_timeout_ms,
+            Arc::new(mcpmem_core::events::now_us),
+        )
+    }
+
+    /// Like [`OauthState::open`], but reading `now_us` instead of the wall
+    /// clock. A test that has to observe an expiry injects a clock it can move;
+    /// it cannot sleep for the lifetime of a token.
+    pub fn open_with_clock(
+        config: crate::config::OAuthConfig,
+        db_path: &Path,
+        busy_timeout_ms: u64,
+        now_us: Arc<dyn Fn() -> i64 + Send + Sync>,
+    ) -> Result<OauthState> {
         let conn = rusqlite::Connection::open(db_path).map_err(|e| open_failed(&e))?;
         conn.busy_timeout(Duration::from_millis(busy_timeout_ms))
             .map_err(|e| open_failed(&e))?;
         Ok(OauthState {
             config,
             store: Mutex::new(mcpmem_oauth::store::Store::new(conn)),
-            now_us: Arc::new(mcpmem_core::events::now_us),
+            now_us,
         })
     }
 }
@@ -65,13 +82,23 @@ fn open_failed(e: &rusqlite::Error) -> MCSError {
     MCSError::MemoryError(format!("failed to open the OAuth store: {e}"))
 }
 
-/// Add the two discovery documents. Both answer 404 when OAuth is off, so a
-/// server without OAuth advertises no authorization server at all.
+/// Add the discovery documents.
+///
+/// The protected-resource document is published twice. A client that knows
+/// only the origin fetches the bare path; a client that follows RFC 9728
+/// section 3.1 inserts the well-known suffix between the host and the path of
+/// the resource identifier, and so fetches the suffixed path. Every route
+/// answers 404 when OAuth is off, so a server without OAuth advertises no
+/// authorization server at all.
 pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
     router
         .route(
             "/.well-known/oauth-protected-resource",
             get(protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/{*resource_path}",
+            get(protected_resource_at),
         )
         .route(
             "/.well-known/oauth-authorization-server",
@@ -84,13 +111,63 @@ fn scopes(state: &HttpState) -> Vec<&'static str> {
     state.enabled_categories.iter().map(|c| c.slug()).collect()
 }
 
+/// The scheme and host of `public_url`, without any path prefix. RFC 9728
+/// section 3.1 inserts the well-known suffix between the host and the path, so
+/// the path a client sends back is relative to the origin, not to
+/// `public_url`. `--public-url` is validated as an `https` URL, so the fallback
+/// is unreachable in a running server.
+fn origin(public_url: &str) -> &str {
+    const SCHEME: &str = "https://";
+    let Some(rest) = public_url.strip_prefix(SCHEME) else {
+        return public_url;
+    };
+    match rest.find('/') {
+        Some(i) => &public_url[..SCHEME.len() + i],
+        None => public_url,
+    }
+}
+
+/// `GET /.well-known/oauth-protected-resource` — the document for a client that
+/// starts from the origin. This server protects one resource, its `/mcp`
+/// endpoint, so that is what the document names.
 async fn protected_resource(State(state): State<HttpState>) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let resource = format!("{}/mcp", oauth.config.public_url);
+    document(&state, oauth, &resource)
+}
+
+/// `GET /.well-known/oauth-protected-resource/{*resource_path}` — the RFC 9728
+/// section 3.1 form. The resource identifier is the origin plus the captured
+/// path, and the document returns exactly that, as section 3.3 requires. A
+/// path that names no resource of ours is 404: this server has one, and echoing
+/// any other would advertise a resource it does not protect.
+async fn protected_resource_at(
+    State(state): State<HttpState>,
+    UrlPath(resource_path): UrlPath<String>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let requested = format!(
+        "{}/{}",
+        origin(&oauth.config.public_url),
+        resource_path.trim_end_matches('/')
+    );
+    if requested != format!("{}/mcp", oauth.config.public_url) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    document(&state, oauth, &requested)
+}
+
+/// The protected-resource document for one resource identifier. The caller
+/// establishes that `resource` is one this server protects.
+fn document(state: &HttpState, oauth: &OauthState, resource: &str) -> Response {
     Json(mcpmem_oauth::metadata::protected_resource(
+        resource,
         &oauth.config.public_url,
-        &scopes(&state),
+        &scopes(state),
     ))
     .into_response()
 }
@@ -123,41 +200,59 @@ mod tests {
         }
     }
 
-    /// The store opened beside the graph is usable, and its connection carries
-    /// the busy timeout [`mcpmem_oauth::store::Store::new`] states as its
-    /// precondition. Both fail silently: a store built before the schema is
-    /// migrated only breaks on the first write, and a missing busy timeout only
-    /// shows up as a lost refresh-token replay under concurrency.
+    /// The state must read the clock it was given. A handler that stamps an
+    /// expiry from the wall clock instead cannot be tested: no test can wait
+    /// for a token to age out. The store round-trip itself is covered from the
+    /// outside, in `tests/oauth_discovery.rs`.
     #[test]
-    fn the_store_opens_on_a_migrated_schema_with_a_busy_timeout() {
+    fn the_injected_clock_replaces_the_wall_clock() {
+        const FIXED: i64 = 1_700_000_000_000_000;
         let dir = tempfile::tempdir().unwrap();
-        let state = HttpState::for_test(
-            dir.path().join("t.mcpmem"),
-            Some(config()),
-            ToolCategory::ALL.to_vec(),
-        );
-        let oauth = state.oauth.as_ref().expect("oauth is on");
-        let store = oauth.store.lock();
+        let state = HttpState::for_test(crate::http::TestSetup {
+            db_path: dir.path().join("t.mcpmem"),
+            oauth: Some(config()),
+            bearer_scopes: vec![ToolCategory::GraphRead],
+            enabled_categories: ToolCategory::ALL.to_vec(),
+            now_us: Some(Arc::new(|| FIXED)),
+        });
+        let oauth = state.oauth().expect("oauth is on");
+        assert_eq!((oauth.now_us)(), FIXED);
+    }
 
-        let record = mcpmem_oauth::store::ClientRecord {
-            client_id: "c-1".into(),
-            client_name: "probe".into(),
-            redirect_uris: vec!["https://claude.ai/callback".into()],
-            source: "dcr".into(),
-            created_us: 1,
-            last_used_us: 1,
-        };
-        store.put_client(&record).expect("the oauth tables exist");
+    /// Without an injected clock the state reads the wall clock, which is what
+    /// a running server needs.
+    #[test]
+    fn the_default_clock_is_the_wall_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = HttpState::for_test(crate::http::TestSetup {
+            db_path: dir.path().join("t.mcpmem"),
+            oauth: Some(config()),
+            bearer_scopes: ToolCategory::ALL.to_vec(),
+            enabled_categories: ToolCategory::ALL.to_vec(),
+            now_us: None,
+        });
+        let oauth = state.oauth().expect("oauth is on");
+        let observed = (oauth.now_us)();
+        let wall = mcpmem_core::events::now_us();
+        assert!(
+            (wall - observed).abs() < 10_000_000,
+            "observed {observed}, wall clock {wall}"
+        );
+    }
+
+    /// RFC 9728 section 3.1 puts the well-known suffix between the host and the
+    /// path, so a `--public-url` carrying a path prefix must contribute only its
+    /// origin when a requested path is resolved.
+    #[test]
+    fn the_origin_drops_a_path_prefix() {
+        assert_eq!(origin("https://mem.example.com"), "https://mem.example.com");
         assert_eq!(
-            store.get_client("c-1").expect("read back"),
-            Some(record),
-            "the store must round-trip through the migrated schema"
+            origin("https://mem.example.com/server"),
+            "https://mem.example.com"
         );
-
-        let timeout: i64 = store
-            .connection()
-            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
-            .unwrap();
-        assert!(timeout > 0, "busy_timeout was {timeout}");
+        assert_eq!(
+            origin("https://mem.example.com/a/b"),
+            "https://mem.example.com"
+        );
     }
 }

@@ -1,15 +1,16 @@
 //! Shared fixtures for the OAuth integration tests.
-//!
-//! Every test binary compiles this module, and each one uses a subset of it, so
-//! unused items here are expected rather than dead.
-#![allow(dead_code)]
+
+use std::sync::Arc;
 
 use axum::Router;
 use axum::http::Response;
 use http_body_util::BodyExt;
 use mcpmem::config::OAuthConfig;
+use mcpmem::http::{HttpState, TestSetup};
+use mcpmem::oauth_routes::OauthState;
 use mcpmem::principals::PrincipalEntry;
 use mcpmem::tools::ToolCategory;
+use tempfile::TempDir;
 
 pub const PUBLIC_URL: &str = "https://mem.example.com";
 
@@ -36,36 +37,107 @@ pub fn oauth_config(upstream_issuer: &str) -> OAuthConfig {
     }
 }
 
-/// A router with OAuth on, backed by a fresh temporary database. The directory
-/// is returned so the caller keeps it alive for the length of the test.
-pub async fn oauth_router_with(upstream_issuer: &str) -> (tempfile::TempDir, Router) {
-    let dir = tempfile::tempdir().unwrap();
-    let state = mcpmem::http::HttpState::for_test(
-        dir.path().join("t.mcpmem"),
-        Some(oauth_config(upstream_issuer)),
-        ToolCategory::ALL.to_vec(),
-    );
-    (dir, mcpmem::http::router(state))
+/// The tool-category flags `dispatch_http_body` reads are process-wide atomics
+/// (`src/server.rs`), and building a server publishes them. Hold this lock for
+/// the whole body of any test that reads the flags — one that asserts on
+/// `tools/list` or calls a tool — and of any test that enables something other
+/// than every category. Tests that enable every category need no lock: they
+/// publish the value the readers expect.
+pub async fn category_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
 }
 
-/// A router with OAuth on and an upstream that is never reached.
+/// A router, the state behind it, and the temporary directory holding the
+/// database. Keep the whole struct for the length of the test: dropping it
+/// removes the directory.
+pub struct Server {
+    pub router: Router,
+    pub state: HttpState,
+    dir: TempDir,
+}
+
+impl Server {
+    /// The OAuth state, for a test that inspects the store or the clock.
+    pub const fn oauth(&self) -> &Arc<OauthState> {
+        self.state.oauth().expect("this server has OAuth on")
+    }
+
+    /// Let the directory outlive this handle, and keep only the router. For a
+    /// test that never reads the database again; the operating system removes
+    /// the directory.
+    pub fn keep(self) -> Router {
+        let _ = self.dir.keep();
+        self.router
+    }
+}
+
+/// The two scope lists a server holds. Named fields, because both are
+/// `Vec<ToolCategory>` and nothing else would show which is which.
+pub struct Scopes {
+    /// What the presented credential holds. The `/ui` gate reads these.
+    pub bearer: Vec<ToolCategory>,
+    /// What the server exposes, and so advertises as OAuth scopes.
+    pub enabled: Vec<ToolCategory>,
+}
+
+impl Scopes {
+    /// Every category, on both lists.
+    pub fn all() -> Scopes {
+        Scopes {
+            bearer: ToolCategory::ALL.to_vec(),
+            enabled: ToolCategory::ALL.to_vec(),
+        }
+    }
+}
+
+/// Build a server over a fresh temporary database.
+fn server(oauth: Option<OAuthConfig>, scopes: Scopes) -> Server {
+    let dir = tempfile::tempdir().unwrap();
+    let state = HttpState::for_test(TestSetup {
+        db_path: dir.path().join("t.mcpmem"),
+        oauth,
+        bearer_scopes: scopes.bearer,
+        enabled_categories: scopes.enabled,
+        now_us: None,
+    });
+    Server {
+        router: mcpmem::http::router(state.clone()),
+        state,
+        dir,
+    }
+}
+
+/// OAuth on, every category enabled, and an upstream that is never reached.
+pub async fn oauth_server() -> Server {
+    oauth_server_with("https://idp.invalid").await
+}
+
+/// OAuth on, every category enabled, against the named upstream issuer.
+pub async fn oauth_server_with(upstream_issuer: &str) -> Server {
+    server(Some(oauth_config(upstream_issuer)), Scopes::all())
+}
+
+/// The router of [`oauth_server`], for a test that needs nothing else.
 pub async fn oauth_router() -> Router {
-    let (dir, router) = oauth_router_with("https://idp.invalid").await;
-    // The discovery tests never touch the database after this point, and the
-    // operating system removes the directory.
-    std::mem::forget(dir);
-    router
+    oauth_server().await.keep()
 }
 
-/// A router with OAuth off: no authorization server, and no static token.
-pub async fn open_router() -> (tempfile::TempDir, Router) {
-    let dir = tempfile::tempdir().unwrap();
-    let state = mcpmem::http::HttpState::for_test(
-        dir.path().join("t.mcpmem"),
-        None,
-        ToolCategory::ALL.to_vec(),
-    );
-    (dir, mcpmem::http::router(state))
+/// OAuth on and no tool category enabled: what a bare `--oidc-issuer` with no
+/// `--enable-*` flag produces. Hold [`category_lock`] around this one.
+pub async fn oauth_server_without_categories() -> Server {
+    server(
+        Some(oauth_config("https://idp.invalid")),
+        Scopes {
+            bearer: Vec::new(),
+            enabled: Vec::new(),
+        },
+    )
+}
+
+/// OAuth off and no static token: the fully open server.
+pub async fn open_server() -> Server {
+    server(None, Scopes::all())
 }
 
 pub async fn json(res: Response<axum::body::Body>) -> serde_json::Value {

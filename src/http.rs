@@ -75,45 +75,82 @@ pub struct HttpState {
     pub(crate) oauth: Option<Arc<OauthState>>,
 }
 
+/// What a test wants its [`HttpState`] to hold. Named fields, because
+/// `bearer_scopes` and `enabled_categories` are two lists of one type and a
+/// positional call cannot show which is which.
+#[doc(hidden)]
+pub struct TestSetup {
+    pub db_path: std::path::PathBuf,
+    /// `Some` turns OAuth on for this state.
+    pub oauth: Option<crate::config::OAuthConfig>,
+    /// Scopes the presented credential holds. With no static token configured
+    /// these are the scopes of the anonymous principal an open server
+    /// dispatches with, and the `/ui` gate reads them.
+    pub bearer_scopes: Vec<ToolCategory>,
+    /// Categories this server exposes. These are the advertised OAuth scopes,
+    /// and they publish the process-wide category flags.
+    pub enabled_categories: Vec<ToolCategory>,
+    /// The clock the OAuth state reads. `None` uses the wall clock.
+    pub now_us: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+}
+
 impl HttpState {
-    /// Build a state over a fresh database at `db_path`, for integration tests
-    /// that drive [`router`] with `tower::ServiceExt::oneshot`. Opening the
-    /// graph migrates the schema, which is what the OAuth store needs in place
-    /// before it is built.
-    ///
-    /// The state carries no static bearer token, so the credential under test
-    /// is the OAuth one; the static-token paths run against the real binary in
-    /// `tests/ui_http.rs`. `categories` becomes both the advertised scopes and
-    /// the scopes of the anonymous principal an open server dispatches with.
+    /// The OAuth state, or `None` when OAuth is off. For a test that inspects
+    /// the store or the clock behind a router.
     #[doc(hidden)]
-    pub fn for_test(
-        db_path: impl AsRef<std::path::Path>,
-        oauth: Option<crate::config::OAuthConfig>,
-        categories: Vec<ToolCategory>,
-    ) -> HttpState {
-        let db_path = db_path.as_ref();
-        let tuning = crate::config::SqliteTuning::default();
-        let kg = GraphHandle::new(
+    pub const fn oauth(&self) -> Option<&Arc<OauthState>> {
+        self.oauth.as_ref()
+    }
+
+    /// Build a state over a fresh database, for integration tests that drive
+    /// [`router`] with `tower::ServiceExt::oneshot`.
+    ///
+    /// The graph is opened through [`crate::server::MCPServer::new_kg`], the
+    /// same entry point `src/main.rs` uses. That matters twice: it migrates the
+    /// schema the OAuth store needs, and it publishes the process-wide tool
+    /// category flags that `dispatch_http_body` consults before any scope
+    /// check. Building the graph directly leaves those flags `false`, and every
+    /// `tools/call` through the router then answers `MethodNotFound`.
+    ///
+    /// Those flags are process-wide, so two tests in one binary that need
+    /// different category sets must not run at the same time.
+    ///
+    /// The state carries no static bearer token: the credential under test is
+    /// the OAuth one. The static-token paths run against the real binary in
+    /// `tests/ui_http.rs`.
+    #[doc(hidden)]
+    pub fn for_test(setup: TestSetup) -> HttpState {
+        let TestSetup {
             db_path,
-            crate::config::Durability::Async,
-            tuning,
-            std::num::NonZeroUsize::new(1000).expect("1000 > 0"),
-            2,
-        )
-        .expect("open the test graph");
+            oauth,
+            bearer_scopes,
+            enabled_categories,
+            now_us,
+        } = setup;
+        let config = crate::config::Config {
+            memory_file_path: db_path.to_string_lossy().into_owned(),
+            enabled_categories: enabled_categories.clone(),
+            ..crate::config::Config::default()
+        };
+        let busy_timeout_ms = config.busy_timeout_ms;
+        let kg = crate::server::MCPServer::new_kg(config)
+            .expect("build the test server")
+            .graph();
         let oauth = oauth.map(|config| {
-            Arc::new(
-                OauthState::open(config, db_path, tuning.busy_timeout_ms)
-                    .expect("open the test OAuth store"),
-            )
+            let state = match now_us {
+                Some(clock) => {
+                    OauthState::open_with_clock(config, &db_path, busy_timeout_ms, clock)
+                }
+                None => OauthState::open(config, &db_path, busy_timeout_ms),
+            };
+            Arc::new(state.expect("open the test OAuth store"))
         });
-        let categories: Arc<[ToolCategory]> = Arc::from(categories);
         HttpState {
-            kg: Arc::new(kg),
+            kg,
             vs: None,
             auth_token: None,
-            bearer_scopes: Arc::clone(&categories),
-            enabled_categories: categories,
+            bearer_scopes: Arc::from(bearer_scopes),
+            enabled_categories: Arc::from(enabled_categories),
             oauth,
         }
     }
@@ -257,19 +294,27 @@ fn authorized(state: &HttpState, headers: &HeaderMap) -> bool {
 
 /// The RFC 6750 challenge. With OAuth on it names the resource metadata, so the
 /// client can discover the authorization server. With OAuth off it is bare.
+///
+/// The `scope` parameter is omitted when no category is enabled. RFC 6749
+/// section 3.3, which RFC 6750 section 3 defers to, admits no empty scope
+/// list, and a parser that rejects the malformed parameter discards the whole
+/// header — including the only discovery pointer the client has.
 fn unauthorized(state: &HttpState) -> Response {
     let mut value = String::from("Bearer");
     if let Some(oauth) = state.oauth.as_ref() {
+        value.push_str(&format!(
+            " resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+            oauth.config.public_url
+        ));
         let scope = state
             .enabled_categories
             .iter()
             .map(|c| c.slug())
             .collect::<Vec<_>>()
             .join(" ");
-        value.push_str(&format!(
-            " resource_metadata=\"{}/.well-known/oauth-protected-resource\", scope=\"{scope}\"",
-            oauth.config.public_url
-        ));
+        if !scope.is_empty() {
+            value.push_str(&format!(", scope=\"{scope}\""));
+        }
     }
     (
         StatusCode::UNAUTHORIZED,
@@ -402,13 +447,17 @@ async fn ui_js_handler() -> Response {
 /// whole graph, so it needs both the process-wide category and the
 /// `graph-read` scope on the presented credential. Returns the error
 /// `Response` to send back, or `None` when the request may proceed.
+///
+/// The 401 is [`unauthorized`], the same challenge `/mcp` sends: one server
+/// answers with one shape, and a scripted viewer client can discover the
+/// authorization server from here too.
 fn ui_data_gate(
     state: &HttpState,
     headers: &HeaderMap,
     params: &HashMap<String, String>,
 ) -> Option<Response> {
     if !authorized_ui(state, headers, params.get("token").map(String::as_str)) {
-        return Some((StatusCode::UNAUTHORIZED, "Unauthorized").into_response());
+        return Some(unauthorized(state));
     }
     if !server::graph_read_enabled() {
         return Some(
