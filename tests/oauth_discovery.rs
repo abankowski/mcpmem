@@ -307,21 +307,50 @@ async fn bearer_holds_narrows_the_credential_and_not_the_advertised_scopes() {
 }
 
 /// One `Server` at a time: the guard on the process-wide category flags is not
-/// reentrant, so a test that holds two waits forever. Without the deadline the
-/// harness reports no panic, no message and no test name, and under
-/// `--test-threads=1` the whole binary stalls.
+/// reentrant, so a second one on the same thread would wait forever. That is
+/// the whole failure a hang gives the harness — no panic, no message, no test
+/// name, and under `--test-threads=1` a stalled binary.
 ///
-/// The deadline is named here so the proof costs a second rather than
-/// [`support::GUARD_TIMEOUT`]. The code path is the one every fixture uses.
+/// The detection is holder identity, not a deadline, so it must fire at once. A
+/// deadline long enough to survive a full binary's queueing would take that
+/// long to report, and would also fire on a test that did nothing wrong.
+///
+/// A `#[tokio::test]` drives a current-thread runtime on one libtest thread, so
+/// the spawned task below runs on the thread that already holds the guard: it
+/// is the two-server case, and its panic arrives as a `JoinError`.
 #[tokio::test]
-#[should_panic(expected = "one Server at a time")]
-async fn a_second_server_in_one_test_panics_instead_of_hanging() {
-    let _first = support::oauth_server().await;
-    let _second = support::server_within(
-        std::time::Duration::from_secs(1),
-        None,
-        support::Scopes::all(),
-        None,
-    )
-    .await;
+async fn a_second_server_on_one_thread_panics_at_once() {
+    use std::time::{Duration, Instant};
+
+    let first = support::oauth_server().await;
+
+    let started = Instant::now();
+    let error = tokio::spawn(async {
+        drop(support::oauth_server().await);
+    })
+    .await
+    .expect_err("a second server on this thread must panic");
+    let waited = started.elapsed();
+
+    assert!(error.is_panic(), "the task failed without panicking");
+    let panic = error.into_panic();
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("<not a string>");
+    assert!(
+        message.contains("one Server at a time"),
+        "message was: {message}"
+    );
+    assert!(
+        waited < Duration::from_secs(2),
+        "the panic must not wait out a deadline; it took {waited:?}"
+    );
+
+    // Releasing the first server releases the guard, so the next one is built
+    // without complaint. A holder that is recorded but never cleared would make
+    // every later test on this thread panic instead.
+    drop(first);
+    let _second = support::oauth_server().await;
 }

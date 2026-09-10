@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -146,11 +145,6 @@ impl Server {
             .expect("the router answers every request")
     }
 
-    /// The state the router was built from.
-    pub const fn state(&self) -> &HttpState {
-        &self.state
-    }
-
     /// The OAuth state, for a test that inspects the store or the clock.
     pub const fn oauth(&self) -> &Arc<OauthState> {
         self.state.oauth().expect("this server has OAuth on")
@@ -169,39 +163,47 @@ impl Server {
     }
 }
 
-/// How long a server waits for the category guard before it calls the wait a
-/// deadlock. Generous, because every server in a test binary queues on this one
-/// guard: the bound has to exceed the whole binary's hold time, not one test's.
-pub const GUARD_TIMEOUT: Duration = Duration::from_secs(30);
+/// The thread holding [`CATEGORY_FLAGS`], or `None` when the guard is free.
+///
+/// A `#[tokio::test]` drives its current-thread runtime on one libtest thread,
+/// so an acquisition attempt from a thread that already holds the guard is
+/// exactly the two-server case, and nothing else is. That makes the check
+/// deterministic: no clock, and no false positive from a binary whose tests
+/// queue for a long time.
+static GUARD_HOLDER: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+
+static CATEGORY_FLAGS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn holder() -> std::sync::MutexGuard<'static, Option<std::thread::ThreadId>> {
+    GUARD_HOLDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        // Before `categories` drops, so the guard is never free while it is
+        // still recorded as held.
+        *holder() = None;
+    }
+}
 
 /// Build a server over a fresh temporary database. `clock` replaces the wall
 /// clock when given.
+///
+/// Waiting for another test's server is normal and unbounded: every server in a
+/// binary serialises on the category guard. Waiting for your own is a deadlock,
+/// and panics here.
 pub async fn server(oauth: Option<OAuthConfig>, scopes: Scopes, clock: Option<Clock>) -> Server {
-    server_within(GUARD_TIMEOUT, oauth, scopes, clock).await
-}
-
-/// [`server`], with the guard deadline named. Only the test that proves the
-/// deadline fires passes anything but [`GUARD_TIMEOUT`]: a short deadline turns
-/// ordinary queueing into a failure.
-pub async fn server_within(
-    guard_timeout: Duration,
-    oauth: Option<OAuthConfig>,
-    scopes: Scopes,
-    clock: Option<Clock>,
-) -> Server {
-    static CATEGORY_FLAGS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    // A hang here is the worst failure the harness can report: no panic, no
-    // message, no test name, and under `--test-threads=1` a stalled binary. The
-    // deadline turns it into a named panic.
-    let Ok(categories) = tokio::time::timeout(guard_timeout, CATEGORY_FLAGS.lock()).await else {
-        panic!(
-            "one Server at a time: waited {:?} for the tool-category guard. \
-             The guard is not reentrant, so a test holding two Server values \
-             waits forever. Drop the first before you build the second, or \
-             split the test in two.",
-            guard_timeout
-        );
-    };
+    assert!(
+        *holder() != Some(std::thread::current().id()),
+        "one Server at a time: this thread already holds the tool-category \
+         guard. The guard is not reentrant, so a test holding two Server \
+         values waits forever. Drop the first before you build the second, or \
+         split the test in two."
+    );
+    let categories = CATEGORY_FLAGS.lock().await;
+    *holder() = Some(std::thread::current().id());
 
     let dir = tempfile::tempdir().unwrap();
     let state = HttpState::for_test(TestSetup {
