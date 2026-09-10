@@ -49,6 +49,13 @@ mcpmem-indexer = { path = "crates/mcpmem-indexer", version = "1.0.0-rc.4", optio
 mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.0-rc.4", optional = true }
 mcpmem-oauth = { path = "crates/mcpmem-oauth", version = "1.0.0-rc.4" }
 uuid = { version = "1" }
+# Percent-encoding, for the two places the OAuth routes meet a query string:
+# parsing the consent form body (which repeats `scope`, so no `Deserialize`
+# shape fits it) and building the redirect back to the client. It arrives with
+# the `oauth` feature and with nothing else — a graph-only build has no
+# authorization endpoint to encode for. `url` carries no HTTP client, so the
+# `.github/workflows/ci.yml` guard on that build is unaffected.
+url = { version = "2", optional = true }
 
 # --- Code-symbol indexing (feature = "code") ---------------------------------
 # Tree-sitter parsing + the `tags` extractor drive the code knowledge graph.
@@ -82,7 +89,7 @@ bedrock = ["indexer", "mcpmem-indexer/bedrock"]
 # green: a forwarded feature is dropped by `--no-default-features`, and the
 # HTTP client goes with it. A graph-only build serves no OAuth login, which is
 # the intended meaning.
-oauth = ["mcpmem-oauth/upstream"]
+oauth = ["mcpmem-oauth/upstream", "dep:url"]
 # Tree-sitter code-symbol indexing: the `code_*` MCP tools + indexer.
 code = [
     "dep:tree-sitter",

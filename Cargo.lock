@@ -2029,6 +2029,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-tags",
  "tree-sitter-typescript",
+ "url",
  "usearch",
  "uuid",
  "zerocopy",

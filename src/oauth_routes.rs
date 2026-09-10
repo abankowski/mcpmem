@@ -169,9 +169,10 @@ fn open_failed(e: &rusqlite::Error) -> MCSError {
 /// route answers 404 when OAuth is off, so a server without OAuth advertises no
 /// authorization server at all.
 ///
-/// The two upstream routes are absent from a build without the `oauth`
+/// The three login routes are absent from a build without the `oauth`
 /// feature, and that is their intended meaning: such a build carries no HTTP
-/// client, so it can reach no OpenID Connect provider and can serve no login.
+/// client, so it can reach no OpenID Connect provider, can serve no login, and
+/// so has nothing to ask a human to consent to.
 pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
     let router = router
         .route(
@@ -194,7 +195,8 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
     #[cfg(feature = "oauth")]
     let router = router
         .route("/oauth/authorize", get(authorize))
-        .route("/oauth/callback", get(callback));
+        .route("/oauth/callback", get(callback))
+        .route("/oauth/consent", post(consent));
     router
 }
 
@@ -596,8 +598,9 @@ async fn finish_login(
     let now_us = (oauth.now_us)();
     // Taken, not read: the row is consumed here whatever happens next, so no
     // second exchange is ever attempted for one login. A login that reaches
-    // consent is written back below, with the human attached, and that is the
-    // row Task 7 consumes.
+    // consent is written back below, with the human attached and its scopes
+    // narrowed to what that human may be offered, and that is the row
+    // `POST /oauth/consent` consumes.
     let login = oauth
         .with_store(|store| store.take_login(login_state, now_us))
         .map_err(|e| format!("the store refused to read the login: {e}"))?
@@ -628,11 +631,31 @@ async fn finish_login(
         .map_err(|e| e.to_string())?;
 
     let principal = principal_of(oauth, &claims)?;
-    let page = consent_page(&login, &principal);
+    // The offered set is decided here, once, because this is where the human
+    // becomes known. It is stored on the login row, so the set the page shows
+    // and the set `mcpmem_oauth::consent::approve` validates against are one
+    // value that cannot drift apart.
+    let offered = mcpmem_oauth::consent::offered(&login.scopes, &principal.scope_set());
+    if offered.is_empty() {
+        // Nothing to consent to. This is a refusal of the login, and it gets
+        // the one page every refusal here gets: whether a named human holds a
+        // given scope is not a question an anonymous caller may ask.
+        return Err(format!(
+            "{} holds none of the requested scopes",
+            principal.name
+        ));
+    }
+    let client = oauth
+        .with_store(|store| store.get_client(&login.client_id))
+        .map_err(|e| format!("the store refused to read the client: {e}"))?
+        .ok_or_else(|| "the client of this login is no longer registered".to_owned())?;
+
+    let page = consent_page(&login, &client, principal, &offered);
     oauth
         .with_store(|store| {
             store.put_login(&LoginRecord {
-                principal: Some(principal),
+                principal: Some(principal.name.clone()),
+                scopes: offered,
                 ..login
             })
         })
@@ -640,22 +663,25 @@ async fn finish_login(
     Ok(page)
 }
 
-/// The name of the allowed human this identity belongs to.
+/// The allowed human this identity belongs to.
 ///
 /// The match is on `iss` and `sub` together. `sub` alone would let a second
 /// provider — one an operator added later, or one an attacker stood up —
 /// mint a subject that names somebody here.
+///
+/// The whole entry comes back, not the name alone: the consent page needs the
+/// label and the offered set needs the scopes, and a second lookup for each
+/// could find a different entry from the one that admitted the login.
 #[cfg(feature = "oauth")]
-fn principal_of(
-    oauth: &OauthState,
+fn principal_of<'a>(
+    oauth: &'a OauthState,
     claims: &IdentityClaims,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<&'a crate::principals::PrincipalEntry, String> {
     oauth
         .config
         .principals
         .iter()
         .find(|p| p.key() == (claims.iss.as_str(), claims.sub.as_str()))
-        .map(|p| p.name.clone())
         .ok_or_else(|| {
             format!(
                 "no principal is registered for {} {}",
@@ -704,54 +730,217 @@ fn login_refused() -> Response {
         .into_response()
 }
 
-/// What the human sees once the provider has vouched for them.
+/// What the human sees once the provider has vouched for them: the consent
+/// form, and the values `POST /oauth/consent` needs back.
 ///
-/// Task 7 replaces the body of this page with the consent form and its
-/// `POST /oauth/consent` target. Until then the page reports the state the
-/// login is in, which is exactly where the flow stops today: the human is
-/// known, the request is recorded, and nothing has been granted.
+/// The rendering, and every escape in it, lives in
+/// [`mcpmem_oauth::consent::page`]. Nothing here formats markup: the client
+/// name comes from an unauthenticated registration request, and one escaping
+/// rule in one place is the only way that stays true.
+///
+/// `csrf` goes to the human and comes back on the form. It is bound to this
+/// login and single-use, because approval consumes the login row.
 #[cfg(feature = "oauth")]
-fn consent_page(login: &LoginRecord, principal: &str) -> Response {
-    let scopes = if login.scopes.is_empty() {
-        "no scope".to_owned()
-    } else {
-        login.scopes.join(", ")
-    };
+fn consent_page(
+    login: &LoginRecord,
+    client: &mcpmem_oauth::store::ClientRecord,
+    principal: &crate::principals::PrincipalEntry,
+    offered: &[String],
+) -> Response {
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        format!(
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-             <title>Authorize</title></head><body>\
-             <h1>Signed in</h1>\
-             <p>You are signed in as {}.</p>\
-             <p>{} is asking for {}.</p>\
-             </body></html>",
-            escape(principal),
-            escape(&login.client_id),
-            escape(&scopes),
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // A consent form is a decision about one login. A cached copy
+            // would carry a token that the first approval has already spent.
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        mcpmem_oauth::consent::page(
+            &client.client_name,
+            principal.label.as_deref().unwrap_or(&principal.name),
+            offered,
+            &login.csrf,
+            &login.state,
         ),
     )
         .into_response()
 }
 
-/// The five characters that would otherwise let a value chosen by a client —
-/// a `client_id`, which on the metadata-document path is a URL the client
-/// published — leave the text of this page and become markup in it.
+/// What a consent form may send.
+///
+/// The body is parsed as pairs rather than deserialized into a shape: `scope`
+/// repeats once per ticked box, and no `Deserialize` implementation here
+/// collects a repeated key into a list. The pairs are read once, into this.
 #[cfg(feature = "oauth")]
-fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
+struct ConsentForm {
+    csrf: Option<String>,
+    state: Option<String>,
+    scopes: Vec<String>,
+    deny: bool,
+    /// The body carried more scopes than [`MAX_APPROVED_SCOPES`]. Recorded
+    /// rather than acted on here, so the parser has one job and the refusal
+    /// stays with every other refusal.
+    too_many_scopes: bool,
+}
+
+/// The most scopes one consent form may carry.
+///
+/// The offered set is at most one slug per tool category, so a form ticking
+/// every box is far below this. The cap is on the size of the list a crafted
+/// body can make this server allocate and then compare, for the same reason
+/// [`MAX_REQUESTED_SCOPES`] exists: a rate limit bounds how many requests
+/// arrive, never how large one is.
+///
+/// Reaching it is a refusal, not a truncation. Truncating would answer a
+/// crafted body with a grant the human never saw a form for, and silence is
+/// the wrong answer to a request this server did not honour in full.
+#[cfg(feature = "oauth")]
+const MAX_APPROVED_SCOPES: usize = 16;
+
+#[cfg(feature = "oauth")]
+fn parse_consent_form(body: &[u8]) -> ConsentForm {
+    let mut form = ConsentForm {
+        csrf: None,
+        state: None,
+        scopes: Vec::new(),
+        deny: false,
+        too_many_scopes: false,
+    };
+    for (key, value) in url::form_urlencoded::parse(body) {
+        match key.as_ref() {
+            "csrf" => form.csrf = Some(value.into_owned()),
+            "state" => form.state = Some(value.into_owned()),
+            "scope" => {
+                if form.scopes.len() < MAX_APPROVED_SCOPES {
+                    form.scopes.push(value.into_owned());
+                } else {
+                    form.too_many_scopes = true;
+                }
+            }
+            // The Deny button carries a value; a form with no button pressed
+            // carries neither, and is an approval of whatever was ticked.
+            "deny" => form.deny = true,
+            _ => {}
         }
     }
-    out
+    form
+}
+
+/// `POST /oauth/consent` — the human's decision.
+///
+/// This is the only place an authorization code is minted, and the only place
+/// this server redirects to a client. That redirect is safe because the
+/// `redirect_uri` is not in this request: it comes from the login row, where
+/// `GET /oauth/authorize` put it after matching it against the client's
+/// registered list.
+///
+/// **A refusal is never a redirect.** A caller who fails the token check has
+/// not been shown to hold this login, and sending them anywhere — even to a
+/// registered URI — would answer a question about somebody else's session.
+#[cfg(feature = "oauth")]
+async fn consent(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let form = parse_consent_form(&body);
+    if form.too_many_scopes {
+        return refused("too many scopes");
+    }
+    let (Some(csrf), Some(login_state)) = (form.csrf, form.state) else {
+        return refused("the consent form needs a state and a csrf token");
+    };
+
+    let now_us = (oauth.now_us)();
+    let iss = oauth.config.public_url.clone();
+    if form.deny {
+        return match oauth
+            .with_store(|store| mcpmem_oauth::consent::deny(store, &login_state, &csrf, now_us))
+        {
+            Ok(d) => client_redirect(
+                &d.redirect_uri,
+                &[
+                    ("error", "access_denied"),
+                    ("error_description", "the human refused this request"),
+                ],
+                d.client_state.as_deref(),
+                &iss,
+            ),
+            Err(e) => consent_refused(&e),
+        };
+    }
+    match oauth.with_store(|store| {
+        mcpmem_oauth::consent::approve(store, &login_state, &csrf, &form.scopes, now_us)
+    }) {
+        Ok(a) => client_redirect(
+            &a.redirect_uri,
+            &[("code", a.code.as_str())],
+            a.client_state.as_deref(),
+            &iss,
+        ),
+        Err(e) => consent_refused(&e),
+    }
+}
+
+/// The answer to a decision this server did not accept.
+///
+/// The match is exhaustive on purpose: a new refusal must name its own status,
+/// and 400 is not a safe default for one that means *you are not the party
+/// holding this login*.
+#[cfg(feature = "oauth")]
+fn consent_refused(e: &mcpmem_oauth::consent::ConsentError) -> Response {
+    use mcpmem_oauth::consent::ConsentError;
+    match e {
+        // 403, not 400: the request was well formed and this caller is not
+        // the one the form was handed to.
+        ConsentError::BadCsrf => (
+            StatusCode::FORBIDDEN,
+            "this consent form does not belong to a login in flight",
+        )
+            .into_response(),
+        ConsentError::UnknownLogin
+        | ConsentError::NotAuthenticated
+        | ConsentError::NotOffered
+        | ConsentError::NothingApproved => (
+            StatusCode::BAD_REQUEST,
+            "this consent could not be recorded",
+        )
+            .into_response(),
+        ConsentError::Store(inner) => {
+            tracing::error!(error = %inner, "the OAuth store refused to record a consent");
+            server_error()
+        }
+    }
+}
+
+/// Redirect to the client, carrying `params`, the client's own state when it
+/// sent one, and this server's issuer identifier.
+///
+/// `iss` is RFC 9207: a client with more than one authorization server
+/// configured must be able to tell which one answered, or a code from a
+/// server the attacker controls can be delivered as though it came from this
+/// one. It is on every redirect, including a refusal.
+///
+/// `base` is a registered redirect URI, so it carries no fragment
+/// (`mcpmem_oauth::registration`) and appending a query is safe. It may carry
+/// a query of its own, which is legal and must be kept.
+#[cfg(feature = "oauth")]
+fn client_redirect(
+    base: &str,
+    params: &[(&str, &str)],
+    client_state: Option<&str>,
+    iss: &str,
+) -> Response {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in params {
+        query.append_pair(key, value);
+    }
+    if let Some(client_state) = client_state {
+        query.append_pair("state", client_state);
+    }
+    query.append_pair("iss", iss);
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let location = format!("{base}{separator}{}", query.finish());
+    (StatusCode::FOUND, [(header::LOCATION, location)]).into_response()
 }
 
 #[cfg(test)]

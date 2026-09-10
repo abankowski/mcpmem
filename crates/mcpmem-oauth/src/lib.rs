@@ -3,6 +3,10 @@
 //! `mcpmem` issues its own tokens. An upstream OpenID Connect provider only
 //! authenticates the human. Tokens are opaque; the database holds their digest.
 
+/// The consent page and the authorization code it produces. No HTTP and no
+/// template engine: the page is two compiled-in files and one substitution
+/// pass, so a build without an HTTP client still carries the whole decision.
+pub mod consent;
 pub mod metadata;
 pub mod registration;
 pub mod store;

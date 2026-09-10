@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Authorize {{client_name}}</title>
+<style>
+:root { color-scheme: light dark; }
+body {
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  margin: 0; display: flex; justify-content: center; padding: 3rem 1rem;
+}
+main { max-width: 32rem; width: 100%; }
+h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+.who { opacity: 0.75; font-size: 0.9rem; }
+fieldset { border: 1px solid currentColor; border-radius: 6px; margin: 1.5rem 0; padding: 1rem; }
+legend { padding: 0 0.4rem; font-weight: 600; }
+.scope { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.25rem 0; }
+.scope code { font-size: 0.95rem; }
+.buttons { display: flex; gap: 0.75rem; }
+button { font: inherit; padding: 0.5rem 1.25rem; border-radius: 6px; cursor: pointer; }
+button[name="approve"] { font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Authorize {{client_name}}</h1>
+<p><strong>{{client_name}}</strong> asks to use your memory graph on your behalf.</p>
+<p class="who">You are signed in as {{principal_label}}.</p>
+<!--
+  The action is relative on purpose. This page is served from
+  `GET /oauth/callback`, so `consent` resolves to `/oauth/consent` at the same
+  prefix — which is what a server published under a path prefix needs, and
+  what an absolute `/oauth/consent` would get wrong behind a stripping proxy.
+-->
+<form method="post" action="consent">
+<input type="hidden" name="csrf" value="{{csrf}}">
+<input type="hidden" name="state" value="{{state}}">
+<fieldset>
+<legend>Grant only what it needs</legend>
+{{scopes}}
+</fieldset>
+<div class="buttons">
+<button type="submit" name="approve" value="1">Approve</button>
+<button type="submit" name="deny" value="1">Deny</button>
+</div>
+</form>
+</main>
+</body>
+</html>
