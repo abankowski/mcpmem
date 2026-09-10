@@ -907,7 +907,9 @@ impl Store {
 
     pub fn put_login(&self, l: &LoginRecord) -> Result<()>;
     pub fn take_login(&self, state: &str, now_us: i64) -> Result<Option<LoginRecord>>;
-    pub fn set_login_principal(&self, state: &str, principal: &str) -> Result<()>;
+    // `set_login_principal` was deleted in Task 6: the callback consumes the
+    // login row and writes it back, so the method had no caller. Task 7 adds it
+    // again only with a caller.
 
     pub fn put_code(&self, code: &str, g: &CodeGrant,
                     created_us: i64, expires_us: i64) -> Result<()>;
