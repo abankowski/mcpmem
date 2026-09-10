@@ -83,11 +83,14 @@ pub struct IdpBehaviour {
     /// The `aud` claim. `None` is [`AUDIENCE`].
     pub audience: Option<String>,
     /// A second `aud` value. With it the claim is an array, which is the shape
-    /// `jsonwebtoken` tests as an intersection rather than an equality, and so
-    /// the shape that needs `azp`.
+    /// `jsonwebtoken` tests as an intersection rather than an equality — so it
+    /// passes that layer, and `mcpmem_oauth::upstream` refuses it: OpenID
+    /// Connect Core section 3.1.3.7 item 3 is a MUST that no audience this
+    /// client does not trust may appear.
     pub second_audience: Option<String>,
-    /// The `azp` claim. OpenID Connect Core section 3.1.3.7 requires it to
-    /// equal the client identifier when `aud` names more than one party.
+    /// The `azp` claim. Item 4 is a SHOULD to validate it and item 5 a MAY to
+    /// compare it with the client identifier. It is not what saves an
+    /// untrusted second audience — nothing does.
     pub azp: Option<String>,
     /// The `nonce` claim. `None` echoes the nonce of the authorization
     /// request, and is absent when no authorization request arrived.

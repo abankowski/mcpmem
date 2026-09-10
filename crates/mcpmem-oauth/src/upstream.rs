@@ -56,10 +56,15 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// The claim failures are separate variants rather than one `InvalidToken`
 /// because each one means something different to the operator reading the log:
-/// [`UpstreamError::Audience`] is a misconfigured client identifier,
-/// [`UpstreamError::Nonce`] is a replayed or crossed login, and
-/// [`UpstreamError::Signature`] is a forgery. None of them reaches the human,
-/// whose page says only that the login failed.
+/// [`UpstreamError::Audience`] is a token this client is not the party for —
+/// either a misconfigured client identifier here, or a token minted for
+/// somebody else and presented here — [`UpstreamError::Nonce`] is a replayed
+/// or crossed login, and [`UpstreamError::Signature`] is a forgery. None of
+/// them reaches the human, whose page says only that the login failed.
+///
+/// Two variants carry a reason as well as a name. `Audience` and `KeyMismatch`
+/// are each reached by more than one check, and the reason is what tells an
+/// operator — and a test — which one refused the token.
 #[derive(Debug, Error)]
 pub enum UpstreamError {
     #[error("the provider could not be reached: {0}")]
@@ -76,8 +81,8 @@ pub enum UpstreamError {
     KeyMismatch(String),
     #[error("the identity token does not carry the provider's signature")]
     Signature,
-    #[error("the identity token was issued for another audience")]
-    Audience,
+    #[error("the identity token was issued for another audience: {0}")]
+    Audience(String),
     #[error("the identity token names another issuer")]
     Issuer,
     #[error("the identity token has expired")]
@@ -115,8 +120,14 @@ pub struct IdentityClaims {
 
 /// The `aud` claim, which RFC 7519 section 4.1.3 allows in two shapes: one
 /// party as a string, or several as an array.
+///
+/// `#[non_exhaustive]` because this is a published crate: a third shape would
+/// otherwise be a breaking change for every caller that matches on it. Nothing
+/// needs to match on it anyway — [`Audience::all`] hands out every party in
+/// one slice.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum Audience {
     One(String),
     Many(Vec<String>),
@@ -393,15 +404,24 @@ impl Provider {
             .map_err(|e| claim_error(&e))?
             .claims;
         // `jsonwebtoken` tests the audience as a non-empty intersection, not
-        // as an equality, so `set_audience` above accepts a token whose `aud`
-        // names this client *and* an attacker's client. OpenID Connect Core
-        // section 3.1.3.7 item 3 is a MUST that it does not meet: a token
-        // carrying an audience this client does not trust must be rejected.
-        // This server trusts exactly one audience, its own client identifier,
-        // so the rule is that every party named is that one.
+        // as an equality, so `set_audience` above refuses a token that names
+        // this client nowhere, and accepts one that names this client *and* an
+        // attacker's client. OpenID Connect Core section 3.1.3.7 item 3 is a
+        // MUST that the second half does not meet: a token carrying an
+        // audience this client does not trust must be rejected. This server
+        // trusts exactly one audience, its own client identifier, so the rule
+        // here is that every party named is that one.
+        //
+        // The rule subsumes `set_audience` — a token every one of whose
+        // parties is this client necessarily intersects with it — so the two
+        // layers are told apart by their reason and by nothing else. Keep the
+        // three strings distinct: each one is what a test asserts to say which
+        // layer refused, and what an operator reads in the log.
         let audiences = claims.aud.all();
         if audiences.is_empty() || audiences.iter().any(|party| party != client_id) {
-            return Err(UpstreamError::Audience);
+            return Err(UpstreamError::Audience(
+                "the audience names a party this client does not trust".to_owned(),
+            ));
         }
         // Item 4 is a SHOULD and item 5 a MAY. Redundant with the rule above
         // for a token that reaches here — one audience, and it is this client
@@ -411,7 +431,9 @@ impl Provider {
         // own: the fact reported and the operator's remedy are the same, which
         // is what this error type's own doc says a variant is for.
         if claims.azp.as_deref().is_some_and(|azp| azp != client_id) {
-            return Err(UpstreamError::Audience);
+            return Err(UpstreamError::Audience(
+                "the authorized party is another client".to_owned(),
+            ));
         }
         if claims.nonce.as_deref() != Some(expected_nonce) {
             return Err(UpstreamError::Nonce);
@@ -528,16 +550,27 @@ fn decoding_key(
 ///
 /// The match names each kind it reports rather than falling through to one
 /// message, because [`UpstreamError::Signature`] and [`UpstreamError::Audience`]
-/// send an operator to two different places. `InvalidAlgorithm` is the other
-/// half of the algorithm-confusion refusal: it fires when the key named an
-/// `alg` and the token's header named a different one, which is the same
-/// disagreement [`decoding_key`] reports when the key named none.
+/// send an operator to two different places.
+///
+/// Two of the reasons here name a layer rather than restate a variant, because
+/// `Provider::verify` reaches the same variant by another route:
+///
+/// - `InvalidAudience` is the library's intersection test, which refuses a
+///   token that names this client nowhere. The local rule refuses one that
+///   names this client *and* somebody else, and says so differently.
+/// - `InvalidAlgorithm` is the library's algorithm check, raised in two places
+///   — the token header's algorithm is not among the validation algorithms,
+///   and the key's family does not match one of them. Either way it is the
+///   same disagreement [`decoding_key`] reports when the key names no `alg`,
+///   and the two are told apart by their text.
 fn claim_error(e: &jsonwebtoken::errors::Error) -> UpstreamError {
     use jsonwebtoken::errors::ErrorKind;
     match e.kind() {
         ErrorKind::InvalidSignature => UpstreamError::Signature,
         ErrorKind::ExpiredSignature => UpstreamError::Expired,
-        ErrorKind::InvalidAudience => UpstreamError::Audience,
+        ErrorKind::InvalidAudience => {
+            UpstreamError::Audience("the audience does not name this client".to_owned())
+        }
         ErrorKind::InvalidIssuer => UpstreamError::Issuer,
         ErrorKind::InvalidAlgorithm => {
             UpstreamError::KeyMismatch("the token header names another algorithm".to_owned())

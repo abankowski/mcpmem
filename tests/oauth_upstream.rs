@@ -100,7 +100,15 @@ async fn an_identity_token_with_the_wrong_audience_is_refused() {
         .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
         .await
         .unwrap_err();
-    assert!(matches!(err, UpstreamError::Audience), "was: {err:?}");
+    // The reason names the layer. This token names this client nowhere, so
+    // `jsonwebtoken`'s intersection test refuses it before the local rule
+    // runs — and the local rule would refuse it too, which is exactly why the
+    // variant alone cannot say which one did.
+    assert!(
+        matches!(&err, UpstreamError::Audience(reason)
+                 if reason == "the audience does not name this client"),
+        "was: {err:?}"
+    );
 }
 
 /// `--oidc-issuer` is normalized without a trailing slash, and several large
@@ -336,9 +344,10 @@ async fn an_hmac_header_against_a_key_that_names_its_algorithm_is_refused() {
         .await
         .unwrap_err();
     // The reason, not only the variant. Two independent layers refuse this
-    // token with `KeyMismatch`, and only their text tells them apart: this is
-    // `jsonwebtoken`'s own key-family check, reached because the key names
-    // `ES256` and the header names something else.
+    // token with `KeyMismatch`, and only their text tells them apart. This is
+    // `jsonwebtoken`: the key names `ES256`, so its key-family loop passes and
+    // the next check fires — the header's `HS256` is not among the validation
+    // algorithms (`decoding.rs:228`).
     assert!(
         matches!(&err, UpstreamError::KeyMismatch(reason)
                  if reason == "the token header names another algorithm"),
@@ -418,7 +427,13 @@ async fn a_token_naming_an_audience_this_client_does_not_trust_is_refused() {
         .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
         .await
         .unwrap_err();
-    assert!(matches!(err, UpstreamError::Audience), "was: {err:?}");
+    // The local rule, not the library's: this token does name this client, so
+    // the intersection test passes it through.
+    assert!(
+        matches!(&err, UpstreamError::Audience(reason)
+                 if reason == "the audience names a party this client does not trust"),
+        "was: {err:?}"
+    );
 }
 
 /// `azp` naming this client does not rescue an untrusted second audience. The
@@ -440,7 +455,13 @@ async fn a_second_audience_is_refused_even_when_azp_names_this_client() {
         .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
         .await
         .unwrap_err();
-    assert!(matches!(err, UpstreamError::Audience), "was: {err:?}");
+    // Still the local rule. A correct `azp` is checked after it and cannot be
+    // reached, which is what "does not rescue" means here.
+    assert!(
+        matches!(&err, UpstreamError::Audience(reason)
+                 if reason == "the audience names a party this client does not trust"),
+        "was: {err:?}"
+    );
 }
 
 /// The `azp` check on its own. One audience, this client's, so the audience
@@ -462,7 +483,12 @@ async fn a_token_authorized_for_another_party_is_refused() {
         .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
         .await
         .unwrap_err();
-    assert!(matches!(err, UpstreamError::Audience), "was: {err:?}");
+    // The third layer, and the only one this token reaches.
+    assert!(
+        matches!(&err, UpstreamError::Audience(reason)
+                 if reason == "the authorized party is another client"),
+        "was: {err:?}"
+    );
 }
 
 // ── The two routes ──────────────────────────────────────────────────────────
