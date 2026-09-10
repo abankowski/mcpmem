@@ -1055,24 +1055,33 @@ Expected: the table does not exist, or the count is 3.
 ```toml
 [package]
 name = "mcpmem-oauth"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "1.0.0-rc.4"
+edition = "2024"
+license = "Apache-2.0"
+description = "OAuth 2.1 authorization server for the mcpmem MCP server."
+repository = "https://github.com/abankowski/mcpmem"
 
 [dependencies]
-mcpmem-core = { path = "../mcpmem-core" }
-rusqlite = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
+mcpmem-core = { path = "../mcpmem-core", version = "1.0.0-rc.4" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.2"
 subtle = "2.6"
-thiserror = { workspace = true }
-tracing = { workspace = true }
+thiserror = "2"
+tracing = "0.1"
+
+[lints]
+workspace = true
 ```
 
-Use `{ workspace = true }` only for keys the root `Cargo.toml` already declares in `[workspace.dependencies]`. Read the root file first and copy the exact spelling that the other crates use.
+This repository has no `[workspace.dependencies]` table. Each crate states its
+own versions. The manifest above copies the spelling of
+`crates/mcpmem-webhook/Cargo.toml`. Match the `version` field to the version in
+the root `Cargo.toml`, and keep the `[lints] workspace = true` block, which every
+crate here carries.
 
 Add `"crates/mcpmem-oauth"` to the workspace members at `Cargo.toml:2`.
 
