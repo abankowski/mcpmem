@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# A newer push to the same ref supersedes this run. Without this, every push
+# waits behind the run it replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -14,9 +20,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # An invalid workflow file otherwise fails as a run with no logs, which
+      # names no cause. This step names it.
+      - name: Lint workflows
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # After the toolchain: the cache key includes the rustc version.
+      - uses: Swatinem/rust-cache@v2
       - name: Workspace versions agree and are valid semver
         run: scripts/check-release-version.sh
       - name: Check formatting
