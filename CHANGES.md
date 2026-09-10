@@ -1,0 +1,244 @@
+# Changes
+
+`mcpmem` 1.0.0 is the first release of this project. It starts from
+[`corporatepiyush/mcp-memory`](https://github.com/corporatepiyush/mcp-memory)
+version 5.2.1, commit `d6fe34b`. The license stays Apache-2.0, and
+[`NOTICE`](NOTICE) records the derivation.
+
+This entry lists every change since that snapshot. The version line restarts at
+1.0.0, because the upstream crate name belongs to another author.
+
+## 1.0.0 — 2026-09-10
+
+### Breaking changes
+
+- **An observation is an object, not a string.** Every read and every mutation
+  result returns `{ body, createdAtUs, occurredAtUs, originEntityName }`.
+  `create_entities`, `upsert_entities`, `add_observations` and
+  `delete_observations` accept `{ body, occurredAtUs? }`. The boundary denies an
+  unknown field, and it denies an explicit `"occurredAtUs": null`; a caller omits
+  the field instead. A 5.2.1 client that sends strings fails with
+  `expected struct ObservationInput`. Two ways forward: send objects, or start
+  the server with `--legacy-observations`.
+- **The crate, the binary and the maintenance command are renamed.**
+  `cargo install mcp-memory` becomes `cargo install mcpmem`. The binary
+  `mcp-memory` becomes `mcpmem`, and `mcp-memory-maintenance` becomes
+  `mcpmem-maintenance`. A Claude Desktop configuration needs
+  `"command": "mcpmem"`. The `bench` binary keeps its name. No environment
+  variable changed, and the default database path stays `memory.mcpmem`.
+- **A managed vector store refuses a direct vector write.**
+  `vector_upsert_embedding`, `vector_batch_upsert` and `vector_delete_embedding`
+  fail with `direct_vector_writes_disabled` after the store adopts an index
+  profile. `vector_batch_upsert` reports the refusal for each item. A store that
+  stays in legacy compatibility keeps the old behaviour.
+
+### Added
+
+- **One workspace of five crates.** `mcpmem` holds the server and the binaries.
+  `mcpmem-core` holds the transactional SQLite graph, the schema bootstrap, the
+  change log and the relation repair. `mcpmem-runtime` holds the role
+  enumeration, the role parser and the supervisor. `mcpmem-indexer` holds the
+  embedding worker. `mcpmem-webhook` holds the delivery worker. A user installs
+  `mcpmem`; the four library crates publish so the set resolves.
+- **Cargo features select the subsystems.** `default = ["code"]`. `code` compiles
+  the tree-sitter grammars for ten languages and supplies the `code_*` tools.
+  `indexer` and `webhooks` add the two worker roles. `bedrock` implies `indexer`
+  and adds the AWS embedding client. A `--no-default-features` build is a lean
+  memory server; CI proves that build carries no HTTP client and no AWS client.
+- **Runtime roles.** The new flag `--role` takes a comma-separated list of `mcp`,
+  `indexer` and `webhooks`. The default is `mcp` alone, so an existing invocation
+  keeps its behaviour. One process can run the server, a worker, or any compiled
+  combination. A role whose feature is absent fails at startup with
+  `runtime role '<name>' was selected but its Cargo feature is not compiled`. A
+  duplicate role, an empty list and an unknown name each fail with their own
+  message. The process stops when the first role returns.
+- **A durable change log and a durable outbox.** Migration
+  `0001_change_events.sql` creates `entity_revision`, `change_event`,
+  `event_outbox`, `index_profile`, `index_profile_registry`, `index_job`,
+  `profile_vector`, `ann_generation` and `idempotency_record`. A mutation writes
+  its change event and its queue rows inside the same transaction as the graph
+  rows, so a crash loses no work. `change_event` is immutable, and a trigger
+  protects it.
+- **Ordered migrations with checksums.** The server records each applied
+  migration in `schema_migration` with a version, a SHA-256 checksum and a
+  timestamp. A changed checksum for an applied version stops startup, and a
+  database newer than the binary stops startup. Every role runs the one shared
+  bootstrap, `mcpmem_core::schema::initialize_database`.
+- **Semantic indexing through a durable job queue.** Every effective entity
+  change queues one `index_job` row per managed profile. A second change to the
+  same entity replaces the queued row and raises the lease epoch, so an in-flight
+  worker cannot commit a stale revision. A profile-less store writes the job in
+  state `held`, where nothing claims it.
+- **An indexer worker, started with `--role indexer`.** The worker claims one due
+  job, takes a 30-second lease, calls the provider outside the write
+  transaction, then commits the vector under the lease fence. A commit is refused
+  when the lease expired, when the entity revision moved, or when the profile is
+  no longer writable. A failure returns the job to `pending` with a one-second
+  delay and records `last_error`; attempts are unlimited. The role polls every
+  250 milliseconds.
+- **Three embedding providers behind one trait.** Ollama uses
+  `MCP_MEMORY_OLLAMA_URL` and posts to `<url>/api/embed`. The OpenAI-compatible
+  provider uses `MCP_MEMORY_OPENAI_URL` with `MCP_MEMORY_OPENAI_API_KEY`; both
+  keys must be set together. Bedrock uses the standard AWS credential chain and
+  needs the `bedrock` feature. The registry dispatches strictly on the profile
+  field `provider_kind`; an unknown kind fails the job instead of reaching
+  another provider. A URL that carries a user name or a password is rejected.
+- **A rebuild lifecycle for the vector index.** `index_profile_registry` holds
+  one state per store key: `LegacyCompat`, `Active`, `Rebuilding` or `Failed`. A
+  rebuild queues every live entity against the candidate profile, and activation
+  promotes the candidate only after the full scan is verified. A profile is
+  immutable and carries a fingerprint.
+- **Durable webhook delivery.** Migration `0002_webhook_subscriptions.sql`
+  creates `webhook_subscription`. A subscription holds an HTTPS `endpoint`, the
+  event kinds (`create`, `update`, `delete`, `rename`), the entity types, a
+  `consumer_origin`, the ignored origins, a `secret_ref` and an `enabled` flag.
+  An empty kind list or an empty type list matches everything. A subscription
+  never receives its own writes, which stops a loop between two instances.
+- **At-least-once delivery with a lease fence.** A mutation enqueues one
+  `event_outbox` row per matching enabled subscription. One delivery per
+  subscription is in flight, in one process only, under a 30-second lease with a
+  token and an epoch. The worker retries a 408, a 429 and a status of 500 or
+  more, and it kills any other non-2xx status at once. The delay is the
+  `Retry-After` header, clamped from one second to one hour, and one second
+  otherwise. After eight attempts the row moves to `dead` and keeps
+  `last_error`.
+- **Signed, pinned webhook requests.** The worker signs
+  `<timestamp_us>.<body>` with HMAC-SHA256 and sends
+  `X-Memory-Signature`, `X-Memory-Timestamp` and `Idempotency-Key`. The body is
+  a version 2 JSON envelope with no observation content, bounded to 64 KiB; a
+  receiver reads the graph for the entity state. The endpoint must use HTTPS on
+  port 443, with a hostname from an allowlist and no credentials. The worker
+  resolves the hostname, refuses a private, loopback, link-local, multicast or
+  unspecified address, pins the connection to the resolved address, and disables
+  redirects.
+- **Typed machine ingress provenance.** A machine mutation needs the
+  `memory:write` scope and the requested origin in its allowlist. The mutation
+  carries the actor, the origin, a correlation id, an optional causation id, a
+  hop count and an idempotency key, and a subscriber receives those fields.
+- **The MCP tool `rename_entity`.** It takes `oldName` and `newName` and returns
+  the renamed entity. The entity keeps its identity, its observations and every
+  incident relation. An existing destination name is rejected, and an unchanged
+  name is a successful no-op. A rename emits one change event with the operation
+  `rename` and the name pair, and it emits no synthetic create or delete. A
+  rename leaves the counters and `updated_us` unchanged.
+- **Observation metadata.** Migration `0003_observation_metadata.sql` adds
+  `origin_entity_id`, `origin_entity_name` and `occurred_us` with a non-negative
+  check. `created_us` stays server-owned and immutable. An existing row keeps its
+  `created_us`, and the three new columns are null for it. `merge_entities`
+  records the source entity of a copied observation, so a reader sees
+  `originEntityName`.
+- **The operator binary `mcpmem-maintenance`.** `relation-audit --database <path>
+  --format json` is read-only. It reports duplicate relation groups, duplicate
+  rows, dangling rows and counter drift. `relation-repair --database <path>
+  --backup <new-path> --confirm` keeps the oldest row of each duplicate triple,
+  recomputes every derived counter from surviving physical rows, and creates the
+  unique index last. The repair needs `--confirm` and a backup target that does
+  not exist; it copies the database with the SQLite online backup API, reopens
+  the copy, and needs `PRAGMA integrity_check = 'ok'`. A dangling relation row
+  aborts the run before any write to the source. Server startup never runs a
+  repair.
+- **Relation uniqueness on a new database.** A database that 1.0.0 creates gets
+  `UNIQUE INDEX relation_unique_triple ON relation(from_id, to_id, type_id)`. An
+  existing database stays openable and gains the index only through
+  `relation-repair`.
+- **The deprecated flag `--legacy-observations`.** It restores the historical
+  `observations: string[]` contract for an MCP client, in the manifest and in
+  both directions. It changes no stored data. It needs the `mcp` role, and
+  version 2.0.0 removes it.
+- **A published crates.io release.** All five crates carry one version. The
+  release publishes only for a published GitHub release; a push to `main`
+  publishes nothing. `scripts/check-release-version.sh` refuses build metadata,
+  a version mismatch between the crates, a path dependency that carries no
+  version, a tag that does not match, and a version crates.io already holds.
+  See [`docs/runbooks/release.md`](docs/runbooks/release.md).
+
+### Changed
+
+- **Every graph mutation is one transaction.** All mutations route through one
+  transactional service. It issues `BEGIN IMMEDIATE`, applies the graph rows, the
+  derived counters, the change events and the index jobs, and commits once; a
+  guard rolls back on any later failure. A partial write can no longer happen.
+  The in-memory metadata cache no longer publishes uncommitted state after a
+  failed mutation.
+- **`describe_entity` returns the bundle its description promised.** The result
+  adds `relations` (every incident relation, ordered by `from`, `to`,
+  `relationType`), `neighbors` (distinct names, sorted) and `degree` with the
+  members `in` and `out`. One reader snapshot serves the whole response, and the
+  degrees are counted from the returned relations, not from the denormalized
+  cache. There is no total degree field.
+- **The `upsert_entities` description states what the server does.** The old text
+  claimed an existing entity keeps its type. The manifest now states the truth: a
+  call on an existing exact name sets that entity's type to the supplied
+  `entityType` and adds only the observations it does not hold, and it keeps the
+  entity identity, the existing observations and every incident relation. The
+  behaviour did not change.
+- **A historical durable record stays readable.** A pre-1.0 `change_event`
+  payload or `idempotency_record` response may hold a bare observation string.
+  The reader accepts both shapes and reports the missing metadata as null. It
+  fabricates no timestamp.
+- **The database bootstrap creates the graph tables before it applies the
+  migrations.** Before this change a worker process that reached a new database
+  first created the event tables with no graph table and no seeded statistics.
+  One shared initializer now commits the graph DDL, the full-text projections,
+  the triggers and the statistics rows, and only then runs the migrations.
+  Startup stays non-destructive and re-runs safely.
+
+### Fixed
+
+Each item is a defect inherited from 5.2.1. The triage is in
+[`docs/analysis/2026-09-08-inherited-legacy-bugs-triage.md`](docs/analysis/2026-09-08-inherited-legacy-bugs-triage.md).
+
+- A batch `delete_relations` built one broken SQL statement. The typed request
+  now deletes each relation correctly.
+- `describe_entity` advertised a graph context bundle and returned only the name,
+  the type and the observations. A hub with 40 relations looked like an isolated
+  node.
+- A failed `merge_entities` left the graph half-merged. The copied observations
+  and the redirected relations stayed committed when the source delete failed.
+- `merge_entities` could create a duplicate relation. The write path now refuses
+  one, and `relation-repair` removes an existing duplicate.
+- A merge erased the origin of a copied observation. The reader now reports
+  `originEntityName`.
+- Observation time was invisible. A client could not read when a fact was
+  recorded, and could not state when it happened.
+- The retype contract in the tool manifest was false.
+- A rename was absent from the tool set.
+- Destructive tool annotations were inconsistent. One central registry now owns
+  them.
+- A renamed entity stayed reachable under its old name in the vector and code
+  search paths, because those paths resolved a cached name map. Every operational
+  path now resolves the current name from SQLite.
+
+### Known limitations
+
+- **The shipped binary delivers no webhook.** `mcpmem --role webhooks` fails with
+  `webhook role selected without configured worker ports`. The failure is
+  deliberate and observable. Delivery works for a program that embeds
+  `mcpmem-webhook` and constructs the worker with a connector, a secret provider,
+  a hostname allowlist and a resolver.
+- **No MCP tool manages a webhook subscription.** A user writes the
+  `webhook_subscription` table, or calls the Rust repository API.
+- **A legacy database keeps its duplicate relations and its counter drift until
+  an operator repairs it.** Startup deletes no row and adds no unique index to a
+  table that existed before bootstrap.
+- **There is no `retype_entity` tool.** A retype is possible only through
+  `upsert_entities`.
+- **Bedrock supports Amazon Titan Text Embeddings V2 only**, with 256, 512 or
+  1024 dimensions.
+- **`--legacy-observations` is temporary.** It stays through 1.x, and 2.0.0
+  removes it.
+
+### For a contributor
+
+CI runs actionlint, the version gate, the crate-include gate,
+`cargo package -p mcpmem-core`, `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`, the
+workspace test suite, the indexer feature matrix, the runtime role matrix, and a
+check that the graph-only build carries no HTTP client and no AWS client.
+
+The gates are scripts, so the same check runs on a laptop and on a runner:
+`check-release-version.sh`, `check-crate-includes.sh`, `set-version.sh`,
+`next-version.sh`, `test-next-version.sh` and `publish-crates.sh`.
+
+The design documents and the operator runbooks are under
+[`docs/`](docs/).
