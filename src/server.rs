@@ -12,6 +12,7 @@ use tracing::error;
 #[cfg(feature = "code")]
 use crate::actions::code as code_actions;
 use crate::actions::memory;
+use crate::authz::{self, Principal};
 use crate::config::Config;
 use crate::errors::{MCSError, Result};
 use crate::kg::GraphHandle;
@@ -216,7 +217,7 @@ pub fn dispatch_line(line: &str, kg: &GraphHandle, vs: Option<&VectorStore>) -> 
         Err(e) => return Some(serde_json::to_string(&parse_error(e.to_string())).unwrap()),
     };
     req.id.as_ref()?;
-    match process_request(&req, kg, vs) {
+    match process_request(&req, kg, vs, &authz::LOCAL_PRINCIPAL) {
         Ok(HandlerResult::Value(result)) => {
             let resp = JsonRpcResponse::success(req.id, result);
             Some(serde_json::to_string(&resp).unwrap())
@@ -238,38 +239,100 @@ pub fn dispatch_line(line: &str, kg: &GraphHandle, vs: Option<&VectorStore>) -> 
     }
 }
 
+/// What the HTTP transport should send back. A scope failure is not a JSON-RPC
+/// error body: it must become HTTP 403 with a `WWW-Authenticate` header.
+#[derive(Debug)]
+pub enum HttpOutcome {
+    /// Only notifications; send 202 with no content.
+    Accepted,
+    /// Send this JSON body with 200.
+    Body(Value),
+    /// Send 403 and name every scope the request needed.
+    InsufficientScope(Vec<&'static str>),
+}
+
 /// Dispatch a Streamable-HTTP POST body, which may be a single JSON-RPC message
-/// or a batch array. `Ok(None)` means the body held only notifications (HTTP
-/// 202, empty body); `Err` means the body was not valid JSON.
+/// or a batch array. [`HttpOutcome::Accepted`] means the body held only
+/// notifications (HTTP 202, empty body); `Err` means the body was not valid
+/// JSON.
+///
+/// The whole body is screened against `principal` before anything runs, so a
+/// batch that holds one denied call returns
+/// [`HttpOutcome::InsufficientScope`] for the *whole* batch — naming the scopes
+/// of every denied call, sorted and deduplicated — and applies none of it.
 pub fn dispatch_http_body(
     body: &str,
     kg: &GraphHandle,
     vs: Option<&VectorStore>,
-) -> std::result::Result<Option<Value>, String> {
+    principal: &Principal,
+) -> std::result::Result<HttpOutcome, String> {
     let value: Value = serde_json::from_str(body.trim()).map_err(|e| e.to_string())?;
+    let denied = denied_scopes(&value, principal);
+    if !denied.is_empty() {
+        return Ok(HttpOutcome::InsufficientScope(denied));
+    }
     match value {
         Value::Array(items) => {
             // Batches are rare and never huge — keep Value path for simplicity.
             let responses: Vec<Value> = items
                 .into_iter()
-                .filter_map(|v| process_value_http(v, kg, vs))
+                .filter_map(|v| process_value_http(v, kg, vs, principal))
                 .collect();
-            Ok((!responses.is_empty()).then_some(Value::Array(responses)))
+            Ok(if responses.is_empty() {
+                HttpOutcome::Accepted
+            } else {
+                HttpOutcome::Body(Value::Array(responses))
+            })
         }
-        other => Ok(process_value_http(other, kg, vs)),
+        other => Ok(match process_value_http(other, kg, vs, principal) {
+            Some(value) => HttpOutcome::Body(value),
+            None => HttpOutcome::Accepted,
+        }),
     }
+}
+
+/// The scopes a body needs but `principal` does not hold, sorted and
+/// deduplicated. Screening happens before dispatch so a refused batch never
+/// leaves half its calls applied.
+fn denied_scopes(value: &Value, principal: &Principal) -> Vec<&'static str> {
+    let mut denied: Vec<&'static str> = match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| denied_scope(item, principal))
+            .collect(),
+        other => denied_scope(other, principal).into_iter().collect(),
+    };
+    denied.sort_unstable();
+    denied.dedup();
+    denied
+}
+
+/// The scope one JSON-RPC message needs but `principal` lacks. An unknown tool
+/// name has no scope: it stays a `Method not found` error from the dispatcher
+/// rather than becoming a misleading scope refusal.
+fn denied_scope(value: &Value, principal: &Principal) -> Option<&'static str> {
+    if value.get("method").and_then(Value::as_str)? != "tools/call" {
+        return None;
+    }
+    let name = value.pointer("/params/name").and_then(Value::as_str)?;
+    tools::scope_of(name).filter(|scope| !principal.scopes.contains(*scope))
 }
 
 /// Process one JSON-RPC message for the HTTP transport, converting any
 /// `RawResult` back into a `Value` (acceptable since HTTP payloads are typically
 /// much smaller in this context). `None` means the message was a notification.
-fn process_value_http(value: Value, kg: &GraphHandle, vs: Option<&VectorStore>) -> Option<Value> {
+fn process_value_http(
+    value: Value,
+    kg: &GraphHandle,
+    vs: Option<&VectorStore>,
+    principal: &Principal,
+) -> Option<Value> {
     let req: JsonRpcRequest = match serde_json::from_value(value) {
         Ok(r) => r,
         Err(e) => return Some(to_value(parse_error(e.to_string()))),
     };
     req.id.as_ref()?;
-    match process_request(&req, kg, vs) {
+    match process_request(&req, kg, vs, principal) {
         Ok(HandlerResult::Value(result)) => {
             Some(to_value(JsonRpcResponse::success(req.id, result)))
         }
@@ -420,6 +483,9 @@ impl MCPServer {
             self.graph(),
             self.vs.clone(),
             self.config.auth_token.clone(),
+            // The static bearer token grants every scope, so a token holder
+            // keeps the reach it had before scopes existed.
+            Arc::from(tools::ToolCategory::ALL),
             self.config.tls_cert.clone(),
             self.config.tls_key.clone(),
         )
@@ -570,11 +636,15 @@ fn process_request(
     req: &JsonRpcRequest,
     kg: &GraphHandle,
     vs: Option<&VectorStore>,
+    principal: &Principal,
 ) -> Result<HandlerResult> {
     match req.method.as_str() {
         "initialize" => Ok(HandlerResult::Value(handle_initialize(req, vs.is_some()))),
-        "tools/list" => Ok(HandlerResult::Value(handle_tools_list(vs.is_some()))),
-        "tools/call" => handle_tools_call(req, kg, vs),
+        "tools/list" => Ok(HandlerResult::Value(handle_tools_list(
+            vs.is_some(),
+            principal,
+        ))),
+        "tools/call" => handle_tools_call(req, kg, vs, principal),
         "ping" => Ok(HandlerResult::Value(Value::Null)),
         method if method.starts_with("notifications/") => {
             tracing::trace!("Received notification: {method}");
@@ -685,17 +755,18 @@ fn code_tools() -> &'static Vec<Value> {
 }
 
 /// `tools/list` response. Each tool is advertised only when its category is
-/// enabled, so the server never lists a tool it would reject. Knowledge-graph
-/// tools are gated by the graph-read / graph-write flags; vector and code tools
-/// by their subsystems being enabled.
-fn handle_tools_list(vectors_enabled: bool) -> Value {
+/// enabled *and* the caller's scopes cover it, so the server never lists a tool
+/// it would reject. Knowledge-graph tools are gated by the graph-read /
+/// graph-write flags; vector and code tools by their subsystems being enabled.
+fn handle_tools_list(vectors_enabled: bool, principal: &Principal) -> Value {
     let (read, write) = (graph_read_enabled(), graph_write_enabled());
     let mut all: Vec<Value> = base_tools()
         .iter()
         .filter(|t| {
-            t.get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|n| if tools::is_write_tool(n) { write } else { read })
+            t.get("name").and_then(Value::as_str).is_some_and(|n| {
+                let category_on = if tools::is_write_tool(n) { write } else { read };
+                category_on && authz::allows_tool(principal, n)
+            })
         })
         .cloned()
         .collect();
@@ -719,13 +790,31 @@ fn handle_tools_list(vectors_enabled: bool) -> Value {
         }
     }
     if vectors_enabled {
-        all.extend(vector_tools().iter().cloned());
+        all.extend(
+            vector_tools()
+                .iter()
+                .filter(|t| in_scope(t, principal))
+                .cloned(),
+        );
     }
     #[cfg(feature = "code")]
     if code_enabled() {
-        all.extend(code_tools().iter().cloned());
+        all.extend(
+            code_tools()
+                .iter()
+                .filter(|t| in_scope(t, principal))
+                .cloned(),
+        );
     }
     json!({ "tools": all })
+}
+
+/// `true` when the caller's scopes cover the tool this manifest entry names.
+#[inline]
+fn in_scope(tool: &Value, principal: &Principal) -> bool {
+    tool.get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|n| authz::allows_tool(principal, n))
 }
 
 /// Process-wide flag for the code-indexing subsystem, set once at server
@@ -748,12 +837,24 @@ fn handle_tools_call(
     req: &JsonRpcRequest,
     kg: &GraphHandle,
     vs: Option<&VectorStore>,
+    principal: &Principal,
 ) -> Result<HandlerResult> {
     let tool_name = req
         .params
         .as_ref()
         .and_then(|p| p.get("name").and_then(|v| v.as_str()))
         .ok_or_else(|| MCSError::InvalidParams("Missing 'name' parameter".into()))?;
+
+    // Scope gate. An unknown name has no scope: it falls through to the
+    // existing `Method not found` paths rather than becoming a scope refusal.
+    if let Some(scope) = tools::scope_of(tool_name)
+        && !principal.scopes.contains(scope)
+    {
+        return Err(MCSError::InsufficientScope {
+            tool: tool_name.to_owned(),
+            scope,
+        });
+    }
 
     let tool_args = req.params.as_ref().and_then(|p| p.get("arguments"));
     let adapted_args = if legacy_observations() {
@@ -952,5 +1053,53 @@ fn handle_tools_call(
         legacy_observation_output(result)
     } else {
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The gate inside the dispatcher is the authoritative one: it covers every
+    /// transport, not only the HTTP body screen. Exercise it directly, because
+    /// the HTTP path refuses a denied call before dispatch ever sees it.
+    #[test]
+    fn tools_call_refuses_a_tool_outside_the_principals_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let kg = GraphHandle::new(
+            &dir.path().join("memory.db"),
+            crate::config::Durability::Sync,
+            crate::config::SqliteTuning::default(),
+            NonZeroUsize::new(32).unwrap(),
+            2,
+        )
+        .unwrap();
+        let principal = authz::bearer_principal(&[tools::ToolCategory::GraphRead]);
+        let req: JsonRpcRequest = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "delete_entities", "arguments": { "entityNames": ["a"] } }
+        }))
+        .unwrap();
+
+        let Err(err) = process_request(&req, &kg, None, &principal) else {
+            panic!("expected a scope refusal");
+        };
+        assert_eq!(err.error_code(), -32002, "{err}");
+        assert!(
+            matches!(&err, MCSError::InsufficientScope { tool, scope }
+                if tool == "delete_entities" && *scope == "graph-write"),
+            "{err}"
+        );
+
+        // Control: the same request with the scope passes the gate. The
+        // category flag is process-wide, so put it back afterwards.
+        let allowed = authz::bearer_principal(&[tools::ToolCategory::GraphWrite]);
+        let was_on = graph_write_enabled();
+        GRAPH_WRITE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+        let outcome = process_request(&req, &kg, None, &allowed);
+        GRAPH_WRITE_ENABLED.store(was_on, std::sync::atomic::Ordering::Relaxed);
+        assert!(outcome.is_ok(), "control failed");
     }
 }

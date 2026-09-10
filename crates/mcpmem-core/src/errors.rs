@@ -11,6 +11,9 @@ pub enum MCSError {
     #[error("Invalid params: {0}")]
     InvalidParams(String),
 
+    #[error("Insufficient scope: {tool} needs {scope}")]
+    InsufficientScope { tool: String, scope: &'static str },
+
     #[error("Memory error: {0}")]
     MemoryError(String),
 
@@ -30,6 +33,7 @@ impl MCSError {
             MCSError::ParseError(_) => -32700,
             MCSError::MethodNotFound(_) => -32601,
             MCSError::InvalidParams(_) => -32602,
+            MCSError::InsufficientScope { .. } => -32002,
             MCSError::MemoryError(_) => -32000,
             MCSError::IoError(_) => -32003,
             MCSError::JsonError(_) => -32700,

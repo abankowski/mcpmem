@@ -37,7 +37,8 @@ use tracing::{error, info};
 
 use crate::errors::{MCSError, Result};
 use crate::kg::GraphHandle;
-use crate::server;
+use crate::server::{self, HttpOutcome};
+use crate::tools::ToolCategory;
 use crate::vector_store::VectorStore;
 
 /// The graph viewer's static assets, embedded at build time (served from `/ui`).
@@ -55,13 +56,15 @@ const MAX_UI_NODES: usize = 1000;
 /// bounds a single interaction's payload.
 const MAX_UI_EXPAND_DEPTH: u32 = 3;
 
-/// Shared state for the HTTP handlers: the graph, the optional vector store, and
-/// an optional bearer token required on every request when present.
+/// Shared state for the HTTP handlers: the graph, the optional vector store,
+/// an optional bearer token required on every request when present, and the
+/// scopes that token grants.
 #[derive(Clone)]
 pub struct HttpState {
     kg: Arc<GraphHandle>,
     vs: Option<Arc<VectorStore>>,
     auth_token: Option<Arc<str>>,
+    bearer_scopes: Arc<[ToolCategory]>,
 }
 
 /// Build the axum router for the HTTP transport. Exposed so tests can drive it
@@ -96,11 +99,17 @@ pub async fn run(
     kg: Arc<GraphHandle>,
     vs: Option<Arc<VectorStore>>,
     auth_token: Option<Arc<str>>,
+    bearer_scopes: Arc<[ToolCategory]>,
     tls_cert: Option<std::path::PathBuf>,
     tls_key: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let auth = if auth_token.is_some() { "on" } else { "off" };
-    let state = HttpState { kg, vs, auth_token };
+    let state = HttpState {
+        kg,
+        vs,
+        auth_token,
+        bearer_scopes,
+    };
 
     if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
         let tls = crate::tls::server_config(&cert, &key)
@@ -168,11 +177,13 @@ async fn post_handler(
     }
     let kg = state.kg;
     let vs = state.vs;
+    let principal = crate::authz::bearer_principal(&state.bearer_scopes);
     // The dispatch path locks the graph and may perform a blocking fsync, so
     // run it off the async worker pool (keeps the HTTP reactor responsive).
-    let result =
-        tokio::task::spawn_blocking(move || server::dispatch_http_body(&body, &kg, vs.as_deref()))
-            .await;
+    let result = tokio::task::spawn_blocking(move || {
+        server::dispatch_http_body(&body, &kg, vs.as_deref(), &principal)
+    })
+    .await;
 
     let outcome = match result {
         Ok(inner) => inner,
@@ -184,8 +195,8 @@ async fn post_handler(
 
     match outcome {
         // Body held only notifications → nothing to return.
-        Ok(None) => StatusCode::ACCEPTED.into_response(),
-        Ok(Some(value)) => {
+        Ok(HttpOutcome::Accepted) => StatusCode::ACCEPTED.into_response(),
+        Ok(HttpOutcome::Body(value)) => {
             if wants_sse(&headers) {
                 // One JSON-RPC reply delivered as a single SSE event, then close.
                 let json = serde_json::to_string(&value).unwrap();
@@ -196,6 +207,18 @@ async fn post_handler(
             } else {
                 Json(value).into_response()
             }
+        }
+        Ok(HttpOutcome::InsufficientScope(scopes)) => {
+            let scope = scopes.join(" ");
+            (
+                StatusCode::FORBIDDEN,
+                [(
+                    header::WWW_AUTHENTICATE,
+                    format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\""),
+                )],
+                "insufficient scope",
+            )
+                .into_response()
         }
         Err(e) => {
             // Malformed JSON body → JSON-RPC parse error.

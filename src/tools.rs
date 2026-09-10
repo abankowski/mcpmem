@@ -261,6 +261,13 @@ pub fn category_of(name: &str) -> Option<ToolCategory> {
     None
 }
 
+/// The OAuth scope a tool needs, or `None` when the name is unknown. The scope
+/// string is the category slug; there is no second mapping.
+#[inline]
+pub fn scope_of(name: &str) -> Option<&'static str> {
+    category_of(name).map(ToolCategory::slug)
+}
+
 /// Whether a tool is callable given the set of enabled categories. A tool is
 /// available only if it is a known name *and* its category is enabled. (The
 /// vector and code subsystems impose additional runtime gating — a store/flag
@@ -321,5 +328,24 @@ mod tests {
         }
         assert!("bogus".parse::<ToolCategory>().is_err());
         assert!(ToolCategory::ALL.len() <= 10);
+    }
+
+    #[test]
+    fn scope_strings_and_categories_match_in_both_directions() {
+        for cat in ToolCategory::ALL {
+            let scope = cat.slug();
+            let back: ToolCategory = scope.parse().expect("slug parses back");
+            assert_eq!(*cat, back, "slug {scope} did not round-trip");
+        }
+        // Every scope a tool can need must name a real category.
+        for meta in ALL_TOOLS {
+            let scope = scope_of(meta.name).expect("known tool has a scope");
+            assert!(
+                ToolCategory::ALL.iter().any(|c| c.slug() == scope),
+                "tool {} produced unknown scope {scope}",
+                meta.name
+            );
+        }
+        assert_eq!(ToolCategory::ALL.len(), 4, "a new category needs a scope");
     }
 }

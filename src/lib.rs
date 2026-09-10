@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod authz;
 #[cfg(feature = "code")]
 pub mod code;
 #[cfg(feature = "code")]
