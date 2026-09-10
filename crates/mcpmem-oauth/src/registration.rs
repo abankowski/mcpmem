@@ -108,7 +108,9 @@ struct MetadataDocument {
 pub fn register(store: &Store, body: &Value, now_us: i64) -> Result<Value, RegistrationError> {
     let request = RegistrationRequest::deserialize(body)
         .map_err(|_| RegistrationError::InvalidClientMetadata)?;
-    if request.redirect_uris.is_empty() {
+    if request.redirect_uris.is_empty()
+        || !within_bounds(&request.client_name, &request.redirect_uris)
+    {
         return Err(RegistrationError::InvalidClientMetadata);
     }
     check_redirect_uris(&request.redirect_uris)?;
@@ -146,6 +148,15 @@ pub fn register(store: &Store, body: &Value, now_us: i64) -> Result<Value, Regis
 /// binding between the identifier a client presents and the metadata this
 /// server acts on; without it a document on an allowed domain could claim any
 /// identifier, including one already registered.
+///
+/// # `allowed_domains`
+///
+/// One entry per host, matched as a **whole** host and case-insensitively.
+/// `claude.ai` admits `https://claude.ai/…` and refuses
+/// `https://auth.claude.ai/…`. A subdomain needs its own entry. A suffix
+/// match would admit `claude.ai.evil.example`, which is why the rule is what
+/// it is; the cost is that an operator must list each host the vendor
+/// publishes on. `--cimd-allowed-domain` states the same rule.
 pub fn resolve_metadata_document(
     url: &str,
     allowed_domains: &[String],
@@ -168,7 +179,10 @@ pub fn resolve_metadata_document(
     if document.client_id != url {
         return Err(RegistrationError::MetadataMismatch);
     }
-    if document.client_name.is_empty() || document.redirect_uris.is_empty() {
+    if document.client_name.is_empty()
+        || document.redirect_uris.is_empty()
+        || !within_bounds(&document.client_name, &document.redirect_uris)
+    {
         return Err(RegistrationError::MalformedDocument);
     }
     check_redirect_uris(&document.redirect_uris)?;
@@ -198,14 +212,51 @@ fn check_redirect_uris(uris: &[String]) -> Result<(), RegistrationError> {
 /// a native client that listens on an ephemeral port. Every other plain-http
 /// URL is refused: the authorization code would cross the network in clear.
 ///
+/// A URI carrying a fragment is refused, whatever its scheme. RFC 6749 section
+/// 3.1.2 forbids one, and the consequence is not cosmetic: the comparison
+/// against a presented `redirect_uri` is an exact string match, so a
+/// registered fragment reaches the redirect this server builds. Appending
+/// `?code=…` to `https://claude.ai/cb#f` puts the query inside the fragment,
+/// where no browser sends it, and the client waits for a code it never
+/// receives. A query component is legal and stays legal.
+///
 /// The loopback names are matched whole. A host that merely ends in
 /// `localhost` — `evil.localhost` — is a public name someone else can own.
 fn is_acceptable_redirect_uri(uri: &str) -> bool {
+    if uri.contains('#') {
+        return false;
+    }
     if host(uri, "https://").is_some() {
         return true;
     }
     host(uri, "http://")
         .is_some_and(|h| h == "127.0.0.1" || h == "[::1]" || h.eq_ignore_ascii_case("localhost"))
+}
+
+/// The longest `client_name` this server stores, in bytes.
+const MAX_CLIENT_NAME_BYTES: usize = 256;
+/// The most redirect URIs one client may register.
+const MAX_REDIRECT_URIS: usize = 8;
+/// The longest redirect URI this server stores, in bytes.
+const MAX_REDIRECT_URI_BYTES: usize = 2048;
+
+/// Whether the client-supplied metadata fits in one reasonable row.
+///
+/// Registration is unauthenticated and nothing evicts a client, so the size of
+/// one row is a cost a stranger chooses. The only cap above this point is the
+/// transport's global body limit, which is 16 MiB and bounds a request rather
+/// than a row; a rate limit bounds how many rows arrive, not how large one is.
+/// The `client_name` is also the text a consent screen asks a human to trust,
+/// and an unbounded string is not that.
+///
+/// The caps are byte counts, not character counts: bytes are what the database
+/// stores, and a multi-byte name is not entitled to more of them.
+fn within_bounds(client_name: &str, redirect_uris: &[String]) -> bool {
+    client_name.len() <= MAX_CLIENT_NAME_BYTES
+        && redirect_uris.len() <= MAX_REDIRECT_URIS
+        && redirect_uris
+            .iter()
+            .all(|uri| uri.len() <= MAX_REDIRECT_URI_BYTES)
 }
 
 /// The host of `url` when it uses `scheme`, or `None`.

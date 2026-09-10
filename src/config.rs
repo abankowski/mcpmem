@@ -79,7 +79,10 @@ pub struct OAuthConfig {
     pub oidc_client_secret: Option<Arc<str>>,
     /// The humans allowed to authorize, and the scopes each one may grant.
     pub principals: Vec<crate::principals::PrincipalEntry>,
-    /// Domains allowed to host a client metadata document.
+    /// Hosts allowed to host a client metadata document. Each entry is matched
+    /// as a whole host, case-insensitively: `claude.ai` does not admit
+    /// `auth.claude.ai`, which needs its own entry. See
+    /// `mcpmem_oauth::registration::resolve_metadata_document`.
     pub cimd_allowed_domains: Vec<String>,
     /// Trust `X-Forwarded-Proto` from a reverse proxy that terminates TLS.
     pub trust_forwarded_proto: bool,

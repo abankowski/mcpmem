@@ -61,6 +61,17 @@ impl OauthState {
     ///
     /// Every statement group that must be atomic therefore belongs in one
     /// call: two calls are two lock acquisitions with a window between them.
+    ///
+    /// Two rules the type cannot state, and both matter more as `f` grows:
+    ///
+    /// - `f` must not call `with_store` again, directly or through a helper
+    ///   that holds an `&OauthState`. The mutex is not reentrant, so a second
+    ///   acquisition on this thread self-deadlocks the worker — no timeout, no
+    ///   panic, no poisoning, and nothing in a log.
+    /// - `f` must not block: no `block_on`, no synchronous network call, no
+    ///   sleep. Blocking under the lock is exactly what holding the guard
+    ///   across an `await` would have done, and the type only rules out the
+    ///   spelling with `await` in it.
     pub fn with_store<T>(&self, f: impl FnOnce(&mcpmem_oauth::store::Store) -> T) -> T {
         f(&self.store.lock())
     }
@@ -152,7 +163,10 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
 /// client assumes: a client that has just discovered this server holds no
 /// credential to authenticate a registration with. Nothing in the body is
 /// trusted — see `mcpmem_oauth::registration::RegistrationRequest` — and the
-/// cost of an open endpoint is one row, which Task 9 bounds with a rate limit.
+/// cost of one request is one bounded row: `register` caps the name, the
+/// number of redirect URIs and the length of each. Task 9 bounds how many
+/// requests arrive; a rate limit cannot bound the size of a row, which is why
+/// the caps live in `register` and not here.
 ///
 /// The body is read as bytes rather than through the `Json` extractor. A
 /// malformed body must answer with the RFC 7591 section 3.2.2 error object,

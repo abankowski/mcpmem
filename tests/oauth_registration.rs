@@ -49,6 +49,12 @@ fn post_register(body: &str) -> Request<Body> {
     post_to("/oauth/register", body)
 }
 
+/// An `https` URL of exactly `bytes` bytes, for the redirect-URI length cap.
+fn long_uri(bytes: usize) -> String {
+    const PREFIX: &str = "https://claude.ai/";
+    format!("{PREFIX}{}", "c".repeat(bytes - PREFIX.len()))
+}
+
 /// One registration against a fresh server. The server lives for the call and
 /// drops before the assertions, so no test holds two.
 async fn register(body: &str) -> (StatusCode, serde_json::Value) {
@@ -69,10 +75,40 @@ async fn dynamic_registration_returns_a_client_id() {
     let (status, body) = register(CLAUDE).await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(!body["client_id"].as_str().unwrap().is_empty());
+    assert_eq!(body["client_name"], "Claude");
     assert_eq!(
         body["redirect_uris"][0],
         "https://claude.ai/api/mcp/auth_callback"
     );
+    assert_eq!(
+        body["grant_types"],
+        serde_json::json!(["authorization_code", "refresh_token"])
+    );
+    assert_eq!(body["response_types"], serde_json::json!(["code"]));
+    assert_eq!(body["token_endpoint_auth_method"], "none");
+    assert!(body.get("client_secret").is_none(), "clients are public");
+}
+
+/// The response states what this server does; it never echoes the request.
+/// A client that asked for `client_credentials` and a secret must read back
+/// the one grant set this server implements and no secret, or it builds a
+/// token request this server refuses.
+#[tokio::test]
+async fn the_response_states_the_server_capabilities_and_never_echoes_them() {
+    let (status, body) = register(
+        r#"{"client_name":"Greedy",
+            "redirect_uris":["https://claude.ai/cb"],
+            "grant_types":["client_credentials","implicit"],
+            "response_types":["token"],
+            "token_endpoint_auth_method":"client_secret_basic"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        body["grant_types"],
+        serde_json::json!(["authorization_code", "refresh_token"])
+    );
+    assert_eq!(body["response_types"], serde_json::json!(["code"]));
     assert_eq!(body["token_endpoint_auth_method"], "none");
     assert!(body.get("client_secret").is_none(), "clients are public");
 }
@@ -178,19 +214,152 @@ async fn a_second_redirect_uri_is_checked_too() {
     assert_eq!(body["error"], "invalid_redirect_uri");
 }
 
-/// The identifier is this server's to issue. A request that names one must not
-/// take it: a client that chose `client_id` could name a client already
-/// registered and inherit its redirect list.
+/// The identifier, the source and both timestamps are this server's to set. A
+/// request that names any of them must not take it: a client that chose
+/// `client_id` could name a client already registered and inherit its redirect
+/// list, and one that chose `source` could pass itself off as a client whose
+/// metadata this server fetched and checked itself.
+///
+/// The stored row is what a later task reads, so the assertions are on the row
+/// and not only on the response. The clock is injected, so `created_us` has a
+/// value the test knows.
 #[tokio::test]
-async fn a_client_supplied_client_id_is_ignored() {
-    let (status, body) = register(
-        r#"{"client_id":"impostor","client_name":"Evil",
-            "source":"cimd","created_us":1,
-            "redirect_uris":["https://claude.ai/cb"]}"#,
-    )
+async fn a_request_cannot_choose_the_identifier_the_source_or_the_timestamps() {
+    let server = support::oauth_server_with_clock(support::Clock::at(NOW_US)).await;
+    let res = server
+        .request(post_register(
+            r#"{"client_id":"impostor","client_name":"Evil",
+                "source":"cimd","created_us":1,"last_used_us":1,
+                "client_id_issued_at":1,
+                "redirect_uris":["https://claude.ai/cb"]}"#,
+        ))
+        .await;
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let body = support::json(res).await;
+    let client_id = body["client_id"].as_str().unwrap().to_owned();
+    assert_ne!(client_id, "impostor");
+    assert_eq!(body["client_id_issued_at"], NOW_US / 1_000_000);
+
+    let record = server
+        .oauth()
+        .with_store(|store| store.get_client(&client_id))
+        .expect("the store answers")
+        .expect("the registration is stored");
+    assert_eq!(record.source, "dcr", "the request chose the source");
+    assert_eq!(record.created_us, NOW_US);
+    assert_eq!(record.last_used_us, NOW_US);
+    assert!(
+        server
+            .oauth()
+            .with_store(|store| store.get_client("impostor"))
+            .expect("the store answers")
+            .is_none(),
+        "the identifier the request named must hold no client"
+    );
+}
+
+/// Bytes, not entries, are what one unauthenticated POST costs. The only cap
+/// above this endpoint is the global body limit of 16 MiB (`src/server.rs`),
+/// nothing evicts a registration, and the name reaches a consent screen a
+/// human is asked to trust. Each cap is checked at its own boundary below.
+#[tokio::test]
+async fn an_over_long_client_name_is_refused() {
+    let name = "n".repeat(257);
+    let (status, body) = register(&format!(
+        r#"{{"client_name":"{name}","redirect_uris":["https://claude.ai/cb"]}}"#
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn too_many_redirect_uris_are_refused() {
+    let uris = (0..9)
+        .map(|i| format!(r#""https://claude.ai/cb{i}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let (status, body) = register(&format!(
+        r#"{{"client_name":"Many","redirect_uris":[{uris}]}}"#
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_client_metadata");
+}
+
+#[tokio::test]
+async fn an_over_long_redirect_uri_is_refused() {
+    let uri = long_uri(2049);
+    let (status, body) = register(&format!(
+        r#"{{"client_name":"Long","redirect_uris":["{uri}"]}}"#
+    ))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_client_metadata");
+}
+
+/// Each cap admits its own boundary. Without this the three tests above pass
+/// for a check that refuses everything.
+#[tokio::test]
+async fn metadata_at_every_cap_is_accepted() {
+    let name = "n".repeat(256);
+    let mut uris: Vec<String> = (0..7)
+        .map(|i| format!(r#""https://claude.ai/cb{i}""#))
+        .collect();
+    uris.push(format!(r#""{}""#, long_uri(2048)));
+    let (status, _) = register(&format!(
+        r#"{{"client_name":"{name}","redirect_uris":[{}]}}"#,
+        uris.join(",")
+    ))
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_ne!(body["client_id"], "impostor");
+}
+
+/// RFC 6749 section 3.1.2: a redirection endpoint URI must carry no fragment.
+/// The comparison a later task makes is an exact string match, so a registered
+/// fragment survives into the redirect it builds: `…/cb#f` plus `?code=…`
+/// puts the query inside the fragment, where it never leaves the browser. The
+/// client then waits for a code that was never sent, which is a dead flow
+/// rather than a refusal.
+#[tokio::test]
+async fn a_redirect_uri_carrying_a_fragment_is_refused() {
+    let (status, body) =
+        register(r#"{"client_name":"Fragmented","redirect_uris":["https://claude.ai/cb#f"]}"#)
+            .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_redirect_uri");
+}
+
+/// A query is not a fragment. RFC 6749 section 3.1.2 admits a query component
+/// in a registered redirection endpoint, so the fragment rule must not reach
+/// it.
+#[tokio::test]
+async fn a_redirect_uri_carrying_a_query_is_accepted() {
+    let (status, _) =
+        register(r#"{"client_name":"Queried","redirect_uris":["https://claude.ai/cb?tenant=7"]}"#)
+            .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+/// A store failure is this server's fault, not the client's. The status says
+/// so, and the store's own message — which names the database — stays out of
+/// the response.
+#[tokio::test]
+async fn a_store_failure_answers_a_server_error_and_leaks_no_detail() {
+    let server = support::oauth_server().await;
+    server
+        .oauth()
+        .with_store(|store| store.connection().execute("DROP TABLE oauth_client", []))
+        .expect("the table exists to be dropped");
+
+    let res = server.request(post_register(CLAUDE)).await;
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = support::json(res).await;
+    assert_eq!(body["error"], "server_error");
+    assert!(
+        body.get("error_description").is_none(),
+        "the store detail names the database: {body}"
+    );
 }
 
 #[tokio::test]
@@ -258,6 +427,44 @@ fn a_metadata_document_on_an_allowed_domain_is_accepted() {
         vec!["https://claude.ai/api/mcp/auth_callback"]
     );
     assert_eq!(record.created_us, NOW_US);
+}
+
+/// One row and one consent screen, whatever the metadata came from. The
+/// fetcher caps the body at 64 KB, which is far more than a client record may
+/// cost, so the same caps apply here.
+#[test]
+fn a_metadata_document_outside_the_caps_is_refused() {
+    let url = "https://claude.ai/c.json";
+    let over_long_name = "n".repeat(257);
+    let over_long_uri = long_uri(2049);
+    let many = (0..9)
+        .map(|i| format!(r#""https://claude.ai/cb{i}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    for members in [
+        format!(r#""client_name":"{over_long_name}","redirect_uris":["https://claude.ai/cb"]"#),
+        format!(r#""client_name":"Claude","redirect_uris":["{over_long_uri}"]"#),
+        format!(r#""client_name":"Claude","redirect_uris":[{many}]"#),
+    ] {
+        let doc = format!(r#"{{"client_id":"{url}",{members}}}"#);
+        let err = resolve_metadata_document(url, &allowed(), &StubFetch(doc), NOW_US).unwrap_err();
+        assert!(
+            matches!(err, RegistrationError::MalformedDocument),
+            "a document outside the caps was accepted, or refused for another reason: {err:?}"
+        );
+    }
+}
+
+/// One redirect-URI rule, whatever the metadata came from.
+#[test]
+fn a_metadata_document_with_a_fragment_in_a_redirect_uri_is_refused() {
+    let url = "https://claude.ai/c.json";
+    let doc = format!(
+        r#"{{"client_id":"{url}","client_name":"Claude",
+             "redirect_uris":["https://claude.ai/cb#f"]}}"#
+    );
+    let err = resolve_metadata_document(url, &allowed(), &StubFetch(doc), NOW_US).unwrap_err();
+    assert!(matches!(err, RegistrationError::InvalidRedirectUri));
 }
 
 #[test]

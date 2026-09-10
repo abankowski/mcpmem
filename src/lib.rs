@@ -171,7 +171,8 @@ pub struct Args {
     #[arg(long = "principals-file")]
     pub principals_file: Option<String>,
 
-    /// Domain allowed to host a client metadata document. Repeatable.
+    /// Whole host allowed to host a client metadata document; a subdomain
+    /// needs its own entry. Repeatable.
     #[arg(long = "cimd-allowed-domain", value_name = "DOMAIN")]
     pub cimd_allowed_domains: Vec<String>,
 
