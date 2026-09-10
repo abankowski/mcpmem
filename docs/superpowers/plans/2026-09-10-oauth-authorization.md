@@ -18,7 +18,7 @@
 - Token tables hold a SHA-256 digest. They never hold a token value.
 - `redirect_uri` comparison is an exact string match. No prefix match. No wildcard.
 - The static bearer path at `src/http.rs:151` must keep working, with OAuth on and with OAuth off. With no auth configured the server stays open.
-- Every new dependency needs a reason. This plan adds exactly two: `jsonwebtoken` and the development dependency `tower`.
+- Every new dependency needs a reason. Exactly one crate is new to `Cargo.lock`: `jsonwebtoken`, for upstream identity-token verification. `tower`, `http-body-util`, `base64`, `getrandom`, `subtle`, `reqwest` and `url` are already in the tree; the new crate and the development section only name them directly. Verify with `grep -A1 '^name = "<crate>"$' Cargo.lock` before you add one.
 - The principals file is JSON, not TOML. The repository already ships JSON manifests, and JSON needs no new dependency.
 - Each task is test-first. Each task ends with `cargo fmt --all --check` and a commit.
 - Subagents never run git commands. The controller commits.
@@ -324,7 +324,7 @@ use mcpmem::server::{HttpOutcome, dispatch_http_body};
 #[test]
 fn dispatch_denies_a_write_tool_for_a_read_only_principal() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = mcpmem::kg::GraphHandle::new_for_test(dir.path().join("t.mcpmem"));
+    let kg = test_graph(&dir);
     let p = bearer_principal(&[ToolCategory::GraphRead]);
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"delete_entities","arguments":{"entityNames":["a"]}}}"#;
@@ -337,7 +337,7 @@ fn dispatch_denies_a_write_tool_for_a_read_only_principal() {
 #[test]
 fn tools_list_hides_what_the_principal_may_not_call() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = mcpmem::kg::GraphHandle::new_for_test(dir.path().join("t.mcpmem"));
+    let kg = test_graph(&dir);
     let p = bearer_principal(&[ToolCategory::GraphRead]);
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
     let HttpOutcome::Body(v) = dispatch_http_body(body, &kg, None, &p).unwrap() else {
@@ -354,7 +354,30 @@ fn tools_list_hides_what_the_principal_may_not_call() {
 }
 ```
 
-If `GraphHandle::new_for_test` does not exist, use the constructor that the existing integration tests use; read `tests/mutation_service.rs` for the pattern and copy it verbatim.
+Add this helper at the top of `tests/scope_gating.rs`. It is the constructor
+that `tests/mutation_service.rs:14` uses.
+
+```rust
+use mcpmem::config::{Durability, SqliteTuning};
+use mcpmem::kg::GraphHandle;
+use std::num::NonZeroUsize;
+
+fn test_graph(dir: &tempfile::TempDir) -> GraphHandle {
+    GraphHandle::new(
+        &dir.path().join("memory.db"),
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap()
+}
+```
+
+Both categories must be enabled for these two tests. The category flags are
+process-wide atomics at `src/server.rs:123-126`. Set them once at the top of the
+file through the public entry point that `src/main.rs` uses, or expose a
+`#[doc(hidden)]` setter beside them and call it from the test.
 
 - [ ] **Step 15: Run the whole affected set.**
 
@@ -1004,7 +1027,8 @@ fn the_oauth_migration_applies_to_a_database_that_predates_it() {
 }
 ```
 
-Read `crates/mcpmem-core/src/schema.rs` for the real initializer name before writing this test. Use the name that exists.
+`mcpmem_core::schema::initialize_database` is the real initializer, at
+`crates/mcpmem-core/src/schema.rs:15`.
 
 - [ ] **Step 4: Run it and watch it fail.**
 
@@ -1535,6 +1559,27 @@ async fn authorization_server(State(state): State<HttpState>) -> Response {
 
 Add `enabled_categories: Arc<[ToolCategory]>` and `oauth: Option<Arc<OauthState>>` to `HttpState`, and call `oauth_routes::attach` inside `router()` at `src/http.rs:69`. The `/.well-known` routes answer HTTP 404 when OAuth is off, so a server without OAuth advertises nothing.
 
+Declare `OauthState` in `src/oauth_routes.rs` now, with every field that later
+tasks need. Retrofitting it in Task 8 would touch code that is already reviewed.
+
+```rust
+/// Everything the OAuth routes share. The clock is a field, not a call to the
+/// wall clock: expiry tests cannot sleep for an hour.
+pub struct OauthState {
+    pub config: crate::config::OAuthConfig,
+    pub store: mcpmem_oauth::store::Store,
+    pub now_us: Arc<dyn Fn() -> i64 + Send + Sync>,
+    pub limits: mcpmem_oauth::limits::RateLimiter,
+}
+```
+
+`limits` arrives in Task 9. Until then, declare the field with a permissive
+limiter, or leave the field out and add it in Task 9. Either is acceptable; say
+which you chose in the report. `now_us` defaults to
+`Arc::new(mcpmem_core::events::now_us)`.
+
+`HttpState::for_test` takes `Vec<ToolCategory>` and converts with `Arc::from`.
+
 - [ ] **Step 6: Send the challenge.** Replace the two `StatusCode::UNAUTHORIZED` responses in `post_handler` and `get_handler` with a shared helper in `src/http.rs`:
 
 ```rust
@@ -1977,6 +2022,7 @@ git commit -m "feat: authenticate the human at an OpenID Connect provider"
 **Files:**
 - Create: `crates/mcpmem-oauth/src/consent.rs`
 - Create: `src/ui/consent.html`
+- Create: `tests/support/flow.rs`
 - Create: `tests/oauth_consent.rs`
 - Modify: `src/oauth_routes.rs` (add `POST /oauth/consent`)
 
@@ -2152,6 +2198,7 @@ git commit -m "feat: ask the human for least-privilege consent"
 **Files:**
 - Create: `crates/mcpmem-oauth/src/token.rs`
 - Create: `tests/oauth_flow.rs`
+- Modify: `tests/support/flow.rs` (add `Flow`, `Reply`, the clock)
 - Modify: `src/oauth_routes.rs` (add `POST /oauth/token` and `POST /oauth/revoke`)
 - Modify: `src/http.rs:142-233` (resolve a bearer token into a principal)
 
@@ -2388,6 +2435,7 @@ git commit -m "feat: issue and validate audience-bound OAuth tokens"
 **Files:**
 - Create: `crates/mcpmem-oauth/src/limits.rs`
 - Create: `docs/runbooks/oauth-deployment.md`
+- Modify: `tests/support/flow.rs` (add `fresh`, `register_from`, `insert_expired_family`, `count`, `now`)
 - Modify: `crates/mcpmem-oauth/src/store.rs` (call `sweep`)
 - Modify: `src/runtime.rs` (schedule the sweep)
 - Modify: `README.md`
