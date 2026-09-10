@@ -307,15 +307,18 @@ fn denied_scopes(value: &Value, principal: &Principal) -> Vec<&'static str> {
     denied
 }
 
-/// The scope one JSON-RPC message needs but `principal` lacks. An unknown tool
-/// name has no scope: it stays a `Method not found` error from the dispatcher
-/// rather than becoming a misleading scope refusal.
+/// The scope one JSON-RPC message needs but `principal` lacks. The decision
+/// itself belongs to [`authz::missing_scope`], so this screen and the gate in
+/// [`handle_tools_call`] can never disagree.
 fn denied_scope(value: &Value, principal: &Principal) -> Option<&'static str> {
+    // A message with no id is a notification: it never executes, so it can
+    // never be a scope failure, and it must not refuse the batch around it.
+    value.get("id")?;
     if value.get("method").and_then(Value::as_str)? != "tools/call" {
         return None;
     }
     let name = value.pointer("/params/name").and_then(Value::as_str)?;
-    tools::scope_of(name).filter(|scope| !principal.scopes.contains(*scope))
+    authz::missing_scope(principal, name)
 }
 
 /// Process one JSON-RPC message for the HTTP transport, converting any
@@ -845,11 +848,9 @@ fn handle_tools_call(
         .and_then(|p| p.get("name").and_then(|v| v.as_str()))
         .ok_or_else(|| MCSError::InvalidParams("Missing 'name' parameter".into()))?;
 
-    // Scope gate. An unknown name has no scope: it falls through to the
-    // existing `Method not found` paths rather than becoming a scope refusal.
-    if let Some(scope) = tools::scope_of(tool_name)
-        && !principal.scopes.contains(scope)
-    {
+    // Scope gate. This is the authoritative check: it covers every transport,
+    // not only the HTTP body screen.
+    if let Some(scope) = authz::missing_scope(principal, tool_name) {
         return Err(MCSError::InsufficientScope {
             tool: tool_name.to_owned(),
             scope,

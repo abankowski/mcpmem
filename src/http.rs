@@ -285,8 +285,10 @@ async fn ui_js_handler() -> Response {
 }
 
 /// Shared auth + `graph-read` gate for the viewer's data endpoints
-/// (`/ui/graph`, `/ui/search`, `/ui/expand`). Returns the error `Response` to
-/// send back, or `None` when the request may proceed.
+/// (`/ui/graph`, `/ui/search`, `/ui/node`, `/ui/expand`). The viewer reads the
+/// whole graph, so it needs both the process-wide category and the
+/// `graph-read` scope on the presented credential. Returns the error
+/// `Response` to send back, or `None` when the request may proceed.
 fn ui_data_gate(
     state: &HttpState,
     headers: &HeaderMap,
@@ -300,6 +302,15 @@ fn ui_data_gate(
             (
                 StatusCode::FORBIDDEN,
                 "graph-read tools are disabled; start the server with --enable-graph-read (or --enable-all) to view the graph",
+            )
+                .into_response(),
+        );
+    }
+    if !state.bearer_scopes.contains(&ToolCategory::GraphRead) {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                "the presented credential does not hold the graph-read scope",
             )
                 .into_response(),
         );
@@ -606,5 +617,54 @@ async fn ui_expand_handler(
             error!("/ui/expand task panicked: {join_err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::server::MCPServer;
+    use crate::tools::ToolCategory;
+
+    /// A viewer state with `graph-read` enabled process-wide, no bearer token,
+    /// and the given scopes on the credential. The category flag is a
+    /// process-wide atomic, so this goes through the same entry point
+    /// `src/main.rs` uses.
+    fn ui_state(dir: &tempfile::TempDir, scopes: &[ToolCategory]) -> HttpState {
+        let config = Config {
+            memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
+            enabled_categories: vec![ToolCategory::GraphRead],
+            ..Config::default()
+        };
+        let kg = MCPServer::new_kg(config)
+            .expect("test server builds")
+            .graph();
+        HttpState {
+            kg,
+            vs: None,
+            auth_token: None,
+            bearer_scopes: Arc::from(scopes),
+        }
+    }
+
+    /// The viewer reads the whole graph, so it needs the same `graph-read`
+    /// scope as `read_graph`. Without it the endpoint must refuse, even though
+    /// the category is enabled and the token is accepted.
+    #[tokio::test]
+    async fn ui_graph_refuses_a_credential_without_the_graph_read_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ui_state(&dir, &[ToolCategory::Vectors]);
+        let resp = ui_graph_handler(State(state), HeaderMap::new(), Query(HashMap::new())).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Control: the same request with the scope is served.
+    #[tokio::test]
+    async fn ui_graph_serves_a_credential_holding_the_graph_read_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ui_state(&dir, &[ToolCategory::GraphRead]);
+        let resp = ui_graph_handler(State(state), HeaderMap::new(), Query(HashMap::new())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

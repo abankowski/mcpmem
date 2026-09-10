@@ -46,8 +46,18 @@ fn principal_with(id: &str, scopes: &[ToolCategory]) -> Principal {
     }
 }
 
-/// `true` when the principal holds the scope this tool needs. An unknown tool
-/// name is never allowed.
+/// The scope `tool` needs but `principal` lacks, or `None` when the principal
+/// may call it. This is the one place the scope decision is made. An unknown
+/// tool name has no scope, so it is not a scope failure: the dispatcher still
+/// answers `Method not found`.
+#[inline]
+pub fn missing_scope(principal: &Principal, tool: &str) -> Option<&'static str> {
+    tools::scope_of(tool).filter(|s| !principal.scopes.contains(*s))
+}
+
+/// `true` when the principal holds the scope this tool needs. Reports
+/// [`missing_scope`] for the `tools/list` filters, where an unknown name must
+/// not be advertised either.
 #[inline]
 pub fn allows_tool(principal: &Principal, tool: &str) -> bool {
     tools::scope_of(tool).is_some_and(|s| principal.scopes.contains(s))

@@ -1,6 +1,6 @@
 //! Per-principal tool gating: a caller may only reach the tools its scopes name.
 
-use mcpmem::authz::{allows_tool, bearer_principal, local_principal};
+use mcpmem::authz::{allows_tool, bearer_principal, local_principal, missing_scope};
 use mcpmem::config::Config;
 use mcpmem::kg::GraphHandle;
 use mcpmem::server::{HttpOutcome, MCPServer, dispatch_http_body};
@@ -29,11 +29,57 @@ fn body_of(outcome: HttpOutcome) -> Value {
     }
 }
 
+/// Every name the registry knows: knowledge-graph, vector and code tools.
+fn every_tool_name() -> Vec<&'static str> {
+    mcpmem::tools::ALL_TOOLS
+        .iter()
+        .map(|t| t.name)
+        .chain(mcpmem::tools::VECTOR_TOOL_NAMES.iter().copied())
+        .chain(mcpmem::tools::CODE_TOOL_NAMES.iter().copied())
+        .collect()
+}
+
 #[test]
 fn a_read_only_principal_may_not_call_a_write_tool() {
     let p = bearer_principal(&[ToolCategory::GraphRead]);
     assert!(allows_tool(&p, "read_graph"));
     assert!(!allows_tool(&p, "delete_entities"));
+}
+
+/// One helper owns the scope decision; `allows_tool` only reports it. The two
+/// must never disagree, and they must keep their one deliberate asymmetry: an
+/// unknown tool is not a scope failure, yet it is never allowed.
+#[test]
+fn missing_scope_and_allows_tool_agree_on_every_known_tool() {
+    let none = bearer_principal(&[]);
+    let all = local_principal();
+    for name in every_tool_name() {
+        let scope = mcpmem::tools::scope_of(name).expect("known tool has a scope");
+        assert_eq!(missing_scope(&none, name), Some(scope), "{name}");
+        assert!(!allows_tool(&none, name), "{name}");
+        assert_eq!(missing_scope(&all, name), None, "{name}");
+        assert!(allows_tool(&all, name), "{name}");
+    }
+    assert_eq!(missing_scope(&all, "no_such_tool"), None);
+    assert!(!allows_tool(&all, "no_such_tool"));
+}
+
+/// A `tools/call` with no id is a notification: it never executes, so it can
+/// never be a scope failure, and it must not refuse the batch around it.
+#[test]
+fn a_denied_notification_does_not_refuse_the_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let kg = test_graph(&dir);
+    let p = bearer_principal(&[ToolCategory::GraphRead]);
+    let body = r#"[
+        {"jsonrpc":"2.0","method":"tools/call",
+         "params":{"name":"delete_entities","arguments":{"entityNames":["a"]}}},
+        {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+    ]"#;
+    let v = body_of(dispatch_http_body(body, &kg, None, &p).unwrap());
+    let items = v.as_array().expect("a batch answers with an array");
+    assert_eq!(items.len(), 1, "only the request is answered: {v}");
+    assert_eq!(items[0]["id"], 2, "{v}");
 }
 
 #[test]
