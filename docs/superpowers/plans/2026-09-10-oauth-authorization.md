@@ -734,8 +734,11 @@ whose feature is not compiled, at `crates/mcpmem-runtime/src/lib.rs:78`. Only
 - [ ] **Step 7: Run and watch them fail.**
 
 ```text
-cargo test --test oauth_config
+cargo test --test oauth_config --features webhooks
 ```
+
+The feature is needed. Without it the role-refusal test is compiled out, and the
+run passes while proving nothing. Use this command everywhere in this task.
 
 - [ ] **Step 8: Extend `Config`.** Add to the struct at `src/config.rs:10`:
 
