@@ -841,7 +841,7 @@ cargo test -p mcpmem --lib config
 There is no `tests/config.rs`. The `Config` unit tests live in the library, at
 `src/config.rs:218`.
 
-- [ ] **Step 10: Use `bearer_scopes` in the HTTP transport.** In `src/main.rs`, pass `config.bearer_scopes` into `http::run`. Convert it with `Arc::from(config.bearer_scopes)` when you set `HttpState.bearer_scopes`, which Task 1 added as `Arc<[ToolCategory]>`.
+- [ ] **Step 10: Use `bearer_scopes` in the HTTP transport.** The `http::run` call site is `MCPServer::run_http` at `src/server.rs:485`, not `src/main.rs`. Task 1 already added the parameter, so pass `config.bearer_scopes` there and convert it with `Arc::from`.
 
 - [ ] **Step 11: Check and commit.**
 
