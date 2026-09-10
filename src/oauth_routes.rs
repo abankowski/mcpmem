@@ -8,9 +8,11 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::{Path as UrlPath, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, http::StatusCode};
+use mcpmem_oauth::registration::RegistrationError;
 use parking_lot::Mutex;
+use serde_json::json;
 
 use crate::errors::{MCSError, Result};
 use crate::http::HttpState;
@@ -24,13 +26,15 @@ use crate::http::HttpState;
 /// serialized connection is also what SQLite wants for writes, and the OAuth
 /// tables see one statement per request.
 ///
-/// Never hold the guard across an `await`. The lock is not async-aware, so a
-/// task that sleeps while holding it — an upstream token exchange, say —
-/// blocks every other OAuth request on that worker. Take the lock, finish the
-/// statement, drop the guard.
+/// The guard must never be held across an `await`. The lock is not
+/// async-aware, so a task that sleeps while holding it — an upstream token
+/// exchange, say — blocks every other OAuth request on that worker. That is
+/// why the field is private and every reader goes through
+/// [`OauthState::with_store`], which makes the mistake unwritable rather than
+/// merely discouraged.
 pub struct OauthState {
     pub config: crate::config::OAuthConfig,
-    pub store: Mutex<mcpmem_oauth::store::Store>,
+    store: Mutex<mcpmem_oauth::store::Store>,
     pub now_us: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
@@ -44,6 +48,21 @@ impl OauthState {
     /// path silently stops matching.
     pub fn resource(&self) -> String {
         format!("{}/mcp", self.config.public_url)
+    }
+
+    /// Run `f` with the store locked, and drop the guard before returning.
+    ///
+    /// The guard cannot escape and cannot span an `await`. `f` returns a `T`
+    /// that is fixed by the caller, so it cannot name the guard's lifetime:
+    /// neither the guard itself nor a future borrowing the `&Store` type-checks
+    /// as a return value. An `await` inside `f` is impossible for the same
+    /// reason — `f` is a plain closure, and an `async` block it built would
+    /// borrow the store it cannot outlive.
+    ///
+    /// Every statement group that must be atomic therefore belongs in one
+    /// call: two calls are two lock acquisitions with a window between them.
+    pub fn with_store<T>(&self, f: impl FnOnce(&mcpmem_oauth::store::Store) -> T) -> T {
+        f(&self.store.lock())
     }
 
     /// Open the OAuth store on `db_path` and build the shared state.
@@ -93,7 +112,7 @@ fn open_failed(e: &rusqlite::Error) -> MCSError {
     MCSError::MemoryError(format!("failed to open the OAuth store: {e}"))
 }
 
-/// Add the discovery documents.
+/// Add the discovery documents and the registration endpoint.
 ///
 /// Each document is published twice. A client that knows only the origin
 /// fetches the bare path. A client that follows RFC 9728 section 3.1 (for the
@@ -124,6 +143,64 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
             "/.well-known/oauth-authorization-server/{*suffix}",
             get(authorization_server_at),
         )
+        .route("/oauth/register", post(register))
+}
+
+/// `POST /oauth/register` — RFC 7591 dynamic client registration.
+///
+/// The endpoint is open, as RFC 7591 section 1.2 allows and as every MCP
+/// client assumes: a client that has just discovered this server holds no
+/// credential to authenticate a registration with. Nothing in the body is
+/// trusted — see `mcpmem_oauth::registration::RegistrationRequest` — and the
+/// cost of an open endpoint is one row, which Task 9 bounds with a rate limit.
+///
+/// The body is read as bytes rather than through the `Json` extractor. A
+/// malformed body must answer with the RFC 7591 section 3.2.2 error object,
+/// and the extractor's own rejection is a different shape a client cannot
+/// parse.
+async fn register(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return registration_refused(&RegistrationError::InvalidClientMetadata);
+    };
+    let now_us = (oauth.now_us)();
+    match oauth.with_store(|store| mcpmem_oauth::registration::register(store, &value, now_us)) {
+        Ok(document) => (StatusCode::CREATED, Json(document)).into_response(),
+        Err(e) => registration_refused(&e),
+    }
+}
+
+/// The RFC 7591 section 3.2.2 error object for a refused registration.
+///
+/// The match is exhaustive on purpose: a new reason for refusing a client must
+/// name the code it reports, and `invalid_client_metadata` is not a safe
+/// default for every one of them.
+fn registration_refused(e: &RegistrationError) -> Response {
+    let code = match e {
+        RegistrationError::InvalidRedirectUri => "invalid_redirect_uri",
+        RegistrationError::InvalidClientMetadata
+        | RegistrationError::DomainNotAllowed
+        | RegistrationError::MalformedDocument
+        | RegistrationError::MetadataMismatch
+        | RegistrationError::Fetch(_) => "invalid_client_metadata",
+        // The request was well formed and this server failed. Its own detail
+        // names the database, so it goes to the log and not to the client.
+        RegistrationError::Store(inner) => {
+            tracing::error!(error = %inner, "the OAuth store refused a client registration");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "server_error" })),
+            )
+                .into_response();
+        }
+    };
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": code, "error_description": e.to_string() })),
+    )
+        .into_response()
 }
 
 /// The scopes this server advertises: one slug per enabled tool category.

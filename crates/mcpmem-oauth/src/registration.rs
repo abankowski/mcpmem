@@ -1,0 +1,236 @@
+//! The two ways a client becomes known to this server.
+//!
+//! [`register`] is RFC 7591 dynamic client registration: the client posts its
+//! metadata and this server issues the identifier. [`resolve_metadata_document`]
+//! is the client identifier metadata document: the client publishes its
+//! metadata at an https URL and presents that URL as its identifier.
+//!
+//! Both paths end in one [`ClientRecord`], and both apply one redirect-URI
+//! rule. A registration is unauthenticated, so nothing here may trust a value
+//! the request chose: the identifier, the source and both timestamps are
+//! server-controlled, and [`RegistrationRequest`] is the only shape a request
+//! body deserializes into.
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+use thiserror::Error;
+
+use crate::store::{ClientRecord, Store, StoreError};
+
+/// Fetch one document over HTTP. The trait exists so a test supplies a
+/// document without a network, and so the transport is chosen once, by the
+/// caller that owns the process's HTTP client.
+///
+/// # Implementation requirements
+///
+/// [`resolve_metadata_document`] checks the scheme and the host before it
+/// calls `get`, and nothing after that check constrains the request. An
+/// implementation must therefore enforce the rest itself:
+///
+/// - `https` only, and no redirect followed — a redirect moves the response
+///   off the host this server just authorized;
+/// - a 64 KB body cap, and a 5 second timeout — the URL is client-chosen, so
+///   the host may stream forever or never answer.
+///
+/// No implementation ships in this crate: `mcpmem-oauth` is a non-optional
+/// dependency of `mcpmem`, and CI requires the graph-only build
+/// (`cargo tree --no-default-features`) to carry no HTTP client
+/// (`.github/workflows/ci.yml`). The real fetcher therefore arrives with the
+/// upstream provider, behind a cargo feature, and never as a plain dependency
+/// of this crate.
+pub trait Fetch: Send + Sync {
+    /// The body of `url`, or a message describing why it could not be read.
+    fn get(&self, url: &str) -> Result<String, String>;
+}
+
+/// Why a registration was refused.
+///
+/// The first two arise from a registration request, the next four from a
+/// metadata document, and the last from the store. `src/oauth_routes.rs` maps
+/// each one to an RFC 7591 section 3.2.2 error code.
+#[derive(Debug, Error)]
+pub enum RegistrationError {
+    #[error("the registration request is not usable client metadata")]
+    InvalidClientMetadata,
+    #[error("every redirect URI must use https, or be a loopback http URL")]
+    InvalidRedirectUri,
+    #[error("the metadata document URL is not an https URL on an allowed domain")]
+    DomainNotAllowed,
+    #[error("the metadata document is not usable client metadata")]
+    MalformedDocument,
+    #[error("the metadata document names a client_id other than its own URL")]
+    MetadataMismatch,
+    #[error("the metadata document could not be fetched: {0}")]
+    Fetch(String),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+/// Everything a registration request is allowed to choose.
+///
+/// Unknown members are ignored rather than refused, which is what makes this
+/// type the guard it is: a body carrying `client_id`, `source` or `created_us`
+/// registers a client with a server-issued identifier and server-set
+/// timestamps, exactly as a body without them does. [`ClientRecord`] itself
+/// does not implement `Deserialize`, so no other shape can appear here.
+///
+/// `client_name` is optional in RFC 7591 section 2 and stays optional here: a
+/// client that sends none registers with an empty name. A consent screen must
+/// therefore be ready to name a client by its identifier.
+#[derive(Debug, Deserialize)]
+struct RegistrationRequest {
+    #[serde(default)]
+    client_name: String,
+    #[serde(default)]
+    redirect_uris: Vec<String>,
+}
+
+/// The three members a client identifier metadata document must carry. All
+/// three are required: a document is the client's own publication, and one
+/// that omits any of them cannot be shown to a human or redirected to.
+#[derive(Debug, Deserialize)]
+struct MetadataDocument {
+    client_id: String,
+    client_name: String,
+    redirect_uris: Vec<String>,
+}
+
+/// Register a client and return the RFC 7591 section 3.2.1 response body.
+///
+/// `now_us` is microseconds since the epoch, the unit the store keeps.
+/// `client_id_issued_at` is seconds, the unit RFC 7591 states.
+///
+/// The response reports what this server does, not what the request asked
+/// for. There is one grant set, one response type and no client secret, so
+/// `grant_types`, `response_types` and `token_endpoint_auth_method` are stated
+/// rather than echoed: RFC 7591 section 3.2.1 admits that, and echoing a
+/// method this server does not implement would be a lie a client acts on.
+pub fn register(store: &Store, body: &Value, now_us: i64) -> Result<Value, RegistrationError> {
+    let request = RegistrationRequest::deserialize(body)
+        .map_err(|_| RegistrationError::InvalidClientMetadata)?;
+    if request.redirect_uris.is_empty() {
+        return Err(RegistrationError::InvalidClientMetadata);
+    }
+    check_redirect_uris(&request.redirect_uris)?;
+
+    let record = ClientRecord {
+        client_id: crate::new_token(),
+        client_name: request.client_name,
+        redirect_uris: request.redirect_uris,
+        source: ClientRecord::DCR.to_string(),
+        created_us: now_us,
+        last_used_us: now_us,
+    };
+    store.put_client(&record)?;
+
+    Ok(json!({
+        "client_id": record.client_id,
+        "client_id_issued_at": now_us / 1_000_000,
+        "client_name": record.client_name,
+        "redirect_uris": record.redirect_uris,
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none"
+    }))
+}
+
+/// Fetch and validate the client identifier metadata document at `url`, and
+/// return the client it describes.
+///
+/// The order matters. The scheme and the host are checked first, and a URL
+/// that fails either check produces no request at all: `url` arrives from an
+/// authorization request, so a fetch before the check would make this server
+/// an open proxy that any client can point at any host.
+///
+/// `client_id` must equal `url` byte for byte. That equality is the whole
+/// binding between the identifier a client presents and the metadata this
+/// server acts on; without it a document on an allowed domain could claim any
+/// identifier, including one already registered.
+pub fn resolve_metadata_document(
+    url: &str,
+    allowed_domains: &[String],
+    fetch: &dyn Fetch,
+    now_us: i64,
+) -> Result<ClientRecord, RegistrationError> {
+    let Some(host) = host(url, "https://") else {
+        return Err(RegistrationError::DomainNotAllowed);
+    };
+    if !allowed_domains
+        .iter()
+        .any(|domain| domain.eq_ignore_ascii_case(host))
+    {
+        return Err(RegistrationError::DomainNotAllowed);
+    }
+
+    let body = fetch.get(url).map_err(RegistrationError::Fetch)?;
+    let document: MetadataDocument =
+        serde_json::from_str(&body).map_err(|_| RegistrationError::MalformedDocument)?;
+    if document.client_id != url {
+        return Err(RegistrationError::MetadataMismatch);
+    }
+    if document.client_name.is_empty() || document.redirect_uris.is_empty() {
+        return Err(RegistrationError::MalformedDocument);
+    }
+    check_redirect_uris(&document.redirect_uris)?;
+
+    Ok(ClientRecord {
+        client_id: document.client_id,
+        client_name: document.client_name,
+        redirect_uris: document.redirect_uris,
+        source: ClientRecord::CIMD.to_string(),
+        created_us: now_us,
+        last_used_us: now_us,
+    })
+}
+
+/// Every entry, not just the first: one plain-http entry in a list is the whole
+/// interception the rule exists to prevent.
+fn check_redirect_uris(uris: &[String]) -> Result<(), RegistrationError> {
+    for uri in uris {
+        if !is_acceptable_redirect_uri(uri) {
+            return Err(RegistrationError::InvalidRedirectUri);
+        }
+    }
+    Ok(())
+}
+
+/// An `https` URL, or a loopback `http` URL as RFC 8252 section 7.3 allows for
+/// a native client that listens on an ephemeral port. Every other plain-http
+/// URL is refused: the authorization code would cross the network in clear.
+///
+/// The loopback names are matched whole. A host that merely ends in
+/// `localhost` — `evil.localhost` — is a public name someone else can own.
+fn is_acceptable_redirect_uri(uri: &str) -> bool {
+    if host(uri, "https://").is_some() {
+        return true;
+    }
+    host(uri, "http://")
+        .is_some_and(|h| h == "127.0.0.1" || h == "[::1]" || h.eq_ignore_ascii_case("localhost"))
+}
+
+/// The host of `url` when it uses `scheme`, or `None`.
+///
+/// `scheme` carries its `://`. The authority is read up to the first `/`, `?`
+/// or `#`, so nothing in a path or a query is mistaken for a host.
+///
+/// An authority carrying userinfo is refused outright rather than parsed.
+/// `https://claude.ai@evil.example/c.json` has host `evil.example`, and its
+/// only purpose is to read as an allowed domain; no legitimate redirect URI or
+/// metadata document URL carries credentials.
+fn host<'a>(url: &'a str, scheme: &str) -> Option<&'a str> {
+    let authority = url
+        .strip_prefix(scheme)?
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    if authority.contains('@') {
+        return None;
+    }
+    // Drop a port, and leave a bracketed IPv6 literal whole: the last colon of
+    // `[::1]` is not a port separator, and what follows it is not a number.
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    (!host.is_empty()).then_some(host)
+}

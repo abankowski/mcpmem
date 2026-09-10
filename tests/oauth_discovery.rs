@@ -244,7 +244,6 @@ async fn the_discovery_documents_are_absent_when_oauth_is_off() {
 #[tokio::test]
 async fn the_store_is_reachable_and_opens_on_a_migrated_schema() {
     let server = support::oauth_server().await;
-    let store = server.oauth().store.lock();
 
     let record = mcpmem_oauth::store::ClientRecord {
         client_id: "c-1".into(),
@@ -254,17 +253,22 @@ async fn the_store_is_reachable_and_opens_on_a_migrated_schema() {
         created_us: 1,
         last_used_us: 1,
     };
-    store.put_client(&record).expect("the oauth tables exist");
+    // One call, one lock: `with_store` hands out the store for the length of
+    // the closure and never the guard itself.
+    let (round_trip, timeout) = server.oauth().with_store(|store| {
+        store.put_client(&record).expect("the oauth tables exist");
+        let round_trip = store.get_client("c-1").expect("read back");
+        let timeout: i64 = store
+            .connection()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        (round_trip, timeout)
+    });
     assert_eq!(
-        store.get_client("c-1").expect("read back"),
+        round_trip,
         Some(record),
         "the store must round-trip through the migrated schema"
     );
-
-    let timeout: i64 = store
-        .connection()
-        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
-        .unwrap();
     assert!(timeout > 0, "busy_timeout was {timeout}");
 }
 

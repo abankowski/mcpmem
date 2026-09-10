@@ -91,6 +91,15 @@ pub struct ClientRecord {
     pub last_used_us: i64,
 }
 
+impl ClientRecord {
+    /// The `source` of a client this server registered dynamically, under
+    /// RFC 7591. The identifier is opaque and server-issued.
+    pub const DCR: &'static str = "dcr";
+    /// The `source` of a client whose metadata this server fetched from the
+    /// https URL the client presents as its identifier.
+    pub const CIMD: &'static str = "cimd";
+}
+
 /// One authorization request in flight, keyed by the state this server sent
 /// upstream. `client_state` is the state the client sent to this server, which
 /// is opaque here and returned unchanged.

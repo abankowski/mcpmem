@@ -4,6 +4,7 @@
 //! authenticates the human. Tokens are opaque; the database holds their digest.
 
 pub mod metadata;
+pub mod registration;
 pub mod store;
 
 use base64::Engine;
