@@ -55,10 +55,10 @@ pub fn missing_scope(principal: &Principal, tool: &str) -> Option<&'static str> 
     tools::scope_of(tool).filter(|s| !principal.scopes.contains(*s))
 }
 
-/// `true` when the principal holds the scope this tool needs. Reports
-/// [`missing_scope`] for the `tools/list` filters, where an unknown name must
-/// not be advertised either.
+/// `true` when the principal holds the scope this tool needs. Derived from
+/// [`missing_scope`], so the two can never disagree. The `tools/list` filters
+/// use this form, where an unknown name must not be advertised either.
 #[inline]
 pub fn allows_tool(principal: &Principal, tool: &str) -> bool {
-    tools::scope_of(tool).is_some_and(|s| principal.scopes.contains(s))
+    tools::scope_of(tool).is_some() && missing_scope(principal, tool).is_none()
 }

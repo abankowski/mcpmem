@@ -682,6 +682,10 @@ fn oauth_without_public_url_is_refused() {
     assert!(err.contains("--public-url"), "message was: {err}");
 }
 
+// `webhooks` is not a default feature, and `RoleSet::parse_csv` rejects a role
+// that is not compiled. Without this gate the test would fail on the role name
+// rather than on the refusal it exists to prove.
+#[cfg(feature = "webhooks")]
 #[test]
 fn oauth_without_the_mcp_role_is_refused() {
     let p = write_tmp(
@@ -690,7 +694,7 @@ fn oauth_without_the_mcp_role_is_refused() {
     );
     let err = Config::from_args(&args(&[
         "--transport", "http",
-        "--role", "webhook-worker",
+        "--role", "webhooks",
         "--oauth-trust-forwarded-proto",
         "--oidc-issuer", "https://idp.example",
         "--oidc-client-id", "abc",
@@ -721,7 +725,11 @@ fn a_public_url_with_a_trailing_slash_is_normalized() {
 }
 ```
 
-The role name in the third test must match the value that `RoleSet::parse_csv` accepts. Read `crates/mcpmem-runtime/src/lib.rs:62-82` and use the exact string. If the webhook role is not compiled by default, use a role that is, or add the feature to the test command.
+The role strings are `mcp`, `indexer` and `webhooks`, at
+`crates/mcpmem-runtime/src/lib.rs:23-25`. `RoleSet::parse_csv` rejects a role
+whose feature is not compiled, at `crates/mcpmem-runtime/src/lib.rs:78`. Only
+`code` is a default feature. Run the role test with
+`cargo test --test oauth_config --features webhooks`.
 
 - [ ] **Step 7: Run and watch them fail.**
 

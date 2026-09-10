@@ -313,7 +313,8 @@ fn denied_scopes(value: &Value, principal: &Principal) -> Vec<&'static str> {
 fn denied_scope(value: &Value, principal: &Principal) -> Option<&'static str> {
     // A message with no id is a notification: it never executes, so it can
     // never be a scope failure, and it must not refuse the batch around it.
-    value.get("id")?;
+    // An explicit `"id":null` deserializes to `None` too, so it is one as well.
+    value.get("id").filter(|id| !id.is_null())?;
     if value.get("method").and_then(Value::as_str)? != "tools/call" {
         return None;
     }

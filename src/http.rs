@@ -627,14 +627,15 @@ mod tests {
     use crate::server::MCPServer;
     use crate::tools::ToolCategory;
 
-    /// A viewer state with `graph-read` enabled process-wide, no bearer token,
-    /// and the given scopes on the credential. The category flag is a
-    /// process-wide atomic, so this goes through the same entry point
-    /// `src/main.rs` uses.
+    /// A viewer state with no bearer token and the given scopes on the
+    /// credential. The category flags are process-wide atomics, so this goes
+    /// through the same entry point `src/main.rs` uses — and it enables both
+    /// graph categories, because clearing `graph-write` here would race the
+    /// dispatch-gate test in `src/server.rs`, which runs in this same binary.
     fn ui_state(dir: &tempfile::TempDir, scopes: &[ToolCategory]) -> HttpState {
         let config = Config {
             memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
-            enabled_categories: vec![ToolCategory::GraphRead],
+            enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
             ..Config::default()
         };
         let kg = MCPServer::new_kg(config)

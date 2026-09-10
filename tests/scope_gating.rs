@@ -47,25 +47,45 @@ fn a_read_only_principal_may_not_call_a_write_tool() {
 }
 
 /// One helper owns the scope decision; `allows_tool` only reports it. The two
-/// must never disagree, and they must keep their one deliberate asymmetry: an
+/// must never disagree for a known tool, under any scope set — not only the
+/// empty one and the full one. They keep exactly one deliberate asymmetry: an
 /// unknown tool is not a scope failure, yet it is never allowed.
 #[test]
 fn missing_scope_and_allows_tool_agree_on_every_known_tool() {
-    let none = bearer_principal(&[]);
-    let all = local_principal();
-    for name in every_tool_name() {
-        let scope = mcpmem::tools::scope_of(name).expect("known tool has a scope");
-        assert_eq!(missing_scope(&none, name), Some(scope), "{name}");
-        assert!(!allows_tool(&none, name), "{name}");
-        assert_eq!(missing_scope(&all, name), None, "{name}");
-        assert!(allows_tool(&all, name), "{name}");
+    let mut principals = vec![bearer_principal(&[]), local_principal()];
+    principals.extend(
+        ToolCategory::ALL
+            .iter()
+            .map(|c| bearer_principal(std::slice::from_ref(c))),
+    );
+
+    for p in &principals {
+        for name in every_tool_name() {
+            let scope = mcpmem::tools::scope_of(name).expect("known tool has a scope");
+            // Single owner: for a known tool the two are the same decision.
+            assert_eq!(
+                allows_tool(p, name),
+                missing_scope(p, name).is_none(),
+                "{name} under {:?}",
+                p.scopes
+            );
+            // And that decision is the obvious one.
+            let holds = p.scopes.contains(scope);
+            assert_eq!(
+                missing_scope(p, name),
+                (!holds).then_some(scope),
+                "{name} under {:?}",
+                p.scopes
+            );
+        }
+        assert_eq!(missing_scope(p, "no_such_tool"), None, "{:?}", p.scopes);
+        assert!(!allows_tool(p, "no_such_tool"), "{:?}", p.scopes);
     }
-    assert_eq!(missing_scope(&all, "no_such_tool"), None);
-    assert!(!allows_tool(&all, "no_such_tool"));
 }
 
 /// A `tools/call` with no id is a notification: it never executes, so it can
-/// never be a scope failure, and it must not refuse the batch around it.
+/// never be a scope failure, and it must not refuse the batch around it. An
+/// explicit `"id":null` deserializes to `None` too, so it is one as well.
 #[test]
 fn a_denied_notification_does_not_refuse_the_batch() {
     let dir = tempfile::tempdir().unwrap();
@@ -74,6 +94,8 @@ fn a_denied_notification_does_not_refuse_the_batch() {
     let body = r#"[
         {"jsonrpc":"2.0","method":"tools/call",
          "params":{"name":"delete_entities","arguments":{"entityNames":["a"]}}},
+        {"jsonrpc":"2.0","id":null,"method":"tools/call",
+         "params":{"name":"upsert_entities","arguments":{"entities":[]}}},
         {"jsonrpc":"2.0","id":2,"method":"tools/list"}
     ]"#;
     let v = body_of(dispatch_http_body(body, &kg, None, &p).unwrap());
