@@ -487,9 +487,10 @@ impl MCPServer {
             self.graph(),
             self.vs.clone(),
             self.config.auth_token.clone(),
-            // The static bearer token grants every scope, so a token holder
-            // keeps the reach it had before scopes existed.
-            Arc::from(tools::ToolCategory::ALL),
+            // Scopes granted to the static bearer token. Defaults to every
+            // category, so a token holder keeps the reach it had before scopes
+            // existed; `--static-bearer-scopes` narrows it.
+            Arc::from(self.config.bearer_scopes.clone()),
             self.config.tls_cert.clone(),
             self.config.tls_key.clone(),
         )

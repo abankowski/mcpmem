@@ -157,6 +157,16 @@ mcpmem --enable-all --transport http --bind 0.0.0.0:8080 --auth-token "s3cr3t"
 On HTTP the token is sent as `Authorization: Bearer <token>`; comparison is constant-time.
 Binding a non-loopback address **without** a token exposes the entire graph to the network.
 
+By default the token grants every enabled tool category. Narrow it with
+`--static-bearer-scopes`, a comma-separated list of category slugs
+(`graph-read`, `graph-write`, `vectors`, `code`); a call to a tool outside the
+list is refused.
+
+```sh
+mcpmem --enable-all --transport http --auth-token "s3cr3t" \
+  --static-bearer-scopes graph-read,vectors
+```
+
 ### TLS (HTTPS)
 
 The `http` transport can be served over TLS (rustls, `ring` provider). Provide a PEM certificate

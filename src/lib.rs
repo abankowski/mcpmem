@@ -11,6 +11,7 @@ pub use mcpmem_core::errors;
 pub mod http;
 pub mod ivf;
 pub mod kg;
+pub mod principals;
 pub mod protocol;
 pub mod runtime;
 pub mod server;
@@ -147,6 +148,43 @@ pub struct Args {
     /// file is rejected (fail closed). Ignored if `--auth-token` is set.
     #[arg(long = "auth-token-file")]
     pub auth_token_file: Option<String>,
+
+    /// Canonical HTTPS URL of this server, for example `https://mem.example.com`.
+    /// Required with `--oidc-issuer`. Never derived from the Host header.
+    #[arg(long = "public-url")]
+    pub public_url: Option<String>,
+
+    /// Upstream OpenID Connect issuer. Turns the OAuth authorization server on.
+    #[arg(long = "oidc-issuer")]
+    pub oidc_issuer: Option<String>,
+
+    /// Client identifier registered at the upstream provider.
+    #[arg(long = "oidc-client-id")]
+    pub oidc_client_id: Option<String>,
+
+    /// File holding the upstream client secret. Omit for a public client.
+    #[arg(long = "oidc-client-secret-file")]
+    pub oidc_client_secret_file: Option<String>,
+
+    /// JSON file listing the humans allowed to authorize, and their scopes.
+    #[arg(long = "principals-file")]
+    pub principals_file: Option<String>,
+
+    /// Domain allowed to host a client metadata document. Repeatable.
+    #[arg(long = "cimd-allowed-domain", value_name = "DOMAIN")]
+    pub cimd_allowed_domains: Vec<String>,
+
+    /// Trust X-Forwarded-Proto from a reverse proxy that terminates TLS.
+    #[arg(long = "oauth-trust-forwarded-proto")]
+    pub oauth_trust_forwarded_proto: bool,
+
+    /// Scopes granted to the static bearer token. Defaults to every category.
+    #[arg(
+        long = "static-bearer-scopes",
+        value_delimiter = ',',
+        value_name = "SCOPE"
+    )]
+    pub static_bearer_scopes: Vec<String>,
 
     /// SQLite mmap size in bytes (default: 64 MiB).
     #[arg(long = "mmap-size", default_value_t = 67108864)]
