@@ -11,6 +11,7 @@ pub use mcpmem_core::errors;
 pub mod http;
 pub mod ivf;
 pub mod kg;
+pub mod oauth_routes;
 pub mod principals;
 pub mod protocol;
 pub mod runtime;

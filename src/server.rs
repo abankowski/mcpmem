@@ -482,18 +482,30 @@ impl MCPServer {
     pub async fn run_http(&self, addr: &str) -> Result<()> {
         spawn_maintenance(self.kg.clone());
         spawn_wal_flush(self.kg.clone(), self.config.wal_flush_ms);
-        crate::http::run(
-            addr,
-            self.graph(),
-            self.vs.clone(),
-            self.config.auth_token.clone(),
+        // The graph handle above already migrated the schema, so the four
+        // `oauth_*` tables exist by the time the store opens.
+        let oauth = match self.config.oauth.clone() {
+            Some(cfg) => Some(Arc::new(crate::oauth_routes::OauthState::open(
+                cfg,
+                Path::new(&self.config.memory_file_path),
+                self.config.busy_timeout_ms,
+            )?)),
+            None => None,
+        };
+        crate::http::run(crate::http::HttpRunConfig {
+            addr: addr.to_owned(),
+            kg: self.graph(),
+            vs: self.vs.clone(),
+            auth_token: self.config.auth_token.clone(),
             // Scopes granted to the static bearer token. Defaults to every
             // category, so a token holder keeps the reach it had before scopes
             // existed; `--static-bearer-scopes` narrows it.
-            Arc::from(self.config.bearer_scopes.clone()),
-            self.config.tls_cert.clone(),
-            self.config.tls_key.clone(),
-        )
+            bearer_scopes: Arc::from(self.config.bearer_scopes.clone()),
+            enabled_categories: Arc::from(self.config.enabled_categories.clone()),
+            oauth,
+            tls_cert: self.config.tls_cert.clone(),
+            tls_key: self.config.tls_key.clone(),
+        })
         .await
     }
 }

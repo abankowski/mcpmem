@@ -3,6 +3,7 @@
 //! `mcpmem` issues its own tokens. An upstream OpenID Connect provider only
 //! authenticates the human. Tokens are opaque; the database holds their digest.
 
+pub mod metadata;
 pub mod store;
 
 use base64::Engine;

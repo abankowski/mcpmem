@@ -47,6 +47,7 @@ mcpmem-core = { path = "crates/mcpmem-core", version = "1.0.0-rc.4" }
 mcpmem-runtime = { path = "crates/mcpmem-runtime", version = "1.0.0-rc.4" }
 mcpmem-indexer = { path = "crates/mcpmem-indexer", version = "1.0.0-rc.4", optional = true }
 mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.0-rc.4", optional = true }
+mcpmem-oauth = { path = "crates/mcpmem-oauth", version = "1.0.0-rc.4" }
 uuid = { version = "1" }
 
 # --- Code-symbol indexing (feature = "code") ---------------------------------
@@ -100,7 +101,10 @@ sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1.41", features = ["process"] }
 mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.0-rc.4" }
-mcpmem-oauth = { path = "crates/mcpmem-oauth", version = "1.0.0-rc.4" }
+# Drive the axum router in-process (`oneshot`) and collect a response body,
+# so the HTTP tests need no socket and no HTTP client.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [[bin]]
 name = "mcpmem"
