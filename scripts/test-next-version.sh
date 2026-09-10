@@ -39,10 +39,11 @@ expect 1.0.0-rc.9 1.0.0-rc.10      # the one that text arithmetic gets wrong
 expect 1.0.0-rc.19 1.0.0-rc.20
 expect 1.0.0-rc 1.0.0-rc.2
 expect 2.4.0-beta.1 2.4.0-beta.2
-expect 1.0.0 1.1.0
-expect 1.2.3 1.3.0
-expect 0.9.0 0.10.0                # minor 9 -> 10, same arithmetic trap
-expect 1.9.9 1.10.0
+expect 1.0.0 1.0.1
+expect 1.2.3 1.2.4
+expect 1.0.9 1.0.10                # patch 9 -> 10, the same arithmetic trap
+expect 0.9.0 0.9.1                 # a minor bump here would claim a feature
+expect 1.9.9 1.9.10
 
 reject 1.0                          # not a semver core
 reject 1.0.0+build.7                # crates.io cannot resolve build metadata

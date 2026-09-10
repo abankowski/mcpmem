@@ -44,16 +44,24 @@ by the workflow:
 
 - a release candidate advances its counter: `1.0.0-rc.3` releases, `main`
   opens `1.0.0-rc.4`;
-- a stable release advances the minor: `1.1.0` releases, `main` opens `1.2.0`.
+- a stable release advances the patch: `1.1.0` releases, `main` opens `1.1.1`.
 
 So the version in `main` is the next release, never the one already published.
 The usual release therefore needs no bump at all: tag what `main` already
 says.
 
+**Patch, and not minor, because a wrong guess costs different amounts in the
+two directions.** From `1.1.1`, a release that turns out to carry a feature
+moves forward to `1.2.0`. From `1.2.0`, a release that turns out to be a bugfix
+has to move back to `1.1.1`, and every draft note or branch name that already
+said `1.2.0` is wrong. The smallest claim keeps every correction a forward one.
+
 `scripts/next-version.sh` holds that arithmetic and has its own tests,
-`scripts/test-next-version.sh`. A patch release, a major release, and the
+`scripts/test-next-version.sh`. A minor release, a major release, and the
 stable release that follows a candidate are human decisions, so set those with
-`scripts/set-version.sh`.
+`scripts/set-version.sh`. No default can prevent a wrong claim here. Deriving
+the level from the commits would, and that needs a commit-message contract this
+repository does not have.
 
 The bump job does nothing when `main` no longer carries the released version,
 which keeps a re-run and a manual bump from fighting each other.

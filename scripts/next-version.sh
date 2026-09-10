@@ -3,14 +3,22 @@
 #
 #   scripts/next-version.sh              # from Cargo.toml
 #   scripts/next-version.sh 1.0.0-rc.3   # -> 1.0.0-rc.4
-#   scripts/next-version.sh 1.2.3        # -> 1.3.0
+#   scripts/next-version.sh 1.2.3        # -> 1.2.4
 #
 # The rule: a release candidate advances its counter, and a stable release
-# advances the minor. After a release, `main` therefore names the version that
+# advances the patch. After a release, `main` therefore names the version that
 # is coming next, never the one already published.
 #
-# A patch or a major release is a human decision. Set it with
-# scripts/set-version.sh.
+# Patch, and not minor, because the two directions of a wrong guess cost
+# different amounts. From 1.2.4, a release that turns out to carry a feature
+# moves forward to 1.3.0. From 1.3.0, a release that turns out to be a bugfix
+# has to move back to 1.2.4, and every draft note or branch name that already
+# said 1.3.0 is wrong. The smallest claim keeps every correction a forward one.
+#
+# A minor or a major release is a human decision. Set it with
+# scripts/set-version.sh. No default can prevent a wrong claim here; deriving
+# the level from the commits would, and that needs a commit-message contract
+# this repository does not have.
 #
 # The command is identical in Bash and fish.
 set -euo pipefail
@@ -41,10 +49,11 @@ if [[ ! ${core} =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
 fi
 major="${BASH_REMATCH[1]}"
 minor="${BASH_REMATCH[2]}"
+patch="${BASH_REMATCH[3]}"
 
 if [[ -z ${pre} ]]; then
-	# Stable: the next release is a minor one until a human says otherwise.
-	printf '%s.%s.0\n' "${major}" $((minor + 1))
+	# Stable: the smallest claim until a human says otherwise.
+	printf '%s.%s.%s\n' "${major}" "${minor}" $((patch + 1))
 	exit 0
 fi
 

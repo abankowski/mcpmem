@@ -557,9 +557,11 @@ dependency order: `mcpmem-core`, then `mcpmem-runtime`, `mcpmem-indexer` and
 `mcpmem-webhook`, then `mcpmem`.
 
 A successful release then advances the version on `main`: a candidate advances its
-counter (`1.0.0-rc.3` becomes `1.0.0-rc.4`), a stable release advances the minor
-(`1.1.0` becomes `1.2.0`). `main` therefore always names the coming version, and the
-usual release needs no manual bump. A patch, a major, or the stable release after a
+counter (`1.0.0-rc.3` becomes `1.0.0-rc.4`), a stable release advances the patch
+(`1.1.0` becomes `1.1.1`). `main` therefore always names the coming version, and the
+usual release needs no manual bump. Patch is the smallest claim, so a release that
+turns out to carry a feature moves forward to `1.2.0`, instead of a pre-announced
+`1.2.0` having to move back. A minor, a major, or the stable release after a
 candidate is a human decision: `scripts/set-version.sh 1.0.0`. See
 [`docs/runbooks/release.md`](docs/runbooks/release.md).
 
