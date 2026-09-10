@@ -45,8 +45,8 @@ are not tombstones. Six deleted entities and two removed relation endpoints left
 their counters behind.
 
 **The drift is historical.** A create and delete cycle on both the `5.2.1`
-binary and the `6.0.0` binary left `type_dict` exact, so no current code path
-reproduces it.
+binary and the 1.0.0 binary, then called 6.0.0, left `type_dict` exact. No
+current code path reproduces it.
 
 ## Repair rehearsal on the copy
 
@@ -64,8 +64,9 @@ reproduces it.
   directly and applies no migration; it adds only `relation_unique_triple`.
 - Both binaries still write to the repaired copy. `create_relations` for the
   duplicate triple returns `[]`, and create plus delete succeed.
-- The `6.0.0` binary rejects a string observation with `expected struct
-  ObservationInput`. That is the intended `6.0.0` contract, not a repair effect.
+- The 1.0.0 binary, then called 6.0.0, rejects a string observation with
+  `expected struct ObservationInput`. That is the intended 1.0.0 contract, not a
+  repair effect.
 
 ## Operator procedure for the live file
 
@@ -73,7 +74,7 @@ Stop the server first. Repair takes the writer lock, and a running server holds
 it.
 
 ```sh
-mcp-memory-maintenance relation-repair \
+mcpmem-maintenance relation-repair \
   --database /home/abankowski/second-brain.mcpmem \
   --backup /home/abankowski/second-brain-before-repair.mcpmem \
   --confirm

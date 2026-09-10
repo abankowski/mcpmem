@@ -24,7 +24,7 @@ a later `created_us`, one with an equal `created_us`, and one with an earlier
 ## 2. Audit before repair
 
 ```sh
-mcp-memory-maintenance relation-audit --database /tmp/legacy-rehearsal/damaged.db --format json
+mcpmem-maintenance relation-audit --database /tmp/legacy-rehearsal/damaged.db --format json
 ```
 
 ```json
@@ -46,7 +46,7 @@ The source kept 203 relation rows after all three refusals.
 ## 4. Repair
 
 ```sh
-mcp-memory-maintenance relation-repair \
+mcpmem-maintenance relation-repair \
   --database /tmp/legacy-rehearsal/damaged.db \
   --backup /tmp/legacy-rehearsal/backup-1.db \
   --confirm
@@ -80,7 +80,7 @@ explicit remediation` and exit code 1. The source kept 199 relation rows. The
 verified backup stays on disk, as section 3 of the repair runbook states; a
 later attempt needs a new backup path.
 
-## 6. The 6.0.0 server on the same legacy database
+## 6. The 1.0.0 server, then called 6.0.0, on the same legacy database
 
 The release binary opened an unrepaired copy of the legacy database.
 

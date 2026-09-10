@@ -29,7 +29,7 @@ depends on graph-bootstrap ordering.
 
 `GraphHandle::delete_relations` now routes through the typed
 `MutationRequest::DeleteRelations` boundary
-([graph.rs](../../crates/memory-core/src/graph.rs:667)). The historical SQL
+([graph.rs](../../crates/mcpmem-core/src/graph.rs:667)). The historical SQL
 builder is gone. The mutation regression suite, including multiple relation
 deletion, passed locally: `cargo test --test mutation_service --
 --test-threads=1` (8 passed).
@@ -52,7 +52,7 @@ outbound and self-loop relations. No follow-up work remains for this item.
 ### 3. Merge relation duplicates — partly fixed, P1 data repair
 
 New relation writes use `INSERT ... SELECT ... WHERE NOT EXISTS` against
-`(from_id,to_id,type_id)` ([mutation.rs](../../crates/memory-core/src/mutation.rs:571)).
+`(from_id,to_id,type_id)` ([mutation.rs](../../crates/mcpmem-core/src/mutation.rs:571)).
 The merge collision regression passes, so current runtime merge does not add a
 new duplicate. Task 2 also preserves physical legacy duplicates correctly when
 calculating counters.
@@ -80,8 +80,8 @@ failure mode is not present on the current mutation path.
 ### 5. Observation provenance on merge — inherited, P2 implementation
 
 `observation` has only `id`, `entity_id`, `idx`, `body`, and `created_us`
-([graph.rs](../../crates/memory-core/src/graph.rs:455)); inserts persist no
-source entity ([mutation.rs](../../crates/memory-core/src/mutation.rs:531)). A
+([graph.rs](../../crates/mcpmem-core/src/graph.rs:455)); inserts persist no
+source entity ([mutation.rs](../../crates/mcpmem-core/src/mutation.rs:531)). A
 merge cannot tell a later reader where an observation came from.
 
 The approved contract stores nullable `origin_entity_id` plus immutable
@@ -123,7 +123,7 @@ responses expose only observation strings. There is no caller-supplied
 The approved model preserves server-owned `created_us`, adds nullable
 caller-supplied non-negative `occurred_us`, and exposes canonical structured
 observations by default. A deprecated `--legacy-observations` MCP adapter
-retains the historical string arrays through 6.x and is removed in 7.0.0.
+retains the historical string arrays through 1.x and is removed in 2.0.0.
 See [`2026-09-08-observation-metadata-contract.md`](2026-09-08-observation-metadata-contract.md).
 
 It shares the bootstrap-migration prerequisite with #5 and should be one
@@ -145,7 +145,7 @@ metadata is no longer the inconsistent source described in the original report.
    cleanup/unique-index migration after a backup/precondition design review.
 3. **P2 observation model implementation:** refactor graph bootstrap/migrations,
    then implement the approved structured observation contract and temporary
-   6.x legacy adapter in one additive migration.
+   1.x legacy adapter in one additive migration.
 
 ## Evidence run by the controller
 

@@ -6,14 +6,14 @@ remains the architecture authority where this addendum is silent.
 
 ## 1. Compatibility and migration ownership
 
-`memory-core` owns one ordered migration runner for the existing memory SQLite
+`mcpmem-core` owns one ordered migration runner for the existing memory SQLite
 file. It runs before any graph, vector, indexer, or webhook role opens a
 connection. It records `version`, SHA-256 `checksum`, and `applied_at_us` in
 `schema_migration`; a version may run once only, and a checksum mismatch aborts
 startup. Each migration is one `BEGIN IMMEDIATE` transaction. There are no
 automatic down-migrations; the operator restores a tested database backup.
 
-`mcp-memory` must retain the existing graph schema and all graph/MCP tool
+`mcpmem` must retain the existing graph schema and all graph/MCP tool
 responses. The existing one-row-per-entity `vector_embedding` table remains
 the legacy compatibility store. Managed profiles use a new `profile_vector`
 table, keyed by `(profile_id, entity_id)`, so a rebuilding candidate can coexist
@@ -31,7 +31,7 @@ model = row.model (or "")
 encoding = "native-f32-legacy"
 ```
 
-Before migration, `mcp-memory migrate --check` is read-only and reports row
+Before migration, `mcpmem migrate --check` is read-only and reports row
 counts grouped by dimensions and model, plus the configured dimensions. It
 fails if a row's stored dimensions differ from its blob header. `migrate
 --apply` requires a backup path and refuses to proceed unless the preflight is
@@ -175,6 +175,17 @@ HMAC-SHA-256 over UTF-8 with literal LF separators:
 ```text
 mcp-memory-webhook-v1\n<timestamp>\n<event_id>\n<delivery_id>\n<subscription_id>\n<key_id>\n<lowercase hex SHA-256(raw_body)>
 ```
+
+**Correction (2026-09-10). The block above is not the implemented wire format.**
+`signature()` in `crates/mcpmem-webhook/src/lib.rs:417` computes
+`HMAC-SHA-256(key, <timestamp> "." <raw_body>)` and returns lowercase hex. The
+timestamp is the Unix seconds value that the worker also sends. The preamble
+`mcp-memory-webhook-v1`, the LF-separated identifier lines, and the body digest
+are unimplemented. The delivery header at
+`crates/mcpmem-webhook/src/lib.rs:144` is `X-Memory-Signature` and it carries
+the bare hex value, not the `v1=` prefix that the paragraph above states. The
+header name carries no product name, so the rebrand does not change it. Treat
+the preamble scheme as a proposal, not as the current contract.
 
 Consumers accept timestamps within five minutes and deduplicate `eventId` for
 at least 30 days. A 2xx status acknowledges delivery. Network errors, 408, 429,

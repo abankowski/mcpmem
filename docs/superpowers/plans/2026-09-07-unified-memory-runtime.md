@@ -4,7 +4,7 @@
 
 **Goal:** Turn the `mcp-memory` fork into a feature-gated, role-composable service that keeps graph/vector search responsive while durable index and webhook workers react to committed knowledge changes.
 
-**Architecture:** The fork gains a `memory-core` mutation and job boundary. A graph change, its event record, matching webhook delivery records, and a coalesced index job commit in one SQLite transaction. Build features decide which adapters exist; runtime roles decide which independently budgeted services run in one process or as separate processes.
+**Architecture:** The fork gains a `mcpmem-core` mutation and job boundary. A graph change, its event record, matching webhook delivery records, and a coalesced index job commit in one SQLite transaction. Build features decide which adapters exist; runtime roles decide which independently budgeted services run in one process or as separate processes.
 
 **Tech Stack:** Rust 2024, Tokio, Axum, rusqlite SQLite WAL, MCP Streamable HTTP, optional reqwest embedding clients; optional AWS SDK only behind `bedrock`.
 
@@ -23,7 +23,7 @@
 - Every runtime role has an explicit bounded concurrency limit and independently exported queue/latency metrics.
 - Cross-process mutation, claim, and completion writes use `BEGIN IMMEDIATE`, finite busy retry, and database-owned monotonically increasing lease fencing epochs; search remains deferred read-only WAL work.
 - Run formatting, strict Clippy, the complete test suite, release build, and a migration/compatibility test before each publish.
-- Run `mcp-memory migrate --check` before `migrate --apply`; apply requires a tested backup path. Schema migrations are ordered, checksummed, transactional, and have no automatic downgrade.
+- Run `mcpmem migrate --check` before `migrate --apply`; apply requires a tested backup path. Schema migrations are ordered, checksummed, transactional, and have no automatic downgrade.
 - Treat `IndexProfile` as the complete vector-space contract: profile/store identity, provider/model, dimensions, representation version, normalization, and distance metric. One store has one active profile.
 - Keep direct `vector_*` writes compatible in `LegacyCompat`; reject mutation writes with `direct_vector_writes_disabled` after managed rebuilding begins.
 - Automation and webhook administration use the authenticated `/v1` contracts; subscription secrets are references resolved only at delivery time.
@@ -35,7 +35,7 @@
 
 **Files:**
 - Modify: `Cargo.toml`, `src/main.rs`, `src/lib.rs`, `src/config.rs`, `src/server.rs`
-- Create: `crates/memory-core/Cargo.toml`, `crates/memory-core/src/lib.rs`, `crates/memory-runtime/Cargo.toml`, `crates/memory-runtime/src/lib.rs`, `tests/role_composition.rs`
+- Create: `crates/mcpmem-core/Cargo.toml`, `crates/mcpmem-core/src/lib.rs`, `crates/mcpmem-runtime/Cargo.toml`, `crates/mcpmem-runtime/src/lib.rs`, `tests/role_composition.rs`
 
 **Interfaces:**
 - Produces `RuntimeRole::{Mcp, Indexer, Webhooks}` and `RoleSet::parse_csv(&str) -> Result<RoleSet, ConfigError>`.
@@ -44,7 +44,7 @@
 
 - [ ] **Step 1: Write failing role parsing tests** for `mcp`, `mcp,indexer,webhooks`, duplicate roles, an empty list, and a role absent from the compiled feature set.
 - [ ] **Step 2: Run `cargo test --test role_composition`** and observe that `RuntimeRole` and feature validation do not exist.
-- [ ] **Step 3: Convert the root package to a workspace** while retaining the existing `mcp-memory` binary and all present tool behavior; move only reusable types into `memory-core`.
+- [ ] **Step 3: Convert the root package to a workspace** while retaining the existing `mcp-memory` binary and all present tool behavior; move only reusable types into `mcpmem-core`.
 - [ ] **Step 4: Implement `RuntimeRole`, `RoleSet`, and `RuntimeComposition`**. `Mcp` starts the existing transport; `Indexer` and `Webhooks` initially start no-op supervised services that expose lifecycle state only.
 - [ ] **Step 5: Add Cargo features**: `indexer`, `webhooks`, and `bedrock`; make `bedrock` depend on `indexer`. Verify `cargo tree --no-default-features` contains neither reqwest nor AWS crates.
 - [ ] **Step 6: Run role tests and existing e2e tests**, then `cargo test --workspace`.
@@ -53,8 +53,8 @@
 ### Task 2: Make graph mutations transactional and report effective changes
 
 **Files:**
-- Modify: `crates/memory-core/src/graph.rs` (extracted from `src/kg.rs`), `src/actions/memory.rs`, `src/server.rs`
-- Create: `crates/memory-core/src/mutation.rs`, `tests/mutation_service.rs`
+- Modify: `crates/mcpmem-core/src/graph.rs` (extracted from `src/kg.rs`), `src/actions/memory.rs`, `src/server.rs`
+- Create: `crates/mcpmem-core/src/mutation.rs`, `tests/mutation_service.rs`
 
 **Interfaces:**
 - Produces `MutationService::apply(MutationRequest, MutationContext) -> Result<CommittedChangeSet, MutationError>`.
@@ -73,8 +73,8 @@
 ### Task 3: Persist events and coalesced index jobs atomically
 
 **Files:**
-- Modify: `crates/memory-core/src/mutation.rs`, `crates/memory-core/src/graph.rs`
-- Create: `crates/memory-core/src/events.rs`, `crates/memory-core/src/jobs.rs`, `migrations/0001_change_events.sql`, `tests/event_outbox.rs`
+- Modify: `crates/mcpmem-core/src/mutation.rs`, `crates/mcpmem-core/src/graph.rs`
+- Create: `crates/mcpmem-core/src/events.rs`, `crates/mcpmem-core/src/jobs.rs`, `migrations/0001_change_events.sql`, `tests/event_outbox.rs`
 
 **Interfaces:**
 - Produces `ChangeEvent`, `IndexJob`, `IndexProfile`, and `IndexProfileRegistry`.
@@ -86,15 +86,15 @@
 - [ ] **Step 3: Add checksummed startup migrations** for `schema_migration`, immutable `change_event`, `event_outbox`, `index_job`, `idempotency_record`, `index_profile`, `profile_vector`, and `ann_generation`; retain `vector_embedding` as `LegacyCompat`. Add unique keys for event identity, event/subscription delivery, entity/profile job coalescing, and `(principal_id, idempotency_key)` ingress idempotency.
 - [ ] **Step 4: Write event/job rows inside Task 2's mutation transaction**, never in MCP dispatch after the commit; persist the API method/path/raw-body fingerprint for idempotency.
 - [ ] **Step 5: Add `BEGIN IMMEDIATE` repository operations** with finite busy retry, lease epoch fencing, recovery, and idempotent completion. Persist a request fingerprint with each `(principal_id, idempotency_key)` and reject reuse with a different request; stale leases become runnable but cannot complete a newer job.
-- [ ] **Step 6: Implement profile activation/rebuild state in `memory-core`**. Hold incompatible jobs, provide the direct-write guard, preserve the durable serving/candidate state, and test that profile-owned durable vectors cannot mix. **Superseded at execution (2026-09-08):** wiring that guard into the legacy `vector_*` tools and swapping their live ANN/search reader belongs to Task 4, which owns `src/vector_store.rs`; Task 4 must prove public direct writes reject with `direct_vector_writes_disabled` during rebuild and that searches retain the serving generation until activation. The former wording assigned one behavior to two tasks and could not be executed independently.
+- [ ] **Step 6: Implement profile activation/rebuild state in `mcpmem-core`**. Hold incompatible jobs, provide the direct-write guard, preserve the durable serving/candidate state, and test that profile-owned durable vectors cannot mix. **Superseded at execution (2026-09-08):** wiring that guard into the legacy `vector_*` tools and swapping their live ANN/search reader belongs to Task 4, which owns `src/vector_store.rs`; Task 4 must prove public direct writes reject with `direct_vector_writes_disabled` during rebuild and that searches retain the serving generation until activation. The former wording assigned one behavior to two tasks and could not be executed independently.
 - [ ] **Step 7: Run event tests, restart/reopen tests, cross-process writer tests, and full graph suite.** Verify read-only WAL searches continue while a writer is busy.
 - [ ] **Step 8: Commit** `feat: enqueue durable entity-change index jobs`.
 
 ### Task 4: Add a provider-neutral indexer worker and OpenAI/Ollama adapters
 
 **Files:**
-- Create: `crates/indexer-worker/src/lib.rs`, `crates/indexer-worker/src/provider.rs`, `crates/indexer-worker/src/openai.rs`, `crates/indexer-worker/src/ollama.rs`, `tests/indexer_worker.rs`
-- Modify: `Cargo.toml`, `crates/memory-runtime/src/lib.rs`, `src/vector_store.rs`
+- Create: `crates/mcpmem-indexer/src/lib.rs`, `crates/mcpmem-indexer/src/provider.rs`, `crates/mcpmem-indexer/src/openai.rs`, `crates/mcpmem-indexer/src/ollama.rs`, `tests/indexer_worker.rs`
+- Modify: `Cargo.toml`, `crates/mcpmem-runtime/src/lib.rs`, `src/vector_store.rs`
 
 **Interfaces:**
 - Produces `EmbeddingProvider::embed(&IndexProfile, &[CanonicalDocument]) -> Result<Vec<Embedding>, EmbeddingError>`.
@@ -103,7 +103,7 @@
 
 - [ ] **Step 1: Write failing worker tests** for slow/failing provider retry, latest-revision coalescing, entity deletion, provider timeout, profile mismatch hold, and two workers where an expired first lease cannot commit/upsert after a newer claimant.
 - [ ] **Step 2: Run `cargo test --test indexer_worker`** and observe missing worker/provider interfaces.
-- [ ] **Step 3: Port canonicalization and job semantics from the existing Second Brain Indexer** as pure `memory-core` functions; preserve exact name identity and no-delete-without-verified-snapshot behavior where full reconciliation is used.
+- [ ] **Step 3: Port canonicalization and job semantics from the existing Second Brain Indexer** as pure `mcpmem-core` functions; preserve exact name identity and no-delete-without-verified-snapshot behavior where full reconciliation is used.
 - [ ] **Step 4: Implement bounded OpenAI-compatible and Ollama adapters** behind `indexer`; reuse native Ollama `/api/embed`, reject credentials in Ollama URLs, and apply finite request deadlines.
 - [ ] **Step 5: Implement worker lease renewal and fenced commit**: after embedding, use one SQLite write transaction to recheck lease epoch, entity revision, and active profile before durable vector mutation and job completion; mark the relevant `ann_generation` dirty in that transaction. Update ANN state only after that transaction succeeds, on a dedicated bounded worker runtime.
 - [ ] **Step 6: Implement startup and background ANN reconciliation**. Build a replacement reader snapshot from a durable generation, atomically swap it when ready, and retain the prior snapshot while rebuilding.
@@ -114,8 +114,8 @@
 ### Task 5: Add optional Bedrock provider without changing the worker contract
 
 **Files:**
-- Create: `crates/indexer-worker/src/bedrock.rs`, `tests/bedrock_provider.rs`
-- Modify: `Cargo.toml`, `crates/indexer-worker/src/provider.rs`, configuration docs/tests
+- Create: `crates/mcpmem-indexer/src/bedrock.rs`, `tests/bedrock_provider.rs`
+- Modify: `Cargo.toml`, `crates/mcpmem-indexer/src/provider.rs`, configuration docs/tests
 
 **Interfaces:**
 - `BedrockEmbeddingProvider` implements Task 4's `EmbeddingProvider` unchanged.
@@ -130,8 +130,8 @@
 ### Task 6: Add webhook subscriptions and asynchronous delivery
 
 **Files:**
-- Create: `crates/webhook-worker/src/lib.rs`, `crates/webhook-worker/src/delivery.rs`, `crates/memory-core/src/subscriptions.rs`, `tests/webhook_outbox.rs`
-- Modify: `Cargo.toml`, `crates/memory-core/src/mutation.rs`, `crates/memory-runtime/src/lib.rs`
+- Create: `crates/mcpmem-webhook/src/lib.rs`, `crates/mcpmem-webhook/src/delivery.rs`, `crates/mcpmem-core/src/subscriptions.rs`, `tests/webhook_outbox.rs`
+- Modify: `Cargo.toml`, `crates/mcpmem-core/src/mutation.rs`, `crates/mcpmem-runtime/src/lib.rs`
 
 **Interfaces:**
 - Produces the versioned `WebhookSubscription`, `Principal`, `SecretProvider`, protected `/api/v1/admin` API, and signed envelope defined in the contracts addendum.
@@ -149,7 +149,7 @@
 ### Task 7: Expose protected operations, observability, and resource isolation
 
 **Files:**
-- Modify: `src/http.rs`, `src/server.rs`, `crates/memory-runtime/src/lib.rs`, `README.md`, `tests/e2e.rs`
+- Modify: `src/http.rs`, `src/server.rs`, `crates/mcpmem-runtime/src/lib.rs`, `README.md`, `tests/e2e.rs`
 - Create: `crates/memory-mcp/src/indexer_tools.rs`, `tests/resource_isolation.rs`, deployment assets for role-specific systemd services
 
 **Interfaces:**
@@ -170,7 +170,7 @@
 - [ ] Run `cargo fmt --all -- --check`.
 - [ ] Run `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 - [ ] Run `cargo test --workspace --all-targets --all-features`.
-- [ ] Run `cargo build --workspace --release --all-features`, `cargo build -p mcp-memory --no-default-features`, and `cargo tree -p mcp-memory -e normal --no-default-features`.
+- [ ] Run `cargo build --workspace --release --all-features`, `cargo build -p mcpmem --no-default-features`, and `cargo tree -p mcpmem -e normal --no-default-features`.
 - [ ] Run migration tests against a copied pre-fork `memory.mcpmem` fixture; verify existing graph and vector searches retain results.
 - [ ] Run crash/restart tests at each outbox/job phase and verify no lost graph event, duplicate vector effect, or duplicate consumer effect after `eventId` deduplication.
 - [ ] Run the stalled-provider/stalled-webhook latency test and record p50/p95/p99 against the agreed budget.

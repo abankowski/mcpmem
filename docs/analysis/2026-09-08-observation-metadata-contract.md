@@ -37,9 +37,9 @@ MCP reads and mutation results containing observations: `get_entity`,
 
 ### Historical durable payloads
 
-Pre-6.0 `change_event.payload` and `idempotency_record.response` records may
+Pre-1.0 `change_event.payload` and `idempotency_record.response` records may
 embed only legacy observation strings. They remain readable independently of
-`--legacy-observations`: v6 adapts each such value to the canonical object,
+`--legacy-observations`: v1 adapts each such value to the canonical object,
 with `createdAtUs`, `occurredAtUs`, and `originEntityName` explicitly `null`.
 The original row may no longer exist, so its time must never be fabricated.
 This narrowly scoped nullable `createdAtUs` exception applies only to
@@ -55,15 +55,19 @@ canonicalization index `body` only.
 `--legacy-observations` is a server-wide MCP compatibility adapter, valid only
 with the MCP role. It switches tool schemas and observation input/output to
 the historical `observations: string[]` shape. It is disabled by default,
-deprecated throughout 6.x, and removed in 7.0.0. There are never parallel
+deprecated throughout 1.x, and removed in 2.0.0. There are never parallel
 legacy and structured observation fields in one response.
 
 ## Release identity
 
-The product remains named `mcp-memory`. The structured-observation contract and
-webhook envelope v2 are breaking changes released as `6.0.0`; the project does
-not reset to `0.0.1` because its MCP graph-memory identity and compatibility
-history remain continuous.
+The crate is `mcpmem`. The structured-observation contract and webhook envelope
+v2 are breaking changes released as `1.0.0`.
+
+**Superseded (2026-09-10).** The earlier decision kept the product name
+`mcp-memory` and released the same contract as `6.0.0`. The upstream crate name
+`mcp-memory` is taken, so a parallel `6.x` version line is not publishable. It
+also collides with the upstream numbering. The fork therefore takes a separate
+name and a separate version line that starts at `1.0.0`.
 
 ## Migration requirements
 

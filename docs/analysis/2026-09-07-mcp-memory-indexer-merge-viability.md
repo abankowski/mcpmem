@@ -26,22 +26,22 @@ MCP / HTTP / stdio
         |
    memory-mcp              Query path: graph/FTS/vector search only
         |
-    memory-core
+    mcpmem-core
   Graph mutation service -- one SQLite transaction -- change_event + outbox
         |                                      |
   graph/vector reads                      bounded worker roles
-                                          |- indexer-worker
-                                          `- webhook-worker
+                                          |- mcpmem-indexer
+                                          `- mcpmem-webhook
 ```
 
 Suggested crates:
 
 | Crate | Owns | Must not own |
 |---|---|---|
-| `memory-core` | graph mutation service, typed change sets, outbox/job repositories | HTTP, MCP JSON, provider clients |
+| `mcpmem-core` | graph mutation service, typed change sets, outbox/job repositories | HTTP, MCP JSON, provider clients |
 | `memory-mcp` | MCP tools, authentication, tool registry | embedding/webhook execution |
-| `indexer-worker` | canonicalization, embedding provider, vector upsert/delete, reconciliation full scan | request-path search |
-| `webhook-worker` | subscription matching, signed HTTP delivery, retry/dead-letter | graph writes |
+| `mcpmem-indexer` | canonicalization, embedding provider, vector upsert/delete, reconciliation full scan | request-path search |
+| `mcpmem-webhook` | subscription matching, signed HTTP delivery, retry/dead-letter | graph writes |
 | composition binary | config and lifecycle of selected roles | domain policy duplication |
 
 ### Build features and runtime roles
@@ -63,7 +63,7 @@ The composed mode is operational convenience, not hard isolation. A single proce
 
 ### Replaceable indexer/provider contract
 
-`memory-core` stores a provider-neutral job: "entity revision R requires index profile P". It must not know OpenAI, Ollama, Bedrock, or HTTP. `indexer-worker` selects an `EmbeddingProvider` through a registry:
+`mcpmem-core` stores a provider-neutral job: "entity revision R requires index profile P". It must not know OpenAI, Ollama, Bedrock, or HTTP. `mcpmem-indexer` selects an `EmbeddingProvider` through a registry:
 
 ```text
 EmbeddingProvider::embed(profile, texts) -> Result<Vec<Embedding>, EmbeddingError>

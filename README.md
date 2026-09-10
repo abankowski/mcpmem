@@ -1,12 +1,12 @@
-# mcp-memory
+# mcpmem
 
 **Persistent memory, a knowledge graph, code intelligence, and semantic search for LLM agents — in a single ~Rust binary backed by one embedded SQLite file.**
 
-[![crates.io](https://img.shields.io/crates/v/mcp-memory.svg)](https://crates.io/crates/mcp-memory)
+[![crates.io](https://img.shields.io/crates/v/mcpmem.svg)](https://crates.io/crates/mcpmem)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-2025--11--25-purple.svg)](https://modelcontextprotocol.io)
 
-`mcp-memory` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives
+`mcpmem` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives
 your agent a long-term brain. It remembers **entities, relations, and observations** in a
 queryable **knowledge graph**, indexes your **codebase** with tree-sitter, and serves
 **vector / hybrid semantic search** — all from one file, with no database to run, no service to
@@ -16,7 +16,7 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
 
 ---
 
-## Why mcp-memory
+## Why mcpmem
 
 - 🧠 **Real memory, not a scratchpad.** A typed knowledge graph — entities, directed relations,
   and free-form observations — with FTS5 full-text search and graph traversal (paths, neighbors,
@@ -38,7 +38,7 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
 
 ```
                     ┌────────────────────────────────────────────────────┐
-                    │   mcp-memory   (one binary · one SQLite file)        │
+                    │   mcpmem       (one binary · one SQLite file)        │
                     │                                                      │
      ┌────────┐     │  ┌──────────┐    ┌─────────────────────────────┐    │
      │ Claude │─────┼─▶│  stdio   │───▶│ GraphHandle                 │    │
@@ -63,24 +63,24 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
 ## Installation
 
 ```sh
-cargo install mcp-memory
+cargo install mcpmem
 ```
 
-This installs the `mcp-memory` binary. (The `code` feature is on by default; build with
+This installs the `mcpmem` binary. (The `code` feature is on by default; build with
 `--no-default-features` for a lean pure-memory binary without tree-sitter grammars.)
 
 ## Quick start
 
 ```sh
 # Knowledge-graph memory (read + write)
-mcp-memory --transport stdio --enable-graph-read --enable-graph-write
+mcpmem --transport stdio --enable-graph-read --enable-graph-write
 
 # Memory + semantic vector search
-mcp-memory --transport stdio --enable-graph-read --enable-graph-write \
+mcpmem --transport stdio --enable-graph-read --enable-graph-write \
   --enable-vectors --embedding-dims 384
 
 # Everything on — memory + vectors + code intelligence
-mcp-memory --transport stdio --enable-all
+mcpmem --transport stdio --enable-all
 ```
 
 ### Use it from Claude Desktop / Claude Code
@@ -89,7 +89,7 @@ mcp-memory --transport stdio --enable-all
 {
   "mcpServers": {
     "memory": {
-      "command": "mcp-memory",
+      "command": "mcpmem",
       "args": ["--enable-all"]
     }
   }
@@ -121,16 +121,16 @@ The database path is resolved in order:
 The same SQLite file works with or without `--enable-vectors`, so you can populate the graph
 plain and later serve it with vectors enabled.
 
-### Observation format (6.0)
+### Observation format (1.0)
 
 MCP observation writes use objects: `{ "body": "…", "occurredAtUs": 1780000000000000 }`.
 `occurredAtUs` is optional; the server always returns `createdAtUs` and
 `originEntityName` (both explicitly `null` when unknown). Search and embeddings index only
 `body`.
 
-`--legacy-observations` is a deprecated 6.x MCP-only compatibility adapter for clients that
+`--legacy-observations` is a deprecated 1.x MCP-only compatibility adapter for clients that
 still send and receive string arrays. It is disabled by default, requires the `mcp` runtime
-role, and will be removed in 7.0.0. It does not change stored data or the web UI.
+role, and will be removed in 2.0.0. It does not change stored data or the web UI.
 
 ### Transports
 
@@ -151,7 +151,7 @@ The `http` transport accepts an optional bearer token (stdio is never authentica
 `MCP_MEMORY_AUTH_TOKEN` environment variable.
 
 ```sh
-mcp-memory --enable-all --transport http --bind 0.0.0.0:8080 --auth-token "s3cr3t"
+mcpmem --enable-all --transport http --bind 0.0.0.0:8080 --auth-token "s3cr3t"
 ```
 
 On HTTP the token is sent as `Authorization: Bearer <token>`; comparison is constant-time.
@@ -164,7 +164,7 @@ chain and private key via `--tls-cert` / `--tls-key` (both required together, or
 refused); the `MCP_TLS_CERT` / `MCP_TLS_KEY` environment variables are accepted as fallbacks.
 
 ```sh
-mcp-memory --enable-all --transport http --bind 0.0.0.0:8080 \
+mcpmem --enable-all --transport http --bind 0.0.0.0:8080 \
   --tls-cert ./cert.pem --tls-key ./key.pem
 ```
 
@@ -212,7 +212,7 @@ open `http://<bind>/ui#token=<token>` — the `#`-fragment stays client-side (ne
 or written to logs) and the page forwards it as a header.
 
 ```sh
-mcp-memory --enable-graph-read --transport http --bind 127.0.0.1:8080
+mcpmem --enable-graph-read --transport http --bind 127.0.0.1:8080
 # then open http://127.0.0.1:8080/ui in a browser
 ```
 
@@ -255,7 +255,7 @@ symbols are ordinary graph entities, every graph tool (`search_nodes`, `extract_
 | `code_semantic_search` | ANN (HNSW) search over embedded symbols by a query vector. |
 
 ```bash
-mcp-memory --enable-code --transport stdio
+mcpmem --enable-code --transport stdio
 # then, over MCP:  code_index {"path": "src", "project": "my-repo"}
 ```
 
@@ -310,16 +310,16 @@ All require `--enable-vectors`:
 
 ```sh
 # HNSW with half-precision storage
-mcp-memory --enable-vectors --transport http --bind 0.0.0.0:8080 \
+mcpmem --enable-vectors --transport http --bind 0.0.0.0:8080 \
   --embedding-dims 768 --vec-metric cos --vec-quantization f16 \
   --vec-connectivity 32 --vec-expansion-search 128
 
 # IVF-Flat for a large corpus
-mcp-memory --enable-vectors --embedding-dims 768 \
+mcpmem --enable-vectors --embedding-dims 768 \
   --vec-index ivf --ivf-nlist 1024 --ivf-nprobe 16
 
 # TurboQuant: ~8x memory reduction with unbiased inner-product scoring
-mcp-memory --enable-vectors --embedding-dims 768 \
+mcpmem --enable-vectors --embedding-dims 768 \
   --vec-index turbo --tq-bits 4
 ```
 
@@ -366,7 +366,7 @@ live in separate external-content FTS5 tables (`name_fts`, `obs_fts`).
 |---|---|---|
 | `entity` | rowid | Primary storage; materialized `obs_count`/`out_deg`/`in_deg`; `name_hash` for O(1) routing |
 | `observation` | `entity_id` (FK) | 1:N observations per entity |
-| `relation` | composite indexes | Directed edges; covering indexes `rel_out`/`rel_in` for index-only scans |
+| `relation` | composite indexes | Directed edges; covering indexes `rel_out`/`rel_in` for index-only scans. A fresh database also gets `UNIQUE INDEX relation_unique_triple`; a database from an older version may not have it |
 | `name_fts` / `obs_fts` | `content_rowid` | External-content FTS5 over names / observation bodies |
 | `type_dict` | name | Interned entity/relation types with live counts (RAM-loaded) |
 | `graph_stat` | key | `WITHOUT ROWID` counters: entities, relations, observations, sequences |
@@ -402,6 +402,41 @@ updates → cache invalidation.
 
 Set via `MCP_MEMORY_DURABILITY=sync`. A background task also runs every 5 minutes: WAL checkpoint
 (TRUNCATE), planner analysis (`PRAGMA optimize`), and FTS optimization.
+
+## Maintenance: relation integrity
+
+`mcpmem-maintenance` is an offline operator command. It is a separate binary from the
+server.
+
+A database that older versions wrote can hold duplicate `(from, to, relationType)` rows.
+It can also hold stale counters in `type_dict`, `entity.out_deg` and `entity.in_deg`. A
+fresh database gets `UNIQUE INDEX relation_unique_triple` from the base schema. Server
+startup never repairs an existing database. Server startup never deletes a row.
+
+Audit first. The audit is read-only:
+
+```sh
+mcpmem-maintenance relation-audit --database <path> --format json
+```
+
+Repair second:
+
+```sh
+mcpmem-maintenance relation-repair --database <path> --backup <new-path> --confirm
+```
+
+The repair first makes a verified backup with the SQLite online backup API. It then keeps
+the row with the lowest `(created_us, rowid)` for each triple. It then recomputes the
+counters. It creates the unique index last.
+
+The repair refuses to run without `--confirm`. It refuses without `--backup`. It refuses
+when the backup path exists. It aborts when a relation row has a missing endpoint.
+
+The repair does not detect a running server. Stop the server first. The repair takes the
+writer lock, and the server holds its own cached state.
+
+Read [`docs/runbooks/relation-integrity-repair.md`](docs/runbooks/relation-integrity-repair.md)
+for the full procedure.
 
 ## Benchmarks
 
@@ -502,6 +537,14 @@ concurrency, fuzzy invariant checks, both ANN backends end-to-end, the retrieval
 upsert, more-like-this, recommend, MMR), category gating, code indexing across all 10 languages,
 and HTTP bearer-token authentication.
 
+## Relation to the original project
+
+This project started from [`corporatepiyush/mcp-memory`](https://github.com/corporatepiyush/mcp-memory)
+version 5.2.1. The license is Apache-2.0 and stays Apache-2.0. The fork has a separate
+name, a separate crate, and a separate version line that starts at 1.0.0. The upstream
+project keeps the crate name `mcp-memory`.
+
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Licensed under the [Apache License, Version 2.0](LICENSE). [`NOTICE`](NOTICE) records the
+derivation from the original project, as the license requires.

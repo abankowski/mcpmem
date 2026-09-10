@@ -10,7 +10,9 @@
 
 **Spec:** `docs/analysis/2026-09-08-inherited-legacy-bugs-triage.md` (the plan supersedes its stale #2 verdict: `describe_entity` was fixed in `f91a297`).
 
-**Release policy:** Keep the product name `mcp-memory`. The structured-observation contract and webhook envelope v2 are released as `6.0.0`; `--legacy-observations` remains available throughout 6.x and is removed in `7.0.0`.
+**Release policy:** The crate is `mcpmem`. The structured-observation contract and webhook envelope v2 are released as `1.0.0`; `--legacy-observations` remains available throughout `1.x` and is removed in `2.0.0`.
+
+**Superseded (2026-09-10):** the earlier release policy kept the product name `mcp-memory`, released `6.0.0`, and removed `--legacy-observations` in the next major version. The upstream crate name `mcp-memory` is taken, so a parallel `6.x` version line is not publishable. It also collides with the upstream numbering.
 
 ## Global Constraints
 
@@ -18,7 +20,7 @@
 - Every normal graph mutation uses the existing write transaction, emits events and index jobs atomically, and keeps reader snapshots valid.
 - Relations are unique by `(from_id, to_id, type_id)` after repair; no server startup path may delete legacy rows automatically.
 - A destructive repair requires a verified, newly-created backup plus a read-only preflight; it must abort on integrity failures.
-- All MCP reads and mutation results containing observations use the canonical structured contract by default: `get_entity`, `describe_entity`, `read_graph`, JSON `export_graph`, and mutation results. `--legacy-observations` is the temporary server-wide compatibility adapter: it switches all of those schemas plus observation input to historical `observations: string[]`; default startup does not. It remains through 6.x and is removed in 7.0.0.
+- All MCP reads and mutation results containing observations use the canonical structured contract by default: `get_entity`, `describe_entity`, `read_graph`, JSON `export_graph`, and mutation results. `--legacy-observations` is the temporary server-wide compatibility adapter: it switches all of those schemas plus observation input to historical `observations: string[]`; default startup does not. It remains through `1.x` and is removed in `2.0.0`.
 - `--legacy-observations` is valid only when the MCP role is selected; startup rejects it for worker-only role sets.
 - `created_us` is server-owned microseconds since Unix epoch; fact time is nullable microseconds since Unix epoch.
 - FTS and vector/indexer canonicalization consume observation `body` only; timestamps and provenance are retrieval/audit metadata and never trigger a semantic reindex.
@@ -73,7 +75,7 @@ pull request; the merge decision belongs to the repository owner.
 **Files:**
 - Modify: `docs/analysis/2026-09-08-inherited-legacy-bugs-triage.md`
 - Modify: `tools.json` (`upsert_entities` entry)
-- Modify: `crates/memory-core/src/graph.rs` (core regression module)
+- Modify: `crates/mcpmem-core/src/graph.rs` (core regression module)
 - Modify: `tests/e2e.rs` (only if the existing MCP assertion does not cover the final response)
 
 **Interfaces:**
@@ -85,7 +87,7 @@ pull request; the merge decision belongs to the repository owner.
 - [ ] **Step 3: Run the targeted test before changing production code.**
 
   ```text
-  cargo test -p memory-core test_upsert_entities -- --exact --nocapture
+  cargo test -p mcpmem-core test_upsert_entities -- --exact --nocapture
   ```
 
   Expected: the new assertion exposes the current missing or incomplete guarantee. If it already passes, retain it as a characterization test and record that existing implementation satisfies the contract.
@@ -95,19 +97,19 @@ pull request; the merge decision belongs to the repository owner.
 
   ```text
   cargo fmt --all --check
-  cargo test -p memory-core test_upsert_entities -- --exact
+  cargo test -p mcpmem-core test_upsert_entities -- --exact
   cargo test --test e2e e2e_upsert_merge_and_wipe -- --exact --test-threads=1
-  git add docs/analysis/2026-09-08-inherited-legacy-bugs-triage.md tools.json crates/memory-core/src/graph.rs tests/e2e.rs
+  git add docs/analysis/2026-09-08-inherited-legacy-bugs-triage.md tools.json crates/mcpmem-core/src/graph.rs tests/e2e.rs
   git commit -m "docs: make upsert retype contract explicit"
   ```
 
 ### Task 2: Add transactional `rename_entity`
 
 **Files:**
-- Modify: `crates/memory-core/src/mutation.rs`
-- Modify: `crates/memory-core/src/events.rs`
-- Modify: `crates/memory-core/src/graph.rs`
-- Modify: `crates/webhook-worker/src/lib.rs`
+- Modify: `crates/mcpmem-core/src/mutation.rs`
+- Modify: `crates/mcpmem-core/src/events.rs`
+- Modify: `crates/mcpmem-core/src/graph.rs`
+- Modify: `crates/mcpmem-webhook/src/lib.rs`
 - Modify: `src/actions/memory.rs`
 - Modify: `src/server.rs`
 - Modify: `src/tools.rs`
@@ -143,24 +145,24 @@ pull request; the merge decision belongs to the repository owner.
   cargo test --test mutation_service -- --test-threads=1
   cargo test --test event_outbox -- --test-threads=1
   cargo test --test e2e -- --test-threads=1
-  git add crates/memory-core/src/mutation.rs crates/memory-core/src/events.rs crates/memory-core/src/graph.rs crates/webhook-worker/src/lib.rs src/actions/memory.rs src/server.rs src/tools.rs tools.json tests/mutation_service.rs tests/event_outbox.rs tests/webhook_outbox.rs tests/e2e.rs README.md
+  git add crates/mcpmem-core/src/mutation.rs crates/mcpmem-core/src/events.rs crates/mcpmem-core/src/graph.rs crates/mcpmem-webhook/src/lib.rs src/actions/memory.rs src/server.rs src/tools.rs tools.json tests/mutation_service.rs tests/event_outbox.rs tests/webhook_outbox.rs tests/e2e.rs README.md
   git commit -m "feat: add transactional entity rename"
   ```
 
 ### Task 3: Make graph bootstrap a prerequisite of ordered migrations
 
 **Files:**
-- Modify: `crates/memory-core/src/graph.rs`
-- Modify: `crates/memory-core/src/events.rs`
-- Create: `crates/memory-core/src/schema.rs`
-- Modify: `crates/memory-core/src/lib.rs`
-- Modify: `crates/indexer-worker/src/lib.rs`
-- Modify: `crates/webhook-worker/src/lib.rs`
+- Modify: `crates/mcpmem-core/src/graph.rs`
+- Modify: `crates/mcpmem-core/src/events.rs`
+- Create: `crates/mcpmem-core/src/schema.rs`
+- Modify: `crates/mcpmem-core/src/lib.rs`
+- Modify: `crates/mcpmem-indexer/src/lib.rs`
+- Modify: `crates/mcpmem-webhook/src/lib.rs`
 - Modify: `tests/event_outbox.rs`
 - Modify: `tests/webhook_outbox.rs`
 
 **Interfaces:**
-- Produces `schema::initialize_database(&Connection) -> Result<()>`, the one shared memory-core initializer that creates legacy graph tables/FTS/triggers and applies ordered migrations before readers or workers operate.
+- Produces `schema::initialize_database(&Connection) -> Result<()>`, the one shared mcpmem-core initializer that creates legacy graph tables/FTS/triggers and applies ordered migrations before readers or workers operate.
 - Consumes the existing `schema_migration(version, checksum, applied_at_us)` ledger without changing checksums for versions 1 and 2.
 
 - [ ] **Step 1: Write failing compatibility tests.** Construct: a fresh database; a legacy graph database with graph tables but no migration ledger; and an existing v1/v2 database. Assert initialization leaves each readable, verifies historical checksums, and supplies graph tables before migration code can reference them. Exercise indexer and webhook worker reopen paths.
@@ -180,7 +182,7 @@ pull request; the merge decision belongs to the repository owner.
   cargo test --test event_outbox -- --test-threads=1
   cargo test --test webhook_outbox -- --test-threads=1
   cargo test --test indexer_worker --features indexer -- --test-threads=1
-  git add crates/memory-core/src/graph.rs crates/memory-core/src/events.rs crates/memory-core/src/schema.rs crates/memory-core/src/lib.rs crates/indexer-worker/src/lib.rs crates/webhook-worker/src/lib.rs tests/event_outbox.rs tests/webhook_outbox.rs
+  git add crates/mcpmem-core/src/graph.rs crates/mcpmem-core/src/events.rs crates/mcpmem-core/src/schema.rs crates/mcpmem-core/src/lib.rs crates/mcpmem-indexer/src/lib.rs crates/mcpmem-webhook/src/lib.rs tests/event_outbox.rs tests/webhook_outbox.rs
   git commit -m "refactor: initialize graph schema before migrations"
   ```
 
@@ -189,18 +191,18 @@ pull request; the merge decision belongs to the repository owner.
 **Decision resolved (2026-09-08):** cleanup is an operator command with mandatory backup, preflight and `--confirm`; it is never an automatic startup migration.
 
 **Files:**
-- Create: `crates/memory-core/src/relation_integrity.rs`
-- Modify: `crates/memory-core/src/lib.rs`
-- Modify: `crates/memory-core/src/schema.rs`
+- Create: `crates/mcpmem-core/src/relation_integrity.rs`
+- Modify: `crates/mcpmem-core/src/lib.rs`
+- Modify: `crates/mcpmem-core/src/schema.rs`
 - Create: `src/bin/maintenance.rs`
-- Modify: `Cargo.toml` (declare binary `mcp-memory-maintenance`)
+- Modify: `Cargo.toml` (declare binary `mcpmem-maintenance`)
 - Modify: `tests/mutation_service.rs`
 - Create: `tests/relation_integrity.rs`
 - Create: `docs/runbooks/relation-integrity-repair.md`
 
 **Interfaces:**
-- Produces standalone, non-server command: `mcp-memory-maintenance relation-audit --database <path> --format json`.
-- Produces standalone repair command: `mcp-memory-maintenance relation-repair --database <path> --backup <new-path> --confirm`.
+- Produces standalone, non-server command: `mcpmem-maintenance relation-audit --database <path> --format json`.
+- Produces standalone repair command: `mcpmem-maintenance relation-repair --database <path> --backup <new-path> --confirm`.
 - Audit JSON reports `duplicate_groups`, `duplicate_rows`, `dangling_relation_rows`, and drift for `graph_stat.relations`, `type_dict.count`, `entity.out_deg`, and `entity.in_deg`. Decision (2026-09-08): any dangling relation makes repair abort before a write; it is reported for a separate explicit remediation.
 - Fresh databases receive `UNIQUE INDEX relation_unique_triple ON relation(from_id,to_id,type_id)` through the shared base schema. Repair keeps the lowest `(created_us, rowid)` relation for every duplicate triple, always recalculates derived counters from surviving physical rows even when no duplicate is found, creates that same index on repaired legacy databases, and returns the before/after audit.
 - Backup uses SQLite’s online backup API to a `--backup` target that must not exist, then reopens the copy and requires `PRAGMA integrity_check = 'ok'`; raw filesystem copying of a live `.db`/WAL is forbidden.
@@ -225,7 +227,7 @@ pull request; the merge decision belongs to the repository owner.
   cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo test --test relation_integrity -- --test-threads=1
   cargo test --test mutation_service -- --test-threads=1
-  git add crates/memory-core/src/relation_integrity.rs crates/memory-core/src/lib.rs crates/memory-core/src/schema.rs src/bin/maintenance.rs Cargo.toml tests/mutation_service.rs tests/relation_integrity.rs
+  git add crates/mcpmem-core/src/relation_integrity.rs crates/mcpmem-core/src/lib.rs crates/mcpmem-core/src/schema.rs src/bin/maintenance.rs Cargo.toml tests/mutation_service.rs tests/relation_integrity.rs
   git commit -m "feat: add backup-gated relation integrity repair"
   ```
 
@@ -237,7 +239,7 @@ pull request; the merge decision belongs to the repository owner.
 
 - [x] **Step 1: Choose provenance retention.** Decision (2026-09-08): storage retains `origin_entity_id INTEGER NULL` plus immutable `origin_entity_name TEXT NULL`; merge-copied observations receive both source values, newly-authored observations receive nulls. This survives source deletion while preserving an audit label. Public MCP objects expose only `originEntityName`; the numeric id is internal and never becomes a client identity contract.
 - [x] **Step 2: Choose fact-time semantics.** Decision (2026-09-08): `occurred_us INTEGER NULL`; it is caller-supplied UTC microseconds since Unix epoch, must be non-negative, and does not replace server-set immutable `created_us`.
-- [x] **Step 3: Choose public compatibility shape.** Decision (2026-09-08): canonical MCP `observations` are structured objects by default: `{ body, createdAtUs, occurredAtUs, originEntityName }`. This applies to all MCP reads and mutation results that contain observations, including JSON exports. `--legacy-observations` switches the whole MCP manifest and observation input/output JSON to the historical `observations: string[]` contract. It is a temporary server-wide adapter, documented as deprecated, available through 6.x and removed in 7.0.0; there are no parallel legacy/detail fields in one response.
+- [x] **Step 3: Choose public compatibility shape.** Decision (2026-09-08): canonical MCP `observations` are structured objects by default: `{ body, createdAtUs, occurredAtUs, originEntityName }`. This applies to all MCP reads and mutation results that contain observations, including JSON exports. `--legacy-observations` switches the whole MCP manifest and observation input/output JSON to the historical `observations: string[]` contract. It is a temporary server-wide adapter, documented as deprecated, available through `1.x` and removed in `2.0.0`; there are no parallel legacy/detail fields in one response.
 - [x] **Step 4: Choose legacy-row policy.** Decision (2026-09-08): all new metadata columns are nullable; existing rows retain their true server `created_us` while `occurred_us`, `origin_entity_id` and `origin_entity_name` are null. No dates or provenance are inferred from free text.
 - [x] **Step 5: Choose merge deduplication provenance.** Decision (2026-09-08): when target already has an identical observation body, merge creates no duplicate and leaves the existing target provenance unchanged. Provenance records the origin of the stored row, not a multi-origin history for equal text.
 - [x] **Step 6: Choose canonical write shape.** Decision (2026-09-08): retain current tool names and envelopes. In canonical mode, entity `observations` and `add_observations.contents` contain `{ body: string, occurredAtUs?: integer }`; `createdAtUs` and `originEntityName` are output-only server fields. Legacy mode restores the historical string elements.
@@ -246,13 +248,13 @@ pull request; the merge decision belongs to the repository owner.
 ### Task 6: Add observation provenance and timestamps after Task 5
 
 **Files:**
-- Modify: `Cargo.toml` (release the approved breaking contract as `6.0.0`)
+- Modify: `Cargo.toml` (release the approved breaking contract as `1.0.0`)
 - Modify: `Cargo.lock` (update the root package version)
 - Create: `migrations/0003_observation_metadata.sql`
-- Modify: `crates/memory-core/src/events.rs`
-- Modify: `crates/memory-core/src/types.rs`
-- Modify: `crates/memory-core/src/mutation.rs`
-- Modify: `crates/memory-core/src/graph.rs`
+- Modify: `crates/mcpmem-core/src/events.rs`
+- Modify: `crates/mcpmem-core/src/types.rs`
+- Modify: `crates/mcpmem-core/src/mutation.rs`
+- Modify: `crates/mcpmem-core/src/graph.rs`
 - Modify: `src/actions/memory.rs`
 - Modify: `src/actions/code.rs`
 - Modify: `src/config.rs`
@@ -289,7 +291,7 @@ duplicate and is deliberately outside this task.
 
 - [ ] **Step 3: Add the append-only migration and registry entry.** The migration may run only after Task 3’s shared bootstrap establishes `observation`. Do not edit migrations 0001 or 0002.
 - [ ] **Step 4: Implement typed boundary parsing and persistence.** Validate `occurred_us >= 0`; server fills `created_us`; mutation inserts origin metadata only for merge-copied observations; direct writes preserve null origin. If merge finds an equal target body, do not insert a row or alter that row’s provenance.
-- [ ] **Step 5: Preserve durable-payload readability independently of the MCP adapter.** `change_event.payload` and `idempotency_record.response` currently contain serialized string observations. Their pre-6.0 representation needs an explicit storage compatibility rule and regression fixtures; the MCP flag must not control whether existing durable records decode. Do not fabricate timestamps absent from a historical payload.
+- [ ] **Step 5: Preserve durable-payload readability independently of the MCP adapter.** `change_event.payload` and `idempotency_record.response` currently contain serialized string observations. Their pre-1.0 representation needs an explicit storage compatibility rule and regression fixtures; the MCP flag must not control whether existing durable records decode. Do not fabricate timestamps absent from a historical payload.
 - [ ] **Step 6: Implement the selected structured contract and adapter.** Default mode serializes metadata with explicit nulls for legacy rows. `--legacy-observations` switches manifest schemas and observation input/output to strings. Update exports and UI paths to consume the canonical internal model; preserve FTS and indexer canonicalization as `body`-only text, independent of transport JSON. Reject malformed or mixed observation arrays rather than silently dropping invalid elements.
 - [ ] **Step 7: Run checks and commit.**
 
@@ -297,7 +299,7 @@ duplicate and is deliberately outside this task.
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo test --workspace --all-targets --all-features -- --test-threads=1
-  git add Cargo.toml Cargo.lock migrations/0003_observation_metadata.sql crates/memory-core/src/events.rs crates/memory-core/src/types.rs crates/memory-core/src/mutation.rs crates/memory-core/src/graph.rs src/actions/memory.rs src/actions/code.rs src/config.rs src/lib.rs src/server.rs src/bin/bench.rs src/ui/graph.js tools.json tests/mutation_service.rs tests/e2e.rs tests/event_outbox.rs
+  git add Cargo.toml Cargo.lock migrations/0003_observation_metadata.sql crates/mcpmem-core/src/events.rs crates/mcpmem-core/src/types.rs crates/mcpmem-core/src/mutation.rs crates/mcpmem-core/src/graph.rs src/actions/memory.rs src/actions/code.rs src/config.rs src/lib.rs src/server.rs src/bin/bench.rs src/ui/graph.js tools.json tests/mutation_service.rs tests/e2e.rs tests/event_outbox.rs
   git commit -m "feat: preserve observation provenance and fact time"
   ```
 
@@ -326,6 +328,6 @@ duplicate and is deliberately outside this task.
   database written by the pre-change `5.2.1` binary at `a140755`, not a fixture.
   Evidence: `docs/runbooks/2026-09-09-relation-repair-rehearsal.md`. Audit,
   three refusal modes, repair, keeper determinism, backup integrity, idempotent
-  second repair, the dangling-row abort, and the 6.0.0 server on the same legacy
-  database all behaved as the plan specifies.
+  second repair, the dangling-row abort, and the 1.0.0 server, then called
+  6.0.0, on the same legacy database all behaved as the plan specifies.
 - [x] Update the status ledger and triage verdicts with commit IDs and executed command output.

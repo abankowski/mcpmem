@@ -1,6 +1,6 @@
 # Relation-integrity repair runbook
 
-`mcp-memory-maintenance` is an offline operator command. It never runs during
+`mcpmem-maintenance` is an offline operator command. It never runs during
 server startup and never writes the source database until it has created and
 validated a SQLite online backup, acquired the writer lock, and passed its
 integrity preflight.
@@ -10,7 +10,7 @@ The commands below are identical in Bash and fish.
 ## 1. Audit first
 
 ```sh
-mcp-memory-maintenance relation-audit --database /absolute/path/to/memory.db --format json
+mcpmem-maintenance relation-audit --database /absolute/path/to/memory.db --format json
 ```
 
 The JSON contains aggregate counts only. `duplicate_groups` and
@@ -27,7 +27,7 @@ explicitly first.
 Choose a destination that does not exist and has enough capacity:
 
 ```sh
-mcp-memory-maintenance relation-repair \
+mcpmem-maintenance relation-repair \
   --database /absolute/path/to/memory.db \
   --backup /absolute/path/to/memory-before-relation-repair.db \
   --confirm
@@ -50,7 +50,7 @@ operator recovery decision, not an automatic action by this tool.
 On success, retain the `before` and `after` audit JSON plus the backup. Re-run:
 
 ```sh
-mcp-memory-maintenance relation-audit --database /absolute/path/to/memory.db --format json
+mcpmem-maintenance relation-audit --database /absolute/path/to/memory.db --format json
 ```
 
 Success has zero duplicate and dangling counts and zero drift. Repair keeps the
