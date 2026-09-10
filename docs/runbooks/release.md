@@ -77,9 +77,41 @@ crate against crates.io, so a dependent cannot be verified before its
 dependency is published. Before the first release, only `mcpmem-core` verifies.
 The script reports the others and continues.
 
+## The crates.io credential
+
+`CARGO_REGISTRY_TOKEN` is an API token from crates.io. Create it under Account
+Settings, then API Tokens, then New Token.
+
+- Endpoint scopes: `publish-new` and `publish-update`. `yank` is not needed.
+- Crate scope: `mcpmem*`. The pattern matches `mcpmem` and every `mcpmem-`
+  crate, including a crate created after the token. The scope is evaluated on
+  each call.
+- Set an expiry date.
+
+Store it as the repository secret `CARGO_REGISTRY_TOKEN`.
+
+### Replace the token with Trusted Publishing after the first release
+
+crates.io supports Trusted Publishing. GitHub proves the workflow identity
+with OIDC, and `rust-lang/crates-io-auth-action` exchanges that proof for a
+token that lives 30 minutes. The action revokes the token when the job ends.
+No credential is stored in the repository.
+
+crates.io accepts a Trusted Publisher entry only for a crate that exists, so
+the first release must use the API token. After that release:
+
+1. Open each of the five crates on crates.io. Add a Trusted Publisher: owner
+   `abankowski`, repository `mcpmem`, workflow `release.yml`, environment
+   `crates-io`.
+2. Delete the `CARGO_REGISTRY_TOKEN` secret.
+
+The workflow needs no edit. It runs the auth action when the secret is absent,
+and it fails with a clear message when neither credential is available.
+
 ## Requirements in the repository settings
 
-- A repository secret `CARGO_REGISTRY_TOKEN` with publish rights for all five
-  crate names.
+- Either the secret `CARGO_REGISTRY_TOKEN`, or a Trusted Publisher entry for
+  all five crates.
 - An environment named `crates-io`. Add required reviewers there when a manual
   approval before publishing is wanted.
+- The job holds `id-token: write`, which the OIDC exchange needs.
