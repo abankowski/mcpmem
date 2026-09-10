@@ -5,6 +5,7 @@ edition = "2024"
 license = "Apache-2.0"
 description = "Durable webhook delivery worker for the mcpmem MCP server."
 repository = "https://github.com/abankowski/mcpmem"
+readme = "README.md"
 
 [dependencies]
 hmac = "0.12"
