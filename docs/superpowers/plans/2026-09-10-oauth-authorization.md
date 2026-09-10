@@ -1702,8 +1702,10 @@ impl Fetch for PanicFetch {
 }
 
 async fn register(body: &str) -> (StatusCode, serde_json::Value) {
-    let (_dir, app) = support::oauth_router_with("https://idp.invalid").await;
-    let res = app
+    let server = support::oauth_server().await;
+    let res = server
+        .router
+        .clone()
         .oneshot(
             Request::post("/oauth/register")
                 .header("content-type", "application/json")
@@ -1715,6 +1717,19 @@ async fn register(body: &str) -> (StatusCode, serde_json::Value) {
     let status = res.status();
     (status, support::json(res).await)
 }
+```
+
+Task 4 froze the fixture interface. The constructors are `server`,
+`oauth_server`, `oauth_server_with`, `oauth_server_with_scopes`,
+`oauth_server_with_clock`, `oauth_server_at`, `oauth_server_without_categories`
+and `open_server`. The types are `Scopes`, `Clock` and `Server`. A `Server` holds
+the router, the temporary directory and the category guard, so keep the `Server`
+alive for the whole test. Never move the router out of it.
+
+Hold one `Server` at a time. The fixture serialises the process-wide tool-category
+flags, so a second one in the same test blocks.
+
+```rust
 
 #[tokio::test]
 async fn dynamic_registration_returns_a_client_id() {
