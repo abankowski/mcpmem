@@ -19,10 +19,14 @@ fn tools_list() -> Request<Body> {
         .unwrap()
 }
 
+fn get(path: &str) -> Request<Body> {
+    Request::get(path).body(Body::empty()).unwrap()
+}
+
 #[tokio::test]
 async fn an_unauthenticated_mcp_post_names_the_resource_metadata() {
-    let app = support::oauth_router().await;
-    let res = app.oneshot(tools_list()).await.unwrap();
+    let server = support::oauth_server().await;
+    let res = server.router.clone().oneshot(tools_list()).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     let header = support::header(&res, "www-authenticate");
     assert_eq!(
@@ -40,7 +44,6 @@ async fn an_unauthenticated_mcp_post_names_the_resource_metadata() {
 /// discards the whole header, and with it the only discovery pointer.
 #[tokio::test]
 async fn the_challenge_omits_the_scope_parameter_when_no_category_is_enabled() {
-    let _guard = support::category_lock().await;
     let server = support::oauth_server_without_categories().await;
     let res = server.router.clone().oneshot(tools_list()).await.unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -61,7 +64,7 @@ async fn the_ui_gate_sends_the_same_challenge_as_the_mcp_endpoint() {
     let ui = server
         .router
         .clone()
-        .oneshot(Request::get("/ui/graph").body(Body::empty()).unwrap())
+        .oneshot(get("/ui/graph"))
         .await
         .unwrap();
     assert_eq!(ui.status(), StatusCode::UNAUTHORIZED);
@@ -73,13 +76,11 @@ async fn the_ui_gate_sends_the_same_challenge_as_the_mcp_endpoint() {
 
 #[tokio::test]
 async fn the_protected_resource_document_names_this_server() {
-    let app = support::oauth_router().await;
-    let res = app
-        .oneshot(
-            Request::get("/.well-known/oauth-protected-resource")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let server = support::oauth_server().await;
+    let res = server
+        .router
+        .clone()
+        .oneshot(get("/.well-known/oauth-protected-resource"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -102,13 +103,11 @@ async fn the_protected_resource_document_names_this_server() {
 /// be the identifier the client started from.
 #[tokio::test]
 async fn the_path_suffixed_document_names_the_resource_the_client_asked_about() {
-    let app = support::oauth_router().await;
-    let res = app
-        .oneshot(
-            Request::get("/.well-known/oauth-protected-resource/mcp")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let server = support::oauth_server().await;
+    let res = server
+        .router
+        .clone()
+        .oneshot(get("/.well-known/oauth-protected-resource/mcp"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -117,31 +116,31 @@ async fn the_path_suffixed_document_names_the_resource_the_client_asked_about() 
     assert_eq!(body["authorization_servers"][0], PUBLIC_URL);
 }
 
-/// This server has exactly one protected resource. A suffix naming anything
-/// else must not be echoed back as though it were ours.
+/// One rule covers every suffix: it names the resource identically, or it is
+/// 404. A trailing slash makes a different identifier, so a client holding
+/// `…/mcp/` must not be answered with a document about `…/mcp` — section 3.3
+/// requires the two to be identical, and such a client aborts on the 200.
 #[tokio::test]
-async fn a_suffix_that_names_no_resource_of_ours_is_not_found() {
-    let app = support::oauth_router().await;
-    let res = app
-        .oneshot(
-            Request::get("/.well-known/oauth-protected-resource/somewhere/else")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+async fn a_suffix_that_is_not_identical_is_not_found() {
+    let server = support::oauth_server().await;
+    for path in [
+        "/.well-known/oauth-protected-resource/mcp/",
+        "/.well-known/oauth-protected-resource/mcp///",
+        "/.well-known/oauth-protected-resource/somewhere/else",
+        "/.well-known/oauth-authorization-server/nope",
+    ] {
+        let res = server.router.clone().oneshot(get(path)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "path was: {path}");
+    }
 }
 
 #[tokio::test]
 async fn the_authorization_server_document_advertises_pkce_and_cimd() {
-    let app = support::oauth_router().await;
-    let res = app
-        .oneshot(
-            Request::get("/.well-known/oauth-authorization-server")
-                .body(Body::empty())
-                .unwrap(),
-        )
+    let server = support::oauth_server().await;
+    let res = server
+        .router
+        .clone()
+        .oneshot(get("/.well-known/oauth-authorization-server"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -165,6 +164,53 @@ async fn the_authorization_server_document_advertises_pkce_and_cimd() {
     );
 }
 
+/// RFC 8414 section 3.1 inserts the well-known suffix between the host and the
+/// path of the issuer identifier, exactly as RFC 9728 does for a resource. A
+/// client that read `authorization_servers: ["https://host/base"]` fetches
+/// `https://host/.well-known/oauth-authorization-server/base`, so that URL must
+/// answer or the flow dead-ends one hop after discovery succeeded.
+#[tokio::test]
+async fn a_server_under_a_path_prefix_answers_both_suffixed_paths() {
+    let public_url = format!("{PUBLIC_URL}/base");
+    let server = support::oauth_server_at(&public_url).await;
+
+    let res = server
+        .router
+        .clone()
+        .oneshot(get("/.well-known/oauth-authorization-server/base"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = support::json(res).await;
+    assert_eq!(body["issuer"], public_url);
+
+    let res = server
+        .router
+        .clone()
+        .oneshot(get("/.well-known/oauth-protected-resource/base/mcp"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = support::json(res).await;
+    assert_eq!(body["resource"], format!("{public_url}/mcp"));
+    assert_eq!(body["authorization_servers"][0], public_url);
+}
+
+/// The suffix is relative to the origin, not to the public URL. A client that
+/// appends the path a second time names a resource this server does not
+/// protect.
+#[tokio::test]
+async fn a_prefixed_server_does_not_answer_the_unprefixed_suffix() {
+    let server = support::oauth_server_at(&format!("{PUBLIC_URL}/base")).await;
+    for path in [
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-authorization-server/base/base",
+    ] {
+        let res = server.router.clone().oneshot(get(path)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "path was: {path}");
+    }
+}
+
 /// With neither OAuth nor a static token, the server is open: a request with no
 /// credential is dispatched, not refused.
 #[tokio::test]
@@ -180,7 +226,6 @@ async fn a_server_with_no_auth_configured_stays_open() {
 /// advertise the `graph-read` tools.
 #[tokio::test]
 async fn a_test_router_advertises_the_tools_of_its_enabled_categories() {
-    let _guard = support::category_lock().await;
     let server = support::open_server().await;
     let res = server.router.clone().oneshot(tools_list()).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -195,8 +240,8 @@ async fn a_test_router_advertises_the_tools_of_its_enabled_categories() {
     assert!(names.contains(&"delete_entities"), "tools were: {names:?}");
 }
 
-/// A server with OAuth off advertises no authorization server, so neither
-/// discovery document exists.
+/// A server with OAuth off advertises no authorization server, so no discovery
+/// document exists at either shape of either path.
 #[tokio::test]
 async fn the_discovery_documents_are_absent_when_oauth_is_off() {
     let server = support::open_server().await;
@@ -204,13 +249,9 @@ async fn the_discovery_documents_are_absent_when_oauth_is_off() {
         "/.well-known/oauth-protected-resource",
         "/.well-known/oauth-protected-resource/mcp",
         "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server/base",
     ] {
-        let res = server
-            .router
-            .clone()
-            .oneshot(Request::get(path).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let res = server.router.clone().oneshot(get(path)).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "path was: {path}");
     }
 }
@@ -246,4 +287,42 @@ async fn the_store_is_reachable_and_opens_on_a_migrated_schema() {
         .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
         .unwrap();
     assert!(timeout > 0, "busy_timeout was {timeout}");
+}
+
+/// The clock a test injects is the clock the state reads, and moving it moves
+/// what the state sees. Tasks 7 and 8 observe an expiry this way; no test can
+/// wait out a token lifetime.
+#[tokio::test]
+async fn the_injected_clock_is_the_one_the_state_reads_and_it_moves() {
+    const FIXED: i64 = 1_700_000_000_000_000;
+    let server = support::oauth_server_with_clock(support::Clock::at(FIXED)).await;
+    let now_us = &server.oauth().now_us;
+    assert_eq!(now_us(), FIXED);
+
+    server.clock().advance_seconds(3600);
+    assert_eq!(now_us(), FIXED + 3_600_000_000);
+    assert_eq!(server.clock().now_us(), FIXED + 3_600_000_000);
+}
+
+/// A credential may hold fewer scopes than the server enables. Task 8 needs
+/// that shape, so the fixture must build it without being edited.
+#[tokio::test]
+async fn a_partial_bearer_scope_list_reaches_the_state() {
+    use mcpmem::tools::ToolCategory;
+    let server = support::oauth_server_with_scopes(support::Scopes::bearer_holds(vec![
+        ToolCategory::GraphRead,
+    ]))
+    .await;
+    let res = server
+        .router
+        .clone()
+        .oneshot(get("/.well-known/oauth-protected-resource"))
+        .await
+        .unwrap();
+    let body: serde_json::Value = support::json(res).await;
+    assert_eq!(
+        body["scopes_supported"],
+        json!(["graph-read", "graph-write", "vectors", "code"]),
+        "the document advertises the enabled categories, not the credential"
+    );
 }

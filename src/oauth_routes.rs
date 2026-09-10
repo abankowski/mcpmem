@@ -35,6 +35,17 @@ pub struct OauthState {
 }
 
 impl OauthState {
+    /// The one resource identifier this server protects: its MCP endpoint under
+    /// the canonical public URL.
+    ///
+    /// Every place that has to name the resource reads it here — the discovery
+    /// document, the suffix check, and from Task 6 on the `resource` a token is
+    /// bound to. A second spelling of the same string is how a later transport
+    /// path silently stops matching.
+    pub fn resource(&self) -> String {
+        format!("{}/mcp", self.config.public_url)
+    }
+
     /// Open the OAuth store on `db_path` and build the shared state.
     ///
     /// # Precondition
@@ -84,11 +95,16 @@ fn open_failed(e: &rusqlite::Error) -> MCSError {
 
 /// Add the discovery documents.
 ///
-/// The protected-resource document is published twice. A client that knows
-/// only the origin fetches the bare path; a client that follows RFC 9728
-/// section 3.1 inserts the well-known suffix between the host and the path of
-/// the resource identifier, and so fetches the suffixed path. Every route
-/// answers 404 when OAuth is off, so a server without OAuth advertises no
+/// Each document is published twice. A client that knows only the origin
+/// fetches the bare path. A client that follows RFC 9728 section 3.1 (for the
+/// resource) or RFC 8414 section 3.1 (for the issuer) inserts the well-known
+/// segment between the host and the path of the identifier it holds, and so
+/// fetches the suffixed path. Both matter, because `--public-url` may carry a
+/// path prefix: then the bare path is what a stripping proxy delivers, and the
+/// suffixed path is what a client derives.
+///
+/// A suffix must name this server identically, or the route answers 404. Every
+/// route answers 404 when OAuth is off, so a server without OAuth advertises no
 /// authorization server at all.
 pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
     router
@@ -97,12 +113,16 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
             get(protected_resource),
         )
         .route(
-            "/.well-known/oauth-protected-resource/{*resource_path}",
+            "/.well-known/oauth-protected-resource/{*suffix}",
             get(protected_resource_at),
         )
         .route(
             "/.well-known/oauth-authorization-server",
             get(authorization_server),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/{*suffix}",
+            get(authorization_server_at),
         )
 }
 
@@ -111,9 +131,9 @@ fn scopes(state: &HttpState) -> Vec<&'static str> {
     state.enabled_categories.iter().map(|c| c.slug()).collect()
 }
 
-/// The scheme and host of `public_url`, without any path prefix. RFC 9728
-/// section 3.1 inserts the well-known suffix between the host and the path, so
-/// the path a client sends back is relative to the origin, not to
+/// The scheme and host of `public_url`, without any path prefix. Both
+/// specifications insert the well-known segment between the host and the path,
+/// so the path a client sends back is relative to the origin, not to
 /// `public_url`. `--public-url` is validated as an `https` URL, so the fallback
 /// is unreachable in a running server.
 fn origin(public_url: &str) -> &str {
@@ -127,6 +147,19 @@ fn origin(public_url: &str) -> &str {
     }
 }
 
+/// The identifier a client holding `suffix` built its request URL from, or
+/// `None` when that is not `expected`.
+///
+/// One rule, and only one: identical, or nothing. No trailing slash is
+/// trimmed, because `…/mcp/` is a different identifier from `…/mcp`, and RFC
+/// 9728 section 3.3 requires the document to name the identifier the client
+/// started from. Answering a document about a neighbouring identifier makes a
+/// validating client abort on a 200 instead of on a 404.
+fn identifier<'a>(oauth: &OauthState, suffix: &str, expected: &'a str) -> Option<&'a str> {
+    let requested = format!("{}/{suffix}", origin(&oauth.config.public_url));
+    (requested == expected).then_some(expected)
+}
+
 /// `GET /.well-known/oauth-protected-resource` — the document for a client that
 /// starts from the origin. This server protects one resource, its `/mcp`
 /// endpoint, so that is what the document names.
@@ -134,36 +167,30 @@ async fn protected_resource(State(state): State<HttpState>) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let resource = format!("{}/mcp", oauth.config.public_url);
-    document(&state, oauth, &resource)
+    resource_document(&state, oauth, &oauth.resource())
 }
 
-/// `GET /.well-known/oauth-protected-resource/{*resource_path}` — the RFC 9728
-/// section 3.1 form. The resource identifier is the origin plus the captured
-/// path, and the document returns exactly that, as section 3.3 requires. A
-/// path that names no resource of ours is 404: this server has one, and echoing
-/// any other would advertise a resource it does not protect.
+/// `GET /.well-known/oauth-protected-resource/{*suffix}` — the RFC 9728 section
+/// 3.1 form. The document names the identifier the client built the URL from,
+/// and a suffix naming anything but this server's one resource is 404: echoing
+/// another would advertise a resource this server does not protect.
 async fn protected_resource_at(
     State(state): State<HttpState>,
-    UrlPath(resource_path): UrlPath<String>,
+    UrlPath(suffix): UrlPath<String>,
 ) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let requested = format!(
-        "{}/{}",
-        origin(&oauth.config.public_url),
-        resource_path.trim_end_matches('/')
-    );
-    if requested != format!("{}/mcp", oauth.config.public_url) {
-        return StatusCode::NOT_FOUND.into_response();
+    let resource = oauth.resource();
+    match identifier(oauth, &suffix, &resource) {
+        Some(resource) => resource_document(&state, oauth, resource),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
-    document(&state, oauth, &requested)
 }
 
 /// The protected-resource document for one resource identifier. The caller
-/// establishes that `resource` is one this server protects.
-fn document(state: &HttpState, oauth: &OauthState, resource: &str) -> Response {
+/// establishes that `resource` is the one this server protects.
+fn resource_document(state: &HttpState, oauth: &OauthState, resource: &str) -> Response {
     Json(mcpmem_oauth::metadata::protected_resource(
         resource,
         &oauth.config.public_url,
@@ -172,13 +199,38 @@ fn document(state: &HttpState, oauth: &OauthState, resource: &str) -> Response {
     .into_response()
 }
 
+/// `GET /.well-known/oauth-authorization-server` — the document for a client
+/// that starts from the origin.
 async fn authorization_server(State(state): State<HttpState>) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    authorization_server_document(&state, oauth)
+}
+
+/// `GET /.well-known/oauth-authorization-server/{*suffix}` — the RFC 8414
+/// section 3.1 form. The issuer identifier is this server's public URL, so the
+/// suffix must reproduce its path exactly. Without this route the flow
+/// dead-ends one hop after discovery: the protected-resource document names an
+/// authorization server carrying a path, and the client derives this URL from
+/// it.
+async fn authorization_server_at(
+    State(state): State<HttpState>,
+    UrlPath(suffix): UrlPath<String>,
+) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match identifier(oauth, &suffix, &oauth.config.public_url) {
+        Some(_) => authorization_server_document(&state, oauth),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn authorization_server_document(state: &HttpState, oauth: &OauthState) -> Response {
     Json(mcpmem_oauth::metadata::authorization_server(
         &oauth.config.public_url,
-        &scopes(&state),
+        &scopes(state),
     ))
     .into_response()
 }
