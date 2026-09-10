@@ -554,7 +554,13 @@ gh release create v1.1.0 --target main --notes-file CHANGES.md
 The workflow re-runs the gate, requires a prerelease tag to carry a prerelease GitHub
 release, requires the commit to be on `main`, runs the suite, and then publishes in
 dependency order: `mcpmem-core`, then `mcpmem-runtime`, `mcpmem-indexer` and
-`mcpmem-webhook`, then `mcpmem`. See
+`mcpmem-webhook`, then `mcpmem`.
+
+A successful release then advances the version on `main`: a candidate advances its
+counter (`1.0.0-rc.3` becomes `1.0.0-rc.4`), a stable release advances the minor
+(`1.1.0` becomes `1.2.0`). `main` therefore always names the coming version, and the
+usual release needs no manual bump. A patch, a major, or the stable release after a
+candidate is a human decision: `scripts/set-version.sh 1.0.0`. See
 [`docs/runbooks/release.md`](docs/runbooks/release.md).
 
 ## Relation to the original project

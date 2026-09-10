@@ -37,14 +37,36 @@ release means.
 Mark the GitHub release as a prerelease. The workflow compares the tag with
 that flag and fails when they disagree.
 
+## `main` always names the coming version
+
+A successful release ends by advancing the version on `main`, in a commit made
+by the workflow:
+
+- a release candidate advances its counter: `1.0.0-rc.3` releases, `main`
+  opens `1.0.0-rc.4`;
+- a stable release advances the minor: `1.1.0` releases, `main` opens `1.2.0`.
+
+So the version in `main` is the next release, never the one already published.
+The usual release therefore needs no bump at all: tag what `main` already
+says.
+
+`scripts/next-version.sh` holds that arithmetic and has its own tests,
+`scripts/test-next-version.sh`. A patch release, a major release, and the
+stable release that follows a candidate are human decisions, so set those with
+`scripts/set-version.sh`.
+
+The bump job does nothing when `main` no longer carries the released version,
+which keeps a re-run and a manual bump from fighting each other.
+
 ## Prepare a release
 
-1. Set the new version with one command. It edits all five `[package]` blocks
-   and every path dependency requirement, refreshes `Cargo.lock`, and runs the
-   gate:
+1. Choose the version. When the number `main` already carries is the one you
+   want, skip to the tests. Otherwise set it with one command, which edits all
+   five `[package]` blocks and every path dependency requirement, refreshes
+   `Cargo.lock`, and runs the gate:
 
    ```sh
-   scripts/set-version.sh 1.1.0
+   scripts/set-version.sh 1.0.0
    ```
 
    Do not edit the manifests by hand. `v1.0.0-rc.2` failed its release gate

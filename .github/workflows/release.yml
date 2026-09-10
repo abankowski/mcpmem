@@ -95,3 +95,39 @@ jobs:
           else
             scripts/publish-crates.sh
           fi
+
+  # After a release, `main` names the version that is coming next, never the one
+  # already published. Owner decision, 2026-09-10, after two releases failed
+  # because a tag moved and the manifests did not.
+  bump:
+    needs: publish
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      # Only this job writes. `publish` stays read-only, so the escalation is
+      # confined to the one commit it exists for.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Advance the version on main
+        env:
+          RELEASED: ${{ github.event.release.tag_name }}
+        run: |
+          released="${RELEASED#v}"
+          current="$(awk '/^\[package\]/ {p=1; next} /^\[/ {p=0} p && /^version = / {gsub(/[",]/, "", $3); print $3; exit}' Cargo.toml)"
+          if [ "${current}" != "${released}" ]; then
+            echo "::notice::main is at ${current}, not the released ${released}; somebody advanced it already, nothing to do"
+            exit 0
+          fi
+          next="$(scripts/next-version.sh "${released}")"
+          scripts/set-version.sh "${next}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.toml Cargo.lock crates/*/Cargo.toml
+          git commit -m "chore: open ${next} after releasing ${released}"
+          git push origin main
