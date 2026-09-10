@@ -103,7 +103,19 @@ the first release must use the API token. After that release:
 1. Open each of the five crates on crates.io. Add a Trusted Publisher: owner
    `abankowski`, repository `mcpmem`, workflow `release.yml`, environment
    `crates-io`.
-2. Delete the `CARGO_REGISTRY_TOKEN` secret.
+2. Delete the `CARGO_REGISTRY_TOKEN` secret in the GitHub repository.
+3. Revoke the same token on crates.io, under Account Settings, then API
+   Tokens.
+
+Step 3 is not optional, and it is not a duplicate of step 2. The secret in
+GitHub is one copy of the token. Deleting that copy removes the workflow's
+access, and it removes nothing else: the token stays valid on crates.io, for
+anybody who holds it, until crates.io revokes it. Delete the secret and stop,
+and the credential still exists with nothing watching it.
+
+Do the two steps together. If the Trusted Publisher entries are wrong, the
+next release fails before it publishes anything, and the repair is a new
+token. That failure is cheaper than a live token nobody uses.
 
 The workflow needs no edit. It runs the auth action when the secret is absent,
 and it fails with a clear message when neither credential is available.
