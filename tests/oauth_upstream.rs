@@ -60,6 +60,10 @@ async fn a_valid_identity_token_yields_its_claims() {
     assert_eq!(claims.iss, idp.issuer);
     assert_eq!(claims.sub, "sub-1");
     assert_eq!(claims.email.as_deref(), Some("adam@example.com"));
+    // The accepting direction of the audience rule: one party, and it is this
+    // client. Without it the rule could refuse everything and the two refusal
+    // tests below would not notice.
+    assert_eq!(claims.aud.all(), [CLIENT_ID.to_string()]);
     assert_eq!(claims.nonce.as_deref(), Some("the-nonce"));
 }
 
@@ -331,7 +335,15 @@ async fn an_hmac_header_against_a_key_that_names_its_algorithm_is_refused() {
         .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
         .await
         .unwrap_err();
-    assert!(matches!(err, UpstreamError::KeyMismatch(_)), "was: {err:?}");
+    // The reason, not only the variant. Two independent layers refuse this
+    // token with `KeyMismatch`, and only their text tells them apart: this is
+    // `jsonwebtoken`'s own key-family check, reached because the key names
+    // `ES256` and the header names something else.
+    assert!(
+        matches!(&err, UpstreamError::KeyMismatch(reason)
+                 if reason == "the token header names another algorithm"),
+        "was: {err:?}"
+    );
 }
 
 /// The same attack against a key set that names no `alg`, which is legal and
@@ -354,7 +366,14 @@ async fn an_hmac_header_against_a_key_that_names_no_algorithm_is_refused() {
         .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
         .await
         .unwrap_err();
-    assert!(matches!(err, UpstreamError::KeyMismatch(_)), "was: {err:?}");
+    // The other layer, and the reason is how this test says so: the key names
+    // no algorithm, so the fallback takes the header's `HS256` into the
+    // elliptic-curve arm, which refuses it before any signature is checked.
+    assert!(
+        matches!(&err, UpstreamError::KeyMismatch(reason)
+                 if reason == "an EC key cannot verify HS256"),
+        "was: {err:?}"
+    );
 }
 
 /// The other side of the fallback: a key set naming no `alg` must still
@@ -378,16 +397,37 @@ async fn a_key_set_that_names_no_algorithm_still_verifies() {
     assert_eq!(claims.sub, "sub-1");
 }
 
-// ── The authorized party ────────────────────────────────────────────────────
+// ── The audience, and the authorized party ──────────────────────────────────
 
-/// `jsonwebtoken` tests the audience as an intersection, so a token naming
-/// this client and another passes that check. OpenID Connect Core section
-/// 3.1.3.7 puts the answer in `azp`, and naming this client is the accepting
-/// direction.
+/// OpenID Connect Core section 3.1.3.7 item 3 is a MUST: refuse a token that
+/// carries an audience this client does not trust. `jsonwebtoken` tests `aud`
+/// as a non-empty intersection, so this token — which names this client and an
+/// attacker's — passes its check and must be refused here.
 #[tokio::test]
-async fn a_multi_audience_token_authorized_for_this_client_is_accepted() {
+async fn a_token_naming_an_audience_this_client_does_not_trust_is_refused() {
     let idp = FakeIdp::start(IdpBehaviour {
-        second_audience: Some("another-client".into()),
+        second_audience: Some("attacker-client".into()),
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let p = Provider::discover(&idp.issuer).await.unwrap();
+    let back = idp
+        .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
+        .await;
+    let err = p
+        .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, UpstreamError::Audience), "was: {err:?}");
+}
+
+/// `azp` naming this client does not rescue an untrusted second audience. The
+/// MUST is about every party the token names, and `azp` is a SHOULD on top of
+/// it, so the presence of a correct `azp` changes nothing here.
+#[tokio::test]
+async fn a_second_audience_is_refused_even_when_azp_names_this_client() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        second_audience: Some("attacker-client".into()),
         azp: Some(CLIENT_ID.into()),
         ..IdpBehaviour::default()
     })
@@ -396,19 +436,20 @@ async fn a_multi_audience_token_authorized_for_this_client_is_accepted() {
     let back = idp
         .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
         .await;
-    let claims = p
+    let err = p
         .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
         .await
-        .unwrap();
-    assert_eq!(claims.azp.as_deref(), Some(CLIENT_ID));
+        .unwrap_err();
+    assert!(matches!(err, UpstreamError::Audience), "was: {err:?}");
 }
 
-/// The refusing direction: the same shape, minted for the other client. The
-/// audience intersection lets it through, and only `azp` refuses it.
+/// The `azp` check on its own. One audience, this client's, so the audience
+/// rule is satisfied and `azp` is the only thing left to refuse the token —
+/// which is what keeps that check covered now the audience rule subsumes the
+/// multi-audience case.
 #[tokio::test]
-async fn a_multi_audience_token_authorized_for_another_client_is_refused() {
+async fn a_token_authorized_for_another_party_is_refused() {
     let idp = FakeIdp::start(IdpBehaviour {
-        second_audience: Some("another-client".into()),
         azp: Some("another-client".into()),
         ..IdpBehaviour::default()
     })

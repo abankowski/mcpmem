@@ -21,8 +21,13 @@
 //!   itself checked against the issuer the operator configured. A principal is
 //!   keyed by `iss` plus `sub`, so a token from another provider claiming a
 //!   known `sub` is exactly the confusion this check refuses.
-//! - **`aud`**, against this server's client identifier. A token minted for
-//!   another client of the same provider is not a login here.
+//! - **`aud`**, and every party it names, against this server's client
+//!   identifier. OpenID Connect Core section 3.1.3.7 item 3 is a MUST on
+//!   exactly this: a token that carries an audience this client does not trust
+//!   is refused, whether or not it also names this one.
+//! - **`azp`**, when the token carries it, against the same identifier. That
+//!   is the SHOULD of item 4 and the MAY of item 5, and it is redundant with
+//!   the rule above for every token this server would otherwise accept.
 //! - **`exp`**, with no leeway. The window is the login window, and it is
 //!   minutes wide; a minute of grace on top of it buys nothing.
 //! - **`nonce`**, against the value stored on the login row. This is what binds
@@ -90,15 +95,42 @@ pub enum UpstreamError {
 pub struct IdentityClaims {
     pub iss: String,
     pub sub: String,
+    /// Every party this token is for.
+    ///
+    /// Carried here rather than left to `jsonwebtoken` because that library
+    /// tests the claim as a non-empty intersection: it accepts a token whose
+    /// `aud` names this client *and* somebody else. The rule this server needs
+    /// is that it names nobody else, and that needs the claim itself.
+    pub aud: Audience,
     #[serde(default)]
     pub email: Option<String>,
     #[serde(default)]
     pub nonce: Option<String>,
-    /// The authorized party. OpenID Connect Core section 3.1.3.7 requires it
-    /// to name the client the token was minted for, whenever `aud` names more
-    /// than one party.
+    /// The authorized party. OpenID Connect Core section 3.1.3.7 item 4 is a
+    /// SHOULD to validate it, and item 5 a MAY to compare it with the client
+    /// identifier. The MUST is item 3, and it is about [`IdentityClaims::aud`].
     #[serde(default)]
     pub azp: Option<String>,
+}
+
+/// The `aud` claim, which RFC 7519 section 4.1.3 allows in two shapes: one
+/// party as a string, or several as an array.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Audience {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Audience {
+    /// Every party named, whichever shape the claim used. One accessor, so no
+    /// caller has to handle the two shapes and forget one of them.
+    pub const fn all(&self) -> &[String] {
+        match self {
+            Audience::One(one) => std::slice::from_ref(one),
+            Audience::Many(many) => many.as_slice(),
+        }
+    }
 }
 
 /// The four members of a discovery document this server uses. Every one is
@@ -361,12 +393,23 @@ impl Provider {
             .map_err(|e| claim_error(&e))?
             .claims;
         // `jsonwebtoken` tests the audience as a non-empty intersection, not
-        // as an equality, so a token whose `aud` names this client *and*
-        // another passes the check above. OpenID Connect Core section 3.1.3.7
-        // covers exactly that shape: `azp` must then name the party the token
-        // was minted for. The variant is `Audience` and not one of its own,
-        // because the fact it reports is the same one and so is the operator's
-        // remedy — this token belongs to another client of this provider.
+        // as an equality, so `set_audience` above accepts a token whose `aud`
+        // names this client *and* an attacker's client. OpenID Connect Core
+        // section 3.1.3.7 item 3 is a MUST that it does not meet: a token
+        // carrying an audience this client does not trust must be rejected.
+        // This server trusts exactly one audience, its own client identifier,
+        // so the rule is that every party named is that one.
+        let audiences = claims.aud.all();
+        if audiences.is_empty() || audiences.iter().any(|party| party != client_id) {
+            return Err(UpstreamError::Audience);
+        }
+        // Item 4 is a SHOULD and item 5 a MAY. Redundant with the rule above
+        // for a token that reaches here — one audience, and it is this client
+        // — and kept because it costs one comparison and refuses a provider
+        // that mints a token for us while naming another party as the one it
+        // was authorized for. The variant is `Audience` and not one of its
+        // own: the fact reported and the operator's remedy are the same, which
+        // is what this error type's own doc says a variant is for.
         if claims.azp.as_deref().is_some_and(|azp| azp != client_id) {
             return Err(UpstreamError::Audience);
         }
