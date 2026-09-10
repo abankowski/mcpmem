@@ -1876,7 +1876,27 @@ git commit -m "feat: accept dynamic client registration and metadata documents"
 - Create: `tests/support/fake_idp.rs`
 - Create: `tests/oauth_upstream.rs`
 - Modify: `src/oauth_routes.rs` (add `GET /oauth/authorize` and `GET /oauth/callback`)
-- Modify: `crates/mcpmem-oauth/Cargo.toml` (add `reqwest`, `jsonwebtoken`, `url`)
+- Modify: `crates/mcpmem-oauth/Cargo.toml` (add `reqwest`, `jsonwebtoken` and `url`, all optional, behind a cargo feature)
+- Modify: `Cargo.toml` (enable that feature from the `mcpmem` package)
+
+**Dependency guard, added 2026-09-10 after Task 5 found it.** CI fails the build
+when a graph-only tree names an HTTP client. The check is at
+`.github/workflows/ci.yml:59`, and it runs
+`cargo tree --no-default-features -e normal`. The `mcpmem` package depends on
+`mcpmem-oauth` with no feature gate today, so a plain `reqwest` dependency in the
+new crate enters that tree and fails the build.
+
+Put `reqwest`, `jsonwebtoken` and `url` behind a cargo feature in
+`crates/mcpmem-oauth`. Gate the real fetcher and the `Provider` on it. Do not
+widen the guard. Run the guard command yourself before you report:
+
+```text
+cargo tree --no-default-features -e normal
+```
+
+Its output must name no `reqwest`, no `aws-*` and no `aws_sdk_*` package. The
+`Fetch` trait and `resolve_metadata_document` from Task 5 stay outside the
+feature, because they hold no network code.
 
 **Interfaces:**
 - Produces `mcpmem_oauth::upstream::Provider`, built from an issuer URL:
