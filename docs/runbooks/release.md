@@ -37,16 +37,53 @@ release means.
 Mark the GitHub release as a prerelease. The workflow compares the tag with
 that flag and fails when they disagree.
 
+## `main` always names the coming version
+
+A successful release ends by advancing the version on `main`, in a commit made
+by the workflow:
+
+- a release candidate advances its counter: `1.0.0-rc.3` releases, `main`
+  opens `1.0.0-rc.4`;
+- a stable release advances the patch: `1.1.0` releases, `main` opens `1.1.1`.
+
+So the version in `main` is the next release, never the one already published.
+The usual release therefore needs no bump at all: tag what `main` already
+says.
+
+**Patch, and not minor, because a wrong guess costs different amounts in the
+two directions.** From `1.1.1`, a release that turns out to carry a feature
+moves forward to `1.2.0`. From `1.2.0`, a release that turns out to be a bugfix
+has to move back to `1.1.1`, and every draft note or branch name that already
+said `1.2.0` is wrong. The smallest claim keeps every correction a forward one.
+
+`scripts/next-version.sh` holds that arithmetic and has its own tests,
+`scripts/test-next-version.sh`. A minor release, a major release, and the
+stable release that follows a candidate are human decisions, so set those with
+`scripts/set-version.sh`. No default can prevent a wrong claim here. Deriving
+the level from the commits would, and that needs a commit-message contract this
+repository does not have.
+
+The bump job does nothing when `main` no longer carries the released version,
+which keeps a re-run and a manual bump from fighting each other.
+
 ## Prepare a release
 
-1. Set the new version in all five manifests: `Cargo.toml` and
-   `crates/mcpmem-*/Cargo.toml`. Set the same version in each `path`
-   dependency's `version` field.
-2. Run the gate and the tests locally:
+1. Choose the version. When the number `main` already carries is the one you
+   want, skip to the tests. Otherwise set it with one command, which edits all
+   five `[package]` blocks and every path dependency requirement, refreshes
+   `Cargo.lock`, and runs the gate:
 
    ```sh
-   scripts/check-release-version.sh --registry v1.1.0
+   scripts/set-version.sh 1.0.0
+   ```
+
+   Do not edit the manifests by hand. `v1.0.0-rc.2` failed its release gate
+   because the tag moved and the workspace did not.
+2. Run the tests and the packaging check locally:
+
+   ```sh
    cargo test --workspace --all-targets --locked -- --test-threads=1
+   cargo package -p mcpmem-core --locked
    ```
 
 3. Merge to `main` through a pull request.

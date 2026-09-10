@@ -1,13 +1,13 @@
 [package]
 name = "mcpmem-runtime"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Feature-gated runtime role composition for the mcpmem MCP server."
 repository = "https://github.com/abankowski/mcpmem"
 
 [dependencies]
-mcpmem-core = { path = "../mcpmem-core", version = "1.0.0-rc.1" }
+mcpmem-core = { path = "../mcpmem-core", version = "1.0.0-rc.3" }
 thiserror = "2.0"
 tokio = { version = "1.41", features = ["rt", "sync"] }
 
