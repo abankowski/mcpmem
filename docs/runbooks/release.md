@@ -19,6 +19,24 @@ The commands below are identical in Bash and fish.
 it without arguments. The release workflow adds `--registry`, which also
 requires the version to be unpublished.
 
+## The first release binds the names on crates.io
+
+A crate name belongs to nobody until a version of it exists. The first release
+is therefore `1.0.0-rc.1`, a prerelease: it takes all five names, and it lets
+crates.io accept the Trusted Publisher entries, which it refuses for a crate
+that does not exist.
+
+A prerelease is the right tool for that job. `cargo install mcpmem` and a
+caret dependency both ignore a prerelease, so nobody receives it by accident,
+and `1.0.0` stays free for the first stable release.
+
+Do not use `0.0.1` for this. It is a stable version, it is permanent, and
+`0.x` states that the API may break at any time, which is not what this
+release means.
+
+Mark the GitHub release as a prerelease. The workflow compares the tag with
+that flag and fails when they disagree.
+
 ## Prepare a release
 
 1. Set the new version in all five manifests: `Cargo.toml` and
