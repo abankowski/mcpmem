@@ -1876,27 +1876,42 @@ git commit -m "feat: accept dynamic client registration and metadata documents"
 - Create: `tests/support/fake_idp.rs`
 - Create: `tests/oauth_upstream.rs`
 - Modify: `src/oauth_routes.rs` (add `GET /oauth/authorize` and `GET /oauth/callback`)
-- Modify: `crates/mcpmem-oauth/Cargo.toml` (add `reqwest`, `jsonwebtoken` and `url`, all optional, behind a cargo feature)
-- Modify: `Cargo.toml` (enable that feature from the `mcpmem` package)
+- Modify: `crates/mcpmem-oauth/Cargo.toml` (add `reqwest`, `jsonwebtoken` and `url` as optional, behind a crate feature named `upstream`)
+- Modify: `Cargo.toml` (add a default-on `mcpmem` feature named `oauth` that forwards to `mcpmem-oauth/upstream`)
 
 **Dependency guard, added 2026-09-10 after Task 5 found it.** CI fails the build
 when a graph-only tree names an HTTP client. The check is at
 `.github/workflows/ci.yml:59`, and it runs
 `cargo tree --no-default-features -e normal`. The `mcpmem` package depends on
-`mcpmem-oauth` with no feature gate today, so a plain `reqwest` dependency in the
-new crate enters that tree and fails the build.
+`mcpmem-oauth` with no feature gate, so a plain `reqwest` dependency in the new
+crate enters that tree and fails the build.
 
-Put `reqwest`, `jsonwebtoken` and `url` behind a cargo feature in
-`crates/mcpmem-oauth`. Gate the real fetcher and the `Provider` on it. Do not
-widen the guard. Run the guard command yourself before you report:
+One spelling satisfies both the feature and the guard. Add a crate feature
+`upstream` to `mcpmem-oauth`, and make `reqwest`, `jsonwebtoken` and `url`
+optional under it. Add a `mcpmem` feature `oauth` that is on by default, and let
+it forward to `mcpmem-oauth/upstream`. A build with `--no-default-features` then
+drops the forwarding feature and the HTTP client with it.
+
+A direct `features = ["upstream"]` on the dependency line does not work. It holds
+whatever the caller asks for, so the graph-only tree keeps `reqwest` and the guard
+goes red.
+
+`src/lib.rs` declares `pub mod oauth_routes;` unconditionally, so the code that
+uses `Provider` must carry `#[cfg(feature = "oauth")]`. The two upstream routes
+are absent from a `--no-default-features` build, which is the intended meaning: a
+graph-only build serves no OAuth login.
+
+Do not widen the guard. Run these commands yourself before you report:
 
 ```text
 cargo tree --no-default-features -e normal
+cargo build --no-default-features
+cargo build
 ```
 
-Its output must name no `reqwest`, no `aws-*` and no `aws_sdk_*` package. The
-`Fetch` trait and `resolve_metadata_document` from Task 5 stay outside the
-feature, because they hold no network code.
+The first must name no `reqwest`, no `aws-*` and no `aws_sdk_*` package. The
+other two must both succeed. The `Fetch` trait and `resolve_metadata_document`
+from Task 5 stay outside the feature, because they hold no network code.
 
 **Interfaces:**
 - Produces `mcpmem_oauth::upstream::Provider`, built from an issuer URL:
