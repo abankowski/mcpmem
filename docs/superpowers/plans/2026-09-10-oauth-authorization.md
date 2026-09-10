@@ -1542,6 +1542,10 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
             get(protected_resource),
         )
         .route(
+            "/.well-known/oauth-protected-resource/{*resource_path}",
+            get(protected_resource),
+        )
+        .route(
             "/.well-known/oauth-authorization-server",
             get(authorization_server),
         )

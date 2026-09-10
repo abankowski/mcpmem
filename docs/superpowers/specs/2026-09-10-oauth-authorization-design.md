@@ -132,7 +132,8 @@ All new routes attach at the router builder, `src/http.rs:69`.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /.well-known/oauth-protected-resource` | RFC 9728 metadata for the resource |
+| `GET /.well-known/oauth-protected-resource` | RFC 9728 metadata, for a client that asks for the bare origin |
+| `GET /.well-known/oauth-protected-resource/{path}` | RFC 9728 metadata at the path-suffixed URL |
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata for the authorization server |
 | `POST /oauth/register` | RFC 7591 dynamic client registration |
 | `GET /oauth/authorize` | starts the upstream login leg |
@@ -151,6 +152,19 @@ Protected resource metadata:
   "bearer_methods_supported": ["header"]
 }
 ```
+
+*Correction, found by the Task 4 review:* the first version of this section named
+one route only. RFC 9728 section 3.1 builds the metadata URL by inserting the
+well-known segment between the host and the path. A client that starts from the
+resource identifier `https://host/mcp` therefore asks for
+`https://host/.well-known/oauth-protected-resource/mcp`, and a server that serves
+only the bare path answers 404.
+
+RFC 9728 section 3.3 then requires the `resource` value to equal the identifier
+the client built the request URL from. One constant document cannot satisfy both
+callers, so the `resource` value is derived from the request path: the public
+origin plus the captured path for the suffixed route, and `{public_url}/mcp` for
+the bare route.
 
 Authorization server metadata carries at least these fields:
 
