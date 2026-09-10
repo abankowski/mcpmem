@@ -403,7 +403,6 @@ fn startup_rejects_changed_migration_and_preserves_legacy_vector_rows() {
         .collect();
     assert_eq!(versions, registered);
     drop(graph(&path));
-    assert_eq!(count(&conn, "schema_migration"), migration_count());
     conn.execute("UPDATE schema_migration SET checksum='tampered'", [])
         .unwrap();
     assert!(

@@ -55,6 +55,44 @@ pub const MIGRATIONS: [(i64, &str); 4] = [
     (4, include_str!("../migrations/0004_oauth.sql")),
 ];
 
+#[cfg(test)]
+mod migration_inventory {
+    /// The one inventory anchor for the migration set. Every other test derives
+    /// its expectation from [`super::MIGRATIONS`], so a registry entry deleted
+    /// by a bad merge, misnumbered, or edited in place would otherwise pass the
+    /// whole suite. Checksums are what production verifies at every startup, so
+    /// pinning them here pins count, order and content together.
+    #[test]
+    fn every_migration_version_and_checksum_is_pinned() {
+        let inventory: Vec<(i64, String)> = super::MIGRATIONS
+            .iter()
+            .map(|(version, sql)| (*version, super::sha256(sql.as_bytes())))
+            .collect();
+        assert_eq!(
+            inventory,
+            vec![
+                (
+                    1,
+                    "a48def8b25e9ecf813d3fa27a785893ba5de346a8b82f012cc543af2fecd5af2".to_string()
+                ),
+                (
+                    2,
+                    "2c267315d89203d5223895a845b275d8add904310d2c0a5a7a5b0d1873b984ec".to_string()
+                ),
+                (
+                    3,
+                    "0b82809aca1b4e90edfea4796e33a9c32963e055b7b57b8524b86dcb580bd454".to_string()
+                ),
+                (
+                    4,
+                    "18371cb1a53d5aba1aa68d95d8ae9cd9da9295fe93cddaf2036e5ab296cf1f34".to_string()
+                ),
+            ],
+            "a migration was added, removed, renumbered or edited"
+        );
+    }
+}
+
 /// Apply all pending ordered migrations in one transaction, including their
 /// ledger entries. Any failure rolls the entire pending set back; historical
 /// checksums are verified even when no migrations remain to apply.

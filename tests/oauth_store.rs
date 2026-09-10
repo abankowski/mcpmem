@@ -145,6 +145,11 @@ fn an_expired_access_token_is_not_found() {
     .unwrap();
     assert!(s.find_access(&token, 5).unwrap().is_some());
     assert!(s.find_access(&token, 11).unwrap().is_none());
+    assert!(
+        s.find_access(&token, 10).unwrap().is_none(),
+        "expires_us equal to now_us is expired: the read predicate and the \
+         sweep predicate must stay complementary"
+    );
 }
 
 #[test]
@@ -322,8 +327,34 @@ fn family_of_reports_the_family_of_a_spent_token() {
     )
     .unwrap();
     s.take_refresh(&refresh, 2).unwrap();
-    assert_eq!(s.family_of(&refresh).unwrap().as_deref(), Some("fam"));
-    assert_eq!(s.family_of(&new_token()).unwrap(), None);
+    assert_eq!(s.family_of(&refresh, 3).unwrap().as_deref(), Some("fam"));
+    assert_eq!(s.family_of(&new_token(), 3).unwrap(), None);
+    s.revoke_family("fam").unwrap();
+    assert_eq!(
+        s.family_of(&refresh, 4).unwrap().as_deref(),
+        Some("fam"),
+        "revocation must stay idempotent"
+    );
+}
+
+#[test]
+fn an_expired_token_has_no_family() {
+    let (_d, s) = store();
+    let refresh = new_token();
+    s.put_token(
+        &refresh,
+        TokenKind::Refresh,
+        &grant("fam", &["code"]),
+        1,
+        10,
+    )
+    .unwrap();
+    assert_eq!(s.family_of(&refresh, 5).unwrap().as_deref(), Some("fam"));
+    assert_eq!(
+        s.family_of(&refresh, 11).unwrap(),
+        None,
+        "an expired token must not be able to revoke a live family"
+    );
 }
 
 #[test]
@@ -335,8 +366,20 @@ fn the_sweep_deletes_only_expired_rows() {
         .unwrap();
     s.put_token(&dead, TokenKind::Access, &grant("f2", &["code"]), 1, 5)
         .unwrap();
+    let boundary = new_token();
+    s.put_token(
+        &boundary,
+        TokenKind::Access,
+        &grant("f3", &["code"]),
+        1,
+        100,
+    )
+    .unwrap();
     let removed = s.sweep(100).unwrap();
-    assert_eq!(removed, 1);
+    assert_eq!(
+        removed, 2,
+        "a row whose expires_us equals the sweep instant is expired"
+    );
     assert!(s.find_access(&live, 101).unwrap().is_some());
 }
 
@@ -433,4 +476,59 @@ fn a_client_round_trips_and_touch_records_the_last_use() {
     s.touch_client("c1", 77).unwrap();
     assert_eq!(s.get_client("c1").unwrap().unwrap().last_used_us, 77);
     assert_eq!(s.get_client("c1").unwrap().unwrap().created_us, 1);
+}
+
+#[test]
+fn a_repeat_registration_refreshes_the_metadata_and_keeps_the_creation_time() {
+    let (_d, s) = store();
+    let first = ClientRecord {
+        client_id: "c1".into(),
+        client_name: "Claude".into(),
+        redirect_uris: vec!["https://claude.ai/api/mcp/auth_callback".into()],
+        source: "dcr".into(),
+        created_us: 1,
+        last_used_us: 1,
+    };
+    s.put_client(&first).unwrap();
+    let again = ClientRecord {
+        client_name: "Claude Desktop".into(),
+        redirect_uris: vec![
+            "https://claude.ai/api/mcp/auth_callback".into(),
+            "https://claude.ai/other".into(),
+        ],
+        created_us: 500,
+        last_used_us: 500,
+        ..first
+    };
+    s.put_client(&again).unwrap();
+    let stored = s.get_client("c1").unwrap().unwrap();
+    assert_eq!(stored.client_name, "Claude Desktop");
+    assert_eq!(stored.redirect_uris.len(), 2);
+    assert_eq!(stored.last_used_us, 500);
+    assert_eq!(
+        stored.created_us, 1,
+        "a repeat registration must not rewrite created_us"
+    );
+}
+
+#[test]
+fn the_debug_output_of_a_login_hides_its_secrets() {
+    let l = LoginRecord {
+        state: "state-abc".into(),
+        upstream_verifier: "the-verifier".into(),
+        nonce: "the-nonce".into(),
+        csrf: "the-csrf".into(),
+        ..login("unused", 10_000)
+    };
+    let shown = format!("{l:?}");
+    for secret in ["the-verifier", "the-nonce", "the-csrf"] {
+        assert!(
+            !shown.contains(secret),
+            "a login secret must never reach a log: {shown}"
+        );
+    }
+    assert!(
+        shown.contains("state-abc"),
+        "the non-secret fields must still print: {shown}"
+    );
 }

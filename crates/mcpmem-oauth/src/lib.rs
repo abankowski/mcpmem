@@ -10,17 +10,19 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 
 /// Lowercase hex SHA-256 of a token value. The store holds this, never the value.
+///
+/// This delegates to `mcpmem_core::events::sha256`, the same primitive that
+/// computes the migration checksums verified at every startup. One hash
+/// spelling in the workspace, and the `mcpmem-core` dependency states a fact.
 pub fn digest(token: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    format!("{:x}", h.finalize())
+    mcpmem_core::events::sha256(token.as_bytes())
 }
 
 /// 32 random bytes, base64url without padding. Panics only when the operating
 /// system random source fails, which is not a recoverable condition.
 pub fn new_token() -> String {
     let mut buf = [0u8; 32];
-    getrandom::getrandom(&mut buf).expect("operating system random source");
+    getrandom::fill(&mut buf).expect("operating system random source");
     URL_SAFE_NO_PAD.encode(buf)
 }
 

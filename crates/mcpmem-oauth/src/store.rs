@@ -1,15 +1,20 @@
 //! Durable storage for OAuth clients, logins, authorization codes and tokens.
 //!
-//! No credential value reaches SQLite. [`Store::put_token`] and
-//! [`Store::put_code`] take the value, hash it with [`crate::digest`], and
+//! No token or authorization code value reaches SQLite. [`Store::put_token`]
+//! and [`Store::put_code`] take the value, hash it with [`crate::digest`], and
 //! store the digest alone. A read hashes the presented value and matches on the
-//! digest, so a stolen database copy yields no usable credential.
+//! digest, so a stolen database copy yields no usable token.
+//!
+//! `oauth_login` is the exception, and it is deliberate: it holds the upstream
+//! verifier, the nonce and the CSRF value in the clear, because the callback
+//! must replay all three. Those three columns are secret-equivalent. Never log
+//! or export a [`LoginRecord`]; its [`std::fmt::Debug`] output redacts them.
 //!
 //! The four tables arrive with migration `0004_oauth.sql`, registered in
 //! `mcpmem_core::events::MIGRATIONS`. A caller opens the connection and runs
 //! `mcpmem_core::schema::initialize_database` before it builds a [`Store`].
 use rusqlite::{Connection, OptionalExtension, Row, params};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::digest;
@@ -72,7 +77,11 @@ pub enum RefreshOutcome {
 
 /// A registered client. `source` is `dcr` for dynamic registration, or `cimd`
 /// for a client identifier metadata document.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+// `Deserialize` is deliberately absent. `client_id`, `source`, `created_us` and
+// `last_used_us` are server-controlled, so a registration request must never
+// deserialize into this shape. A request type carries the two client-supplied
+// fields instead.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ClientRecord {
     pub client_id: String,
     pub client_name: String,
@@ -85,7 +94,7 @@ pub struct ClientRecord {
 /// One authorization request in flight, keyed by the state this server sent
 /// upstream. `client_state` is the state the client sent to this server, which
 /// is opaque here and returned unchanged.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct LoginRecord {
     pub state: String,
     pub client_id: String,
@@ -100,6 +109,28 @@ pub struct LoginRecord {
     pub principal: Option<String>,
     pub created_us: i64,
     pub expires_us: i64,
+}
+
+/// Prints the routing fields and redacts the three secret-equivalent ones, so
+/// that `tracing::debug!(?login)` in a route handler cannot leak them.
+impl std::fmt::Debug for LoginRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginRecord")
+            .field("state", &self.state)
+            .field("client_id", &self.client_id)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("client_state", &self.client_state)
+            .field("code_challenge", &self.code_challenge)
+            .field("resource", &self.resource)
+            .field("scopes", &self.scopes)
+            .field("upstream_verifier", &"<redacted>")
+            .field("nonce", &"<redacted>")
+            .field("csrf", &"<redacted>")
+            .field("principal", &self.principal)
+            .field("created_us", &self.created_us)
+            .field("expires_us", &self.expires_us)
+            .finish()
+    }
 }
 
 /// The columns a grant occupies, in the order every query selects them.
@@ -129,9 +160,10 @@ fn grant_from_columns(
     })
 }
 
-/// A `BEGIN IMMEDIATE` guard. The write lock is taken up front, so the busy
-/// timeout applies to lock acquisition rather than to the first write. An early
-/// return rolls the whole statement group back.
+/// A `BEGIN IMMEDIATE` guard. The write lock is taken up front, so a caller's
+/// busy timeout applies to lock acquisition rather than to the first write. An
+/// early return rolls the whole statement group back. [`Store::new`] states the
+/// precondition that makes the timeout part true.
 struct Tx<'a> {
     conn: &'a Connection,
     done: bool,
@@ -165,6 +197,16 @@ pub struct Store {
 
 impl Store {
     /// Take ownership of a connection whose schema is already migrated.
+    ///
+    /// # Precondition
+    ///
+    /// The caller must set `PRAGMA busy_timeout` before it builds a `Store`.
+    /// [`Store::take_refresh`] takes the write lock with `BEGIN IMMEDIATE`, and
+    /// without a busy timeout a second concurrent presentation of one refresh
+    /// token fails with `SQLITE_BUSY` instead of reporting the replay, so the
+    /// token family stays live. Every other component here sets the timeout
+    /// right after it opens the connection; the default is 5000 ms, at
+    /// `mcpmem_core::storage`.
     pub const fn new(conn: Connection) -> Store {
         Store { conn }
     }
@@ -520,15 +562,20 @@ impl Store {
         Ok(())
     }
 
-    /// The family of a stored token, whatever its state. The revocation
-    /// endpoint needs the family of a token that may already be spent, so this
-    /// read filters on nothing.
-    pub fn family_of(&self, token: &str) -> Result<Option<String>> {
+    /// The family of a live token, whatever else its state.
+    ///
+    /// Spent and revoked rows still answer, because the revocation endpoint
+    /// must find the family of a token it has already spent, and revocation
+    /// must stay idempotent. An expired token answers `None`: it is worthless
+    /// to its holder, and letting it name a family would let that holder revoke
+    /// the live family of the same principal.
+    pub fn family_of(&self, token: &str, now_us: i64) -> Result<Option<String>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT family FROM oauth_token WHERE token_digest = ?1",
-                params![digest(token)],
+                "SELECT family FROM oauth_token
+                 WHERE token_digest = ?1 AND expires_us > ?2",
+                params![digest(token), now_us],
                 |r| r.get(0),
             )
             .optional()?)

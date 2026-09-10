@@ -2050,7 +2050,7 @@ name = "mcpmem-oauth"
 version = "1.0.0-rc.4"
 dependencies = [
  "base64",
- "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "mcpmem-core",
  "rusqlite",
  "serde",
