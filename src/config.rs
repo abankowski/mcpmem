@@ -90,11 +90,10 @@ pub struct OAuthConfig {
 /// discovery path) can be plain equality: strip the trailing slash, lowercase
 /// the scheme and the host, and refuse anything that cannot identify one
 /// server. `flag` names the flag in the message. A path prefix is kept, and
-/// keeps its case; a query or a fragment is refused, because RFC 8707 forbids
-/// a fragment in a resource indicator and a query makes the value unusable as
-/// an audience.
+/// keeps its case; a query, a fragment or a userinfo part is refused, because
+/// RFC 8707 forbids all three in a resource indicator and the OpenID Connect
+/// issuer rule forbids them in an issuer identifier.
 fn normalize_https_url(flag: &str, value: &str) -> Result<String> {
-    let value = value.trim_end_matches('/');
     if value.contains('?') || value.contains('#') {
         return Err(MCSError::InvalidParams(format!(
             "{flag} must carry no query string and no fragment"
@@ -108,12 +107,23 @@ fn normalize_https_url(flag: &str, value: &str) -> Result<String> {
             "{flag} must use the https scheme"
         )));
     }
+    // Trim below the scheme, not above it: trimming the whole value would eat
+    // the `//` of a bare `https://` and report a missing scheme instead of a
+    // missing host.
+    let rest = rest.trim_end_matches('/');
     let (host, path) = match rest.find('/') {
         Some(i) => rest.split_at(i),
         None => (rest, ""),
     };
     if host.is_empty() {
         return Err(MCSError::InvalidParams(format!("{flag} must name a host")));
+    }
+    if host.contains('@') {
+        // Lowercasing the authority would silently rewrite a case-sensitive
+        // password, and neither specification allows userinfo here anyway.
+        return Err(MCSError::InvalidParams(format!(
+            "{flag} must carry no userinfo; remove the part before the '@'"
+        )));
     }
     Ok(format!("https://{}{path}", host.to_ascii_lowercase()))
 }

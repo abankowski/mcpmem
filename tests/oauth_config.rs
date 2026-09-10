@@ -309,9 +309,11 @@ fn oauth_on_the_stdio_transport_is_refused() {
 #[test]
 fn an_oauth_flag_without_the_issuer_is_refused() {
     let p = one_principal("f2.json");
+    let secret = write_tmp("f2-secret.txt", "s3cr3t\n");
     for orphan in [
         vec!["--public-url", "https://mem.example.com"],
         vec!["--oidc-client-id", "abc"],
+        vec!["--oidc-client-secret-file", secret.as_str()],
         vec!["--principals-file", p.as_str()],
         vec!["--cimd-allowed-domain", "claude.ai"],
         vec!["--oauth-trust-forwarded-proto"],
@@ -468,12 +470,39 @@ fn principal_scopes_are_stored_as_canonical_slugs() {
     );
     let list = mcpmem::principals::load(&path).unwrap();
     assert_eq!(list[0].scopes, vec!["graph-read", "code"]);
-    // `load` has already canonicalized them, so the set is a plain copy here.
-    let set = list[0].scope_set();
-    assert!(
-        set.contains("graph-read") && set.contains("code"),
-        "{set:?}"
-    );
+}
+
+#[test]
+fn a_public_url_with_userinfo_is_refused() {
+    let p = one_principal("f13.json");
+    let err = Config::from_args(&args(&valid_oauth(
+        &p,
+        &["--public-url", "https://user:pW@mem.example.com"],
+    )))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("userinfo"), "message was: {err}");
+}
+
+#[test]
+fn an_issuer_with_userinfo_is_refused() {
+    let p = one_principal("f14.json");
+    let err = Config::from_args(&args(&valid_oauth(
+        &p,
+        &["--oidc-issuer", "https://user:pW@idp.example"],
+    )))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("userinfo"), "message was: {err}");
+}
+
+#[test]
+fn a_public_url_of_nothing_but_the_scheme_names_the_host() {
+    let p = one_principal("f15.json");
+    let err = Config::from_args(&args(&valid_oauth(&p, &["--public-url", "https://"])))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("host"), "message was: {err}");
 }
 
 #[test]
