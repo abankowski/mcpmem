@@ -195,6 +195,29 @@ impl Drop for Server {
 /// binary serialises on the category guard. Waiting for your own is a deadlock,
 /// and panics here.
 pub async fn server(oauth: Option<OAuthConfig>, scopes: Scopes, clock: Option<Clock>) -> Server {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("t.mcpmem");
+    build(dir, db_path, oauth, scopes, clock).await
+}
+
+/// A construction that panics inside `HttpState::for_test`: the database path
+/// names a directory that does not exist, so opening the graph fails.
+///
+/// Only the test that proves a failed construction leaves the guard record
+/// clean calls this. The signature claims a `Server` it never returns.
+pub async fn server_that_fails_to_build() -> Server {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("no-such-directory/t.mcpmem");
+    build(dir, db_path, None, Scopes::all(), None).await
+}
+
+async fn build(
+    dir: TempDir,
+    db_path: std::path::PathBuf,
+    oauth: Option<OAuthConfig>,
+    scopes: Scopes,
+    clock: Option<Clock>,
+) -> Server {
     assert!(
         *holder() != Some(std::thread::current().id()),
         "one Server at a time: this thread already holds the tool-category \
@@ -203,18 +226,26 @@ pub async fn server(oauth: Option<OAuthConfig>, scopes: Scopes, clock: Option<Cl
          split the test in two."
     );
     let categories = CATEGORY_FLAGS.lock().await;
-    *holder() = Some(std::thread::current().id());
 
-    let dir = tempfile::tempdir().unwrap();
+    // Everything that can panic happens before the record. A panic here unwinds
+    // `categories` and frees the guard, and no `Server` exists to clear the
+    // record in `Drop`, so a record taken any earlier would outlive the guard
+    // it describes — and every later test on this thread would then trip the
+    // assertion above with a false cause.
     let state = HttpState::for_test(TestSetup {
-        db_path: dir.path().join("t.mcpmem"),
+        db_path,
         oauth,
         bearer_scopes: scopes.bearer,
         enabled_categories: scopes.enabled,
         now_us: clock.as_ref().map(Clock::as_fn),
     });
+    let router = mcpmem::http::router(state.clone());
+
+    // Nothing between the lock and here awaits, so no reentrant call can
+    // arrive in that window and the record is not needed until now.
+    *holder() = Some(std::thread::current().id());
     Server {
-        router: mcpmem::http::router(state.clone()),
+        router,
         state,
         clock,
         dir,

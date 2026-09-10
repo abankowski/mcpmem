@@ -354,3 +354,23 @@ async fn a_second_server_on_one_thread_panics_at_once() {
     drop(first);
     let _second = support::oauth_server().await;
 }
+
+/// A construction that panics must leave the guard record clean. The local
+/// guard unwinds and frees the mutex, and no `Server` exists for `Drop` to
+/// clear, so a record taken before the construction would outlive the guard it
+/// describes. Every later `server()` call on this thread would then trip the
+/// reentrance assertion and fail with a confidently false cause — under
+/// `--test-threads=1` that is every remaining test in the binary, because
+/// libtest runs them all on the main thread and a `ThreadId` is never reused.
+#[tokio::test]
+async fn a_failed_construction_leaves_the_guard_record_clean() {
+    let error = tokio::spawn(async {
+        drop(support::server_that_fails_to_build().await);
+    })
+    .await
+    .expect_err("the construction must panic");
+    assert!(error.is_panic(), "the task failed without panicking");
+
+    // The guard is free, so nothing must be recorded as holding it.
+    let _server = support::oauth_server().await;
+}
