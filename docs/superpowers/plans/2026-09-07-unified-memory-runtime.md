@@ -74,7 +74,7 @@
 
 **Files:**
 - Modify: `crates/mcpmem-core/src/mutation.rs`, `crates/mcpmem-core/src/graph.rs`
-- Create: `crates/mcpmem-core/src/events.rs`, `crates/mcpmem-core/src/jobs.rs`, `migrations/0001_change_events.sql`, `tests/event_outbox.rs`
+- Create: `crates/mcpmem-core/src/events.rs`, `crates/mcpmem-core/src/jobs.rs`, `crates/mcpmem-core/migrations/0001_change_events.sql`, `tests/event_outbox.rs`
 
 **Interfaces:**
 - Produces `ChangeEvent`, `IndexJob`, `IndexProfile`, and `IndexProfileRegistry`.

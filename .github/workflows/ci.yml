@@ -33,6 +33,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Workspace versions agree and are valid semver
         run: scripts/check-release-version.sh
+      # The v1.0.0-rc.1 release failed while verifying the packaged crate,
+      # because an include_str! read a file outside the crate root. CI now
+      # answers that question before a release does.
+      - name: Every include stays inside its crate
+        run: scripts/check-crate-includes.sh
+      - name: The packaged core crate compiles
+        run: cargo package -p mcpmem-core --locked
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Lint every feature combination

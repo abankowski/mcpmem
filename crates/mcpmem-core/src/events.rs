@@ -35,6 +35,25 @@ pub fn request_fingerprint(method: &str, normalized_path: &str, raw_body: &[u8])
     format!("{hash:x}", hash = hash.finalize())
 }
 
+/// The ordered migration set, embedded at compile time.
+///
+/// Public because a test that builds a historical database needs the exact SQL
+/// and its checksum. It must not read the `.sql` file itself: the files belong
+/// to this crate, and `cargo package` copies only the files under one crate
+/// root, so an `include_str!` from another crate ships a crate that cannot
+/// compile. That is how the `v1.0.0-rc.1` release failed.
+pub const MIGRATIONS: [(i64, &str); 3] = [
+    (1, include_str!("../migrations/0001_change_events.sql")),
+    (
+        2,
+        include_str!("../migrations/0002_webhook_subscriptions.sql"),
+    ),
+    (
+        3,
+        include_str!("../migrations/0003_observation_metadata.sql"),
+    ),
+];
+
 /// Apply all pending ordered migrations in one transaction, including their
 /// ledger entries. Any failure rolls the entire pending set back; historical
 /// checksums are verified even when no migrations remain to apply.
@@ -44,20 +63,7 @@ pub fn request_fingerprint(method: &str, normalized_path: &str, raw_body: &[u8])
 pub fn migrate(conn: &Connection) -> Result<()> {
     let tx = TxGuard::begin(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;").map_err(sql_error)?;
-    let migrations = [
-        (
-            1_i64,
-            include_str!("../../../migrations/0001_change_events.sql"),
-        ),
-        (
-            2_i64,
-            include_str!("../../../migrations/0002_webhook_subscriptions.sql"),
-        ),
-        (
-            3_i64,
-            include_str!("../../../migrations/0003_observation_metadata.sql"),
-        ),
-    ];
+    let migrations = MIGRATIONS;
     let newest: i64 = conn
         .query_row(
             "SELECT coalesce(max(version),0) FROM schema_migration",
