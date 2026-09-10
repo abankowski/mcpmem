@@ -229,24 +229,31 @@ Rules that hold for every table:
 | `--oidc-issuer` | upstream OpenID Connect issuer |
 | `--oidc-client-id` | client identifier registered at the provider |
 | `--oidc-client-secret-file` | client secret, read from a file |
-| `--principals-file` | TOML file of allowed humans and their scopes |
+| `--principals-file` | JSON file of allowed humans and their scopes |
 | `--cimd-allowed-domain` | repeatable; defaults to `claude.ai` and `chatgpt.com` |
 | `--oauth-trust-forwarded-proto` | accept `X-Forwarded-Proto` from a reverse proxy |
 | `--static-bearer-scopes` | scopes for the principal named `static` |
 
 The principals file:
 
-```toml
-[[principal]]
-name   = "adam-claude"
-iss    = "https://accounts.google.com"
-sub    = "107800000000000000000"
-label  = "adam@example.com"
-scopes = ["graph-read", "graph-write", "vectors"]
+```json
+[
+  {
+    "name": "adam-claude",
+    "iss": "https://accounts.google.com",
+    "sub": "107800000000000000000",
+    "label": "adam@example.com",
+    "scopes": ["graph-read", "graph-write", "vectors"]
+  }
+]
 ```
 
 `label` is display text for the consent page. Identity is `iss` plus `sub`,
 because an email address changes at most providers.
+
+*Correction:* the design conversation showed this file in TOML. JSON needs no
+new dependency, and the repository already ships JSON manifests. The format is
+JSON.
 
 The server refuses to start in these cases:
 
