@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Feature-gated runtime role composition for the mcpmem MCP server."
-repository = "https://github.com/abankowski/mcp-memory"
+repository = "https://github.com/abankowski/mcpmem"
 
 [dependencies]
 mcpmem-core = { path = "../mcpmem-core", version = "1.0.0" }

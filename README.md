@@ -537,6 +537,26 @@ concurrency, fuzzy invariant checks, both ANN backends end-to-end, the retrieval
 upsert, more-like-this, recommend, MMR), category gating, code indexing across all 10 languages,
 and HTTP bearer-token authentication.
 
+### Releases
+
+A push to `main` never publishes to crates.io. Publishing happens only for a published
+GitHub release, through `.github/workflows/release.yml`.
+
+All five workspace crates share one version. A tag is `v` plus that version, and the
+version is strict semver 2.0.0. `scripts/check-release-version.sh` enforces both, and CI
+runs it on every push.
+
+```sh
+scripts/check-release-version.sh --registry v1.1.0   # tag, versions, crates.io
+gh release create v1.1.0 --target main --notes-file CHANGES.md
+```
+
+The workflow re-runs the gate, requires a prerelease tag to carry a prerelease GitHub
+release, requires the commit to be on `main`, runs the suite, and then publishes in
+dependency order: `mcpmem-core`, then `mcpmem-runtime`, `mcpmem-indexer` and
+`mcpmem-webhook`, then `mcpmem`. See
+[`docs/runbooks/release.md`](docs/runbooks/release.md).
+
 ## Relation to the original project
 
 This project started from [`corporatepiyush/mcp-memory`](https://github.com/corporatepiyush/mcp-memory)
