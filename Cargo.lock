@@ -1855,6 +1855,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64",
+ "js-sys",
+ "ring",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1970,6 +1983,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "base64",
  "blake3",
  "clap",
  "dashmap",
@@ -1977,6 +1991,7 @@ dependencies = [
  "hmac 0.12.1",
  "http-body-util",
  "ignore",
+ "jsonwebtoken",
  "lru",
  "mcpmem-core",
  "mcpmem-indexer",
@@ -1986,6 +2001,8 @@ dependencies = [
  "notify",
  "parking_lot",
  "petgraph",
+ "reqwest",
+ "ring",
  "rusqlite",
  "rustc-hash",
  "rustls 0.23.40",
@@ -2053,7 +2070,9 @@ version = "1.0.0-rc.4"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
+ "jsonwebtoken",
  "mcpmem-core",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2061,6 +2080,7 @@ dependencies = [
  "subtle",
  "thiserror",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -2459,6 +2479,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls 0.23.40",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",

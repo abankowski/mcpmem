@@ -72,10 +72,17 @@ blake3 = { version = "1", optional = true }
 notify = { version = "8", optional = true }
 
 [features]
-default = ["code"]
+default = ["code", "oauth"]
 indexer = ["mcpmem-runtime/indexer", "dep:mcpmem-indexer"]
 webhooks = ["mcpmem-runtime/webhooks", "dep:mcpmem-webhook"]
 bedrock = ["indexer", "mcpmem-indexer/bedrock"]
+# The upstream OpenID Connect leg: `GET /oauth/authorize` and
+# `GET /oauth/callback`. Forwarding rather than a `features = ["upstream"]` on
+# the dependency line is what keeps the guard at `.github/workflows/ci.yml`
+# green: a forwarded feature is dropped by `--no-default-features`, and the
+# HTTP client goes with it. A graph-only build serves no OAuth login, which is
+# the intended meaning.
+oauth = ["mcpmem-oauth/upstream"]
 # Tree-sitter code-symbol indexing: the `code_*` MCP tools + indexer.
 code = [
     "dep:tree-sitter",
@@ -105,6 +112,15 @@ mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.0-rc.4" }
 # so the HTTP tests need no socket and no HTTP client.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# The fake OpenID Connect provider in `tests/support/fake_idp.rs` signs its own
+# identity tokens: `ring` generates the P-256 keypair, `jsonwebtoken` signs with
+# it, and `base64` encodes the two public coordinates into the JWKS. `reqwest`
+# is the client that drives the provider's own endpoints; it is already in the
+# tree through the `oauth` feature, so it costs nothing here.
+jsonwebtoken = { version = "9", default-features = false }
+ring = "0.17"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json"] }
 
 [[bin]]
 name = "mcpmem"

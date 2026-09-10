@@ -6,12 +6,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+#[cfg(feature = "oauth")]
+use axum::extract::Query;
 use axum::extract::{Path as UrlPath, State};
+#[cfg(feature = "oauth")]
+use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, http::StatusCode};
 use mcpmem_oauth::registration::RegistrationError;
+#[cfg(feature = "oauth")]
+use mcpmem_oauth::store::LoginRecord;
+#[cfg(feature = "oauth")]
+use mcpmem_oauth::upstream::{IdentityClaims, Provider, UpstreamError};
 use parking_lot::Mutex;
+#[cfg(feature = "oauth")]
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::errors::{MCSError, Result};
@@ -36,6 +46,18 @@ pub struct OauthState {
     pub config: crate::config::OAuthConfig,
     store: Mutex<mcpmem_oauth::store::Store>,
     pub now_us: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// The upstream provider, discovered on the first authorization request
+    /// and kept for the lifetime of the process.
+    ///
+    /// Discovery is one HTTP round trip to a host this server does not
+    /// control, so it does not belong on the startup path — a provider that is
+    /// slow or briefly down would stop the server from serving the graph. It
+    /// also does not belong on every request. A `OnceCell` is both: the first
+    /// login pays for it, a concurrent second login waits for the same
+    /// initialization rather than starting another, and a failed discovery
+    /// leaves the cell empty so the next login retries.
+    #[cfg(feature = "oauth")]
+    provider: tokio::sync::OnceCell<Provider>,
 }
 
 impl OauthState {
@@ -115,7 +137,17 @@ impl OauthState {
             config,
             store: Mutex::new(mcpmem_oauth::store::Store::new(conn)),
             now_us,
+            #[cfg(feature = "oauth")]
+            provider: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// The upstream provider, discovering it if this is the first caller.
+    #[cfg(feature = "oauth")]
+    async fn provider(&self) -> std::result::Result<&Provider, UpstreamError> {
+        self.provider
+            .get_or_try_init(|| Provider::discover(&self.config.oidc_issuer))
+            .await
     }
 }
 
@@ -136,8 +168,12 @@ fn open_failed(e: &rusqlite::Error) -> MCSError {
 /// A suffix must name this server identically, or the route answers 404. Every
 /// route answers 404 when OAuth is off, so a server without OAuth advertises no
 /// authorization server at all.
+///
+/// The two upstream routes are absent from a build without the `oauth`
+/// feature, and that is their intended meaning: such a build carries no HTTP
+/// client, so it can reach no OpenID Connect provider and can serve no login.
 pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
-    router
+    let router = router
         .route(
             "/.well-known/oauth-protected-resource",
             get(protected_resource),
@@ -154,7 +190,12 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
             "/.well-known/oauth-authorization-server/{*suffix}",
             get(authorization_server_at),
         )
-        .route("/oauth/register", post(register))
+        .route("/oauth/register", post(register));
+    #[cfg(feature = "oauth")]
+    let router = router
+        .route("/oauth/authorize", get(authorize))
+        .route("/oauth/callback", get(callback));
+    router
 }
 
 /// `POST /oauth/register` — RFC 7591 dynamic client registration.
@@ -324,6 +365,345 @@ fn authorization_server_document(state: &HttpState, oauth: &OauthState) -> Respo
         &scopes(state),
     ))
     .into_response()
+}
+
+// ── The upstream OpenID Connect leg ─────────────────────────────────────────
+
+/// How long a login may stay in flight, in microseconds. It bounds the time a
+/// human has between arriving at the provider and coming back, and it is the
+/// window in which a stolen `state` is worth anything.
+#[cfg(feature = "oauth")]
+const LOGIN_TTL_US: i64 = 10 * 60 * 1_000_000;
+
+/// What a client may send to `GET /oauth/authorize`.
+///
+/// Every member is optional here and checked below, so that a missing one is
+/// this server's plain refusal rather than the extractor's rejection, which a
+/// human would read as a crash.
+#[cfg(feature = "oauth")]
+#[derive(Deserialize)]
+struct AuthorizeParams {
+    client_id: Option<String>,
+    redirect_uri: Option<String>,
+    /// The client's own state, opaque here and returned unchanged. RFC 6749
+    /// section 4.1.1 makes it optional.
+    state: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    scope: Option<String>,
+    /// RFC 8707. Optional, and when present it must name this server's one
+    /// resource.
+    resource: Option<String>,
+}
+
+#[cfg(feature = "oauth")]
+#[derive(Deserialize)]
+struct CallbackParams {
+    code: Option<String>,
+    state: Option<String>,
+}
+
+/// `GET /oauth/authorize` — start a login at the upstream provider.
+///
+/// **Every refusal here is a plain 400, never a redirect.** That is the whole
+/// reason the checks are in this order. A redirect built from an unvalidated
+/// `redirect_uri` is an open redirect, and an open redirect on the
+/// authorization endpoint is how an authorization code is delivered to
+/// somebody else. RFC 6749 section 4.1.2.1 says the same thing: when the
+/// redirect URI is missing, unknown or mismatched, the error is shown to the
+/// human and not sent anywhere.
+///
+/// The comparison against the registered list is byte-for-byte. No prefix and
+/// no wildcard: `https://client.example/cb` does not admit
+/// `https://client.example/cb/anything`, and a registered URI carries no
+/// fragment (`mcpmem_oauth::registration`), so nothing here can be smuggled
+/// past the equality.
+#[cfg(feature = "oauth")]
+async fn authorize(State(state): State<HttpState>, Query(q): Query<AuthorizeParams>) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    start_login(oauth, q).await
+}
+
+/// Validate the authorization request, record the login, and answer.
+///
+/// The answer is built here rather than handed back as a `Result` for the
+/// caller to shape: a refusal and a redirect are both one `Response`, and a
+/// `Result<String, Response>` would put a 128-byte error on every return of a
+/// function whose happy path is the rare one.
+#[cfg(feature = "oauth")]
+async fn start_login(oauth: &Arc<OauthState>, q: AuthorizeParams) -> Response {
+    let (Some(client_id), Some(redirect_uri), Some(code_challenge)) =
+        (q.client_id, q.redirect_uri, q.code_challenge)
+    else {
+        return refused("client_id, redirect_uri and code_challenge are all required");
+    };
+    if q.code_challenge_method.as_deref() != Some("S256") {
+        return refused("code_challenge_method must be S256");
+    }
+    if code_challenge.is_empty() {
+        return refused("code_challenge must not be empty");
+    }
+    let resource = oauth.resource();
+    if q.resource.is_some_and(|asked| asked != resource) {
+        return refused("resource does not name this server");
+    }
+
+    let client = match oauth.with_store(|store| store.get_client(&client_id)) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!(error = %e, "the OAuth store refused to read a client");
+            return server_error();
+        }
+    };
+    let Some(client) = client else {
+        return refused("unknown client_id");
+    };
+    if !client.redirect_uris.contains(&redirect_uri) {
+        return refused("redirect_uri is not registered for this client");
+    }
+
+    // Discovery happens before the row is written, so a provider that cannot
+    // be reached leaves nothing behind to sweep up.
+    let provider = match oauth.provider().await {
+        Ok(provider) => provider,
+        Err(e) => {
+            tracing::error!(error = %e, issuer = %oauth.config.oidc_issuer,
+                            "the upstream provider could not be discovered");
+            return (
+                StatusCode::BAD_GATEWAY,
+                "the upstream provider could not be reached",
+            )
+                .into_response();
+        }
+    };
+
+    let now_us = (oauth.now_us)();
+    let login = LoginRecord {
+        state: mcpmem_oauth::new_token(),
+        client_id,
+        redirect_uri,
+        client_state: q.state,
+        code_challenge,
+        resource,
+        scopes: q
+            .scope
+            .as_deref()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+        upstream_verifier: mcpmem_oauth::new_token(),
+        nonce: mcpmem_oauth::new_token(),
+        csrf: mcpmem_oauth::new_token(),
+        principal: None,
+        created_us: now_us,
+        expires_us: now_us + LOGIN_TTL_US,
+    };
+    let url = provider.authorize_url(
+        &oauth.config.oidc_client_id,
+        &callback_uri(oauth),
+        &login.state,
+        &login.nonce,
+        &mcpmem_oauth::s256_challenge(&login.upstream_verifier),
+    );
+    if let Err(e) = oauth.with_store(|store| store.put_login(&login)) {
+        tracing::error!(error = %e, "the OAuth store refused to record a login");
+        return server_error();
+    }
+    (StatusCode::FOUND, [(header::LOCATION, url)]).into_response()
+}
+
+/// `GET /oauth/callback` — the upstream provider sends the human back here.
+///
+/// **Every outcome that is not a successful login of an allowed human is the
+/// same 403 page.** The caller is anonymous: whoever holds the URL can send
+/// this request, and a status or a body that differs by reason answers the
+/// question *is this person allowed here* for anybody who asks. So an unknown
+/// state, a refused exchange, a forged token and a human who is simply not on
+/// the list are indistinguishable from the outside, and the reason goes to the
+/// log instead.
+///
+/// It never redirects. The client's `redirect_uri` is reached only after
+/// consent, in Task 7, and a redirect from here would carry the outcome of an
+/// identity check to a party that has not been granted anything yet.
+#[cfg(feature = "oauth")]
+async fn callback(State(state): State<HttpState>, Query(q): Query<CallbackParams>) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let (Some(code), Some(login_state)) = (q.code, q.state) else {
+        // Not an identity outcome: no login was even named, so this discloses
+        // nothing that the request itself did not already contain.
+        return refused("the callback needs a code and a state");
+    };
+    match finish_login(oauth, &code, &login_state).await {
+        Ok(page) => page,
+        Err(reason) => {
+            tracing::warn!(reason = %reason, "an upstream login was refused");
+            login_refused()
+        }
+    }
+}
+
+/// Take the login, exchange the code, and name the human. The error is the
+/// reason, for the log alone: the page a refused caller sees is the same
+/// whatever it says.
+#[cfg(feature = "oauth")]
+async fn finish_login(
+    oauth: &Arc<OauthState>,
+    code: &str,
+    login_state: &str,
+) -> std::result::Result<Response, String> {
+    let now_us = (oauth.now_us)();
+    // Taken, not read: the row is consumed here whatever happens next, so a
+    // replayed callback finds nothing and no second exchange is attempted for
+    // one login. A login that ends in consent is written back below, with the
+    // human attached, which is the row Task 7 consumes.
+    let login = oauth
+        .with_store(|store| store.take_login(login_state, now_us))
+        .map_err(|e| format!("the store refused to read the login: {e}"))?
+        .ok_or_else(|| "no login in flight carries this state".to_owned())?;
+
+    let provider = oauth.provider().await.map_err(|e| e.to_string())?;
+    let claims = provider
+        .exchange(
+            code,
+            &login.upstream_verifier,
+            &oauth.config.oidc_client_id,
+            oauth.config.oidc_client_secret.as_deref(),
+            &callback_uri(oauth),
+            &login.nonce,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let principal = principal_of(oauth, &claims)?;
+    let page = consent_page(&login, &principal);
+    oauth
+        .with_store(|store| {
+            store.put_login(&LoginRecord {
+                principal: Some(principal),
+                ..login
+            })
+        })
+        .map_err(|e| format!("the store refused to record the human: {e}"))?;
+    Ok(page)
+}
+
+/// The name of the allowed human this identity belongs to.
+///
+/// The match is on `iss` and `sub` together. `sub` alone would let a second
+/// provider — one an operator added later, or one an attacker stood up —
+/// mint a subject that names somebody here.
+#[cfg(feature = "oauth")]
+fn principal_of(
+    oauth: &OauthState,
+    claims: &IdentityClaims,
+) -> std::result::Result<String, String> {
+    oauth
+        .config
+        .principals
+        .iter()
+        .find(|p| p.key() == (claims.iss.as_str(), claims.sub.as_str()))
+        .map(|p| p.name.clone())
+        .ok_or_else(|| {
+            format!(
+                "no principal is registered for {} {}",
+                claims.iss, claims.sub
+            )
+        })
+}
+
+/// The redirect URI this server registers at the upstream provider. One
+/// spelling, because the value is sent twice — once with the authorization
+/// request and once with the token exchange — and a provider refuses the
+/// exchange when the two differ.
+#[cfg(feature = "oauth")]
+fn callback_uri(oauth: &OauthState) -> String {
+    format!("{}/oauth/callback", oauth.config.public_url)
+}
+
+/// A refused authorization request: plain, and with no `Location`.
+#[cfg(feature = "oauth")]
+fn refused(reason: &'static str) -> Response {
+    (StatusCode::BAD_REQUEST, reason).into_response()
+}
+
+#[cfg(feature = "oauth")]
+fn server_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "this server failed to record the request",
+    )
+        .into_response()
+}
+
+/// The one page a refused login gets. It names no reason, and there is only
+/// one of it: see [`callback`].
+#[cfg(feature = "oauth")]
+fn login_refused() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <title>Sign-in failed</title></head><body>\
+         <h1>Sign-in failed</h1>\
+         <p>This sign-in could not be completed. Close this window and start again.</p>\
+         </body></html>",
+    )
+        .into_response()
+}
+
+/// What the human sees once the provider has vouched for them.
+///
+/// Task 7 replaces the body of this page with the consent form and its
+/// `POST /oauth/consent` target. Until then the page reports the state the
+/// login is in, which is exactly where the flow stops today: the human is
+/// known, the request is recorded, and nothing has been granted.
+#[cfg(feature = "oauth")]
+fn consent_page(login: &LoginRecord, principal: &str) -> Response {
+    let scopes = if login.scopes.is_empty() {
+        "no scope".to_owned()
+    } else {
+        login.scopes.join(", ")
+    };
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <title>Authorize</title></head><body>\
+             <h1>Signed in</h1>\
+             <p>You are signed in as {}.</p>\
+             <p>{} is asking for {}.</p>\
+             </body></html>",
+            escape(principal),
+            escape(&login.client_id),
+            escape(&scopes),
+        ),
+    )
+        .into_response()
+}
+
+/// The five characters that would otherwise let a value chosen by a client —
+/// a `client_id`, which on the metadata-document path is a URL the client
+/// published — leave the text of this page and become markup in it.
+#[cfg(feature = "oauth")]
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

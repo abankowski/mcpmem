@@ -6,6 +6,11 @@
 //! on the compiler to notice a helper nobody calls.
 #![allow(dead_code)]
 
+/// A real OpenID Connect provider on a loopback port, for the tests of the
+/// upstream leg. It is a submodule rather than a second `mod` at each test
+/// root so that the fixture stays one module with one `dead_code` allowance.
+pub mod fake_idp;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 

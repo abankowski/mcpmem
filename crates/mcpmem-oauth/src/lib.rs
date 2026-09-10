@@ -6,6 +6,12 @@
 pub mod metadata;
 pub mod registration;
 pub mod store;
+/// The upstream OpenID Connect provider that authenticates the human.
+///
+/// Behind a feature because it is the only part of this crate that speaks
+/// HTTP, and `mcpmem` must stay buildable with no HTTP client at all.
+#[cfg(feature = "upstream")]
+pub mod upstream;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
