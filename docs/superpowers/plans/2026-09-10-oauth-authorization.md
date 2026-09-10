@@ -1719,17 +1719,17 @@ async fn register(body: &str) -> (StatusCode, serde_json::Value) {
 Task 4 froze the fixture interface. Read `tests/support/mod.rs` before you write
 a test, and use these rules.
 
-- The constructors are `server`, `server_within`, `oauth_server`,
-  `oauth_server_with`, `oauth_server_with_scopes`, `oauth_server_with_clock`,
-  `oauth_server_at`, `oauth_server_without_categories` and `open_server`.
-- The types are `Scopes`, `Clock` and `Server`. The constant is `GUARD_TIMEOUT`.
+- The constructors are `server`, `oauth_server`, `oauth_server_with`,
+  `oauth_server_with_scopes`, `oauth_server_with_clock`, `oauth_server_at`,
+  `oauth_server_without_categories` and `open_server`.
+- The types are `Scopes`, `Clock` and `Server`.
 - Send every request with `server.request(req).await`. The router is private, and
   no accessor hands out anything that outlives the `Server`.
 - The accessors are `oauth`, `clock` and `dir`.
 - Keep the `Server` alive for the whole test.
 - Hold one `Server` at a time. The fixture serialises the process-wide
-  tool-category flags. A second `Server` in one test panics. Split such a test
-  into two tests.
+  tool-category flags. A second `Server` on the same thread panics at once. Split
+  such a test into two tests.
 
 ```rust
 
