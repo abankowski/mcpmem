@@ -111,6 +111,13 @@ pub struct LoginRecord {
     pub client_state: Option<String>,
     pub code_challenge: String,
     pub resource: String,
+    /// Two phases, discriminated by `principal`.
+    ///
+    /// While `principal` is `None` this is what the client asked for, as
+    /// `GET /oauth/authorize` split it. Once `GET /oauth/callback` names the
+    /// human it is narrowed in place to the intersection with what that human
+    /// holds, and from then on it is the set the consent page showed and the
+    /// only set [`crate::consent::approve`] will grant. Never widen it.
     pub scopes: Vec<String>,
     pub upstream_verifier: String,
     pub nonce: String,

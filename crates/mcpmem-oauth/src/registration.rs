@@ -224,6 +224,33 @@ fn check_redirect_uris(uris: &[String]) -> Result<(), RegistrationError> {
 ///
 /// The loopback names are matched whole. A host that merely ends in
 /// `localhost` — `evil.localhost` — is a public name someone else can own.
+///
+/// # The half of RFC 8252 section 7.3 this server declines
+///
+/// That section has two rules. This function follows the first: a loopback
+/// `http` redirect URI is acceptable. The comparison against a presented
+/// `redirect_uri` declines the second, which says an authorization server
+/// "MUST allow any port to be specified at the time of the request" — here the
+/// port is compared like every other byte.
+///
+/// The reason is that registration is dynamic and unauthenticated (RFC 7591),
+/// so a native client registers *after* it has bound its port, one request
+/// before it starts the authorization request. It can always register the URI
+/// it will present, and one exact comparison is then the whole rule with
+/// nothing to reason about.
+///
+/// The price is real and belongs next to the decision. This server implements
+/// no RFC 7592 client management — the registration response carries no
+/// `registration_access_token` and no `registration_client_uri` — so a client
+/// cannot update its redirect URIs. A client that persists its `client_id`
+/// across restarts and binds a fresh ephemeral port on the next run presents a
+/// URI that identifier never registered, and gets `redirect_uri is not
+/// registered for this client`. The recovery is to register again, which such a
+/// client must therefore do once per port.
+///
+/// Do not relax the comparison to "comply with 7.3" without revisiting this: it
+/// is a decision, not an oversight. `a_loopback_redirect_uri_differing_only_in_port_is_refused`
+/// in `tests/oauth_consent.rs` is the test that records it.
 fn is_acceptable_redirect_uri(uri: &str) -> bool {
     if uri.contains('#') {
         return false;

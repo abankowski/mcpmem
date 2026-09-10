@@ -487,6 +487,19 @@ async fn start_login(oauth: &Arc<OauthState>, q: AuthorizeParams) -> Response {
     // Split once and kept: the list that is counted is the list that is
     // stored, and no second split can disagree with the first.
     let requested = requested_scopes(&q.scope);
+    // A request naming no scope is refused here, not after the human has
+    // signed in. Consent offers the intersection of this list with what the
+    // human holds, so an empty list can never become a grant: the callback
+    // would spend a real sign-in and then answer with the one refusal page it
+    // gives every failed login, while the client waited for a redirect that
+    // never comes. RFC 6749 section 3.3 makes `scope` optional in the
+    // protocol; this server protects one resource whose every operation needs
+    // a scope, so a request for none of them is a defect in the request. It
+    // discloses nothing about any human, which is why it can be a plain 400
+    // here while the empty *intersection* at the callback cannot.
+    if requested.is_empty() {
+        return refused("scope must name at least one scope");
+    }
     if requested.len() > MAX_REQUESTED_SCOPES {
         return refused("too many scopes");
     }
@@ -505,6 +518,10 @@ async fn start_login(oauth: &Arc<OauthState>, q: AuthorizeParams) -> Response {
     let Some(client) = client else {
         return refused("unknown client_id");
     };
+    // Byte for byte, including the port of a loopback URI. That declines half
+    // of RFC 8252 section 7.3, deliberately;
+    // `mcpmem_oauth::registration::is_acceptable_redirect_uri` records why and
+    // what it costs.
     if !client.redirect_uris.contains(&redirect_uri) {
         return refused("redirect_uri is not registered for this client");
     }
@@ -756,7 +773,16 @@ fn consent_page(
             (header::CACHE_CONTROL, "no-store"),
         ],
         mcpmem_oauth::consent::page(
-            &client.client_name,
+            // RFC 7591 section 2 makes `client_name` optional, so
+            // `mcpmem_oauth::registration` records a client that sent none
+            // with an empty name. Name it by its identifier instead: a page
+            // that names nobody is the more dangerous prompt of the two,
+            // because an attacker would reach it by leaving one field out.
+            if client.client_name.is_empty() {
+                &client.client_id
+            } else {
+                &client.client_name
+            },
             principal.label.as_deref().unwrap_or(&principal.name),
             offered,
             &login.csrf,

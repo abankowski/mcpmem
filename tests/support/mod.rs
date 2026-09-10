@@ -11,10 +11,11 @@
 /// root so that the fixture stays one module with one `dead_code` allowance.
 pub mod fake_idp;
 
-/// The three hops a client walks before it sees the consent page, and the
-/// helpers that read the page and post it back. Tasks that start from a
-/// rendered consent page — consent itself, the token exchange, the expiry
-/// windows — share this one path rather than each rebuilding it.
+/// The hops a client walks before it sees the consent page, the helpers that
+/// read the page and post it back, and the hop from a rendered page to an
+/// authorization code. Tasks that start from a consent page or from a code —
+/// consent itself, the token exchange, the expiry windows — share this one
+/// path rather than each rebuilding it.
 pub mod flow;
 
 use std::sync::Arc;

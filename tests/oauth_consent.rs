@@ -11,14 +11,19 @@ use axum::http::StatusCode;
 use mcpmem_oauth::consent::{escape_html, page};
 
 mod support;
-use support::flow::{self, Authorized, authorize_to_consent};
+use support::flow::{self, Authorized, Flow};
+
+/// The whole flow up to a rendered consent page, with every default.
+async fn consent_for(scope: &str) -> Authorized {
+    Flow::new(scope).into_consent().await
+}
 
 // ── The page ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn the_consent_page_offers_only_the_intersection() {
     // The principal in `support::principals` holds graph-read and graph-write.
-    let a: Authorized = authorize_to_consent("graph-read graph-write code").await;
+    let a: Authorized = consent_for("graph-read graph-write code").await;
     assert!(a.body.contains(r#"value="graph-read""#));
     assert!(a.body.contains(r#"value="graph-write""#));
     assert!(!a.body.contains(r#"value="code""#), "code was not granted");
@@ -29,9 +34,33 @@ async fn the_consent_page_offers_only_the_intersection() {
 /// route and not only in the function that renders it.
 #[tokio::test]
 async fn the_served_page_escapes_a_hostile_client_name() {
-    let a = flow::authorize_to_consent_named("<script>alert(1)</script>", "graph-read").await;
+    let a = Flow::new("graph-read")
+        .client_name("<script>alert(1)</script>")
+        .into_consent()
+        .await;
     assert!(!a.body.contains("<script>alert(1)</script>"));
     assert!(a.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+}
+
+/// RFC 7591 section 2 makes `client_name` optional, so a client can register
+/// without one — and then the page must name it by its identifier. A page that
+/// names nobody is the more dangerous prompt of the two: an attacker would get
+/// a blank "asks to use your memory graph" by omitting one field.
+#[tokio::test]
+async fn a_client_that_registered_no_name_is_named_by_its_identifier() {
+    let a = Flow::new("graph-read")
+        .without_client_name()
+        .into_consent()
+        .await;
+    assert!(
+        a.body.contains(&a.client_id),
+        "the page must name the client it cannot name by name: {}",
+        a.body
+    );
+    assert!(
+        !a.body.contains("<strong></strong>"),
+        "the page must not ask the human to grant access to nobody"
+    );
 }
 
 /// A human who holds none of the scopes the client asked for has nothing to
@@ -39,28 +68,27 @@ async fn the_served_page_escapes_a_hostile_client_name() {
 /// gets, and leaves no login for a later approval to find.
 #[tokio::test]
 async fn a_request_naming_only_scopes_the_principal_lacks_never_reaches_consent() {
-    let c = flow::authorize_to_callback(flow::CLIENT_NAME, "code").await;
+    let c = Flow::new("code").into_callback().await;
     assert_eq!(c.response.status(), StatusCode::FORBIDDEN);
     assert!(c.response.headers().get("location").is_none());
-    assert_eq!(c.count_logins(), 0, "the refused login is consumed");
+    assert_eq!(
+        flow::count_rows(c.server(), "oauth_login"),
+        0,
+        "the refused login is consumed"
+    );
 }
 
 // ── Approval ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn approval_issues_a_code_for_only_the_approved_scopes() {
-    let a = authorize_to_consent("graph-read graph-write").await;
-    let res = a
-        .post_consent(&[
-            ("csrf", &a.csrf),
-            ("state", &a.state),
-            ("scope", "graph-read"),
-        ])
-        .await;
-    assert_eq!(res.status(), StatusCode::FOUND);
-    let code = flow::code_from(&support::header(&res, "location"));
-    let stored = a.take_code(&code);
+    let a = consent_for("graph-read graph-write").await;
+    let code = a.approve(&["graph-read"]).await;
+    let stored = a.code_grant(&code);
     assert_eq!(stored.grant.scopes, vec!["graph-read"]);
+    // Reading the grant must not spend the code: Task 8 asserts on it and then
+    // exchanges the same value at the token endpoint.
+    assert_eq!(a.count_codes(), 1, "inspecting a grant must not spend it");
 }
 
 /// Task 8 exchanges the code, and every value it checks is written here. A
@@ -68,17 +96,9 @@ async fn approval_issues_a_code_for_only_the_approved_scopes() {
 /// code the right client cannot spend — or the wrong one can.
 #[tokio::test]
 async fn the_code_grant_binds_the_client_the_resource_and_the_challenge() {
-    let a = authorize_to_consent("graph-read graph-write").await;
-    let res = a
-        .post_consent(&[
-            ("csrf", &a.csrf),
-            ("state", &a.state),
-            ("scope", "graph-write"),
-            ("scope", "graph-read"),
-        ])
-        .await;
-    assert_eq!(res.status(), StatusCode::FOUND);
-    let stored = a.take_code(&flow::code_from(&support::header(&res, "location")));
+    let a = consent_for("graph-read graph-write").await;
+    let code = a.approve(&["graph-write", "graph-read"]).await;
+    let stored = a.code_grant(&code);
     assert_eq!(stored.grant.client_id, a.client_id);
     assert_eq!(stored.grant.principal, "adam");
     assert_eq!(stored.grant.resource, "https://mem.example.com/mcp");
@@ -94,7 +114,7 @@ async fn the_code_grant_binds_the_client_the_resource_and_the_challenge() {
 
 #[tokio::test]
 async fn the_redirect_carries_the_client_state_and_the_iss_parameter() {
-    let a = authorize_to_consent("graph-read").await;
+    let a = consent_for("graph-read").await;
     let res = a
         .post_consent(&[
             ("csrf", &a.csrf),
@@ -105,21 +125,72 @@ async fn the_redirect_carries_the_client_state_and_the_iss_parameter() {
     let location = support::header(&res, "location");
     assert!(location.starts_with("https://claude.ai/api/mcp/auth_callback?"));
     assert!(location.contains("code="));
-    assert!(location.contains(&format!("state={}", a.client_state)));
+    assert!(location.contains(&format!("state={}", a.client_state())));
     assert!(location.contains("iss=https%3A%2F%2Fmem.example.com"));
 }
 
+/// A registered redirect URI may carry a query of its own, and RFC 6749
+/// section 3.1.2 keeps it legal. The code is then appended with `&`, not `?`,
+/// or the client receives one parameter named `tenant` whose value swallows the
+/// code and loses the query it registered.
 #[tokio::test]
-async fn a_second_approval_finds_no_login_row() {
-    let a = authorize_to_consent("graph-read").await;
-    let first = a
+async fn a_redirect_uri_that_already_carries_a_query_keeps_it() {
+    let a = Flow::new("graph-read")
+        .redirect_uri("https://app.example/cb?tenant=acme")
+        .into_consent()
+        .await;
+    let res = a
         .post_consent(&[
             ("csrf", &a.csrf),
             ("state", &a.state),
             ("scope", "graph-read"),
         ])
         .await;
-    assert_eq!(first.status(), StatusCode::FOUND);
+    let location = support::header(&res, "location");
+    assert!(
+        location.starts_with("https://app.example/cb?tenant=acme&"),
+        "the registered query must survive: {location}"
+    );
+    assert_eq!(
+        flow::query_param(&location, "tenant").as_deref(),
+        Some("acme")
+    );
+    assert!(flow::query_param(&location, "code").is_some());
+}
+
+/// RFC 6749 section 4.1.1 makes `state` optional, and a PKCE client has no
+/// need of it. The redirect must then carry no `state` at all: a server that
+/// invented one would send a client a parameter it never chose, and a client
+/// that checks for a `state` it did not send would refuse the code.
+#[tokio::test]
+async fn a_client_that_sent_no_state_gets_no_state_back() {
+    let a = Flow::new("graph-read")
+        .without_client_state()
+        .into_consent()
+        .await;
+    let res = a
+        .post_consent(&[
+            ("csrf", &a.csrf),
+            ("state", &a.state),
+            ("scope", "graph-read"),
+        ])
+        .await;
+    let location = support::header(&res, "location");
+    assert!(
+        flow::query_param(&location, "state").is_none(),
+        "this server must not invent a state: {location}"
+    );
+    assert!(flow::query_param(&location, "code").is_some());
+    assert_eq!(
+        flow::query_param(&location, "iss").as_deref(),
+        Some("https://mem.example.com")
+    );
+}
+
+#[tokio::test]
+async fn a_second_approval_finds_no_login_row() {
+    let a = consent_for("graph-read").await;
+    a.approve(&["graph-read"]).await;
     let second = a
         .post_consent(&[
             ("csrf", &a.csrf),
@@ -138,7 +209,7 @@ async fn a_second_approval_finds_no_login_row() {
 /// guessing a state must not be able to end somebody's login.
 #[tokio::test]
 async fn a_wrong_csrf_token_is_refused() {
-    let a = authorize_to_consent("graph-read").await;
+    let a = consent_for("graph-read").await;
     let res = a
         .post_consent(&[
             ("csrf", "not-the-token"),
@@ -165,7 +236,7 @@ async fn a_wrong_csrf_token_is_refused() {
 
 #[tokio::test]
 async fn approving_a_scope_the_principal_lacks_is_refused() {
-    let a = authorize_to_consent("graph-read").await;
+    let a = consent_for("graph-read").await;
     let res = a
         .post_consent(&[("csrf", &a.csrf), ("state", &a.state), ("scope", "code")])
         .await;
@@ -180,7 +251,7 @@ async fn approving_a_scope_the_principal_lacks_is_refused() {
 /// `code` and then approves it.
 #[tokio::test]
 async fn approving_a_requested_scope_the_principal_lacks_is_refused() {
-    let a = authorize_to_consent("graph-read code").await;
+    let a = consent_for("graph-read code").await;
     let res = a
         .post_consent(&[
             ("csrf", &a.csrf),
@@ -199,7 +270,7 @@ async fn approving_a_requested_scope_the_principal_lacks_is_refused() {
 
 #[tokio::test]
 async fn approving_nothing_is_refused() {
-    let a = authorize_to_consent("graph-read").await;
+    let a = consent_for("graph-read").await;
     let res = a
         .post_consent(&[("csrf", &a.csrf), ("state", &a.state)])
         .await;
@@ -213,7 +284,7 @@ async fn approving_nothing_is_refused() {
 /// refusing would answer with a perfectly good code.
 #[tokio::test]
 async fn a_form_carrying_more_scopes_than_the_cap_is_refused() {
-    let a = authorize_to_consent("graph-read").await;
+    let a = consent_for("graph-read").await;
     let mut fields = vec![("csrf", a.csrf.as_str()), ("state", a.state.as_str())];
     for _ in 0..17 {
         fields.push(("scope", "graph-read"));
@@ -227,7 +298,7 @@ async fn a_form_carrying_more_scopes_than_the_cap_is_refused() {
 
 #[tokio::test]
 async fn denial_redirects_with_access_denied() {
-    let a = authorize_to_consent("graph-read").await;
+    let a = consent_for("graph-read").await;
     let forged = a
         .post_consent(&[
             ("csrf", "not-the-token"),
@@ -246,7 +317,7 @@ async fn denial_redirects_with_access_denied() {
         .await;
     let location = support::header(&res, "location");
     assert!(location.contains("error=access_denied"));
-    assert!(location.contains(&format!("state={}", a.client_state)));
+    assert!(location.contains(&format!("state={}", a.client_state())));
     assert!(location.contains("iss=https%3A%2F%2Fmem.example.com"));
     assert_eq!(a.count_codes(), 0);
     assert_eq!(a.count_logins(), 0, "a denial ends the login");
@@ -255,19 +326,28 @@ async fn denial_redirects_with_access_denied() {
 // ── The redirect URI, compared exactly ──────────────────────────────────────
 
 /// RFC 8252 section 7.3 lets an authorization server ignore the port of a
-/// loopback redirect URI. This server does not: registration is dynamic, so a
-/// native client registers the port it has just bound, and the comparison stays
-/// one exact string match with nothing to reason about.
+/// loopback redirect URI. This server does not, and
+/// `mcpmem_oauth::registration::is_acceptable_redirect_uri` records the
+/// decision and its price: a client that outlives its listener must register
+/// again for the port it binds next.
 #[tokio::test]
 async fn a_loopback_redirect_uri_differing_only_in_port_is_refused() {
     let server = support::oauth_server().await;
     let client_id = flow::register(&server, flow::CLIENT_NAME, "http://127.0.0.1:41234/cb").await;
+    let query = flow::query_string(&[
+        ("response_type", "code"),
+        ("client_id", &client_id),
+        ("redirect_uri", "http://127.0.0.1:41235/cb"),
+        ("code_challenge", flow::CODE_CHALLENGE),
+        ("code_challenge_method", "S256"),
+        ("scope", "graph-read"),
+    ]);
     let res = server
-        .request(flow::authorize_request(
-            &client_id,
-            "http://127.0.0.1:41235/cb",
-            "graph-read",
-        ))
+        .request(
+            axum::http::Request::get(format!("/oauth/authorize?{query}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     assert!(res.headers().get("location").is_none());

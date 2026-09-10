@@ -689,6 +689,34 @@ async fn a_request_naming_too_many_scopes_is_refused() {
     assert!(res.headers().get("location").is_none());
 }
 
+/// A request naming no scope is refused here, before any human is sent
+/// anywhere. Nothing could be granted for it: consent offers the intersection
+/// of the request with what the human holds, and the intersection with an
+/// empty request is empty. Refusing at the callback instead would spend a real
+/// sign-in and then answer the human with a bare "sign-in failed" page, while
+/// the client waited for a redirect that never comes. This is a defect in the
+/// request, it discloses nothing about any human, and it is knowable now.
+#[tokio::test]
+async fn a_request_naming_no_scope_is_refused() {
+    let idp = FakeIdp::start(IdpBehaviour::default()).await;
+    let server = support::oauth_server_with(&idp.issuer).await;
+    let client_id = register(&server).await;
+
+    let absent: Vec<_> = good_params(&client_id)
+        .into_iter()
+        .filter(|p| p.0 != "scope")
+        .collect();
+    let res = server.request(authorize_request(&as_pairs(&absent))).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(res.headers().get("location").is_none());
+
+    // `scope=` and `scope=   ` are the same request: RFC 6749 section 3.3
+    // splits on whitespace, so both name nothing.
+    let blank = params_with(&client_id, "scope", "   ");
+    let res = server.request(authorize_request(&as_pairs(&blank))).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn a_resource_this_server_does_not_protect_is_refused() {
     let idp = FakeIdp::start(IdpBehaviour::default()).await;
