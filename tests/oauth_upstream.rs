@@ -12,7 +12,8 @@ use axum::http::{Request, StatusCode};
 use mcpmem_oauth::upstream::{Provider, UpstreamError};
 
 mod support;
-use support::fake_idp::{DocumentIssuer, FakeIdp, IdpBehaviour};
+use jsonwebtoken::Algorithm;
+use support::fake_idp::{DocumentIssuer, FakeIdp, IdpBehaviour, KeyKind};
 
 const CLIENT_ID: &str = "mcpmem-test";
 const REDIRECT: &str = "https://mem.example.com/oauth/callback";
@@ -182,7 +183,12 @@ async fn an_identity_token_with_a_stale_nonce_is_refused() {
 #[tokio::test]
 async fn an_expired_identity_token_is_refused() {
     let idp = FakeIdp::start(IdpBehaviour {
-        expires_in_seconds: -60,
+        // Strictly inside `jsonwebtoken`'s default 60-second leeway, so that
+        // restoring that default makes this token valid and the test fails
+        // deterministically. At -60 the token sits exactly on the boundary,
+        // and whether a mutation survives turns on which second the signing
+        // and the verification land in.
+        expires_in_seconds: -5,
         ..IdpBehaviour::default()
     })
     .await;
@@ -216,12 +222,11 @@ async fn an_unknown_key_identifier_refetches_the_key_set_once() {
     assert_eq!(idp.jwks_requests(), 2, "one initial fetch, one refetch");
 }
 
-/// A key identifier that never appears refetches once and then gives up. The
-/// test above proves the refetch happens; this one proves it happens *once*,
-/// which is what stops a stream of forged tokens from becoming a stream of
-/// requests to the provider.
+/// A key set that rotates publishes the new identifier on the refetch, so the
+/// key *is* found and a foreign signature is what refuses the token. The
+/// refetch bound is asserted here too: still two fetches, not one per key.
 #[tokio::test]
-async fn an_identity_token_whose_key_never_appears_is_refused_after_one_refetch() {
+async fn a_rotated_key_with_a_foreign_signature_is_refused_on_its_signature() {
     let idp = FakeIdp::start(IdpBehaviour {
         sign_with_foreign_key: true,
         rotate_kid_after_discovery: true,
@@ -232,14 +237,191 @@ async fn an_identity_token_whose_key_never_appears_is_refused_after_one_refetch(
     let back = idp
         .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
         .await;
-    // The rotated key identifier *is* published on the refetch, so the token is
-    // found and refused on its signature rather than on its key identifier.
     let err = p
         .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
         .await
         .unwrap_err();
     assert!(matches!(err, UpstreamError::Signature), "was: {err:?}");
     assert_eq!(idp.jwks_requests(), 2, "one initial fetch, one refetch");
+}
+
+/// A key identifier the provider never publishes is the case the refetch
+/// cannot fix. It must give up after exactly one refetch: a stream of forged
+/// identifiers must not become a stream of requests to the provider.
+#[tokio::test]
+async fn an_identity_token_naming_a_key_that_is_never_published_is_refused() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        sign_with_unpublished_kid: true,
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let p = Provider::discover(&idp.issuer).await.unwrap();
+    let back = idp
+        .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
+        .await;
+    let err = p
+        .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, UpstreamError::UnknownKey), "was: {err:?}");
+    assert_eq!(idp.jwks_requests(), 2, "one initial fetch, one refetch");
+}
+
+// ── RSA, which is what a real provider signs with ───────────────────────────
+
+/// Google, Okta and Entra all sign `RS256`. Every test above exercises the
+/// elliptic-curve arm of the key selection, so without this one the arm every
+/// production deployment takes has no coverage at all.
+#[tokio::test]
+async fn a_valid_rsa_identity_token_yields_its_claims() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        key_kind: KeyKind::Rsa,
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let p = Provider::discover(&idp.issuer).await.unwrap();
+    let back = idp
+        .login(&p.authorize_url(CLIENT_ID, REDIRECT, "the-state", "the-nonce", "c"))
+        .await;
+    let claims = p
+        .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "the-nonce")
+        .await
+        .unwrap();
+    assert_eq!(claims.sub, "sub-1");
+    assert_eq!(claims.nonce.as_deref(), Some("the-nonce"));
+}
+
+#[tokio::test]
+async fn an_rsa_identity_token_signed_by_another_key_is_refused() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        key_kind: KeyKind::Rsa,
+        sign_with_foreign_key: true,
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let p = Provider::discover(&idp.issuer).await.unwrap();
+    let back = idp
+        .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
+        .await;
+    let err = p
+        .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, UpstreamError::Signature), "was: {err:?}");
+}
+
+// ── Algorithm confusion ─────────────────────────────────────────────────────
+
+/// The original attack: present the provider's public key as an HMAC secret
+/// and stamp `HS256` in the header. The key names `ES256`, so the token's own
+/// header disagrees with the key and `jsonwebtoken` refuses it before any
+/// signature is checked.
+#[tokio::test]
+async fn an_hmac_header_against_a_key_that_names_its_algorithm_is_refused() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        header_alg: Some(Algorithm::HS256),
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let p = Provider::discover(&idp.issuer).await.unwrap();
+    let back = idp
+        .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
+        .await;
+    let err = p
+        .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, UpstreamError::KeyMismatch(_)), "was: {err:?}");
+}
+
+/// The same attack against a key set that names no `alg`, which is legal and
+/// common. The verifier then falls back to the token's own header, and the
+/// key type is the only thing left to refuse it — which is the check the
+/// module calls its defence against algorithm confusion.
+#[tokio::test]
+async fn an_hmac_header_against_a_key_that_names_no_algorithm_is_refused() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        header_alg: Some(Algorithm::HS256),
+        publish_key_alg: false,
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let p = Provider::discover(&idp.issuer).await.unwrap();
+    let back = idp
+        .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
+        .await;
+    let err = p
+        .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, UpstreamError::KeyMismatch(_)), "was: {err:?}");
+}
+
+/// The other side of the fallback: a key set naming no `alg` must still
+/// verify a token whose header agrees with the key type. Without this, the
+/// fallback could refuse everything and the two tests above would not notice.
+#[tokio::test]
+async fn a_key_set_that_names_no_algorithm_still_verifies() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        publish_key_alg: false,
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let p = Provider::discover(&idp.issuer).await.unwrap();
+    let back = idp
+        .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
+        .await;
+    let claims = p
+        .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
+        .await
+        .unwrap();
+    assert_eq!(claims.sub, "sub-1");
+}
+
+// ── The authorized party ────────────────────────────────────────────────────
+
+/// `jsonwebtoken` tests the audience as an intersection, so a token naming
+/// this client and another passes that check. OpenID Connect Core section
+/// 3.1.3.7 puts the answer in `azp`, and naming this client is the accepting
+/// direction.
+#[tokio::test]
+async fn a_multi_audience_token_authorized_for_this_client_is_accepted() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        second_audience: Some("another-client".into()),
+        azp: Some(CLIENT_ID.into()),
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let p = Provider::discover(&idp.issuer).await.unwrap();
+    let back = idp
+        .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
+        .await;
+    let claims = p
+        .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
+        .await
+        .unwrap();
+    assert_eq!(claims.azp.as_deref(), Some(CLIENT_ID));
+}
+
+/// The refusing direction: the same shape, minted for the other client. The
+/// audience intersection lets it through, and only `azp` refuses it.
+#[tokio::test]
+async fn a_multi_audience_token_authorized_for_another_client_is_refused() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        second_audience: Some("another-client".into()),
+        azp: Some("another-client".into()),
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let p = Provider::discover(&idp.issuer).await.unwrap();
+    let back = idp
+        .login(&p.authorize_url(CLIENT_ID, REDIRECT, "s", "n", "c"))
+        .await;
+    let err = p
+        .exchange(&back.code, "v", CLIENT_ID, None, REDIRECT, "n")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, UpstreamError::Audience), "was: {err:?}");
 }
 
 // ── The two routes ──────────────────────────────────────────────────────────
@@ -282,6 +464,7 @@ fn authorize_request(params: &[(&str, &str)]) -> Request<Body> {
 /// The parameters of a request this server accepts, with `client_id` filled in.
 fn good_params(client_id: &str) -> Vec<(&'static str, String)> {
     vec![
+        ("response_type", "code".to_owned()),
         ("client_id", client_id.to_owned()),
         ("redirect_uri", CLIENT_REDIRECT.to_owned()),
         ("state", "the-client-state".to_owned()),
@@ -404,6 +587,41 @@ async fn a_plain_code_challenge_method_is_refused() {
     assert!(res.headers().get("location").is_none());
 }
 
+/// RFC 6749 section 3.1.1 makes `response_type` required, and this server's
+/// own metadata advertises one value. A client that believes it is in the
+/// implicit flow must be told no here: the login row is the only record of
+/// what was asked for, so a mismatch accepted now is invisible to Task 7 and
+/// Task 8, and ends with an authorization code handed to a client that never
+/// asked for one.
+#[tokio::test]
+async fn a_response_type_that_is_not_code_is_refused() {
+    let idp = FakeIdp::start(IdpBehaviour::default()).await;
+    let server = support::oauth_server_with(&idp.issuer).await;
+    let client_id = register(&server).await;
+    let params = params_with(&client_id, "response_type", "token");
+    let res = server.request(authorize_request(&as_pairs(&params))).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(res.headers().get("location").is_none());
+}
+
+/// The size of the row an unauthenticated request writes is this endpoint's
+/// problem, exactly as it is the registration endpoint's. Seventeen scopes is
+/// one past the cap, and one past is what a cap has to refuse.
+#[tokio::test]
+async fn a_request_naming_too_many_scopes_is_refused() {
+    let idp = FakeIdp::start(IdpBehaviour::default()).await;
+    let server = support::oauth_server_with(&idp.issuer).await;
+    let client_id = register(&server).await;
+    let many = (0..17)
+        .map(|i| format!("scope-{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let params = params_with(&client_id, "scope", &many);
+    let res = server.request(authorize_request(&as_pairs(&params))).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert!(res.headers().get("location").is_none());
+}
+
 #[tokio::test]
 async fn a_resource_this_server_does_not_protect_is_refused() {
     let idp = FakeIdp::start(IdpBehaviour::default()).await;
@@ -462,6 +680,40 @@ async fn the_callback_records_the_authenticated_human_on_the_login() {
         .expect("the callback leaves the login row for the consent step");
     assert_eq!(login.principal.as_deref(), Some("adam"));
     assert_eq!(login.client_id, client_id);
+}
+
+/// A completed login is waiting for consent, and the callback URL is in a
+/// browser's history and a proxy's log. A second callback must not destroy it,
+/// and must not spend the upstream code a second time.
+#[tokio::test]
+async fn a_replayed_callback_leaves_a_completed_login_alone() {
+    let idp = FakeIdp::start(IdpBehaviour::default()).await;
+    let server = support::oauth_server_with(&idp.issuer).await;
+    let client_id = register(&server).await;
+
+    let params = good_params(&client_id);
+    let started = server.request(authorize_request(&as_pairs(&params))).await;
+    let back = idp.login(&support::header(&started, "location")).await;
+    let path = format!("/oauth/callback?code={}&state={}", back.code, back.state);
+
+    let first = server
+        .request(Request::get(&path).body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let replay = server
+        .request(Request::get(&path).body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(replay.status(), StatusCode::FORBIDDEN);
+    assert!(replay.headers().get("location").is_none());
+
+    let now = (server.oauth().now_us)();
+    let login = server
+        .oauth()
+        .with_store(|s| s.take_login(&back.state, now))
+        .unwrap()
+        .expect("the replay must leave the completed login in place");
+    assert_eq!(login.principal.as_deref(), Some("adam"));
 }
 
 /// Every refusal at the callback is one page. An anonymous caller learns

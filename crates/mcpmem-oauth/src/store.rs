@@ -400,16 +400,6 @@ impl Store {
         }))
     }
 
-    /// Attach the authenticated human to a login in flight. The upstream
-    /// callback calls this before it issues the authorization code.
-    pub fn set_login_principal(&self, state: &str, principal: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE oauth_login SET principal = ?2 WHERE state = ?1",
-            params![state, principal],
-        )?;
-        Ok(())
-    }
-
     // ── Authorization codes ───────────────────────────────────────────────
 
     /// Store the digest of an authorization code. The value stays with the

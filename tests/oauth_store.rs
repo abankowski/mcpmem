@@ -451,15 +451,6 @@ fn an_expired_login_is_not_returned() {
 }
 
 #[test]
-fn the_upstream_callback_records_the_principal_on_the_login() {
-    let (_d, s) = store();
-    s.put_login(&login("st", 10_000)).unwrap();
-    s.set_login_principal("st", "adam").unwrap();
-    let taken = s.take_login("st", 2).unwrap().unwrap();
-    assert_eq!(taken.principal.as_deref(), Some("adam"));
-}
-
-#[test]
 fn a_client_round_trips_and_touch_records_the_last_use() {
     let (_d, s) = store();
     let c = ClientRecord {

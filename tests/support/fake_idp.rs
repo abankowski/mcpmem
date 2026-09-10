@@ -54,6 +54,27 @@ const FIRST_KID: &str = "k1";
 /// a rotation this test cares about is a key the verifier has not seen, and a
 /// new `kid` on the same key is exactly that, with nothing else moving.
 const ROTATED_KID: &str = "k2";
+/// A key identifier the key set never serves, whatever else happens. It is
+/// how a test reaches the branch that gives up after one refetch.
+const UNPUBLISHED_KID: &str = "k-never-published";
+
+/// The RSA keypair the provider publishes under [`KeyKind::Rsa`], as the
+/// base64 of a PKCS#1 `RSAPrivateKey`, which is what `jsonwebtoken`'s
+/// `from_rsa_der` hands to `ring`.
+///
+/// Fixed rather than generated, for two reasons. Generating an RSA key needs a
+/// crate this workspace does not carry — `ring` generates elliptic-curve keys
+/// only — and a 2048-bit generation is slow enough to notice in a test that
+/// runs it twice. A test key in a repository is not a secret, and the base64
+/// of a DER document carries no `PRIVATE KEY` banner for a scanner to trip on.
+const RSA_PUBLISHED_DER: &str = include_str!("fake_idp_rsa_published.b64");
+/// The modulus of [`RSA_PUBLISHED_DER`], base64url, as a JWK spells it.
+const RSA_PUBLISHED_MODULUS: &str = "uG60wVhlcYtaDEMgd3Pqnp87maa0TynyqgZ8cvr7dbzcMQbhQo_jCSampPplRucVDhm9jEpaOGAJvC-L84TNckXV_lW0WdpH55n5k6WbU3KkGWL7z5eazVvN9M4V0XzgftAOm5jh4qdewhKf3A1r7O7pMSOYsUGUqfZyAmt2VuWL8U7A8SkmA_hAALJv9LNpjMMWxRvEbrZht4SaId40toJsneVR2kSUE2-ISBiTke4MlunCbmzUMdF6NCn6OK5LCV8cInQzbktubnof69uxgo-tRax1RIY7uCiSO2LjQcChmrXWNeSCYyq5rfe5UBBKR63t5Pgsf8u9vgUhfDBnRQ";
+/// A second RSA keypair, for [`IdpBehaviour::sign_with_foreign_key`] under
+/// [`KeyKind::Rsa`]. Its modulus is never published.
+const RSA_FOREIGN_DER: &str = include_str!("fake_idp_rsa_foreign.b64");
+/// Every key here uses the conventional public exponent, 65537.
+const RSA_EXPONENT: &str = "AQAB";
 
 /// What this provider does wrong. Each field breaks one thing and nothing else.
 pub struct IdpBehaviour {
@@ -61,6 +82,13 @@ pub struct IdpBehaviour {
     pub sign_with_foreign_key: bool,
     /// The `aud` claim. `None` is [`AUDIENCE`].
     pub audience: Option<String>,
+    /// A second `aud` value. With it the claim is an array, which is the shape
+    /// `jsonwebtoken` tests as an intersection rather than an equality, and so
+    /// the shape that needs `azp`.
+    pub second_audience: Option<String>,
+    /// The `azp` claim. OpenID Connect Core section 3.1.3.7 requires it to
+    /// equal the client identifier when `aud` names more than one party.
+    pub azp: Option<String>,
     /// The `nonce` claim. `None` echoes the nonce of the authorization
     /// request, and is absent when no authorization request arrived.
     pub nonce: Option<String>,
@@ -77,21 +105,40 @@ pub struct IdpBehaviour {
     /// [`ROTATED_KID`] to every later one, and sign with [`ROTATED_KID`]. A
     /// verifier holding the first answer must refetch to verify anything.
     pub rotate_kid_after_discovery: bool,
+    /// Which kind of key the provider signs with and publishes.
+    pub key_kind: KeyKind,
+    /// Publish the `alg` member of the JWK. Omitting it is legal and common,
+    /// and it makes the verifier fall back to the token's own header.
+    pub publish_key_alg: bool,
+    /// Stamp this algorithm in the token header instead of the key's own.
+    /// An HMAC algorithm here signs with the published public key as the
+    /// secret, which is the algorithm-confusion attack in its original form.
+    pub header_alg: Option<Algorithm>,
+    /// Stamp [`UNPUBLISHED_KID`] in the token header. The key set never serves
+    /// it, so no refetch can find it.
+    pub sign_with_unpublished_kid: bool,
 }
 
-/// A well-formed provider. `expires_in_seconds` is spelled out rather than
-/// derived: a derived `0` is a token that expired the moment it was signed,
-/// which is a trap for every test that does not name the field.
+/// A well-formed provider. `expires_in_seconds` and `publish_key_alg` are
+/// spelled out rather than derived: a derived `0` is a token that expired the
+/// moment it was signed, and a derived `false` would leave every key set
+/// without an `alg`. Both are traps for a test that does not name the field.
 impl Default for IdpBehaviour {
     fn default() -> IdpBehaviour {
         IdpBehaviour {
             sign_with_foreign_key: false,
             audience: None,
+            second_audience: None,
+            azp: None,
             nonce: None,
             token_issuer: None,
             document_issuer: DocumentIssuer::Own,
             expires_in_seconds: 300,
             rotate_kid_after_discovery: false,
+            key_kind: KeyKind::Ec,
+            publish_key_alg: true,
+            header_alg: None,
+            sign_with_unpublished_kid: false,
         }
     }
 }
@@ -118,19 +165,49 @@ pub struct Callback {
     pub state: String,
 }
 
-/// One P-256 keypair, in the two shapes this file needs: the signing key
-/// `jsonwebtoken` wants, and the two public coordinates a JWK carries.
+/// Which key type the provider uses.
+///
+/// Both matter. Elliptic curve is what this file can generate afresh per test;
+/// RSA is what Google, Okta and Entra actually sign with, so the arm every
+/// production deployment takes has to be executed here too.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum KeyKind {
+    Ec,
+    Rsa,
+}
+
+/// The public half of a keypair, in the shape a JWK carries.
+enum PublicKey {
+    Ec { x: String, y: String },
+    Rsa { n: String, e: String },
+}
+
+/// One keypair, in the three shapes this file needs: the signing key
+/// `jsonwebtoken` wants, the public members a JWK carries, and the raw public
+/// bytes an algorithm-confusion test presents as an HMAC secret.
 struct Keypair {
     signing: EncodingKey,
-    x: String,
-    y: String,
+    public: PublicKey,
+    public_bytes: Vec<u8>,
+    /// The algorithm this key signs with, and the `alg` its JWK names.
+    alg: Algorithm,
 }
 
 impl Keypair {
-    /// Generate a keypair. `ring` produces the PKCS#8 document that
+    /// The provider's own keypair, or — with `foreign` — one it never
+    /// publishes.
+    fn generate(kind: KeyKind, foreign: bool) -> Keypair {
+        match kind {
+            KeyKind::Ec => Keypair::ec(),
+            KeyKind::Rsa if foreign => Keypair::rsa(RSA_FOREIGN_DER, ""),
+            KeyKind::Rsa => Keypair::rsa(RSA_PUBLISHED_DER, RSA_PUBLISHED_MODULUS),
+        }
+    }
+
+    /// A fresh P-256 keypair. `ring` produces the PKCS#8 document that
     /// `jsonwebtoken` hands straight back to `ring` when it signs, so the two
     /// agree on the encoding by construction.
-    fn generate() -> Keypair {
+    fn ec() -> Keypair {
         let rng = SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
             .expect("generate a P-256 keypair");
@@ -141,8 +218,31 @@ impl Keypair {
         assert_eq!(point.len(), 65, "an uncompressed P-256 point is 65 bytes");
         Keypair {
             signing: EncodingKey::from_ec_der(pkcs8.as_ref()),
-            x: URL_SAFE_NO_PAD.encode(&point[1..33]),
-            y: URL_SAFE_NO_PAD.encode(&point[33..65]),
+            public: PublicKey::Ec {
+                x: URL_SAFE_NO_PAD.encode(&point[1..33]),
+                y: URL_SAFE_NO_PAD.encode(&point[33..65]),
+            },
+            public_bytes: point[1..].to_vec(),
+            alg: Algorithm::ES256,
+        }
+    }
+
+    /// One of the two embedded RSA keypairs. `modulus` is empty for the
+    /// foreign key, whose public half is never published and never presented.
+    fn rsa(der_base64: &str, modulus: &str) -> Keypair {
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(der_base64.replace('\n', ""))
+            .expect("the embedded RSA key is base64");
+        Keypair {
+            signing: EncodingKey::from_rsa_der(&der),
+            public: PublicKey::Rsa {
+                n: modulus.to_owned(),
+                e: RSA_EXPONENT.to_owned(),
+            },
+            public_bytes: URL_SAFE_NO_PAD
+                .decode(modulus)
+                .expect("the embedded modulus is base64url"),
+            alg: Algorithm::RS256,
         }
     }
 }
@@ -164,7 +264,9 @@ struct IdpState {
 impl IdpState {
     /// The key identifier the identity token carries.
     const fn token_kid(&self) -> &'static str {
-        if self.behaviour.rotate_kid_after_discovery {
+        if self.behaviour.sign_with_unpublished_kid {
+            UNPUBLISHED_KID
+        } else if self.behaviour.rotate_kid_after_discovery {
             ROTATED_KID
         } else {
             FIRST_KID
@@ -203,9 +305,9 @@ impl FakeIdp {
     /// asynchronous except the bind: the listener exists before this returns,
     /// so a request sent on the next line cannot lose a race with it.
     pub async fn start(behaviour: IdpBehaviour) -> FakeIdp {
-        let published = Keypair::generate();
+        let published = Keypair::generate(behaviour.key_kind, false);
         let signing = if behaviour.sign_with_foreign_key {
-            Keypair::generate().signing
+            Keypair::generate(behaviour.key_kind, true).signing
         } else {
             published.signing.clone()
         };
@@ -302,7 +404,7 @@ async fn configuration(State(state): State<Arc<IdpState>>) -> Json<Value> {
         "jwks_uri": format!("{issuer}/jwks"),
         "response_types_supported": ["code"],
         "subject_types_supported": ["public"],
-        "id_token_signing_alg_values_supported": ["ES256"],
+        "id_token_signing_alg_values_supported": [state.published.alg],
         "code_challenge_methods_supported": ["S256"],
     }))
 }
@@ -314,17 +416,16 @@ async fn jwks(State(state): State<Arc<IdpState>>) -> Json<Value> {
     } else {
         FIRST_KID
     };
-    Json(json!({
-        "keys": [{
-            "kty": "EC",
-            "crv": "P-256",
-            "use": "sig",
-            "alg": "ES256",
-            "kid": kid,
-            "x": state.published.x,
-            "y": state.published.y,
-        }],
-    }))
+    let mut key = match &state.published.public {
+        PublicKey::Ec { x, y } => json!({ "kty": "EC", "crv": "P-256", "x": x, "y": y }),
+        PublicKey::Rsa { n, e } => json!({ "kty": "RSA", "n": n, "e": e }),
+    };
+    key["use"] = json!("sig");
+    key["kid"] = json!(kid);
+    if state.behaviour.publish_key_alg {
+        key["alg"] = json!(state.published.alg);
+    }
+    Json(json!({ "keys": [key] }))
 }
 
 /// Authenticate nobody and redirect at once, carrying the fixed code and the
@@ -367,23 +468,40 @@ async fn token(
         .clone()
         .or_else(|| state.seen_nonce.lock().clone());
     let published = state.published_issuer();
+    let audience = state.behaviour.audience.as_deref().unwrap_or(AUDIENCE);
     let mut claims = json!({
         "iss": state.behaviour.token_issuer.as_deref().unwrap_or(&published),
         "sub": SUBJECT,
-        "aud": state.behaviour.audience.as_deref().unwrap_or(AUDIENCE),
         "email": EMAIL,
         "iat": now,
         "exp": now + state.behaviour.expires_in_seconds,
     });
+    claims["aud"] = match state.behaviour.second_audience.as_deref() {
+        Some(second) => json!([audience, second]),
+        None => json!(audience),
+    };
     if let Some(nonce) = nonce {
         claims["nonce"] = json!(nonce);
     }
+    if let Some(azp) = state.behaviour.azp.as_deref() {
+        claims["azp"] = json!(azp);
+    }
+    let alg = state.behaviour.header_alg.unwrap_or(state.published.alg);
     let header = Header {
-        alg: Algorithm::ES256,
+        alg,
         kid: Some(state.token_kid().to_owned()),
         ..Header::default()
     };
-    let id_token = encode(&header, &claims, &state.signing).expect("sign the identity token");
+    // An HMAC header keyed on the published public key: the confusion attack
+    // in its original form, and a token that is genuinely well formed under
+    // the algorithm it claims.
+    let key = match alg {
+        Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
+            EncodingKey::from_secret(&state.published.public_bytes)
+        }
+        _ => state.signing.clone(),
+    };
+    let id_token = encode(&header, &claims, &key).expect("sign the identity token");
     Json(json!({
         "access_token": "fake-idp-access-token",
         "token_type": "Bearer",

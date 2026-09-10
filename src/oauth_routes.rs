@@ -375,6 +375,30 @@ fn authorization_server_document(state: &HttpState, oauth: &OauthState) -> Respo
 #[cfg(feature = "oauth")]
 const LOGIN_TTL_US: i64 = 10 * 60 * 1_000_000;
 
+/// The most scopes one authorization request may name.
+///
+/// This server advertises one slug per tool category, and a request asking for
+/// every one of them is far below this. The cap is not about what is
+/// meaningful — Task 7 intersects the request with the principal's grant — but
+/// about the size of the row an unauthenticated request writes, which is the
+/// same rule `register` states for its own caps.
+#[cfg(feature = "oauth")]
+const MAX_REQUESTED_SCOPES: usize = 16;
+
+/// The scopes an authorization request names, split on whitespace as RFC 6749
+/// section 3.3 defines. The caller splits once and keeps the result: the list
+/// counted against [`MAX_REQUESTED_SCOPES`] is the list stored on the login
+/// row, so no second split can disagree with the first.
+#[cfg(feature = "oauth")]
+fn requested_scopes(scope: &Option<String>) -> Vec<String> {
+    scope
+        .as_deref()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
 /// What a client may send to `GET /oauth/authorize`.
 ///
 /// Every member is optional here and checked below, so that a missing one is
@@ -383,6 +407,9 @@ const LOGIN_TTL_US: i64 = 10 * 60 * 1_000_000;
 #[cfg(feature = "oauth")]
 #[derive(Deserialize)]
 struct AuthorizeParams {
+    /// RFC 6749 section 3.1.1 makes it required, and this server supports one
+    /// value. `metadata::authorization_server` advertises the same one.
+    response_type: Option<String>,
     client_id: Option<String>,
     redirect_uri: Option<String>,
     /// The client's own state, opaque here and returned unchanged. RFC 6749
@@ -439,11 +466,27 @@ async fn start_login(oauth: &Arc<OauthState>, q: AuthorizeParams) -> Response {
     else {
         return refused("client_id, redirect_uri and code_challenge are all required");
     };
+    if q.response_type.as_deref() != Some("code") {
+        return refused("response_type must be code");
+    }
     if q.code_challenge_method.as_deref() != Some("S256") {
         return refused("code_challenge_method must be S256");
     }
     if code_challenge.is_empty() {
         return refused("code_challenge must not be empty");
+    }
+    // The row this request writes is bounded here, for the reason the
+    // registration endpoint states two screens up: a rate limit bounds how
+    // many rows arrive, never how large one is, and this endpoint is reachable
+    // by anyone who has registered a client once. Which scopes a token ends up
+    // carrying is Task 7's intersection with the principal's grant; how many a
+    // stranger may store is this endpoint's problem.
+    //
+    // Split once and kept: the list that is counted is the list that is
+    // stored, and no second split can disagree with the first.
+    let requested = requested_scopes(&q.scope);
+    if requested.len() > MAX_REQUESTED_SCOPES {
+        return refused("too many scopes");
     }
     let resource = oauth.resource();
     if q.resource.is_some_and(|asked| asked != resource) {
@@ -487,13 +530,7 @@ async fn start_login(oauth: &Arc<OauthState>, q: AuthorizeParams) -> Response {
         client_state: q.state,
         code_challenge,
         resource,
-        scopes: q
-            .scope
-            .as_deref()
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect(),
+        scopes: requested,
         upstream_verifier: mcpmem_oauth::new_token(),
         nonce: mcpmem_oauth::new_token(),
         csrf: mcpmem_oauth::new_token(),
@@ -557,14 +594,25 @@ async fn finish_login(
     login_state: &str,
 ) -> std::result::Result<Response, String> {
     let now_us = (oauth.now_us)();
-    // Taken, not read: the row is consumed here whatever happens next, so a
-    // replayed callback finds nothing and no second exchange is attempted for
-    // one login. A login that ends in consent is written back below, with the
-    // human attached, which is the row Task 7 consumes.
+    // Taken, not read: the row is consumed here whatever happens next, so no
+    // second exchange is ever attempted for one login. A login that reaches
+    // consent is written back below, with the human attached, and that is the
+    // row Task 7 consumes.
     let login = oauth
         .with_store(|store| store.take_login(login_state, now_us))
         .map_err(|e| format!("the store refused to read the login: {e}"))?
         .ok_or_else(|| "no login in flight carries this state".to_owned())?;
+    if login.principal.is_some() {
+        // The row written back below is live again under the same state, so
+        // the take above is not by itself the replay guard the shape needs. A
+        // login that already names its human is waiting for consent, not for a
+        // second callback: put it back, so that anyone holding the callback
+        // URL cannot destroy a completed login or spend its code twice.
+        oauth
+            .with_store(|store| store.put_login(&login))
+            .map_err(|e| format!("the store refused to restore the login: {e}"))?;
+        return Err("this login was already completed".to_owned());
+    }
 
     let provider = oauth.provider().await.map_err(|e| e.to_string())?;
     let claims = provider

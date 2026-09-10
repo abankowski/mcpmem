@@ -67,6 +67,8 @@ pub enum UpstreamError {
     Malformed(String),
     #[error("the identity token names a key the provider does not publish")]
     UnknownKey,
+    #[error("the identity token and the provider's key disagree: {0}")]
+    KeyMismatch(String),
     #[error("the identity token does not carry the provider's signature")]
     Signature,
     #[error("the identity token was issued for another audience")]
@@ -92,6 +94,11 @@ pub struct IdentityClaims {
     pub email: Option<String>,
     #[serde(default)]
     pub nonce: Option<String>,
+    /// The authorized party. OpenID Connect Core section 3.1.3.7 requires it
+    /// to name the client the token was minted for, whenever `aud` names more
+    /// than one party.
+    #[serde(default)]
+    pub azp: Option<String>,
 }
 
 /// The four members of a discovery document this server uses. Every one is
@@ -353,6 +360,16 @@ impl Provider {
         let claims = decode::<IdentityClaims>(id_token, &key, &validation)
             .map_err(|e| claim_error(&e))?
             .claims;
+        // `jsonwebtoken` tests the audience as a non-empty intersection, not
+        // as an equality, so a token whose `aud` names this client *and*
+        // another passes the check above. OpenID Connect Core section 3.1.3.7
+        // covers exactly that shape: `azp` must then name the party the token
+        // was minted for. The variant is `Audience` and not one of its own,
+        // because the fact it reports is the same one and so is the operator's
+        // remedy — this token belongs to another client of this provider.
+        if claims.azp.as_deref().is_some_and(|azp| azp != client_id) {
+            return Err(UpstreamError::Audience);
+        }
         if claims.nonce.as_deref() != Some(expected_nonce) {
             return Err(UpstreamError::Nonce);
         }
@@ -402,6 +419,16 @@ fn endpoint(name: &str, value: &str) -> Result<Url, UpstreamError> {
 /// That is the whole defence against algorithm confusion: a token whose header
 /// says `HS256` cannot be verified with the provider's public key as an HMAC
 /// secret, because an RSA or EC key admits no HMAC algorithm here.
+///
+/// A refusal here is [`UpstreamError::KeyMismatch`] and not
+/// [`UpstreamError::Discovery`], with one exception. Both the algorithm
+/// allow-lists and the missing key members are reachable from a token an
+/// attacker chose: a forged `RS256` header against an EC key that names no
+/// `alg` lands in the RSA arm and finds no `n`. Reporting either as a
+/// discovery failure would send the operator to the provider's configuration
+/// while somebody forges tokens. The exception is the key type and the key's
+/// own `alg`: neither can be influenced by a token, and both are exactly what
+/// the document said.
 fn decoding_key(
     jwk: &Jwk,
     header_alg: Algorithm,
@@ -412,8 +439,9 @@ fn decoding_key(
             .map_err(|_| UpstreamError::Discovery(format!("unsupported key algorithm {named}")))?,
         None => header_alg,
     };
-    let missing =
-        |member: &str| UpstreamError::Discovery(format!("a {} key carries no '{member}'", jwk.kty));
+    let missing = |member: &str| {
+        UpstreamError::KeyMismatch(format!("a {} key carries no '{member}'", jwk.kty))
+    };
     match jwk.kty.as_str() {
         "RSA" => {
             if !matches!(
@@ -425,26 +453,26 @@ fn decoding_key(
                     | Algorithm::PS384
                     | Algorithm::PS512
             ) {
-                return Err(UpstreamError::Discovery(format!(
+                return Err(UpstreamError::KeyMismatch(format!(
                     "an RSA key cannot verify {alg:?}"
                 )));
             }
             let n = jwk.n.as_deref().ok_or_else(|| missing("n"))?;
             let e = jwk.e.as_deref().ok_or_else(|| missing("e"))?;
             let key = DecodingKey::from_rsa_components(n, e)
-                .map_err(|e| UpstreamError::Discovery(e.to_string()))?;
+                .map_err(|e| UpstreamError::KeyMismatch(e.to_string()))?;
             Ok((key, alg))
         }
         "EC" => {
             if !matches!(alg, Algorithm::ES256 | Algorithm::ES384) {
-                return Err(UpstreamError::Discovery(format!(
+                return Err(UpstreamError::KeyMismatch(format!(
                     "an EC key cannot verify {alg:?}"
                 )));
             }
             let x = jwk.x.as_deref().ok_or_else(|| missing("x"))?;
             let y = jwk.y.as_deref().ok_or_else(|| missing("y"))?;
             let key = DecodingKey::from_ec_components(x, y)
-                .map_err(|e| UpstreamError::Discovery(e.to_string()))?;
+                .map_err(|e| UpstreamError::KeyMismatch(e.to_string()))?;
             Ok((key, alg))
         }
         other => Err(UpstreamError::Discovery(format!(
@@ -457,7 +485,10 @@ fn decoding_key(
 ///
 /// The match names each kind it reports rather than falling through to one
 /// message, because [`UpstreamError::Signature`] and [`UpstreamError::Audience`]
-/// send an operator to two different places.
+/// send an operator to two different places. `InvalidAlgorithm` is the other
+/// half of the algorithm-confusion refusal: it fires when the key named an
+/// `alg` and the token's header named a different one, which is the same
+/// disagreement [`decoding_key`] reports when the key named none.
 fn claim_error(e: &jsonwebtoken::errors::Error) -> UpstreamError {
     use jsonwebtoken::errors::ErrorKind;
     match e.kind() {
@@ -465,6 +496,9 @@ fn claim_error(e: &jsonwebtoken::errors::Error) -> UpstreamError {
         ErrorKind::ExpiredSignature => UpstreamError::Expired,
         ErrorKind::InvalidAudience => UpstreamError::Audience,
         ErrorKind::InvalidIssuer => UpstreamError::Issuer,
+        ErrorKind::InvalidAlgorithm => {
+            UpstreamError::KeyMismatch("the token header names another algorithm".to_owned())
+        }
         _ => UpstreamError::Malformed(e.to_string()),
     }
 }
