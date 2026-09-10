@@ -160,7 +160,9 @@ Binding a non-loopback address **without** a token exposes the entire graph to t
 By default the token grants every enabled tool category. Narrow it with
 `--static-bearer-scopes`, a comma-separated list of category slugs
 (`graph-read`, `graph-write`, `vectors`, `code`); a call to a tool outside the
-list is refused.
+list is refused. The list also gates the built-in graph viewer, with or without
+a token: omit `graph-read` and `/ui/graph`, `/ui/search`, `/ui/node` and
+`/ui/expand` answer 403, so the viewer loads and stays empty.
 
 ```sh
 mcpmem --enable-all --transport http --auth-token "s3cr3t" \

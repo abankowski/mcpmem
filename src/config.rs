@@ -67,10 +67,12 @@ pub struct Config {
 /// `--oidc-issuer` is given, which is what turns OAuth on.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
-    /// Canonical HTTPS origin of this server, without a trailing slash. Never
-    /// derived from the Host header.
+    /// Canonical HTTPS URL of this server: scheme and host lowercased, no
+    /// trailing slash, no query and no fragment. A path prefix is legal — the
+    /// MCP authorization specification names `https://mcp.example.com/server/mcp`
+    /// as a canonical resource URI. Never derived from the Host header.
     pub public_url: String,
-    /// Upstream OpenID Connect issuer, without a trailing slash.
+    /// Upstream OpenID Connect issuer, normalized the same way as `public_url`.
     pub oidc_issuer: String,
     pub oidc_client_id: String,
     /// `None` for a public client.
@@ -81,6 +83,39 @@ pub struct OAuthConfig {
     pub cimd_allowed_domains: Vec<String>,
     /// Trust `X-Forwarded-Proto` from a reverse proxy that terminates TLS.
     pub trust_forwarded_proto: bool,
+}
+
+/// Normalize an HTTPS URL given on the command line so that later string
+/// comparisons (the `aud` claim, the resource indicator, a concatenated
+/// discovery path) can be plain equality: strip the trailing slash, lowercase
+/// the scheme and the host, and refuse anything that cannot identify one
+/// server. `flag` names the flag in the message. A path prefix is kept, and
+/// keeps its case; a query or a fragment is refused, because RFC 8707 forbids
+/// a fragment in a resource indicator and a query makes the value unusable as
+/// an audience.
+fn normalize_https_url(flag: &str, value: &str) -> Result<String> {
+    let value = value.trim_end_matches('/');
+    if value.contains('?') || value.contains('#') {
+        return Err(MCSError::InvalidParams(format!(
+            "{flag} must carry no query string and no fragment"
+        )));
+    }
+    let (scheme, rest) = value
+        .split_once("://")
+        .ok_or_else(|| MCSError::InvalidParams(format!("{flag} must be an absolute https URL")))?;
+    if !scheme.eq_ignore_ascii_case("https") {
+        return Err(MCSError::InvalidParams(format!(
+            "{flag} must use the https scheme"
+        )));
+    }
+    let (host, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    if host.is_empty() {
+        return Err(MCSError::InvalidParams(format!("{flag} must name a host")));
+    }
+    Ok(format!("https://{}{path}", host.to_ascii_lowercase()))
 }
 
 /// Resolve the read-only connection-pool size. `0` means "auto": scale to the
@@ -201,6 +236,13 @@ impl Config {
                     "--oidc-issuer requires the mcp role".into(),
                 ));
             }
+            if args.transport != crate::Transport::Http {
+                return Err(MCSError::InvalidParams(
+                    "--oidc-issuer requires --transport http; stdio is local and \
+                     already holds every scope"
+                        .into(),
+                ));
+            }
             if tls_cert.is_none() && !args.oauth_trust_forwarded_proto {
                 return Err(MCSError::InvalidParams(
                     "--oidc-issuer needs TLS; pass --tls-cert and --tls-key, or \
@@ -208,15 +250,11 @@ impl Config {
                         .into(),
                 ));
             }
+            let oidc_issuer = normalize_https_url("--oidc-issuer", &issuer)?;
             let public_url = args.public_url.clone().ok_or_else(|| {
                 MCSError::InvalidParams("--oidc-issuer requires --public-url".into())
             })?;
-            let public_url = public_url.trim_end_matches('/').to_owned();
-            if !public_url.starts_with("https://") {
-                return Err(MCSError::InvalidParams(
-                    "--public-url must use the https scheme".into(),
-                ));
-            }
+            let public_url = normalize_https_url("--public-url", &public_url)?;
             let client_id = args.oidc_client_id.clone().ok_or_else(|| {
                 MCSError::InvalidParams("--oidc-issuer requires --oidc-client-id".into())
             })?;
@@ -248,7 +286,7 @@ impl Config {
             };
             Some(OAuthConfig {
                 public_url,
-                oidc_issuer: issuer.trim_end_matches('/').to_owned(),
+                oidc_issuer,
                 oidc_client_id: client_id,
                 oidc_client_secret,
                 principals,
@@ -256,6 +294,21 @@ impl Config {
                 trust_forwarded_proto: args.oauth_trust_forwarded_proto,
             })
         } else {
+            // Fail closed, as `--auth-token-file` does above: an OAuth flag
+            // without `--oidc-issuer` is a misconfiguration, not a no-op. The
+            // principals file would never be opened, so its errors would go
+            // unseen while the server ran with OAuth off.
+            if args.public_url.is_some()
+                || args.oidc_client_id.is_some()
+                || args.oidc_client_secret_file.is_some()
+                || args.principals_file.is_some()
+                || !args.cimd_allowed_domains.is_empty()
+                || args.oauth_trust_forwarded_proto
+            {
+                return Err(MCSError::InvalidParams(
+                    "the OAuth flags need --oidc-issuer, which turns OAuth on".into(),
+                ));
+            }
             None
         };
 

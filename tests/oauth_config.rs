@@ -256,3 +256,238 @@ fn the_client_metadata_domain_allowlist_has_a_default() {
     assert!(oauth.oidc_client_secret.is_none());
     assert!(oauth.trust_forwarded_proto);
 }
+
+// ── Fix round 1 ──────────────────────────────────────────────────────────
+
+/// A principals file holding one valid entry.
+fn one_principal(name: &str) -> String {
+    write_tmp(
+        name,
+        r#"[{"name":"a","iss":"https://i","sub":"1","scopes":["graph-read"]}]"#,
+    )
+}
+
+/// The shortest command line that turns OAuth on and passes every refusal.
+/// A flag named in `extra` replaces the default for that flag, because clap
+/// refuses a repeated `Option` argument.
+fn valid_oauth<'a>(p: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut v = vec!["--transport", "http", "--oauth-trust-forwarded-proto"];
+    for (flag, default) in [
+        ("--oidc-issuer", "https://idp.example"),
+        ("--oidc-client-id", "abc"),
+        ("--public-url", "https://mem.example.com"),
+        ("--principals-file", p),
+    ] {
+        if !extra.contains(&flag) {
+            v.push(flag);
+            v.push(default);
+        }
+    }
+    v.extend_from_slice(extra);
+    v
+}
+
+#[test]
+fn oauth_on_the_stdio_transport_is_refused() {
+    let p = one_principal("f1.json");
+    let err = Config::from_args(&args(&[
+        "--oauth-trust-forwarded-proto",
+        "--oidc-issuer",
+        "https://idp.example",
+        "--oidc-client-id",
+        "abc",
+        "--public-url",
+        "https://mem.example.com",
+        "--principals-file",
+        &p,
+    ]))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("--transport http"), "message was: {err}");
+}
+
+#[test]
+fn an_oauth_flag_without_the_issuer_is_refused() {
+    let p = one_principal("f2.json");
+    for orphan in [
+        vec!["--public-url", "https://mem.example.com"],
+        vec!["--oidc-client-id", "abc"],
+        vec!["--principals-file", p.as_str()],
+        vec!["--cimd-allowed-domain", "claude.ai"],
+        vec!["--oauth-trust-forwarded-proto"],
+    ] {
+        let mut argv = vec!["--transport", "http"];
+        argv.extend_from_slice(&orphan);
+        let err = Config::from_args(&args(&argv)).unwrap_err().to_string();
+        assert!(err.contains("--oidc-issuer"), "{orphan:?} gave: {err}");
+    }
+}
+
+#[test]
+fn a_public_url_with_a_query_or_a_fragment_is_refused() {
+    let p = one_principal("f3.json");
+    for bad in [
+        "https://mem.example.com/mcp?x=1",
+        "https://mem.example.com#f",
+    ] {
+        let err = Config::from_args(&args(&valid_oauth(&p, &["--public-url", bad])))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("query"), "{bad} gave: {err}");
+    }
+}
+
+#[test]
+fn a_public_url_keeps_its_path_and_lowercases_its_scheme_and_host() {
+    let p = one_principal("f4.json");
+    let cfg = Config::from_args(&args(&valid_oauth(
+        &p,
+        &["--public-url", "HTTPS://MEM.Example.com/Server/MCP/"],
+    )))
+    .unwrap();
+    // A path prefix is legal: the MCP authorization specification names
+    // `https://mcp.example.com/server/mcp` as a canonical resource URI. The
+    // path keeps its case; the scheme and the host do not.
+    assert_eq!(
+        cfg.oauth.unwrap().public_url,
+        "https://mem.example.com/Server/MCP"
+    );
+}
+
+#[test]
+fn a_public_url_with_no_host_is_refused() {
+    let p = one_principal("f5.json");
+    let err = Config::from_args(&args(&valid_oauth(&p, &["--public-url", "https:///mcp"])))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("host"), "message was: {err}");
+}
+
+#[test]
+fn a_plaintext_issuer_is_refused() {
+    let p = one_principal("f6.json");
+    let err = Config::from_args(&args(&valid_oauth(
+        &p,
+        &["--oidc-issuer", "http://idp.example"],
+    )))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("https"), "message was: {err}");
+}
+
+#[test]
+fn a_populated_client_secret_file_is_trimmed_and_kept() {
+    let p = one_principal("f7.json");
+    let secret = write_tmp("secret-ok.txt", "  s3cr3t\n");
+    let cfg = Config::from_args(&args(&valid_oauth(
+        &p,
+        &["--oidc-client-secret-file", &secret],
+    )))
+    .unwrap();
+    assert_eq!(
+        cfg.oauth.unwrap().oidc_client_secret.as_deref(),
+        Some("s3cr3t")
+    );
+}
+
+#[test]
+fn oauth_without_the_client_id_is_refused() {
+    let p = one_principal("f8.json");
+    let err = Config::from_args(&args(&[
+        "--transport",
+        "http",
+        "--oauth-trust-forwarded-proto",
+        "--oidc-issuer",
+        "https://idp.example",
+        "--public-url",
+        "https://mem.example.com",
+        "--principals-file",
+        &p,
+    ]))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("--oidc-client-id"), "message was: {err}");
+}
+
+#[test]
+fn oauth_without_the_principals_file_is_refused() {
+    let err = Config::from_args(&args(&[
+        "--transport",
+        "http",
+        "--oauth-trust-forwarded-proto",
+        "--oidc-issuer",
+        "https://idp.example",
+        "--oidc-client-id",
+        "abc",
+        "--public-url",
+        "https://mem.example.com",
+    ]))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("--principals-file"), "message was: {err}");
+}
+
+#[test]
+fn a_principals_file_missing_a_field_is_not_called_invalid_json() {
+    let path = write_tmp("f9.json", r#"[{"name":"a","iss":"https://i"}]"#);
+    let err = mcpmem::principals::load(&path).unwrap_err().to_string();
+    assert!(
+        !err.contains("not valid JSON"),
+        "valid JSON was called invalid: {err}"
+    );
+    assert!(err.contains("missing field"), "message was: {err}");
+}
+
+#[test]
+fn principal_identity_fields_are_trimmed() {
+    let path = write_tmp(
+        "f10.json",
+        r#"[{"name":" a ","iss":"https://i ","sub":" 42","scopes":["code"]}]"#,
+    );
+    let list = mcpmem::principals::load(&path).unwrap();
+    assert_eq!(list[0].key(), ("https://i", "42"));
+    assert_eq!(list[0].name, "a");
+}
+
+#[test]
+fn a_duplicate_identity_that_differs_only_by_whitespace_is_refused() {
+    let path = write_tmp(
+        "f11.json",
+        r#"[{"name":"a","iss":"https://i","sub":"1","scopes":["code"]},
+            {"name":"b","iss":"https://i ","sub":" 1","scopes":["code"]}]"#,
+    );
+    let err = mcpmem::principals::load(&path).unwrap_err().to_string();
+    assert!(err.contains("duplicate"), "message was: {err}");
+}
+
+#[test]
+fn principal_scopes_are_stored_as_canonical_slugs() {
+    let path = write_tmp(
+        "f12.json",
+        r#"[{"name":"a","iss":"https://i","sub":"1","scopes":["Graph_Read"," code "]}]"#,
+    );
+    let list = mcpmem::principals::load(&path).unwrap();
+    assert_eq!(list[0].scopes, vec!["graph-read", "code"]);
+    // `load` has already canonicalized them, so the set is a plain copy here.
+    let set = list[0].scope_set();
+    assert!(
+        set.contains("graph-read") && set.contains("code"),
+        "{set:?}"
+    );
+}
+
+#[test]
+fn scope_set_canonicalizes_an_entry_that_did_not_come_from_load() {
+    // `PrincipalEntry` is public and derives `Deserialize`, so an entry can
+    // reach `scope_set` without passing through `load`. The set feeds
+    // `authz::missing_scope`, which compares against `tools::scope_of` output,
+    // so a raw `Graph_Read` here would silently grant nothing.
+    let entry: mcpmem::principals::PrincipalEntry = serde_json::from_str(
+        r#"{"name":"a","iss":"https://i","sub":"1","scopes":["Graph_Read","nonsense"]}"#,
+    )
+    .unwrap();
+    let set = entry.scope_set();
+    assert!(set.contains("graph-read"), "{set:?}");
+    // An unknown scope grants nothing rather than being carried through.
+    assert_eq!(set.len(), 1, "{set:?}");
+}
