@@ -1979,6 +1979,7 @@ dependencies = [
  "lru",
  "mcpmem-core",
  "mcpmem-indexer",
+ "mcpmem-oauth",
  "mcpmem-runtime",
  "mcpmem-webhook",
  "notify",
@@ -2042,6 +2043,22 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "mcpmem-oauth"
+version = "1.0.0-rc.4"
+dependencies = [
+ "base64",
+ "getrandom 0.2.17",
+ "mcpmem-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

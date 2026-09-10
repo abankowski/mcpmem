@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/mcpmem-core", "crates/mcpmem-runtime", "crates/mcpmem-indexer", "crates/mcpmem-webhook"]
+members = [".", "crates/mcpmem-core", "crates/mcpmem-runtime", "crates/mcpmem-indexer", "crates/mcpmem-webhook", "crates/mcpmem-oauth"]
 resolver = "3"
 
 [package]
@@ -100,6 +100,7 @@ sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1.41", features = ["process"] }
 mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.0-rc.4" }
+mcpmem-oauth = { path = "crates/mcpmem-oauth", version = "1.0.0-rc.4" }
 
 [[bin]]
 name = "mcpmem"

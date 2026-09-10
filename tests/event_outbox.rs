@@ -49,6 +49,12 @@ fn count(conn: &Connection, table: &str) -> i64 {
     .unwrap()
 }
 
+/// The ledger is append-only: every migration adds one row. Tests derive the
+/// expected count from the registry, so a new migration needs no edit here.
+const fn migration_count() -> i64 {
+    mcpmem_core::events::MIGRATIONS.len() as i64
+}
+
 #[test]
 fn graph_bootstrap_precedes_migration_statements() {
     let dir = tempfile::tempdir().unwrap();
@@ -71,7 +77,7 @@ fn graph_bootstrap_precedes_migration_statements() {
     let graph = graph(&path);
     graph.create_entities(&[entity("ready")]).unwrap();
     assert_original_entity(&graph, "ready");
-    assert_eq!(count(&conn, "schema_migration"), 3);
+    assert_eq!(count(&conn, "schema_migration"), migration_count());
 }
 
 #[test]
@@ -103,7 +109,7 @@ fn pending_migrations_roll_back_together_after_later_failure() {
     assert_eq!(pending_tables, 0, "no earlier migration DDL may remain");
     conn.execute_batch("DROP TRIGGER reject_second").unwrap();
     drop(graph(&path));
-    assert_eq!(count(&observer, "schema_migration"), 3);
+    assert_eq!(count(&observer, "schema_migration"), migration_count());
 }
 
 #[test]
@@ -113,7 +119,7 @@ fn migration_three_rolls_back_its_columns_when_its_ledger_write_fails() {
     drop(graph(&path));
     let conn = Connection::open(&path).unwrap();
     let before: Vec<(i64, String, i64)> = conn
-        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration WHERE version < 3 ORDER BY version")
+        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration WHERE version <> 3 ORDER BY version")
         .unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .unwrap()
@@ -121,8 +127,8 @@ fn migration_three_rolls_back_its_columns_when_its_ledger_write_fails() {
         .unwrap();
     assert_eq!(
         before.len(),
-        2,
-        "fixture has the historical migration ledger"
+        mcpmem_core::events::MIGRATIONS.len() - 1,
+        "fixture has every ledger row apart from migration three"
     );
     conn.execute("DELETE FROM schema_migration WHERE version=3", [])
         .unwrap();
@@ -239,7 +245,7 @@ fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_t
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(before.len(), 3);
+    assert_eq!(before.len(), mcpmem_core::events::MIGRATIONS.len());
     assert_eq!(
         before[0].1,
         "a48def8b25e9ecf813d3fa27a785893ba5de346a8b82f012cc543af2fecd5af2"
@@ -391,9 +397,13 @@ fn startup_rejects_changed_migration_and_preserves_legacy_vector_rows() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(versions, [1, 2, 3]);
+    let registered: Vec<i64> = mcpmem_core::events::MIGRATIONS
+        .iter()
+        .map(|(version, _)| *version)
+        .collect();
+    assert_eq!(versions, registered);
     drop(graph(&path));
-    assert_eq!(count(&conn, "schema_migration"), 3);
+    assert_eq!(count(&conn, "schema_migration"), migration_count());
     conn.execute("UPDATE schema_migration SET checksum='tampered'", [])
         .unwrap();
     assert!(
