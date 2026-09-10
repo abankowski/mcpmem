@@ -315,8 +315,8 @@ fn setup() -> Client {
     std::fs::write(src_dir.join("greeter.rb"), RB_SRC).unwrap();
     std::fs::write(src_dir.join("service.php"), PHP_SRC).unwrap();
 
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut child = Command::new(&bin)
         .args([
             "-f",
@@ -331,7 +331,7 @@ fn setup() -> Client {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn mcp-memory");
+        .expect("spawn mcpmem");
     Client {
         stdin: child.stdin.take().unwrap(),
         stdout: child.stdout.take().unwrap(),
@@ -531,8 +531,8 @@ fn code_tools_present_when_enabled() {
     for ext in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut child = Command::new(&bin)
         .args([
             "-f",

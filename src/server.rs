@@ -625,7 +625,7 @@ fn handle_initialize(req: &JsonRpcRequest, vectors_enabled: bool) -> Value {
             "tools": { "listChanged": false }
         },
         "serverInfo": {
-            "name": "mcp-memory",
+            "name": "mcpmem",
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": instructions

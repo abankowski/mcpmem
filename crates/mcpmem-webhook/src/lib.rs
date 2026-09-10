@@ -1,7 +1,7 @@
 //! Bounded, lease-fenced webhook delivery. Network implementation is injected.
 use hmac::{Hmac, Mac};
-use memory_core::events::{EventDelivery, EventRepository, now_us};
-use memory_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
+use mcpmem_core::events::{EventDelivery, EventRepository, now_us};
+use mcpmem_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
 use rusqlite::Connection;
 use serde::Serialize;
 use sha2::Sha256;
@@ -20,7 +20,7 @@ pub enum WorkerError {
     #[error("database: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("core: {0}")]
-    Core(#[from] memory_core::errors::MCSError),
+    Core(#[from] mcpmem_core::errors::MCSError),
     #[error("policy: {0}")]
     Policy(String),
     #[error("secret: {0}")]
@@ -282,7 +282,7 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
     }
     pub fn run_once(&self, now: i64) -> Result<DeliveryReport, WorkerError> {
         let conn = Connection::open(&self.database)?;
-        memory_core::schema::initialize_database(&conn)?;
+        mcpmem_core::schema::initialize_database(&conn)?;
         let events = EventRepository::new(&conn);
         let Some(delivery) = events.claim_due(now, self.lease_us)? else {
             return Ok(DeliveryReport::default());
@@ -378,7 +378,7 @@ struct Envelope<'a> {
     transaction_id: String,
     entity_id: i64,
     entity_revision: i64,
-    operation: memory_core::mutation::ChangeOperation,
+    operation: mcpmem_core::mutation::ChangeOperation,
     occurred_at_us: i64,
     origin: &'a str,
     correlation_id: String,
@@ -401,14 +401,14 @@ fn envelope(delivery: &EventDelivery) -> Result<Vec<u8>, WorkerError> {
         correlation_id: event.provenance.correlation_id.to_string(),
         causation_id: event.provenance.causation_id.map(|id| id.to_string()),
         hop_count: event.provenance.hop_count,
-        old_name: (event.change.operation == memory_core::mutation::ChangeOperation::Rename)
+        old_name: (event.change.operation == mcpmem_core::mutation::ChangeOperation::Rename)
             .then_some(event.change.old_name.as_deref())
             .flatten(),
-        new_name: (event.change.operation == memory_core::mutation::ChangeOperation::Rename)
+        new_name: (event.change.operation == mcpmem_core::mutation::ChangeOperation::Rename)
             .then_some(event.change.new_name.as_deref())
             .flatten(),
     })
-    .map_err(memory_core::errors::MCSError::from)?;
+    .map_err(mcpmem_core::errors::MCSError::from)?;
     if body.len() > MAX_BODY {
         return Err(WorkerError::Policy("envelope exceeds 64KiB".into()));
     }

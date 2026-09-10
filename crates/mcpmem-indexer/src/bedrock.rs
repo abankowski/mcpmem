@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use aws_sdk_bedrockruntime::primitives::Blob;
-use memory_core::jobs::IndexProfile;
+use mcpmem_core::jobs::IndexProfile;
 
 use crate::{CanonicalDocument, EmbeddingProvider, ProviderError};
 

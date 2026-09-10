@@ -5,12 +5,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use indexer_worker::{CanonicalDocument, EmbeddingProvider, IndexerWorker, ProviderError};
-use mcp_memory::config::{Durability, SqliteTuning};
-use mcp_memory::kg::GraphHandle;
-use mcp_memory::types::EntityInput as Entity;
-use mcp_memory::vector_store::VectorStore;
-use memory_core::jobs::{DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization};
+use mcpmem::config::{Durability, SqliteTuning};
+use mcpmem::kg::GraphHandle;
+use mcpmem::types::EntityInput as Entity;
+use mcpmem::vector_store::VectorStore;
+use mcpmem_core::jobs::{DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization};
+use mcpmem_indexer::{CanonicalDocument, EmbeddingProvider, IndexerWorker, ProviderError};
 use uuid::Uuid;
 
 struct FixedProvider;
@@ -160,21 +160,21 @@ fn stale_claim_cannot_commit_after_a_newer_claimant() {
     IndexProfileRegistry::new(&conn)
         .begin_rebuild(&profile)
         .unwrap();
-    let first = memory_core::jobs::IndexJobRepository::new(&conn)
+    let first = mcpmem_core::jobs::IndexJobRepository::new(&conn)
         .claim_due(10, 1)
         .unwrap()
         .unwrap();
-    let second = memory_core::jobs::IndexJobRepository::new(&conn)
+    let second = mcpmem_core::jobs::IndexJobRepository::new(&conn)
         .claim_due(12, 10)
         .unwrap()
         .unwrap();
     assert!(
-        !memory_core::jobs::IndexJobRepository::new(&conn)
+        !mcpmem_core::jobs::IndexJobRepository::new(&conn)
             .commit_vector(&first, 12, Some(&[1.0, 1.0]), "test")
             .unwrap()
     );
     assert!(
-        memory_core::jobs::IndexJobRepository::new(&conn)
+        mcpmem_core::jobs::IndexJobRepository::new(&conn)
             .commit_vector(&second, 12, Some(&[1.0, 1.0]), "test")
             .unwrap()
     );
@@ -268,14 +268,14 @@ fn profile_dimension_mismatch_is_retried_without_a_vector_write() {
 #[test]
 fn ollama_rejects_url_credentials() {
     assert!(
-        indexer_worker::OllamaProvider::new("http://token@127.0.0.1:11434", Duration::from_secs(1))
+        mcpmem_indexer::OllamaProvider::new("http://token@127.0.0.1:11434", Duration::from_secs(1))
             .is_err()
     );
 }
 
 #[test]
 fn provider_registry_rejects_unknown_profile_kind() {
-    let registry = indexer_worker::ProviderRegistry::new(None, None);
+    let registry = mcpmem_indexer::ProviderRegistry::new(None, None);
     let mut unknown = profile();
     unknown.provider_kind = "unknown".into();
     let error = registry.embed(&unknown, &[]).unwrap_err();
@@ -285,7 +285,7 @@ fn provider_registry_rejects_unknown_profile_kind() {
 #[test]
 #[cfg(not(feature = "bedrock"))]
 fn provider_registry_rejects_bedrock_without_the_bedrock_feature() {
-    let registry = indexer_worker::ProviderRegistry::new(None, None);
+    let registry = mcpmem_indexer::ProviderRegistry::new(None, None);
     let mut bedrock = profile();
     bedrock.provider_kind = "bedrock".into();
     let error = registry.embed(&bedrock, &[]).unwrap_err();
@@ -297,7 +297,7 @@ fn provider_registry_rejects_bedrock_without_the_bedrock_feature() {
 
 #[test]
 fn search_keeps_serving_snapshot_until_candidate_activation() {
-    use memory_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
+    use mcpmem_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("memory.db");
     let graph = setup(&database);
@@ -387,13 +387,13 @@ fn search_keeps_serving_snapshot_until_candidate_activation() {
         2
     );
     assert!(
-        matches!(IndexProfileRegistry::new(&conn).state("default").unwrap(), memory_core::jobs::StoreState::Active(id) if id == second.id)
+        matches!(IndexProfileRegistry::new(&conn).state("default").unwrap(), mcpmem_core::jobs::StoreState::Active(id) if id == second.id)
     );
 }
 
 #[test]
 fn active_profile_snapshot_refreshes_after_a_durable_generation_change() {
-    use memory_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
+    use mcpmem_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("memory.db");
     let graph = setup(&database);

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use memory_core::jobs::{IndexJobRepository, IndexOperation, IndexProfileRegistry};
+use mcpmem_core::jobs::{IndexJobRepository, IndexOperation, IndexProfileRegistry};
 use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
@@ -34,7 +34,7 @@ pub enum WorkerError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("core error: {0}")]
-    Core(#[from] memory_core::errors::MCSError),
+    Core(#[from] mcpmem_core::errors::MCSError),
 }
 
 pub struct IndexerWorker<P> {
@@ -104,7 +104,7 @@ impl ProviderRegistry {
 impl EmbeddingProvider for ProviderRegistry {
     fn embed(
         &self,
-        profile: &memory_core::jobs::IndexProfile,
+        profile: &mcpmem_core::jobs::IndexProfile,
         documents: &[CanonicalDocument],
     ) -> Result<Vec<Vec<f32>>, ProviderError> {
         match profile.provider_kind.as_str() {
@@ -151,7 +151,7 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
     pub fn run_once(&self, now_us: i64) -> Result<RunReport, WorkerError> {
         let conn = Connection::open(&self.database)?;
         conn.busy_timeout(self.timeout)?;
-        memory_core::schema::initialize_database(&conn)?;
+        mcpmem_core::schema::initialize_database(&conn)?;
         let jobs = IndexJobRepository::new(&conn);
         let Some(job) = jobs.claim_due(now_us, self.lease_us)? else {
             return Ok(RunReport::default());

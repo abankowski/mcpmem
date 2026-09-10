@@ -1,0 +1,19 @@
+[package]
+name = "mcpmem-runtime"
+version = "1.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Feature-gated runtime role composition for the mcpmem MCP server."
+repository = "https://github.com/abankowski/mcp-memory"
+
+[dependencies]
+mcpmem-core = { path = "../mcpmem-core", version = "1.0.0" }
+thiserror = "2.0"
+tokio = { version = "1.41", features = ["rt", "sync"] }
+
+[features]
+indexer = []
+webhooks = []
+
+[lints]
+workspace = true

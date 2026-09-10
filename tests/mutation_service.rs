@@ -1,10 +1,10 @@
-use mcp_memory::config::{Durability, SqliteTuning};
-use mcp_memory::kg::GraphHandle;
-use mcp_memory::types::EntityInput as Entity;
-use memory_core::mutation::{
+use mcpmem::config::{Durability, SqliteTuning};
+use mcpmem::kg::GraphHandle;
+use mcpmem::types::EntityInput as Entity;
+use mcpmem_core::mutation::{
     ChangeOperation, MutationContext, MutationRequest, MutationService, ObservationUpdate,
 };
-use memory_core::schema::initialize_database;
+use mcpmem_core::schema::initialize_database;
 use rusqlite::Connection;
 use std::num::NonZeroUsize;
 
@@ -75,7 +75,7 @@ fn committed_changes_keep_tombstones_and_only_effective_updates() {
             .collect::<Vec<_>>(),
         ["original", "new"]
     );
-    let relation = mcp_memory::types::Relation {
+    let relation = mcpmem::types::Relation {
         from: "a".into(),
         to: "b".into(),
         relation_type: "knows".into(),
@@ -113,9 +113,7 @@ fn committed_changes_keep_tombstones_and_only_effective_updates() {
     assert_eq!(tombstone.before.as_ref().unwrap().name, "a");
     assert!(tombstone.after.is_none());
     assert_eq!(
-        graph
-            .degree("b", mcp_memory::kg::Direction::Incoming)
-            .unwrap(),
+        graph.degree("b", mcpmem::kg::Direction::Incoming).unwrap(),
         0
     );
 }
@@ -201,12 +199,11 @@ fn mcp_observation_batch_rejects_late_invalid_item_without_partial_write() {
     .unwrap();
     graph.create_entities(&[entity("a")]).unwrap();
     let args = serde_json::json!({"observations": [{"entityName":"a","contents":[{"body":"partial"}]}, {"contents":[{"body":"invalid"}]}]});
-    assert!(mcp_memory::actions::memory::handle_add_observations(&graph, Some(&args)).is_err());
+    assert!(mcpmem::actions::memory::handle_add_observations(&graph, Some(&args)).is_err());
     assert_original_entity(&graph, "a");
     let valid =
         serde_json::json!({"observations": [{"entityName":"a","contents":[{"body":"committed"}]}]});
-    let response =
-        mcp_memory::actions::memory::handle_add_observations(&graph, Some(&valid)).unwrap();
+    let response = mcpmem::actions::memory::handle_add_observations(&graph, Some(&valid)).unwrap();
     let text = response["content"][0]["text"].as_str().unwrap();
     let response: serde_json::Value = serde_json::from_str(text).unwrap();
     let inserted = &response["results"][0]["addedObservations"][0];
@@ -252,7 +249,7 @@ fn late_entity_delete_failure_rolls_back_observations_and_stats() {
 
 #[test]
 fn every_write_path_rolls_back_on_a_final_statement_failure() {
-    use mcp_memory::types::Relation;
+    use mcpmem::types::Relation;
     let relation = Relation {
         from: "a".into(),
         to: "b".into(),
@@ -362,7 +359,7 @@ fn every_write_path_rolls_back_on_a_final_statement_failure() {
 
 #[test]
 fn duplicate_relation_deletion_and_merge_keep_effective_counters() {
-    use mcp_memory::types::Relation;
+    use mcpmem::types::Relation;
     let dir = tempfile::tempdir().unwrap();
     let graph = GraphHandle::new(
         &dir.path().join("memory.db"),
@@ -391,18 +388,14 @@ fn duplicate_relation_deletion_and_merge_keep_effective_counters() {
     assert_eq!(graph.get_relation_count().unwrap(), 1);
     assert_eq!(graph.relation_type_counts(), [("link".into(), 1)]);
     assert_eq!(
-        graph
-            .degree("c", mcp_memory::kg::Direction::Incoming)
-            .unwrap(),
+        graph.degree("c", mcpmem::kg::Direction::Incoming).unwrap(),
         1
     );
     graph.delete_relations(&[bc.clone(), bc, ac]).unwrap();
     assert_eq!(graph.get_relation_count().unwrap(), 0);
     assert!(graph.relation_type_counts().is_empty());
     assert_eq!(
-        graph
-            .degree("c", mcp_memory::kg::Direction::Incoming)
-            .unwrap(),
+        graph.degree("c", mcpmem::kg::Direction::Incoming).unwrap(),
         0
     );
     graph.delete_entities(&["b".into(), "b".into()]).unwrap();
@@ -454,7 +447,7 @@ fn wipe_clears_fts_postings_and_preserves_integrity() {
 
 #[test]
 fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
-    use mcp_memory::types::Relation;
+    use mcpmem::types::Relation;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     // Make relation predate bootstrap: fresh databases now reject duplicates,
@@ -519,9 +512,7 @@ fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
         )
         .unwrap();
     assert_eq!(
-        graph
-            .degree("a", mcp_memory::kg::Direction::Outgoing)
-            .unwrap(),
+        graph.degree("a", mcpmem::kg::Direction::Outgoing).unwrap(),
         2
     );
     assert_eq!(graph.relation_type_counts(), [("link".into(), 2)]);
@@ -542,15 +533,11 @@ fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
     assert_eq!(graph.get_relation_count().unwrap(), 0);
     assert!(graph.relation_type_counts().is_empty());
     assert_eq!(
-        graph
-            .degree("a", mcp_memory::kg::Direction::Outgoing)
-            .unwrap(),
+        graph.degree("a", mcpmem::kg::Direction::Outgoing).unwrap(),
         0
     );
     assert_eq!(
-        graph
-            .degree("b", mcp_memory::kg::Direction::Incoming)
-            .unwrap(),
+        graph.degree("b", mcpmem::kg::Direction::Incoming).unwrap(),
         0
     );
     assert_eq!(committed.changes.len(), 2);
@@ -563,7 +550,7 @@ fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
 
 #[test]
 fn rename_preserves_the_stable_entity_and_its_incident_graph() {
-    use mcp_memory::types::Relation;
+    use mcpmem::types::Relation;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
@@ -628,7 +615,7 @@ fn rename_preserves_the_stable_entity_and_its_incident_graph() {
     assert!(graph.get_entity("old").unwrap().is_none());
     assert_eq!(
         graph.search_nodes_filtered("old", None, 0, 10),
-        Vec::<mcp_memory::types::Entity>::new()
+        Vec::<mcpmem::types::Entity>::new()
     );
     assert_eq!(
         graph.search_nodes_filtered("new", None, 0, 10),
@@ -699,7 +686,7 @@ fn rename_rejects_a_distinct_existing_target_and_same_name_is_eventless_noop() {
     let err = graph.rename_entity("old", "taken").unwrap_err();
     assert!(matches!(
         err,
-        memory_core::errors::MCSError::InvalidParams(message)
+        mcpmem_core::errors::MCSError::InvalidParams(message)
             if message == "Entity 'taken' already exists"
     ));
     assert_original_entity(&graph, "old");

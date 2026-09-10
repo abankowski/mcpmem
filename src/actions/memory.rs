@@ -1,4 +1,4 @@
-use memory_core::mutation::{
+use mcpmem_core::mutation::{
     MutationContext, MutationRequest, MutationResult, MutationService, ObservationUpdate,
 };
 use serde_json::{Value, json};

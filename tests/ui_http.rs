@@ -42,8 +42,8 @@ fn spawn_http_server(enable_args: &[&str], auth_token: Option<&str>) -> HttpServ
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
 
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
 
     let mut cmd = Command::new(&bin);
     cmd.arg("-f")
@@ -62,7 +62,7 @@ fn spawn_http_server(enable_args: &[&str], auth_token: Option<&str>) -> HttpServ
         cmd.arg("--auth-token").arg(tok);
     }
 
-    let child = cmd.spawn().expect("failed to spawn mcp-memory");
+    let child = cmd.spawn().expect("failed to spawn mcpmem");
 
     // Wait until the HTTP stack is actually serving, not merely until the port
     // is bound: `GET /ui` needs no auth or permission, so a 200 from it means

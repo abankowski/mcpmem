@@ -32,8 +32,8 @@ fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient
         let _ = std::fs::remove_file(&p);
     }
 
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut command = Command::new(&bin);
     command
         .arg("-f")
@@ -52,7 +52,7 @@ fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn mcp-memory");
+        .expect("failed to spawn mcpmem");
     McpClient {
         stdin: child.stdin.take().unwrap(),
         stdout: child.stdout.take().unwrap(),
@@ -792,8 +792,8 @@ fn e2e_strict_ordering_with_concurrency_one() {
 
     let n = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
     let db_path = format!("/tmp/test_e2e_{n}.db");
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut child = Command::new(&bin)
         .args([
             "-f",

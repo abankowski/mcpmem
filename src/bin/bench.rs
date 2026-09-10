@@ -2,9 +2,9 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use mcp_memory::config::{Durability, SqliteTuning};
-use mcp_memory::kg::{Direction, GraphHandle};
-use mcp_memory::types::{EntityInput as Entity, Relation};
+use mcpmem::config::{Durability, SqliteTuning};
+use mcpmem::kg::{Direction, GraphHandle};
+use mcpmem::types::{EntityInput as Entity, Relation};
 
 fn main() {
     let path = Path::new("/tmp/mcp_memory_bench.db");

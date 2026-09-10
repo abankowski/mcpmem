@@ -1,0 +1,14 @@
+mcpmem
+Copyright 2026 Artur Bańkowski
+
+This product is a derivative work. It started from `mcp-memory` version 5.2.1
+by Piyush, at https://github.com/corporatepiyush/mcp-memory, released under the
+Apache License 2.0.
+
+The upstream project keeps the name `mcp-memory` and the crates.io crate
+`mcp-memory`. This fork uses the name `mcpmem`, a separate crates.io crate, and
+a separate version line that starts at 1.0.0. The two version numbers are not
+comparable.
+
+Licensed under the Apache License, Version 2.0. You may obtain a copy of the
+license at http://www.apache.org/licenses/LICENSE-2.0.

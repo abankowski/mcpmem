@@ -55,8 +55,8 @@ fn spawn_vec_server_with(extra: &[&str]) -> VecClient {
         let _ = std::fs::remove_file(&p);
     }
 
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
 
     let mut cmd = Command::new(&bin);
     cmd.arg("-f")
@@ -77,7 +77,7 @@ fn spawn_vec_server_with(extra: &[&str]) -> VecClient {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn mcp-memory");
+        .expect("failed to spawn mcpmem");
 
     VecClient {
         stdin: child.stdin.take().unwrap(),

@@ -1,4 +1,4 @@
-use memory_core::jobs::IndexProfile;
+use mcpmem_core::jobs::IndexProfile;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1,4 +1,4 @@
-use memory_core::{
+use mcpmem_core::{
     graph::GraphHandle,
     mutation::{MutationContext, MutationRequest, MutationService, ObservationUpdate},
     storage::{Durability, SqliteTuning},
@@ -40,7 +40,7 @@ fn webhook_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("worker.db");
     let connector = TestConnector::default();
-    let worker = webhook_worker::WebhookWorker::new(
+    let worker = mcpmem_webhook::WebhookWorker::new(
         &path,
         &connector,
         TestSecrets,
@@ -158,7 +158,7 @@ fn failed_mutations_leave_no_webhook_outbox_rows() {
 
 #[test]
 fn egress_policy_rejects_private_and_malformed_endpoints() {
-    use webhook_worker::validate_endpoint;
+    use mcpmem_webhook::validate_endpoint;
     let resolver = TestResolver(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
     let allowlist = BTreeSet::from(["example.test".into()]);
     assert!(validate_endpoint("http://example.test", &allowlist, &resolver).is_err());
@@ -177,35 +177,35 @@ fn egress_policy_rejects_private_and_malformed_endpoints() {
 }
 
 struct TestResolver(Vec<IpAddr>);
-impl webhook_worker::Resolver for TestResolver {
-    fn resolve(&self, _: &str) -> Result<Vec<IpAddr>, webhook_worker::WorkerError> {
+impl mcpmem_webhook::Resolver for TestResolver {
+    fn resolve(&self, _: &str) -> Result<Vec<IpAddr>, mcpmem_webhook::WorkerError> {
         Ok(self.0.clone())
     }
 }
 
 struct TestSecrets;
-impl webhook_worker::SecretProvider for TestSecrets {
+impl mcpmem_webhook::SecretProvider for TestSecrets {
     fn signing_key(
         &self,
         _: &str,
-    ) -> Result<webhook_worker::SigningKey, webhook_worker::WorkerError> {
-        webhook_worker::SigningKey::new(b"test-key".to_vec())
+    ) -> Result<mcpmem_webhook::SigningKey, mcpmem_webhook::WorkerError> {
+        mcpmem_webhook::SigningKey::new(b"test-key".to_vec())
     }
 }
 #[derive(Default)]
 struct TestConnector {
-    request: Mutex<Option<webhook_worker::SignedRequest>>,
-    endpoint: Mutex<Option<webhook_worker::ValidatedEndpoint>>,
+    request: Mutex<Option<mcpmem_webhook::SignedRequest>>,
+    endpoint: Mutex<Option<mcpmem_webhook::ValidatedEndpoint>>,
 }
-impl webhook_worker::DeliveryConnector for &TestConnector {
+impl mcpmem_webhook::DeliveryConnector for &TestConnector {
     fn send(
         &self,
-        endpoint: &webhook_worker::ValidatedEndpoint,
-        request: webhook_worker::SignedRequest,
-    ) -> Result<webhook_worker::DeliveryResponse, webhook_worker::WorkerError> {
+        endpoint: &mcpmem_webhook::ValidatedEndpoint,
+        request: mcpmem_webhook::SignedRequest,
+    ) -> Result<mcpmem_webhook::DeliveryResponse, mcpmem_webhook::WorkerError> {
         *self.request.lock().unwrap() = Some(request);
         *self.endpoint.lock().unwrap() = Some(endpoint.clone());
-        Ok(webhook_worker::DeliveryResponse {
+        Ok(mcpmem_webhook::DeliveryResponse {
             status: 204,
             retry_after_us: None,
         })
@@ -243,7 +243,7 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
         )
         .unwrap();
     let connector = TestConnector::default();
-    let report = webhook_worker::WebhookWorker::new(
+    let report = mcpmem_webhook::WebhookWorker::new(
         &path,
         &connector,
         TestSecrets,
@@ -311,7 +311,7 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
             context,
         )
         .unwrap();
-    let report = webhook_worker::WebhookWorker::new(
+    let report = mcpmem_webhook::WebhookWorker::new(
         &path,
         &connector,
         TestSecrets,
@@ -338,7 +338,7 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
 
 #[test]
 fn machine_ingress_derives_actor_and_raw_body_fingerprint() {
-    use memory_core::auth::{Principal, PrincipalKind, machine_mutation_context};
+    use mcpmem_core::auth::{Principal, PrincipalKind, machine_mutation_context};
     let principal = Principal {
         id: "automation-42".into(),
         kind: PrincipalKind::Machine,
@@ -358,7 +358,7 @@ fn machine_ingress_derives_actor_and_raw_body_fingerprint() {
     assert_eq!(context.actor, "automation-42");
     assert_eq!(
         fingerprint,
-        memory_core::events::request_fingerprint(
+        mcpmem_core::events::request_fingerprint(
             "POST",
             "/api/v1/mutations",
             br#"{"operation":"compact"}"#
@@ -380,13 +380,13 @@ fn machine_ingress_derives_actor_and_raw_body_fingerprint() {
 
 #[derive(Clone, Copy)]
 struct StatusConnector(u16, Option<i64>);
-impl webhook_worker::DeliveryConnector for StatusConnector {
+impl mcpmem_webhook::DeliveryConnector for StatusConnector {
     fn send(
         &self,
-        _: &webhook_worker::ValidatedEndpoint,
-        _: webhook_worker::SignedRequest,
-    ) -> Result<webhook_worker::DeliveryResponse, webhook_worker::WorkerError> {
-        Ok(webhook_worker::DeliveryResponse {
+        _: &mcpmem_webhook::ValidatedEndpoint,
+        _: mcpmem_webhook::SignedRequest,
+    ) -> Result<mcpmem_webhook::DeliveryResponse, mcpmem_webhook::WorkerError> {
+        Ok(mcpmem_webhook::DeliveryResponse {
             status: self.0,
             retry_after_us: self.1,
         })
@@ -423,14 +423,14 @@ fn retry_after_is_clamped_and_deleted_subscription_dead_letters() {
         .upsert(subscription(id))
         .unwrap();
     graph.create_entities(&[entity("a")]).unwrap();
-    let worker = webhook_worker::WebhookWorker::new(
+    let worker = mcpmem_webhook::WebhookWorker::new(
         &path,
         StatusConnector(503, Some(99_999_999_999)),
         TestSecrets,
         allowlist(),
         resolver(),
     );
-    let now = memory_core::events::now_us();
+    let now = mcpmem_core::events::now_us();
     assert_eq!(worker.run_once(now).unwrap().retried, 1);
     let next: i64 = conn
         .query_row("SELECT next_attempt_us FROM event_outbox", [], |r| r.get(0))
@@ -457,7 +457,7 @@ fn filters_and_migration_reopen_are_compatible() {
     let graph = graph(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let mut selected = subscription(uuid::Uuid::new_v4());
-    selected.event_operations = vec![memory_core::mutation::ChangeOperation::Delete];
+    selected.event_operations = vec![mcpmem_core::mutation::ChangeOperation::Delete];
     selected.entity_types = vec!["other".into()];
     selected.ignored_origins = vec!["producer".into()];
     SubscriptionRepository::new(&conn).upsert(selected).unwrap();
@@ -473,7 +473,7 @@ fn filters_and_migration_reopen_are_compatible() {
         .unwrap();
     assert_eq!(count(&conn, "event_outbox"), 0);
     drop(graph);
-    memory_core::schema::initialize_database(&conn).unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
     assert_eq!(count(&conn, "schema_migration"), 3);
     assert!(
         conn.query_row::<String, _, _>(
@@ -497,10 +497,10 @@ fn migration_from_a_real_0001_database_applies_remaining_migrations() {
     conn.execute_batch(sql).unwrap();
     conn.execute(
         "INSERT INTO schema_migration VALUES(1,?1,1)",
-        [memory_core::events::sha256(sql.as_bytes())],
+        [mcpmem_core::events::sha256(sql.as_bytes())],
     )
     .unwrap();
-    memory_core::schema::initialize_database(&conn).unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
     assert_eq!(count(&conn, "schema_migration"), 3);
     assert_eq!(count(&conn, "entity"), 0);
     assert_eq!(count(&conn, "graph_stat"), 5);
@@ -528,7 +528,7 @@ fn operation_type_and_ignored_origin_filters_are_independent() {
     let graph = graph(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let mut operation = subscription(uuid::Uuid::new_v4());
-    operation.event_operations = vec![memory_core::mutation::ChangeOperation::Create];
+    operation.event_operations = vec![mcpmem_core::mutation::ChangeOperation::Create];
     let mut kind = subscription(uuid::Uuid::new_v4());
     kind.entity_types = vec!["note".into()];
     let mut ignored = subscription(uuid::Uuid::new_v4());
@@ -567,7 +567,7 @@ fn operation_and_type_filters_each_reject_alone() {
     let graph = graph(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let mut operation = subscription(uuid::Uuid::new_v4());
-    operation.event_operations = vec![memory_core::mutation::ChangeOperation::Delete];
+    operation.event_operations = vec![mcpmem_core::mutation::ChangeOperation::Delete];
     SubscriptionRepository::new(&conn)
         .upsert(operation)
         .unwrap();
@@ -599,7 +599,7 @@ fn operation_and_type_filters_each_reject_alone() {
 #[test]
 fn resolver_rebinding_mixed_private_answer_is_rejected() {
     assert!(
-        webhook_worker::validate_endpoint(
+        mcpmem_webhook::validate_endpoint(
             "https://hooks.example.test",
             &allowlist(),
             &TestResolver(vec![
@@ -621,8 +621,8 @@ fn nonretryable_status_and_attempt_cap_dead_letter() {
         .upsert(subscription(uuid::Uuid::new_v4()))
         .unwrap();
     graph.create_entities(&[entity("a")]).unwrap();
-    let now = memory_core::events::now_us();
-    let worker = webhook_worker::WebhookWorker::new(
+    let now = mcpmem_core::events::now_us();
+    let worker = mcpmem_webhook::WebhookWorker::new(
         &path,
         StatusConnector(400, None),
         TestSecrets,
@@ -635,7 +635,7 @@ fn nonretryable_status_and_attempt_cap_dead_letter() {
         [],
     )
     .unwrap();
-    let worker = webhook_worker::WebhookWorker::new(
+    let worker = mcpmem_webhook::WebhookWorker::new(
         &path,
         StatusConnector(503, None),
         TestSecrets,
@@ -646,15 +646,15 @@ fn nonretryable_status_and_attempt_cap_dead_letter() {
 }
 
 #[derive(Default)]
-struct RecordingHttpsTransport(Mutex<Option<webhook_worker::ValidatedEndpoint>>);
-impl webhook_worker::HttpsTransport for RecordingHttpsTransport {
+struct RecordingHttpsTransport(Mutex<Option<mcpmem_webhook::ValidatedEndpoint>>);
+impl mcpmem_webhook::HttpsTransport for RecordingHttpsTransport {
     fn post(
         &self,
-        endpoint: &webhook_worker::ValidatedEndpoint,
-        _: webhook_worker::SignedRequest,
-    ) -> Result<webhook_worker::DeliveryResponse, webhook_worker::WorkerError> {
+        endpoint: &mcpmem_webhook::ValidatedEndpoint,
+        _: mcpmem_webhook::SignedRequest,
+    ) -> Result<mcpmem_webhook::DeliveryResponse, mcpmem_webhook::WorkerError> {
         *self.0.lock().unwrap() = Some(endpoint.clone());
-        Ok(webhook_worker::DeliveryResponse {
+        Ok(mcpmem_webhook::DeliveryResponse {
             status: 302,
             retry_after_us: None,
         })
@@ -662,19 +662,19 @@ impl webhook_worker::HttpsTransport for RecordingHttpsTransport {
 }
 #[test]
 fn https_connector_hands_pinned_address_to_transport_and_does_not_follow_redirect() {
-    use webhook_worker::DeliveryConnector;
-    let endpoint = webhook_worker::validate_endpoint(
+    use mcpmem_webhook::DeliveryConnector;
+    let endpoint = mcpmem_webhook::validate_endpoint(
         "https://hooks.example.test/path",
         &allowlist(),
         &resolver(),
     )
     .unwrap();
     let transport = RecordingHttpsTransport::default();
-    let connector = webhook_worker::HttpsConnector(transport);
+    let connector = mcpmem_webhook::HttpsConnector(transport);
     let response = connector
         .send(
             &endpoint,
-            webhook_worker::SignedRequest {
+            mcpmem_webhook::SignedRequest {
                 body: b"x".to_vec(),
                 event_id: uuid::Uuid::new_v4().to_string(),
                 timestamp_us: 1,
@@ -690,15 +690,15 @@ fn https_connector_hands_pinned_address_to_transport_and_does_not_follow_redirec
 
 #[test]
 fn production_reqwest_plan_pins_dns_disables_redirects_and_sets_headers() {
-    let endpoint = webhook_worker::validate_endpoint(
+    let endpoint = mcpmem_webhook::validate_endpoint(
         "https://hooks.example.test/path",
         &allowlist(),
         &resolver(),
     )
     .unwrap();
-    let plan = webhook_worker::request_plan(
+    let plan = mcpmem_webhook::request_plan(
         &endpoint,
-        &webhook_worker::SignedRequest {
+        &mcpmem_webhook::SignedRequest {
             body: vec![],
             event_id: "event-1".into(),
             timestamp_us: 42,
@@ -716,7 +716,7 @@ fn production_reqwest_plan_pins_dns_disables_redirects_and_sets_headers() {
 
 #[test]
 fn lease_reclaim_fences_stale_completion_for_webhook_delivery() {
-    use memory_core::events::EventRepository;
+    use mcpmem_core::events::EventRepository;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let graph = graph(&path);

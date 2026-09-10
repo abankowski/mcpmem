@@ -4,7 +4,7 @@ use crate::runtime::RoleSet;
 use crate::tools::ToolCategory;
 use std::sync::Arc;
 
-pub use memory_core::storage::{Durability, SqliteTuning};
+pub use mcpmem_core::storage::{Durability, SqliteTuning};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -55,7 +55,7 @@ pub struct Config {
     pub enabled_categories: Vec<ToolCategory>,
     /// Runtime roles selected for this process. Defaults to the existing MCP server.
     pub roles: RoleSet,
-    /// MCP-only string observation adapter; deprecated and removed in 7.0.0.
+    /// MCP-only string observation adapter; deprecated and removed in 2.0.0.
     pub legacy_observations: bool,
 }
 

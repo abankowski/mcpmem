@@ -3,10 +3,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use indexer_worker::{
+use mcpmem_core::jobs::{DistanceMetric, IndexProfile, Normalization};
+use mcpmem_indexer::{
     BedrockEmbeddingProvider, BedrockTransport, CanonicalDocument, EmbeddingProvider, ProviderError,
 };
-use memory_core::jobs::{DistanceMetric, IndexProfile, Normalization};
 use uuid::Uuid;
 
 #[derive(Clone)]

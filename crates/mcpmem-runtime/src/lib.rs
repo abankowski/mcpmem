@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use memory_core::LifecycleState;
+use mcpmem_core::LifecycleState;
 use thiserror::Error;
 use tokio::task::{JoinError, JoinSet};
 

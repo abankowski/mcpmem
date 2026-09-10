@@ -15,7 +15,7 @@ use crate::errors::{MCSError, Result};
 use crate::ivf::{IvfFlatIndex, Metric as IvfMetric};
 use crate::kg::push_json_str;
 use crate::turboquant::TurboQuantIndex;
-use memory_core::jobs::{
+use mcpmem_core::jobs::{
     AnnGenerationRepository, DistanceMetric, IndexProfileRegistry, StoreState,
 };
 
@@ -1309,7 +1309,7 @@ mod tests {
     }
 
     fn renamed_vector_fixture() -> (TestEnv, EntityId) {
-        use memory_core::mutation::{MutationContext, MutationRequest, MutationService};
+        use mcpmem_core::mutation::{MutationContext, MutationRequest, MutationService};
 
         let env = setup(4);
         create_test_entity(&env.kg, "before", "person");
@@ -1510,7 +1510,7 @@ mod tests {
 
     #[test]
     fn direct_writes_are_rejected_while_a_profile_rebuilds() {
-        use memory_core::jobs::{
+        use mcpmem_core::jobs::{
             DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization,
         };
         use uuid::Uuid;

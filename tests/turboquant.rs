@@ -6,8 +6,8 @@
 //! still leave slack over the pure theory because the coordinate distribution
 //! after the Hadamard rotation is only asymptotically Gaussian.
 
-use mcp_memory::ivf::Metric;
-use mcp_memory::turboquant::{
+use mcpmem::ivf::Metric;
+use mcpmem::turboquant::{
     TurboQuantIndex, TurboQuantMse, TurboQuantProd, gaussian_quantizer_mse, lloyd_max_gaussian,
 };
 

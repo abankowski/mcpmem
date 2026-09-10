@@ -1,5 +1,5 @@
 use crate::{CanonicalDocument, EmbeddingProvider, ProviderError};
-use memory_core::jobs::IndexProfile;
+use mcpmem_core::jobs::IndexProfile;
 use std::time::Duration;
 
 pub struct OpenAiCompatibleProvider {

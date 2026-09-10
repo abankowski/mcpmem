@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use memory_core::relation_integrity::{audit, repair};
+use mcpmem_core::relation_integrity::{audit, repair};
 
 #[derive(Parser)]
-#[command(name = "mcp-memory-maintenance")]
-#[command(about = "Offline maintenance for an mcp-memory SQLite database")]
+#[command(name = "mcpmem-maintenance")]
+#[command(about = "Offline maintenance for an mcpmem SQLite database")]
 struct Args {
     #[command(subcommand)]
     command: Command,

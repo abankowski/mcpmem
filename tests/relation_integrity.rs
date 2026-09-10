@@ -2,10 +2,10 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use memory_core::graph::GraphHandle;
-use memory_core::relation_integrity::{audit, repair};
-use memory_core::schema::initialize_database;
-use memory_core::storage::{Durability, SqliteTuning};
+use mcpmem_core::graph::GraphHandle;
+use mcpmem_core::relation_integrity::{audit, repair};
+use mcpmem_core::schema::initialize_database;
+use mcpmem_core::storage::{Durability, SqliteTuning};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
@@ -35,9 +35,9 @@ fn legacy_fixture(path: &Path) -> Connection {
 }
 
 fn cli(args: &[&str], database: &Path) -> Output {
-    let binary = option_env!("CARGO_BIN_EXE_mcp-memory-maintenance")
+    let binary = option_env!("CARGO_BIN_EXE_mcpmem-maintenance")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/debug/mcp-memory-maintenance"));
+        .unwrap_or_else(|| PathBuf::from("target/debug/mcpmem-maintenance"));
     Command::new(binary)
         .args(args)
         .arg("--database")

@@ -1,10 +1,10 @@
-use memory_core::graph::GraphHandle;
-use memory_core::mutation::{
+use mcpmem_core::graph::GraphHandle;
+use mcpmem_core::mutation::{
     ChangeOperation, MutationContext, MutationRequest, MutationService, ObservationUpdate,
 };
-use memory_core::storage::{Durability, SqliteTuning};
-use memory_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
-use memory_core::types::{EntityInput as Entity, Relation};
+use mcpmem_core::storage::{Durability, SqliteTuning};
+use mcpmem_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
+use mcpmem_core::types::{EntityInput as Entity, Relation};
 use rusqlite::Connection;
 use std::{collections::BTreeSet, num::NonZeroUsize, path::Path};
 
@@ -193,13 +193,13 @@ fn initializer_preserves_legacy_graph_without_migration_ledger() {
     ).unwrap();
     conn.execute(
         "INSERT INTO entity VALUES(7,?1,'legacy',1,1,0,0,11,11,0)",
-        [memory_core::graph::name_hash("legacy")],
+        [mcpmem_core::graph::name_hash("legacy")],
     )
     .unwrap();
     assert_eq!(count(&conn, "entity"), 1);
     assert_eq!(count(&conn, "observation"), 1);
-    memory_core::schema::initialize_database(&conn).unwrap();
-    memory_core::schema::initialize_database(&conn).unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
     let graph = graph(&path);
     assert_original_entity(&graph, "legacy");
     graph.create_entities(&[entity("new")]).unwrap();
@@ -231,7 +231,7 @@ fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_t
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA cache_size=-321; PRAGMA foreign_keys=ON;")
         .unwrap();
-    memory_core::schema::initialize_database(&conn).unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
     let before: Vec<(i64, String, i64)> = conn
         .prepare("SELECT version,checksum,applied_at_us FROM schema_migration ORDER BY version")
         .unwrap()
@@ -248,7 +248,7 @@ fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_t
         before[1].1,
         "2c267315d89203d5223895a845b275d8add904310d2c0a5a7a5b0d1873b984ec"
     );
-    memory_core::schema::initialize_database(&conn).unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
     let after: Vec<(i64, String, i64)> = conn
         .prepare("SELECT version,checksum,applied_at_us FROM schema_migration ORDER BY version")
         .unwrap()
@@ -275,18 +275,18 @@ fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_t
 #[test]
 fn indexer_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
     struct UnusedProvider;
-    impl indexer_worker::EmbeddingProvider for UnusedProvider {
+    impl mcpmem_indexer::EmbeddingProvider for UnusedProvider {
         fn embed(
             &self,
-            _: &memory_core::jobs::IndexProfile,
-            _: &[indexer_worker::CanonicalDocument],
-        ) -> Result<Vec<Vec<f32>>, indexer_worker::ProviderError> {
+            _: &mcpmem_core::jobs::IndexProfile,
+            _: &[mcpmem_indexer::CanonicalDocument],
+        ) -> Result<Vec<Vec<f32>>, mcpmem_indexer::ProviderError> {
             panic!("empty queue must not call provider")
         }
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("worker.db");
-    let worker = indexer_worker::IndexerWorker::new(
+    let worker = mcpmem_indexer::IndexerWorker::new(
         &path,
         UnusedProvider,
         std::time::Duration::from_secs(5),
@@ -423,7 +423,7 @@ fn separately_opened_writers_do_not_reuse_entity_ids_or_lose_events() {
 
 #[test]
 fn delivery_recovery_fences_expired_tokens_and_serializes_each_subscription() {
-    use memory_core::events::EventRepository;
+    use mcpmem_core::events::EventRepository;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let graph = graph(&path);
@@ -458,7 +458,7 @@ fn delivery_recovery_fences_expired_tokens_and_serializes_each_subscription() {
 
 #[test]
 fn raw_request_idempotency_replays_original_result_and_rejects_changed_bytes() {
-    use memory_core::events::request_fingerprint;
+    use mcpmem_core::events::request_fingerprint;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let graph = graph(&path);
@@ -491,8 +491,8 @@ fn raw_request_idempotency_replays_original_result_and_rejects_changed_bytes() {
     assert_eq!(count(&Connection::open(path).unwrap(), "change_event"), 2);
 }
 
-fn profile() -> memory_core::jobs::IndexProfile {
-    use memory_core::jobs::{DistanceMetric, IndexProfile, Normalization};
+fn profile() -> mcpmem_core::jobs::IndexProfile {
+    use mcpmem_core::jobs::{DistanceMetric, IndexProfile, Normalization};
     IndexProfile {
         id: uuid::Uuid::new_v4(),
         store_key: "default".into(),
@@ -508,7 +508,7 @@ fn profile() -> memory_core::jobs::IndexProfile {
 
 #[test]
 fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
-    use memory_core::jobs::{
+    use mcpmem_core::jobs::{
         AnnGenerationRepository, IndexJobRepository, IndexProfileRegistry, StoreState,
     };
     let dir = tempfile::tempdir().unwrap();
@@ -585,7 +585,7 @@ fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
 
 #[test]
 fn empty_candidate_still_requires_an_explicit_reader_publication() {
-    use memory_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
+    use mcpmem_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let _graph = graph(&path);
@@ -730,7 +730,7 @@ fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
     assert_eq!(change.new_name.as_deref(), Some("new"));
     assert!(change.relation_delta.is_none());
     assert_eq!(count(&conn, "change_event"), before_events + 1);
-    let durable_events: Vec<memory_core::events::ChangeEvent> = conn
+    let durable_events: Vec<mcpmem_core::events::ChangeEvent> = conn
         .prepare("SELECT payload FROM change_event WHERE transaction_id=?1")
         .unwrap()
         .query_map([committed.transaction_id.to_string()], |row| {
@@ -802,7 +802,7 @@ fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
 
 #[test]
 fn worker_retries_renewal_validation_and_restart_keep_durable_fences() {
-    use memory_core::jobs::{
+    use mcpmem_core::jobs::{
         AnnGenerationRepository, IndexJobRepository, IndexProfileRegistry, Normalization,
     };
     let dir = tempfile::tempdir().unwrap();

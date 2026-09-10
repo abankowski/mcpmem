@@ -1,8 +1,10 @@
 [package]
-name = "memory-core"
-version = "0.1.0"
+name = "mcpmem-core"
+version = "1.0.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "Transactional SQLite knowledge-graph core for the mcpmem MCP server: entities, relations, observations, FTS5 projections and a durable event outbox."
+repository = "https://github.com/abankowski/mcp-memory"
 
 [dependencies]
 parking_lot = "0.12"

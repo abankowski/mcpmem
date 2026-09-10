@@ -1,9 +1,9 @@
-use mcp_memory::actions::memory::handle_create_entities;
-use mcp_memory::config::{Durability, SqliteTuning};
-use mcp_memory::kg::GraphHandle;
-use mcp_memory::types::{EntityInput, ObservationInput};
-use memory_core::events::{ChangeEvent, EventRepository};
-use memory_core::mutation::{MutationContext, MutationOutcome, MutationRequest, MutationService};
+use mcpmem::actions::memory::handle_create_entities;
+use mcpmem::config::{Durability, SqliteTuning};
+use mcpmem::kg::GraphHandle;
+use mcpmem::types::{EntityInput, ObservationInput};
+use mcpmem_core::events::{ChangeEvent, EventRepository};
+use mcpmem_core::mutation::{MutationContext, MutationOutcome, MutationRequest, MutationService};
 use rusqlite::Connection;
 use serde_json::json;
 use std::num::NonZeroUsize;
@@ -167,7 +167,7 @@ fn observation_metadata_legacy_rows_keep_real_creation_time() {
     let path = dir.path().join("memory.db");
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch("CREATE TABLE observation(id INTEGER PRIMARY KEY,entity_id INTEGER NOT NULL,idx INTEGER NOT NULL,body TEXT NOT NULL,created_us INTEGER NOT NULL) STRICT; INSERT INTO observation VALUES(1,9,0,'old',123);").unwrap();
-    memory_core::schema::initialize_database(&conn).unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
     let row: (i64,Option<i64>,Option<String>,Option<i64>) = conn.query_row("SELECT created_us,origin_entity_id,origin_entity_name,occurred_us FROM observation WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
     assert_eq!(row, (123, None, None, None));
 }

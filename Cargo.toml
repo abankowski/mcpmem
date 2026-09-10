@@ -1,15 +1,15 @@
 [workspace]
-members = [".", "crates/memory-core", "crates/memory-runtime", "crates/indexer-worker", "crates/webhook-worker"]
+members = [".", "crates/mcpmem-core", "crates/mcpmem-runtime", "crates/mcpmem-indexer", "crates/mcpmem-webhook"]
 resolver = "3"
 
 [package]
-name = "mcp-memory"
-version = "6.0.0"
+name = "mcpmem"
+version = "1.0.0"
 edition = "2024"
-authors = ["Piyush"]
+authors = ["Artur Bańkowski", "Piyush <original mcp-memory author>"]
 description = "MCP server giving LLM agents persistent memory: a SQLite knowledge graph with FTS5 search, tree-sitter code indexing (10 languages) with semantic code search, and optional vector + hybrid search (usearch HNSW or IVF-Flat) with batch upsert, more-like-this, recommendations, and MMR diversification"
 license = "Apache-2.0"
-repository = "https://github.com/corporatepiyush/mcp-memory"
+repository = "https://github.com/abankowski/mcp-memory"
 readme = "README.md"
 keywords = ["mcp", "knowledge-graph", "memory", "llm", "agent"]
 categories = ["command-line-utilities"]
@@ -43,10 +43,10 @@ dashmap = "6"
 petgraph = "0.7"
 usearch = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
-memory-core = { path = "crates/memory-core" }
-memory-runtime = { path = "crates/memory-runtime" }
-indexer-worker = { path = "crates/indexer-worker", optional = true }
-webhook-worker = { path = "crates/webhook-worker", optional = true }
+mcpmem-core = { path = "crates/mcpmem-core", version = "1.0.0" }
+mcpmem-runtime = { path = "crates/mcpmem-runtime", version = "1.0.0" }
+mcpmem-indexer = { path = "crates/mcpmem-indexer", version = "1.0.0", optional = true }
+mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.0", optional = true }
 uuid = { version = "1" }
 
 # --- Code-symbol indexing (feature = "code") ---------------------------------
@@ -72,9 +72,9 @@ notify = { version = "8", optional = true }
 
 [features]
 default = ["code"]
-indexer = ["memory-runtime/indexer", "dep:indexer-worker"]
-webhooks = ["memory-runtime/webhooks", "dep:webhook-worker"]
-bedrock = ["indexer", "indexer-worker/bedrock"]
+indexer = ["mcpmem-runtime/indexer", "dep:mcpmem-indexer"]
+webhooks = ["mcpmem-runtime/webhooks", "dep:mcpmem-webhook"]
+bedrock = ["indexer", "mcpmem-indexer/bedrock"]
 # Tree-sitter code-symbol indexing: the `code_*` MCP tools + indexer.
 code = [
     "dep:tree-sitter",
@@ -99,10 +99,10 @@ hmac = "0.12"
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1.41", features = ["process"] }
-webhook-worker = { path = "crates/webhook-worker" }
+mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.0" }
 
 [[bin]]
-name = "mcp-memory"
+name = "mcpmem"
 path = "src/main.rs"
 
 [[bin]]
@@ -110,7 +110,7 @@ name = "bench"
 path = "src/bin/bench.rs"
 
 [[bin]]
-name = "mcp-memory-maintenance"
+name = "mcpmem-maintenance"
 path = "src/bin/maintenance.rs"
 
 # Tests validate statistical distortion bounds with numeric hot loops

@@ -1,6 +1,6 @@
 "use strict";
 /*
- * mcp-memory knowledge-graph viewer.
+ * mcpmem knowledge-graph viewer.
  *
  * A dependency-free, Neo4j-Browser-style graph explorer rendered on a <canvas>:
  * force-directed layout, captioned circular nodes coloured by entity type,
