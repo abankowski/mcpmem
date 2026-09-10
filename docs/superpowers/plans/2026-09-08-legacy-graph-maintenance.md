@@ -250,7 +250,7 @@ pull request; the merge decision belongs to the repository owner.
 **Files:**
 - Modify: `Cargo.toml` (release the approved breaking contract as `1.0.0`)
 - Modify: `Cargo.lock` (update the root package version)
-- Create: `migrations/0003_observation_metadata.sql`
+- Create: `crates/mcpmem-core/migrations/0003_observation_metadata.sql`
 - Modify: `crates/mcpmem-core/src/events.rs`
 - Modify: `crates/mcpmem-core/src/types.rs`
 - Modify: `crates/mcpmem-core/src/mutation.rs`
@@ -299,7 +299,7 @@ duplicate and is deliberately outside this task.
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo test --workspace --all-targets --all-features -- --test-threads=1
-  git add Cargo.toml Cargo.lock migrations/0003_observation_metadata.sql crates/mcpmem-core/src/events.rs crates/mcpmem-core/src/types.rs crates/mcpmem-core/src/mutation.rs crates/mcpmem-core/src/graph.rs src/actions/memory.rs src/actions/code.rs src/config.rs src/lib.rs src/server.rs src/bin/bench.rs src/ui/graph.js tools.json tests/mutation_service.rs tests/e2e.rs tests/event_outbox.rs
+  git add Cargo.toml Cargo.lock crates/mcpmem-core/migrations/0003_observation_metadata.sql crates/mcpmem-core/src/events.rs crates/mcpmem-core/src/types.rs crates/mcpmem-core/src/mutation.rs crates/mcpmem-core/src/graph.rs src/actions/memory.rs src/actions/code.rs src/config.rs src/lib.rs src/server.rs src/bin/bench.rs src/ui/graph.js tools.json tests/mutation_service.rs tests/e2e.rs tests/event_outbox.rs
   git commit -m "feat: preserve observation provenance and fact time"
   ```
 

@@ -50,7 +50,7 @@ The MCP schema nevertheless says existing entities “keep their type” and `en
 
 **Evidence.** Storage has a non-null creation timestamp: `observation.created_us` is declared in the primary schema (`crates/mcpmem-core/src/graph.rs:455-464`) and insertion supplies `now_us()` (`crates/mcpmem-core/src/mutation.rs:516-538`). This was already present in legacy commit `d6fe34b`.
 
-The read model selects only `body` (`crates/mcpmem-core/src/mutation.rs:309-329`) and serializes observations as `Vec<String>` (`crates/mcpmem-core/src/types.rs:3-10`). `describe_entity` returns that same model. The new event log's `occurred_at_us` timestamps mutations, not individual observations (`crates/mcpmem-core/src/events.rs:100-142`; `migrations/0001_change_events.sql:6-14`).
+The read model selects only `body` (`crates/mcpmem-core/src/mutation.rs:309-329`) and serializes observations as `Vec<String>` (`crates/mcpmem-core/src/types.rs:3-10`). `describe_entity` returns that same model. The new event log's `occurred_at_us` timestamps mutations, not individual observations (`crates/mcpmem-core/src/events.rs:100-142`; `crates/mcpmem-core/migrations/0001_change_events.sql:6-14`).
 
 **Impact.** Callers cannot export, filter or sort observations by recorded time, or distinguish server-recorded time from fact time. Existing `created_us` is operational metadata only.
 

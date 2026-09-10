@@ -41,7 +41,7 @@ Schemat nie wymusza tej własności: `relation` ma zwykłe indeksy, bez `UNIQUE`
 
 ## 5. Pochodzenie obserwacji
 
-**Odziedziczone.** `observation` przechowuje tylko `entity_id`, `idx`, `body`, `created_us` ([graph.rs](../../crates/mcpmem-core/src/graph.rs:455)); merge kopiuje same teksty do target ([mutation.rs](../../crates/mcpmem-core/src/mutation.rs:693)). `change_event` ma payload zmiany, nie `source_entity` per obserwacja ([0001_change_events.sql](../../migrations/0001_change_events.sql:6)).
+**Odziedziczone.** `observation` przechowuje tylko `entity_id`, `idx`, `body`, `created_us` ([graph.rs](../../crates/mcpmem-core/src/graph.rs:455)); merge kopiuje same teksty do target ([mutation.rs](../../crates/mcpmem-core/src/mutation.rs:693)). `change_event` ma payload zmiany, nie `source_entity` per obserwacja ([0001_change_events.sql](../../crates/mcpmem-core/migrations/0001_change_events.sql:6)).
 
 **Rekomendacja/test:** wymagająca decyzji migracja: `source_entity_id` albo immutable observation IDs z tabelą provenance, nie string w `body`. Po decyzji merge i drugi merge muszą zachować original source każdej obserwacji.
 
@@ -53,7 +53,7 @@ Schemat nie wymusza tej własności: `relation` ma zwykłe indeksy, bez `UNIQUE`
 
 ## 7. Czas obserwacji
 
-**Częściowo naprawione.** `created_us` istnieje w schemacie i jest ustawiane przez serwer ([graph.rs](../../crates/mcpmem-core/src/graph.rs:455), [mutation.rs](../../crates/mcpmem-core/src/mutation.rs:516)). Nie jest częścią odpowiedzi `Entity`, nie ma `occurred_at`, a `change_event.occurred_at_us` dotyczy mutacji, nie faktu ([0001_change_events.sql](../../migrations/0001_change_events.sql:6)).
+**Częściowo naprawione.** `created_us` istnieje w schemacie i jest ustawiane przez serwer ([graph.rs](../../crates/mcpmem-core/src/graph.rs:455), [mutation.rs](../../crates/mcpmem-core/src/mutation.rs:516)). Nie jest częścią odpowiedzi `Entity`, nie ma `occurred_at`, a `change_event.occurred_at_us` dotyczy mutacji, nie faktu ([0001_change_events.sql](../../crates/mcpmem-core/migrations/0001_change_events.sql:6)).
 
 **Rekomendacja/test:** wersjonowany obiekt obserwacji: `body`, server-owned `createdAt`, opcjonalne `occurredAt`, z migracją `NULL occurredAt`. Serwer ignoruje klientowski `createdAt`, zachowuje `occurredAt`, eksport sortuje stabilnie po `createdAt,id`.
 

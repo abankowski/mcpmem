@@ -493,7 +493,9 @@ fn migration_from_a_real_0001_database_applies_remaining_migrations() {
     let path = dir.path().join("legacy.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch("CREATE TABLE schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;").unwrap();
-    let sql = include_str!("../migrations/0001_change_events.sql");
+    // Not `include_str!`: the migration files belong to mcpmem-core, and
+    // `cargo package` copies only the files under one crate root.
+    let sql = mcpmem_core::events::MIGRATIONS[0].1;
     conn.execute_batch(sql).unwrap();
     conn.execute(
         "INSERT INTO schema_migration VALUES(1,?1,1)",
