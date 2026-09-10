@@ -108,9 +108,7 @@ struct MetadataDocument {
 pub fn register(store: &Store, body: &Value, now_us: i64) -> Result<Value, RegistrationError> {
     let request = RegistrationRequest::deserialize(body)
         .map_err(|_| RegistrationError::InvalidClientMetadata)?;
-    if request.redirect_uris.is_empty()
-        || !within_bounds(&request.client_name, &request.redirect_uris)
-    {
+    if request.redirect_uris.is_empty() {
         return Err(RegistrationError::InvalidClientMetadata);
     }
     check_redirect_uris(&request.redirect_uris)?;
@@ -123,6 +121,9 @@ pub fn register(store: &Store, body: &Value, now_us: i64) -> Result<Value, Regis
         created_us: now_us,
         last_used_us: now_us,
     };
+    if !within_bounds(&record) {
+        return Err(RegistrationError::InvalidClientMetadata);
+    }
     store.put_client(&record)?;
 
     Ok(json!({
@@ -179,22 +180,23 @@ pub fn resolve_metadata_document(
     if document.client_id != url {
         return Err(RegistrationError::MetadataMismatch);
     }
-    if document.client_name.is_empty()
-        || document.redirect_uris.is_empty()
-        || !within_bounds(&document.client_name, &document.redirect_uris)
-    {
+    if document.client_name.is_empty() || document.redirect_uris.is_empty() {
         return Err(RegistrationError::MalformedDocument);
     }
     check_redirect_uris(&document.redirect_uris)?;
 
-    Ok(ClientRecord {
+    let record = ClientRecord {
         client_id: document.client_id,
         client_name: document.client_name,
         redirect_uris: document.redirect_uris,
         source: ClientRecord::CIMD.to_string(),
         created_us: now_us,
         last_used_us: now_us,
-    })
+    };
+    if !within_bounds(&record) {
+        return Err(RegistrationError::MalformedDocument);
+    }
+    Ok(record)
 }
 
 /// Every entry, not just the first: one plain-http entry in a list is the whole
@@ -237,10 +239,19 @@ fn is_acceptable_redirect_uri(uri: &str) -> bool {
 const MAX_CLIENT_NAME_BYTES: usize = 256;
 /// The most redirect URIs one client may register.
 const MAX_REDIRECT_URIS: usize = 8;
-/// The longest redirect URI this server stores, in bytes.
-const MAX_REDIRECT_URI_BYTES: usize = 2048;
+/// The longest URL this server stores, in bytes: the conventional practical
+/// URL limit. Every URL in a client record is bounded by it — each redirect
+/// URI, and the `client_id` itself, which on the metadata-document path is the
+/// document URL. One number, because one reason.
+const MAX_URL_BYTES: usize = 2048;
 
-/// Whether the client-supplied metadata fits in one reasonable row.
+/// Whether one client record fits in one reasonable row.
+///
+/// The argument is the record, not the fields, and that is the point: every
+/// text a client chose is bounded here, and no call site can bound two of the
+/// three and forget the third. `client_id` is server-issued on the
+/// registration path and client-chosen on the metadata-document path, where it
+/// is the document URL.
 ///
 /// Registration is unauthenticated and nothing evicts a client, so the size of
 /// one row is a cost a stranger chooses. The only cap above this point is the
@@ -251,12 +262,14 @@ const MAX_REDIRECT_URI_BYTES: usize = 2048;
 ///
 /// The caps are byte counts, not character counts: bytes are what the database
 /// stores, and a multi-byte name is not entitled to more of them.
-fn within_bounds(client_name: &str, redirect_uris: &[String]) -> bool {
-    client_name.len() <= MAX_CLIENT_NAME_BYTES
-        && redirect_uris.len() <= MAX_REDIRECT_URIS
-        && redirect_uris
+fn within_bounds(record: &ClientRecord) -> bool {
+    record.client_id.len() <= MAX_URL_BYTES
+        && record.client_name.len() <= MAX_CLIENT_NAME_BYTES
+        && record.redirect_uris.len() <= MAX_REDIRECT_URIS
+        && record
+            .redirect_uris
             .iter()
-            .all(|uri| uri.len() <= MAX_REDIRECT_URI_BYTES)
+            .all(|uri| uri.len() <= MAX_URL_BYTES)
 }
 
 /// The host of `url` when it uses `scheme`, or `None`.

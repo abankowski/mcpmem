@@ -455,6 +455,28 @@ fn a_metadata_document_outside_the_caps_is_refused() {
     }
 }
 
+/// The third client-chosen text field of the row is the identifier itself,
+/// which on this path is the document URL. The URL cap therefore has to reach
+/// it: an uncapped `client_id` leaves the row unbounded however tight the
+/// other two caps are. Both directions, because a cap that refuses its own
+/// boundary is as wrong as no cap.
+#[test]
+fn a_metadata_document_client_id_is_capped_at_the_url_length() {
+    for (bytes, accepted) in [(2048_usize, true), (2049, false)] {
+        let url = long_uri(bytes);
+        let doc = format!(
+            r#"{{"client_id":"{url}","client_name":"Claude",
+                 "redirect_uris":["https://claude.ai/cb"]}}"#
+        );
+        let outcome = resolve_metadata_document(&url, &allowed(), &StubFetch(doc), NOW_US);
+        match (accepted, outcome) {
+            (true, Ok(record)) => assert_eq!(record.client_id, url),
+            (false, Err(RegistrationError::MalformedDocument)) => {}
+            (_, other) => panic!("a client_id of {bytes} bytes gave {other:?}"),
+        }
+    }
+}
+
 /// One redirect-URI rule, whatever the metadata came from.
 #[test]
 fn a_metadata_document_with_a_fragment_in_a_redirect_uri_is_refused() {
