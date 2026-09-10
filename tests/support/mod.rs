@@ -8,9 +8,11 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
 use axum::Router;
-use axum::http::Response;
+use axum::body::Body;
+use axum::http::{Request, Response};
 use http_body_util::BodyExt;
 use mcpmem::config::OAuthConfig;
 use mcpmem::http::{HttpState, TestSetup};
@@ -109,17 +111,19 @@ impl Scopes {
 /// A router, the state behind it, the database directory, and the guard on the
 /// process-wide tool-category flags.
 ///
-/// Hold this struct for the whole test. Dropping it removes the database and
-/// releases the flags for the next test, so a router used after its `Server` is
-/// gone reads flags another test has since republished.
+/// Every field is private, and no accessor hands out anything that outlives the
+/// struct. That is deliberate: a router used after its `Server` is gone would
+/// hold an unlinked database directory and a released category guard, and
+/// `let app = oauth_server().await.router;` is one token away from the call
+/// shape the first draft of these tests used. Requests therefore go through
+/// [`Server::request`], which borrows for the length of the call.
 ///
-/// One `Server` at a time per test: the guard is a plain mutex, so a test that
-/// builds a second one while holding the first waits forever.
+/// Hold the `Server` for the whole test. One at a time: see [`server`].
 pub struct Server {
-    pub router: Router,
-    pub state: HttpState,
+    router: Router,
+    state: HttpState,
     /// `Some` when the server was built with an injected clock.
-    pub clock: Option<Clock>,
+    clock: Option<Clock>,
     dir: TempDir,
     /// Building a server publishes `GRAPH_READ_ENABLED` and
     /// `GRAPH_WRITE_ENABLED` (`src/server.rs`), which are process-wide. Holding
@@ -129,6 +133,24 @@ pub struct Server {
 }
 
 impl Server {
+    /// Send one request through the router and return the response.
+    ///
+    /// The router is cloned per call, as `oneshot` consumes it, and the clone
+    /// never leaves this borrow.
+    pub async fn request(&self, req: Request<Body>) -> Response<Body> {
+        use tower::ServiceExt;
+        self.router
+            .clone()
+            .oneshot(req)
+            .await
+            .expect("the router answers every request")
+    }
+
+    /// The state the router was built from.
+    pub const fn state(&self) -> &HttpState {
+        &self.state
+    }
+
     /// The OAuth state, for a test that inspects the store or the clock.
     pub const fn oauth(&self) -> &Arc<OauthState> {
         self.state.oauth().expect("this server has OAuth on")
@@ -147,11 +169,39 @@ impl Server {
     }
 }
 
+/// How long a server waits for the category guard before it calls the wait a
+/// deadlock. Generous, because every server in a test binary queues on this one
+/// guard: the bound has to exceed the whole binary's hold time, not one test's.
+pub const GUARD_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Build a server over a fresh temporary database. `clock` replaces the wall
 /// clock when given.
 pub async fn server(oauth: Option<OAuthConfig>, scopes: Scopes, clock: Option<Clock>) -> Server {
+    server_within(GUARD_TIMEOUT, oauth, scopes, clock).await
+}
+
+/// [`server`], with the guard deadline named. Only the test that proves the
+/// deadline fires passes anything but [`GUARD_TIMEOUT`]: a short deadline turns
+/// ordinary queueing into a failure.
+pub async fn server_within(
+    guard_timeout: Duration,
+    oauth: Option<OAuthConfig>,
+    scopes: Scopes,
+    clock: Option<Clock>,
+) -> Server {
     static CATEGORY_FLAGS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let categories = CATEGORY_FLAGS.lock().await;
+    // A hang here is the worst failure the harness can report: no panic, no
+    // message, no test name, and under `--test-threads=1` a stalled binary. The
+    // deadline turns it into a named panic.
+    let Ok(categories) = tokio::time::timeout(guard_timeout, CATEGORY_FLAGS.lock()).await else {
+        panic!(
+            "one Server at a time: waited {:?} for the tool-category guard. \
+             The guard is not reentrant, so a test holding two Server values \
+             waits forever. Drop the first before you build the second, or \
+             split the test in two.",
+            guard_timeout
+        );
+    };
 
     let dir = tempfile::tempdir().unwrap();
     let state = HttpState::for_test(TestSetup {

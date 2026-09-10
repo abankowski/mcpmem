@@ -99,7 +99,9 @@ code = [
 hmac = "0.12"
 sha2 = "0.10"
 tempfile = "3"
-tokio = { version = "1.41", features = ["process"] }
+# `time` for the fixture's guard deadline (`tokio::time::timeout`); the library
+# gets it through feature unification today, and this states the fact.
+tokio = { version = "1.41", features = ["process", "time"] }
 mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.0-rc.4" }
 # Drive the axum router in-process (`oneshot`) and collect a response body,
 # so the HTTP tests need no socket and no HTTP client.

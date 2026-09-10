@@ -4,7 +4,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
-use tower::ServiceExt;
 
 mod support;
 
@@ -26,7 +25,7 @@ fn get(path: &str) -> Request<Body> {
 #[tokio::test]
 async fn an_unauthenticated_mcp_post_names_the_resource_metadata() {
     let server = support::oauth_server().await;
-    let res = server.router.clone().oneshot(tools_list()).await.unwrap();
+    let res = server.request(tools_list()).await;
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     let header = support::header(&res, "www-authenticate");
     assert_eq!(
@@ -45,7 +44,7 @@ async fn an_unauthenticated_mcp_post_names_the_resource_metadata() {
 #[tokio::test]
 async fn the_challenge_omits_the_scope_parameter_when_no_category_is_enabled() {
     let server = support::oauth_server_without_categories().await;
-    let res = server.router.clone().oneshot(tools_list()).await.unwrap();
+    let res = server.request(tools_list()).await;
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     let header = support::header(&res, "www-authenticate");
     assert_eq!(
@@ -60,13 +59,8 @@ async fn the_challenge_omits_the_scope_parameter_when_no_category_is_enabled() {
 #[tokio::test]
 async fn the_ui_gate_sends_the_same_challenge_as_the_mcp_endpoint() {
     let server = support::oauth_server().await;
-    let mcp = server.router.clone().oneshot(tools_list()).await.unwrap();
-    let ui = server
-        .router
-        .clone()
-        .oneshot(get("/ui/graph"))
-        .await
-        .unwrap();
+    let mcp = server.request(tools_list()).await;
+    let ui = server.request(get("/ui/graph")).await;
     assert_eq!(ui.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         support::header(&ui, "www-authenticate"),
@@ -78,11 +72,8 @@ async fn the_ui_gate_sends_the_same_challenge_as_the_mcp_endpoint() {
 async fn the_protected_resource_document_names_this_server() {
     let server = support::oauth_server().await;
     let res = server
-        .router
-        .clone()
-        .oneshot(get("/.well-known/oauth-protected-resource"))
-        .await
-        .unwrap();
+        .request(get("/.well-known/oauth-protected-resource"))
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = support::json(res).await;
     assert_eq!(
@@ -105,11 +96,8 @@ async fn the_protected_resource_document_names_this_server() {
 async fn the_path_suffixed_document_names_the_resource_the_client_asked_about() {
     let server = support::oauth_server().await;
     let res = server
-        .router
-        .clone()
-        .oneshot(get("/.well-known/oauth-protected-resource/mcp"))
-        .await
-        .unwrap();
+        .request(get("/.well-known/oauth-protected-resource/mcp"))
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = support::json(res).await;
     assert_eq!(body["resource"], format!("{PUBLIC_URL}/mcp"));
@@ -129,7 +117,7 @@ async fn a_suffix_that_is_not_identical_is_not_found() {
         "/.well-known/oauth-protected-resource/somewhere/else",
         "/.well-known/oauth-authorization-server/nope",
     ] {
-        let res = server.router.clone().oneshot(get(path)).await.unwrap();
+        let res = server.request(get(path)).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "path was: {path}");
     }
 }
@@ -138,11 +126,8 @@ async fn a_suffix_that_is_not_identical_is_not_found() {
 async fn the_authorization_server_document_advertises_pkce_and_cimd() {
     let server = support::oauth_server().await;
     let res = server
-        .router
-        .clone()
-        .oneshot(get("/.well-known/oauth-authorization-server"))
-        .await
-        .unwrap();
+        .request(get("/.well-known/oauth-authorization-server"))
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = support::json(res).await;
     assert_eq!(
@@ -175,21 +160,15 @@ async fn a_server_under_a_path_prefix_answers_both_suffixed_paths() {
     let server = support::oauth_server_at(&public_url).await;
 
     let res = server
-        .router
-        .clone()
-        .oneshot(get("/.well-known/oauth-authorization-server/base"))
-        .await
-        .unwrap();
+        .request(get("/.well-known/oauth-authorization-server/base"))
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = support::json(res).await;
     assert_eq!(body["issuer"], public_url);
 
     let res = server
-        .router
-        .clone()
-        .oneshot(get("/.well-known/oauth-protected-resource/base/mcp"))
-        .await
-        .unwrap();
+        .request(get("/.well-known/oauth-protected-resource/base/mcp"))
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = support::json(res).await;
     assert_eq!(body["resource"], format!("{public_url}/mcp"));
@@ -206,7 +185,7 @@ async fn a_prefixed_server_does_not_answer_the_unprefixed_suffix() {
         "/.well-known/oauth-protected-resource/mcp",
         "/.well-known/oauth-authorization-server/base/base",
     ] {
-        let res = server.router.clone().oneshot(get(path)).await.unwrap();
+        let res = server.request(get(path)).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "path was: {path}");
     }
 }
@@ -216,7 +195,7 @@ async fn a_prefixed_server_does_not_answer_the_unprefixed_suffix() {
 #[tokio::test]
 async fn a_server_with_no_auth_configured_stays_open() {
     let server = support::open_server().await;
-    let res = server.router.clone().oneshot(tools_list()).await.unwrap();
+    let res = server.request(tools_list()).await;
     assert_eq!(res.status(), StatusCode::OK);
 }
 
@@ -227,7 +206,7 @@ async fn a_server_with_no_auth_configured_stays_open() {
 #[tokio::test]
 async fn a_test_router_advertises_the_tools_of_its_enabled_categories() {
     let server = support::open_server().await;
-    let res = server.router.clone().oneshot(tools_list()).await.unwrap();
+    let res = server.request(tools_list()).await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = support::json(res).await;
     let names: Vec<&str> = body["result"]["tools"]
@@ -251,7 +230,7 @@ async fn the_discovery_documents_are_absent_when_oauth_is_off() {
         "/.well-known/oauth-authorization-server",
         "/.well-known/oauth-authorization-server/base",
     ] {
-        let res = server.router.clone().oneshot(get(path)).await.unwrap();
+        let res = server.request(get(path)).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "path was: {path}");
     }
 }
@@ -304,25 +283,45 @@ async fn the_injected_clock_is_the_one_the_state_reads_and_it_moves() {
     assert_eq!(server.clock().now_us(), FIXED + 3_600_000_000);
 }
 
-/// A credential may hold fewer scopes than the server enables. Task 8 needs
-/// that shape, so the fixture must build it without being edited.
+/// `Scopes::bearer_holds` must narrow the credential and leave the server's
+/// categories alone. Swap its two fields and the document advertises
+/// `["graph-read"]`, which is the only place that swap is observable: the
+/// bearer list itself is private, and with OAuth on and no static token no
+/// request carries the bearer principal.
 #[tokio::test]
-async fn a_partial_bearer_scope_list_reaches_the_state() {
+async fn bearer_holds_narrows_the_credential_and_not_the_advertised_scopes() {
     use mcpmem::tools::ToolCategory;
     let server = support::oauth_server_with_scopes(support::Scopes::bearer_holds(vec![
         ToolCategory::GraphRead,
     ]))
     .await;
     let res = server
-        .router
-        .clone()
-        .oneshot(get("/.well-known/oauth-protected-resource"))
-        .await
-        .unwrap();
+        .request(get("/.well-known/oauth-protected-resource"))
+        .await;
     let body: serde_json::Value = support::json(res).await;
     assert_eq!(
         body["scopes_supported"],
         json!(["graph-read", "graph-write", "vectors", "code"]),
         "the document advertises the enabled categories, not the credential"
     );
+}
+
+/// One `Server` at a time: the guard on the process-wide category flags is not
+/// reentrant, so a test that holds two waits forever. Without the deadline the
+/// harness reports no panic, no message and no test name, and under
+/// `--test-threads=1` the whole binary stalls.
+///
+/// The deadline is named here so the proof costs a second rather than
+/// [`support::GUARD_TIMEOUT`]. The code path is the one every fixture uses.
+#[tokio::test]
+#[should_panic(expected = "one Server at a time")]
+async fn a_second_server_in_one_test_panics_instead_of_hanging() {
+    let _first = support::oauth_server().await;
+    let _second = support::server_within(
+        std::time::Duration::from_secs(1),
+        None,
+        support::Scopes::all(),
+        None,
+    )
+    .await;
 }
