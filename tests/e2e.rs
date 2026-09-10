@@ -21,6 +21,10 @@ impl Drop for McpClient {
 }
 
 fn spawn_server() -> McpClient {
+    spawn_server_with_legacy_observations(false)
+}
+
+fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient {
     let n = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
     let db_path = format!("/tmp/test_e2e_{n}.db");
     for ext in ["", "-wal", "-shm"] {
@@ -28,9 +32,10 @@ fn spawn_server() -> McpClient {
         let _ = std::fs::remove_file(&p);
     }
 
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
-    let mut child = Command::new(&bin)
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
+    let mut command = Command::new(&bin);
+    command
         .arg("-f")
         .arg(&db_path)
         .arg("--transport")
@@ -38,18 +43,43 @@ fn spawn_server() -> McpClient {
         .arg("--log-level")
         .arg("error")
         .arg("--enable-graph-read")
-        .arg("--enable-graph-write")
+        .arg("--enable-graph-write");
+    if legacy_observations {
+        command.arg("--legacy-observations");
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn mcp-memory");
+        .expect("failed to spawn mcpmem");
     McpClient {
         stdin: child.stdin.take().unwrap(),
         stdout: child.stdout.take().unwrap(),
         child,
         db_path,
     }
+}
+
+const fn observation_write_envelopes() -> [(&'static str, &'static str); 4] {
+    [
+        (
+            "create_entities",
+            "/inputSchema/properties/entities/items/properties/observations/items/type",
+        ),
+        (
+            "upsert_entities",
+            "/inputSchema/properties/entities/items/properties/observations/items/type",
+        ),
+        (
+            "add_observations",
+            "/inputSchema/properties/observations/items/properties/contents/items/type",
+        ),
+        (
+            "delete_observations",
+            "/inputSchema/properties/deletions/items/properties/observations/items/type",
+        ),
+    ]
 }
 
 impl McpClient {
@@ -100,10 +130,17 @@ fn e2e_create_and_read_graph() {
     let text = c.tool_text(
         "create_entities",
         &serde_json::json!({"entities": [
-            {"name": "Ada", "entityType": "person", "observations": ["mathematician"]}
+            {"name": "Ada", "entityType": "person", "observations": [{"body":"mathematician"}]}
         ]}),
     );
     assert!(!text.contains("error"), "create_entities failed: {text}");
+
+    let created: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let observation = &created[0]["observations"][0];
+    assert_eq!(observation["body"], "mathematician");
+    assert!(observation["createdAtUs"].as_i64().is_some());
+    assert!(observation["occurredAtUs"].is_null());
+    assert!(observation["originEntityName"].is_null());
 
     let text = c.tool_text("read_graph", &serde_json::json!({}));
     assert!(text.contains("Ada"), "read_graph missing Ada: {text}");
@@ -119,20 +156,83 @@ fn e2e_create_and_read_graph() {
 }
 
 #[test]
+fn e2e_default_observation_manifest_is_structured_and_rejects_strings() {
+    let mut c = spawn_server();
+    c.send(r#"{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}"#);
+    let listed: serde_json::Value = serde_json::from_str(&c.recv()).unwrap();
+    for (name, pointer) in observation_write_envelopes() {
+        let tool = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"));
+        assert_eq!(
+            tool.pointer(pointer).and_then(serde_json::Value::as_str),
+            Some("object"),
+            "{name} uses the structured observation input"
+        );
+    }
+    let rejected = c.call_tool(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name":"structured-only","entityType":"test","observations":["not accepted"]}
+        ]}),
+    );
+    assert!(rejected["result"]["isError"].as_bool().unwrap_or(false));
+}
+
+#[test]
+fn e2e_legacy_observations_switches_only_the_mcp_boundary() {
+    let mut c = spawn_server_with_legacy_observations(true);
+    c.send(r#"{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}"#);
+    let listed: serde_json::Value = serde_json::from_str(&c.recv()).unwrap();
+    for (name, pointer) in observation_write_envelopes() {
+        let tool = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is listed"));
+        assert_eq!(
+            tool.pointer(pointer).and_then(serde_json::Value::as_str),
+            Some("string"),
+            "{name} uses the legacy observation input"
+        );
+    }
+
+    let created = c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name":"legacy","entityType":"test","observations":["historical string"]}
+        ]}),
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&created).unwrap()[0]["observations"],
+        serde_json::json!(["historical string"])
+    );
+    let read = c.tool_text("get_entity", &serde_json::json!({"name":"legacy"}));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&read).unwrap()["observations"],
+        serde_json::json!(["historical string"])
+    );
+}
+
+#[test]
 fn e2e_add_delete_observations() {
     let mut c = spawn_server();
 
     c.tool_text(
         "create_entities",
         &serde_json::json!({"entities": [
-            {"name": "E", "entityType": "t", "observations": ["a"]}
+            {"name": "E", "entityType": "t", "observations": [{"body":"a"}]}
         ]}),
     );
 
     let text = c.tool_text(
         "add_observations",
         &serde_json::json!({"observations": [
-            {"entityName": "E", "contents": ["b", "c"]}
+            {"entityName": "E", "contents": [{"body":"b"}, {"body":"c"}]}
         ]}),
     );
     assert!(!text.contains("error"), "add_observations failed: {text}");
@@ -145,7 +245,7 @@ fn e2e_add_delete_observations() {
     c.tool_text(
         "delete_observations",
         &serde_json::json!({"deletions": [
-            {"entityName": "E", "observations": ["b"]}
+            {"entityName": "E", "observations": [{"body":"b"}]}
         ]}),
     );
 
@@ -195,8 +295,8 @@ fn e2e_search_filtered() {
     c.tool_text(
         "create_entities",
         &serde_json::json!({"entities": [
-            {"name": "E1", "entityType": "person", "observations": ["math"]},
-            {"name": "E2", "entityType": "place", "observations": ["math"]}
+            {"name": "E1", "entityType": "person", "observations": [{"body":"math"}]},
+            {"name": "E2", "entityType": "place", "observations": [{"body":"math"}]}
         ]}),
     );
 
@@ -221,8 +321,8 @@ fn e2e_delete_and_stats() {
     c.tool_text(
         "create_entities",
         &serde_json::json!({"entities": [
-            {"name": "X", "entityType": "alpha", "observations": ["x-obs"]},
-            {"name": "Y", "entityType": "beta",  "observations": ["y-obs"]},
+            {"name": "X", "entityType": "alpha", "observations": [{"body":"x-obs"}]},
+            {"name": "Y", "entityType": "beta",  "observations": [{"body":"y-obs"}]},
             {"name": "Z", "entityType": "alpha", "observations": []}
         ]}),
     );
@@ -281,22 +381,34 @@ fn e2e_delete_and_stats() {
 fn e2e_upsert_merge_and_wipe() {
     let mut c = spawn_server();
 
+    c.send(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#);
+    let tools = c.recv();
+    assert!(
+        tools.contains(
+            "existing exact-name entities are retyped when `entityType` differs; observations are added only when new."
+        ),
+        "upsert_entities contract is exposed through tools/list: {tools}"
+    );
+
     // Create entities.
     c.tool_text(
         "create_entities",
         &serde_json::json!({"entities": [
-            {"name": "Src", "entityType": "old", "observations": ["a", "b"]},
-            {"name": "Tgt", "entityType": "old", "observations": ["c"]}
+            {"name": "Src", "entityType": "old", "observations": [{"body":"a"}, {"body":"b"}]},
+            {"name": "Tgt", "entityType": "old", "observations": [{"body":"c"}]}
         ]}),
     );
 
     // Upsert — change type and add obs.
-    c.tool_text(
+    let upsert = c.tool_text(
         "upsert_entities",
         &serde_json::json!({"entities": [
-            {"name": "Tgt", "entityType": "new", "observations": ["c", "d"]}
+            {"name": "Tgt", "entityType": "new", "observations": [{"body":"c"}, {"body":"d"}]}
         ]}),
     );
+    assert!(upsert.contains("new"), "upsert retyped Tgt: {upsert}");
+    assert!(upsert.contains("\"c\""), "upsert retained c: {upsert}");
+    assert!(upsert.contains("\"d\""), "upsert added d: {upsert}");
     let open = c.tool_text("open_nodes", &serde_json::json!({"names": ["Tgt"]}));
     assert!(open.contains("new"), "type changed: {open}");
     assert!(open.contains("\"c\""), "c preserved: {open}");
@@ -323,6 +435,50 @@ fn e2e_upsert_merge_and_wipe() {
     let exp = c.tool_text("export_graph", &serde_json::json!({"format": "json"}));
     assert!(exp.contains("Tgt"), "export contains Tgt: {exp}");
     assert!(exp.contains("new"), "export contains new type: {exp}");
+}
+
+#[test]
+fn e2e_rename_entity_is_a_graph_write_tool_with_exact_annotations() {
+    let mut c = spawn_server();
+    c.send(r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#);
+    let list = c.recv();
+    let response: serde_json::Value = serde_json::from_str(&list).unwrap();
+    let tool = response["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "rename_entity")
+        .unwrap_or_else(|| panic!("rename_entity must be exposed by graph-write: {response}"));
+    assert_eq!(
+        tool["annotations"],
+        serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false
+        })
+    );
+
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "Old", "entityType": "note", "observations": [{"body":"kept"}]}
+        ]}),
+    );
+    let renamed = c.tool_text(
+        "rename_entity",
+        &serde_json::json!({"oldName": "Old", "newName": "New"}),
+    );
+    assert!(
+        renamed.contains("\"name\":\"New\""),
+        "new entity result: {renamed}"
+    );
+    let old = c.tool_text("get_entity", &serde_json::json!({"name": "Old"}));
+    assert!(
+        old.contains("not found"),
+        "old name must be unreadable: {old}"
+    );
+    let new = c.tool_text("get_entity", &serde_json::json!({"name": "New"}));
+    assert!(new.contains("kept"), "new entity keeps observations: {new}");
 }
 
 #[test]
@@ -515,8 +671,8 @@ fn e2e_search_edge_cases() {
     assert_eq!(s, "[]", "empty search: {s}");
 
     c.tool_text("create_entities", &serde_json::json!({"entities": [
-        {"name": "Alice", "entityType": "person", "observations": ["likes math"]},
-        {"name": "Bob",   "entityType": "person", "observations": ["likes math", "likes science"]}
+        {"name": "Alice", "entityType": "person", "observations": [{"body":"likes math"}]},
+        {"name": "Bob",   "entityType": "person", "observations": [{"body":"likes math"}, {"body":"likes science"}]}
     ]}));
 
     // Search with filter type.
@@ -589,7 +745,7 @@ fn e2e_pipelined_requests_all_answered_and_correlated() {
     c.tool_text(
         "create_entities",
         &serde_json::json!({"entities": [
-            {"name": "P", "entityType": "t", "observations": ["o"]}
+            {"name": "P", "entityType": "t", "observations": [{"body":"o"}]}
         ]}),
     );
 
@@ -636,8 +792,8 @@ fn e2e_strict_ordering_with_concurrency_one() {
 
     let n = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
     let db_path = format!("/tmp/test_e2e_{n}.db");
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut child = Command::new(&bin)
         .args([
             "-f",

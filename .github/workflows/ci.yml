@@ -17,6 +17,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Workspace versions agree and are valid semver
+        run: scripts/check-release-version.sh
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Lint every feature combination

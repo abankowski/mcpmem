@@ -1,4 +1,4 @@
-//! HTTP-transport tests for `mcp-memory --enable-all`, focused on bearer-token auth.
+//! HTTP-transport tests for `mcpmem --enable-all`, focused on bearer-token auth.
 //!
 //! These are regression tests for the vector server's Streamable-HTTP handler:
 //! when `--auth-token` is configured, every `/mcp` request must carry a matching
@@ -40,8 +40,8 @@ fn spawn_http_server(auth_token: Option<&str>) -> HttpServer {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
 
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
 
     let mut cmd = Command::new(&bin);
     cmd.arg("-f")
@@ -62,7 +62,7 @@ fn spawn_http_server(auth_token: Option<&str>) -> HttpServer {
         cmd.arg("--auth-token").arg(tok);
     }
 
-    let child = cmd.spawn().expect("failed to spawn mcp-memory");
+    let child = cmd.spawn().expect("failed to spawn mcpmem");
 
     // Wait until the server is accepting connections.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -164,7 +164,7 @@ fn test_http_auth_full_tool_flow() {
     let srv = spawn_http_server(Some("s3cret"));
 
     // Create an entity, attach an embedding, then search — all over authed HTTP.
-    let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_entities","arguments":{"entities":[{"name":"alice","entityType":"person","observations":["math"]}]}},"id":2}"#;
+    let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_entities","arguments":{"entities":[{"name":"alice","entityType":"person","observations":[{"body":"math"}]}]}},"id":2}"#;
     let (status, _) = post_mcp(srv.port, create, Some("s3cret"));
     assert_eq!(status, 200, "create_entities over HTTP should succeed");
 

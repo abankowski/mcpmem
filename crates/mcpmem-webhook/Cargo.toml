@@ -1,0 +1,21 @@
+[package]
+name = "mcpmem-webhook"
+version = "1.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Durable webhook delivery worker for the mcpmem MCP server."
+repository = "https://github.com/abankowski/mcpmem"
+
+[dependencies]
+hmac = "0.12"
+mcpmem-core = { path = "../mcpmem-core", version = "1.0.0" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+thiserror = "2"
+url = "2"
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "mcpmem-indexer"
+version = "1.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Durable, provider-neutral embedding indexer worker for the mcpmem MCP server."
+repository = "https://github.com/abankowski/mcpmem"
+
+[dependencies]
+mcpmem-core = { path = "../mcpmem-core", version = "1.0.0" }
+aws-config = { version = "1.12", optional = true }
+aws-sdk-bedrockruntime = { version = "1.143", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "time"] }
+url = "2"
+
+[features]
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
+
+[lints]
+workspace = true

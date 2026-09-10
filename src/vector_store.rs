@@ -7,7 +7,7 @@ use parking_lot::{Mutex, RwLock};
 use petgraph::Directed;
 use petgraph::graph::NodeIndex;
 use petgraph::stable_graph::StableGraph;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -15,7 +15,7 @@ use crate::errors::{MCSError, Result};
 use crate::ivf::{IvfFlatIndex, Metric as IvfMetric};
 use crate::kg::push_json_str;
 use crate::turboquant::TurboQuantIndex;
-use memory_core::jobs::{
+use mcpmem_core::jobs::{
     AnnGenerationRepository, DistanceMetric, IndexProfileRegistry, StoreState,
 };
 
@@ -267,6 +267,8 @@ impl VectorConfig {
 }
 
 pub struct VectorStore {
+    /// Last observed names, maintained for callers inspecting the cache. Entity
+    /// identity must be resolved against SQLite: other writers can rename rows.
     pub name_to_id: Arc<DashMap<String, EntityId>>,
     pub id_to_name: Arc<DashMap<EntityId, String>>,
 
@@ -551,11 +553,8 @@ impl VectorStore {
         conn: &Connection,
         entity_name: &str,
     ) -> Result<Option<(EntityId, String)>> {
-        if let Some(entry) = self.name_to_id.get(entity_name) {
-            let id = *entry;
-            let name = entity_name.to_string();
-            return Ok(Some((id, name)));
-        }
+        // Invalidation from a transport cannot cover independently opened
+        // writers. Never treat a previously observed name as a live alias.
         let h = crate::kg::name_hash(entity_name);
         let mut stmt = conn
             .prepare_cached(
@@ -568,13 +567,59 @@ impl VectorStore {
             Ok((id, name))
         }) {
             Ok(tup) => {
-                self.name_to_id.insert(tup.1.clone(), tup.0);
-                self.id_to_name.insert(tup.0, tup.1.clone());
+                self.cache_entity_name(tup.0, &tup.1);
                 Ok(Some(tup))
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                self.forget_entity_name(entity_name);
+                Ok(None)
+            }
             Err(e) => Err(sqlite_err(e)),
         }
+    }
+
+    fn cache_entity_name(&self, id: EntityId, name: &str) {
+        if let Some(previous) = self.id_to_name.insert(id, name.to_owned())
+            && previous != name
+        {
+            self.name_to_id
+                .remove_if(&previous, |_, value| *value == id);
+        }
+        if let Some(previous) = self.name_to_id.insert(name.to_owned(), id)
+            && previous != id
+        {
+            self.id_to_name
+                .remove_if(&previous, |_, value| value == name);
+        }
+    }
+
+    fn forget_entity_name(&self, name: &str) {
+        if let Some((_, id)) = self.name_to_id.remove(name) {
+            self.id_to_name.remove_if(&id, |_, value| value == name);
+        }
+    }
+
+    fn get_entity_name_type(
+        &self,
+        conn: &Connection,
+        id: EntityId,
+    ) -> Result<Option<(String, String)>> {
+        let entity = conn
+            .prepare_cached(
+                "SELECT e.name, COALESCE(t.name, '') FROM entity e
+                 LEFT JOIN type_dict t ON t.id = e.type_id
+                 WHERE e.id = ?1 AND e.flags = 0",
+            )
+            .map_err(sqlite_err)?
+            .query_row([id], |row| Ok((row.get::<_, String>(0)?, row.get(1)?)))
+            .optional()
+            .map_err(sqlite_err)?;
+        if let Some((name, _)) = &entity {
+            self.cache_entity_name(id, name);
+        } else if let Some((_, name)) = self.id_to_name.remove(&id) {
+            self.name_to_id.remove_if(&name, |_, value| *value == id);
+        }
+        Ok(entity)
     }
 
     pub fn upsert_embedding(
@@ -583,9 +628,15 @@ impl VectorStore {
         embedding: &[f32],
         model: &str,
     ) -> Result<()> {
-        let conn = self.db.lock();
-        IndexProfileRegistry::new(&conn).ensure_legacy_writes("default")?;
-        self.upsert_one(&conn, entity_name, embedding, model)
+        let mut conn = self.db.lock();
+        // Keep name resolution and the write in one snapshot while excluding a
+        // concurrent rename between them, including writers in other processes.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_err)?;
+        IndexProfileRegistry::new(&tx).ensure_legacy_writes("default")?;
+        self.upsert_one(&tx, entity_name, embedding, model)?;
+        tx.commit().map_err(sqlite_err)
     }
 
     /// Rows per multi-row `INSERT`: 5 bind variables each, so 500 rows use
@@ -707,17 +758,14 @@ impl VectorStore {
         let existed = self.index.remove(entity_id as u64).unwrap_or(false);
         self.index.add(entity_id as u64, embedding)?;
 
-        self.name_to_id.insert(entity_name.to_string(), entity_id);
-        self.id_to_name.insert(entity_id, entity_name.to_string());
-
         if !existed {
             self.count.fetch_add(1, Ordering::Relaxed);
         }
         Ok(entity_id)
     }
 
-    /// The single-embedding upsert core; `conn` is either a plain connection
-    /// (implicit per-statement transaction) or an open batch transaction.
+    /// The single-embedding upsert core; `conn` belongs to the caller's write
+    /// transaction so the resolved exact name cannot change before persistence.
     fn upsert_one(
         &self,
         conn: &Connection,
@@ -738,25 +786,26 @@ impl VectorStore {
     }
 
     pub fn delete_embedding(&self, entity_name: &str) -> Result<bool> {
-        let conn = self.db.lock();
-        IndexProfileRegistry::new(&conn).ensure_legacy_writes("default")?;
-        let entity_id = match self.name_to_id.get(entity_name) {
-            Some(entry) => *entry,
-            None => {
-                return Ok(false);
-            }
+        let mut conn = self.db.lock();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_err)?;
+        IndexProfileRegistry::new(&tx).ensure_legacy_writes("default")?;
+        let Some((entity_id, _)) = self.get_entity_id_and_name(&tx, entity_name)? else {
+            return Ok(false);
         };
-
-        self.index.remove(entity_id as u64)?;
-
-        self.name_to_id.remove(entity_name);
-        self.id_to_name.remove(&entity_id);
-
-        conn.execute(
-            "DELETE FROM vector_embedding WHERE entity_id = ?1",
-            params![entity_id],
-        )
-        .map_err(sqlite_err)?;
+        let deleted = tx
+            .execute(
+                "DELETE FROM vector_embedding WHERE entity_id = ?1",
+                params![entity_id],
+            )
+            .map_err(sqlite_err)?;
+        if deleted == 0 {
+            return Ok(false);
+        }
+        let indexed = self.index.remove(entity_id as u64)?;
+        tx.commit().map_err(sqlite_err)?;
+        self.forget_entity_name(entity_name);
 
         {
             let mut g = self.graph.write();
@@ -766,7 +815,9 @@ impl VectorStore {
             }
         }
 
-        self.count.fetch_sub(1, Ordering::Relaxed);
+        if indexed {
+            self.count.fetch_sub(1, Ordering::Relaxed);
+        }
         Ok(true)
     }
 
@@ -903,31 +954,9 @@ impl VectorStore {
         let mut actual_count = 0usize;
 
         for &(id, dist) in &results {
-            let name = self
-                .id_to_name
-                .get(&id)
-                .map(|r| r.value().clone())
-                .or_else(|| {
-                    conn.query_row(
-                        "SELECT name FROM entity WHERE id = ?1 AND flags = 0",
-                        params![id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .ok()
-                });
-
-            let name = match name {
-                Some(n) => n,
-                None => continue,
+            let Some((name, etype)) = self.get_entity_name_type(&conn, id)? else {
+                continue;
             };
-
-            let etype: String = conn
-                .query_row(
-                    "SELECT t.name FROM entity e JOIN type_dict t ON t.id = e.type_id WHERE e.id = ?1 AND e.flags = 0",
-                    params![id],
-                    |row| row.get(0),
-                )
-                .unwrap_or_default();
 
             if let Some(filter_type) = entity_type_filter
                 && etype != filter_type
@@ -1099,7 +1128,7 @@ impl VectorStore {
         self.index.train()
     }
 
-    /// Resolve a live entity id by name (cache first, then the KG table).
+    /// Resolve a live entity id by exact current name in the KG table.
     pub fn entity_id_of(&self, name: &str) -> Result<Option<EntityId>> {
         let conn = self.db.lock();
         Ok(self.get_entity_id_and_name(&conn, name)?.map(|(id, _)| id))
@@ -1126,49 +1155,39 @@ impl VectorStore {
         &self,
         name: &str,
     ) -> Result<Option<(EntityId, Vec<f32>, String)>> {
-        let id = match self.entity_id_of(name)? {
-            Some(id) => id,
-            None => return Ok(None),
-        };
         let conn = self.db.lock();
-        let row: Option<(Vec<u8>, String)> = conn
-            .query_row(
-                "SELECT blob, model FROM vector_embedding WHERE entity_id = ?1",
-                params![id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+        // Resolve the name and read its vector in a single SQLite snapshot.
+        let row: Option<(EntityId, Vec<u8>, String)> = conn
+            .prepare_cached(
+                "SELECT e.id, v.blob, v.model FROM entity e
+                 JOIN vector_embedding v ON v.entity_id = e.id
+                 WHERE e.name_hash = ?1 AND e.name = ?2 AND e.flags = 0",
             )
-            .ok();
+            .map_err(sqlite_err)?
+            .query_row(params![crate::kg::name_hash(name), name], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()
+            .map_err(sqlite_err)?;
         match row {
-            Some((blob, model)) => Ok(Some((id, parse_embedding_blob(&blob)?.to_vec(), model))),
-            None => Ok(None),
+            Some((id, blob, model)) => {
+                self.cache_entity_name(id, name);
+                Ok(Some((id, parse_embedding_blob(&blob)?.to_vec(), model)))
+            }
+            None => {
+                self.forget_entity_name(name);
+                Ok(None)
+            }
         }
     }
 
-    /// Resolve an entity id to `(name, entityType)`, preferring the in-memory name
-    /// cache and reading the type from the KG.
+    /// Resolve an entity id to its current `(name, entityType)` in the KG.
     pub fn resolve_name_type(&self, id: EntityId) -> (String, String) {
         let conn = self.db.lock();
-        let name = self
-            .id_to_name
-            .get(&id)
-            .map(|r| r.value().clone())
-            .or_else(|| {
-                conn.query_row(
-                    "SELECT name FROM entity WHERE id = ?1 AND flags = 0",
-                    params![id],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            })
-            .unwrap_or_default();
-        let etype: String = conn
-            .query_row(
-                "SELECT t.name FROM entity e JOIN type_dict t ON t.id = e.type_id WHERE e.id = ?1 AND e.flags = 0",
-                params![id],
-                |row| row.get(0),
-            )
-            .unwrap_or_default();
-        (name, etype)
+        self.get_entity_name_type(&conn, id)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
 
     /// k-NN that returns resolved `(id, name, entityType, distance)`, optionally
@@ -1207,9 +1226,7 @@ impl VectorStore {
 
     pub fn invalidate_entity_cache(&self, names: &[String]) {
         for name in names {
-            if let Some((_, id)) = self.name_to_id.remove(name.as_str()) {
-                self.id_to_name.remove(&id);
-            }
+            self.forget_entity_name(name);
         }
     }
 
@@ -1232,7 +1249,7 @@ mod tests {
     use super::*;
     use crate::config::{Durability, SqliteTuning};
     use crate::kg::GraphHandle;
-    use crate::types::Entity;
+    use crate::types::EntityInput as Entity;
     use std::num::NonZeroUsize;
 
     struct TestEnv {
@@ -1291,6 +1308,159 @@ mod tests {
         vec![value; dims as usize]
     }
 
+    fn renamed_vector_fixture() -> (TestEnv, EntityId) {
+        use mcpmem_core::mutation::{MutationContext, MutationRequest, MutationService};
+
+        let env = setup(4);
+        create_test_entity(&env.kg, "before", "person");
+        env.vs
+            .upsert_embedding("before", &[1.0, 0.0, 0.0, 0.0], "original")
+            .unwrap();
+        let id = env.vs.entity_id_of("before").unwrap().unwrap();
+        assert_eq!(*env.vs.name_to_id.get("before").unwrap(), id);
+        assert_eq!(env.vs.id_to_name.get(&id).unwrap().as_str(), "before");
+
+        // An independently opened writer uses the same service as inbound HTTP,
+        // without reaching the MCP dispatcher or this VectorStore's caches.
+        let writer = GraphHandle::new(
+            &env.vs.db_path,
+            Durability::Sync,
+            SqliteTuning::default(),
+            NonZeroUsize::new(32).unwrap(),
+            2,
+        )
+        .unwrap();
+        MutationService::new(&writer)
+            .apply(
+                MutationRequest::RenameEntity {
+                    old_name: "before".into(),
+                    new_name: "after".into(),
+                },
+                MutationContext::local(),
+            )
+            .unwrap();
+        assert!(writer.get_entity("before").unwrap().is_none());
+        assert_eq!(writer.get_entity("after").unwrap().unwrap().name, "after");
+        (env, id)
+    }
+
+    #[test]
+    fn vector_names_reject_stale_alias_after_external_rename() {
+        // Exercise each operation with independently warmed stale caches: a
+        // successful read must not be necessary to make subsequent writes safe.
+        let mut outcomes = Vec::new();
+        for operation in ["get", "upsert", "batch", "delete"] {
+            let (env, id) = renamed_vector_fixture();
+            let rejected = match operation {
+                "get" => env.vs.get_embedding_by_name("before").unwrap().is_none(),
+                "upsert" => env
+                    .vs
+                    .upsert_embedding("before", &[0.0, 1.0, 0.0, 0.0], "wrong")
+                    .is_err(),
+                "batch" => {
+                    env.vs
+                        .upsert_embeddings_batch(&[("before", vec![0.0, 1.0, 0.0, 0.0], "wrong")])
+                        [0]
+                    .is_err()
+                }
+                "delete" => !env.vs.delete_embedding("before").unwrap(),
+                _ => unreachable!(),
+            };
+            let absent = env.vs.entity_id_of("before").unwrap().is_none();
+            let preserved = env.vs.get_embedding_by_name("after").unwrap()
+                == Some((id, vec![1.0, 0.0, 0.0, 0.0], "original".into()));
+            outcomes.push((operation, rejected, absent, preserved, env.vs.count()));
+        }
+        assert_eq!(
+            outcomes,
+            [
+                ("get", true, true, true, 1),
+                ("upsert", true, true, true, 1),
+                ("batch", true, true, true, 1),
+                ("delete", true, true, true, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn vector_recreated_name_is_isolated_after_external_rename() {
+        let (env, renamed_id) = renamed_vector_fixture();
+        create_test_entity(&env.kg, "before", "project");
+        let new_id = env.vs.entity_id_of("before").unwrap().unwrap();
+        assert_ne!(new_id, renamed_id);
+        assert!(env.vs.get_embedding_by_name("before").unwrap().is_none());
+        assert!(!env.vs.delete_embedding("before").unwrap());
+        assert_eq!(env.vs.count(), 1);
+        env.vs
+            .upsert_embedding("before", &[0.0, 1.0, 0.0, 0.0], "new")
+            .unwrap();
+        assert_eq!(
+            env.vs.get_embedding_by_name("before").unwrap(),
+            Some((new_id, vec![0.0, 1.0, 0.0, 0.0], "new".into()))
+        );
+        assert!(env.vs.delete_embedding("before").unwrap());
+        assert!(!env.vs.delete_embedding("before").unwrap());
+        assert_eq!(
+            env.vs.get_embedding_by_name("after").unwrap(),
+            Some((renamed_id, vec![1.0, 0.0, 0.0, 0.0], "original".into()))
+        );
+        assert_eq!(env.vs.count(), 1);
+    }
+
+    #[test]
+    fn vector_resolved_search_uses_current_name_after_external_rename() {
+        let mut names = Vec::new();
+        for operation in ["resolve", "search", "json", "hybrid"] {
+            let (env, id) = renamed_vector_fixture();
+            let query = [1.0, 0.0, 0.0, 0.0];
+            let name = match operation {
+                "resolve" => env.vs.resolve_name_type(id).0,
+                "search" => {
+                    let hits = env
+                        .vs
+                        .search_resolved(&query, 1, None, &std::collections::HashSet::new())
+                        .unwrap();
+                    assert_eq!(hits.len(), 1);
+                    assert_eq!(hits[0].0, id);
+                    hits[0].1.clone()
+                }
+                "json" => {
+                    let response = env.vs.search_entities_json(&query, 1, None).unwrap();
+                    let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+                    assert_eq!(parsed["count"], 1);
+                    parsed["results"][0]["name"].as_str().unwrap().to_owned()
+                }
+                "hybrid" => {
+                    let response = crate::vector_actions::handle_hybrid_search(
+                        &env.vs,
+                        &env.kg,
+                        Some(&serde_json::json!({
+                            "queryText": "nonexistenttext", "queryEmbedding": query, "topK": 1
+                        })),
+                    )
+                    .unwrap();
+                    let outer: serde_json::Value = serde_json::from_str(&response).unwrap();
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(outer["content"][0]["text"].as_str().unwrap())
+                            .unwrap();
+                    assert_eq!(parsed["count"], 1);
+                    parsed["results"][0]["name"].as_str().unwrap().to_owned()
+                }
+                _ => unreachable!(),
+            };
+            names.push((operation, name));
+        }
+        assert_eq!(
+            names,
+            [
+                ("resolve", "after".into()),
+                ("search", "after".into()),
+                ("json", "after".into()),
+                ("hybrid", "after".into()),
+            ]
+        );
+    }
+
     #[test]
     fn test_vector_upsert_and_search() {
         let env = setup(4);
@@ -1340,7 +1510,7 @@ mod tests {
 
     #[test]
     fn direct_writes_are_rejected_while_a_profile_rebuilds() {
-        use memory_core::jobs::{
+        use mcpmem_core::jobs::{
             DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization,
         };
         use uuid::Uuid;

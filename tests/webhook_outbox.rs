@@ -1,9 +1,9 @@
-use memory_core::{
+use mcpmem_core::{
     graph::GraphHandle,
     mutation::{MutationContext, MutationRequest, MutationService, ObservationUpdate},
     storage::{Durability, SqliteTuning},
     subscriptions::{SubscriptionRepository, WebhookSubscription},
-    types::Entity,
+    types::EntityInput as Entity,
 };
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -33,6 +33,41 @@ fn entity(name: &str) -> Entity {
 fn count(conn: &rusqlite::Connection, table: &str) -> i64 {
     conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
         .unwrap()
+}
+
+#[test]
+fn webhook_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.db");
+    let connector = TestConnector::default();
+    let worker = mcpmem_webhook::WebhookWorker::new(
+        &path,
+        &connector,
+        TestSecrets,
+        BTreeSet::new(),
+        TestResolver(vec![]),
+    );
+    assert_eq!(worker.run_once(1).unwrap().claimed, 0);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(count(&conn, "entity"), 0);
+    assert_eq!(count(&conn, "graph_stat"), 5);
+    let graph = graph(&path);
+    graph.create_entities(&[entity("retained")]).unwrap();
+    assert_eq!(worker.run_once(1).unwrap().claimed, 0);
+    let retained = graph
+        .get_entity("retained")
+        .unwrap()
+        .expect("retained entity");
+    assert_eq!(retained.name, "retained");
+    assert_eq!(retained.entity_type, "note");
+    assert_eq!(
+        retained
+            .observations
+            .iter()
+            .map(|observation| observation.body.as_str())
+            .collect::<Vec<_>>(),
+        ["secret observation"]
+    );
 }
 
 #[test]
@@ -123,7 +158,7 @@ fn failed_mutations_leave_no_webhook_outbox_rows() {
 
 #[test]
 fn egress_policy_rejects_private_and_malformed_endpoints() {
-    use webhook_worker::validate_endpoint;
+    use mcpmem_webhook::validate_endpoint;
     let resolver = TestResolver(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
     let allowlist = BTreeSet::from(["example.test".into()]);
     assert!(validate_endpoint("http://example.test", &allowlist, &resolver).is_err());
@@ -142,35 +177,35 @@ fn egress_policy_rejects_private_and_malformed_endpoints() {
 }
 
 struct TestResolver(Vec<IpAddr>);
-impl webhook_worker::Resolver for TestResolver {
-    fn resolve(&self, _: &str) -> Result<Vec<IpAddr>, webhook_worker::WorkerError> {
+impl mcpmem_webhook::Resolver for TestResolver {
+    fn resolve(&self, _: &str) -> Result<Vec<IpAddr>, mcpmem_webhook::WorkerError> {
         Ok(self.0.clone())
     }
 }
 
 struct TestSecrets;
-impl webhook_worker::SecretProvider for TestSecrets {
+impl mcpmem_webhook::SecretProvider for TestSecrets {
     fn signing_key(
         &self,
         _: &str,
-    ) -> Result<webhook_worker::SigningKey, webhook_worker::WorkerError> {
-        webhook_worker::SigningKey::new(b"test-key".to_vec())
+    ) -> Result<mcpmem_webhook::SigningKey, mcpmem_webhook::WorkerError> {
+        mcpmem_webhook::SigningKey::new(b"test-key".to_vec())
     }
 }
 #[derive(Default)]
 struct TestConnector {
-    request: Mutex<Option<webhook_worker::SignedRequest>>,
-    endpoint: Mutex<Option<webhook_worker::ValidatedEndpoint>>,
+    request: Mutex<Option<mcpmem_webhook::SignedRequest>>,
+    endpoint: Mutex<Option<mcpmem_webhook::ValidatedEndpoint>>,
 }
-impl webhook_worker::DeliveryConnector for &TestConnector {
+impl mcpmem_webhook::DeliveryConnector for &TestConnector {
     fn send(
         &self,
-        endpoint: &webhook_worker::ValidatedEndpoint,
-        request: webhook_worker::SignedRequest,
-    ) -> Result<webhook_worker::DeliveryResponse, webhook_worker::WorkerError> {
+        endpoint: &mcpmem_webhook::ValidatedEndpoint,
+        request: mcpmem_webhook::SignedRequest,
+    ) -> Result<mcpmem_webhook::DeliveryResponse, mcpmem_webhook::WorkerError> {
         *self.request.lock().unwrap() = Some(request);
         *self.endpoint.lock().unwrap() = Some(endpoint.clone());
-        Ok(webhook_worker::DeliveryResponse {
+        Ok(mcpmem_webhook::DeliveryResponse {
             status: 204,
             retry_after_us: None,
         })
@@ -183,6 +218,7 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
     let path = dir.path().join("memory.db");
     let graph = graph(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
+    graph.create_entities(&[entity("old")]).unwrap();
     SubscriptionRepository::new(&conn)
         .upsert(WebhookSubscription {
             subscription_id: uuid::Uuid::new_v4(),
@@ -199,14 +235,15 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
     context.origin = "producer".into();
     MutationService::new(&graph)
         .apply(
-            MutationRequest::CreateEntities {
-                entities: vec![entity("a")],
+            MutationRequest::RenameEntity {
+                old_name: "old".into(),
+                new_name: "new".into(),
             },
-            context,
+            context.clone(),
         )
         .unwrap();
     let connector = TestConnector::default();
-    let report = webhook_worker::WebhookWorker::new(
+    let report = mcpmem_webhook::WebhookWorker::new(
         &path,
         &connector,
         TestSecrets,
@@ -218,7 +255,33 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
     assert_eq!(report.completed, 1);
     let request = connector.request.lock().unwrap().clone().unwrap();
     let body = String::from_utf8(request.body.clone()).unwrap();
-    assert!(body.contains("\"version\":1"));
+    let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(envelope["version"], 2);
+    assert_eq!(envelope["operation"], "rename");
+    assert_eq!(envelope["oldName"], "old");
+    assert_eq!(envelope["newName"], "new");
+    for field in [
+        "eventId",
+        "transactionId",
+        "entityId",
+        "entityRevision",
+        "occurredAtUs",
+        "origin",
+        "correlationId",
+        "causationId",
+        "hopCount",
+    ] {
+        assert!(envelope.get(field).is_some(), "preserves {field}");
+    }
+    assert_eq!(envelope["origin"], "producer");
+    assert_eq!(envelope["causationId"], serde_json::Value::Null);
+    assert_eq!(envelope["hopCount"], 0);
+    assert!(envelope.get("before").is_none(), "no entity snapshot");
+    assert!(envelope.get("after").is_none(), "no entity snapshot");
+    assert!(
+        envelope.get("observations").is_none(),
+        "no observation bodies"
+    );
     assert!(!body.contains("secret observation"));
     assert!(!body.contains("vault://not-in-body"));
     assert_eq!(request.event_id.len(), 36);
@@ -239,11 +302,43 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     );
+
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::CreateEntities {
+                entities: vec![entity("plain")],
+            },
+            context,
+        )
+        .unwrap();
+    let report = mcpmem_webhook::WebhookWorker::new(
+        &path,
+        &connector,
+        TestSecrets,
+        BTreeSet::from(["hooks.example.test".into()]),
+        TestResolver(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]),
+    )
+    .run_once(i64::MAX / 2)
+    .unwrap();
+    assert_eq!(report.completed, 1);
+    let non_rename_request = connector.request.lock().unwrap().clone().unwrap();
+    let non_rename: serde_json::Value = serde_json::from_slice(&non_rename_request.body).unwrap();
+    assert_eq!(non_rename["operation"], "create");
+    assert_eq!(
+        non_rename.get("oldName"),
+        Some(&serde_json::Value::Null),
+        "non-rename envelope explicitly includes oldName: null"
+    );
+    assert_eq!(
+        non_rename.get("newName"),
+        Some(&serde_json::Value::Null),
+        "non-rename envelope explicitly includes newName: null"
+    );
 }
 
 #[test]
 fn machine_ingress_derives_actor_and_raw_body_fingerprint() {
-    use memory_core::auth::{Principal, PrincipalKind, machine_mutation_context};
+    use mcpmem_core::auth::{Principal, PrincipalKind, machine_mutation_context};
     let principal = Principal {
         id: "automation-42".into(),
         kind: PrincipalKind::Machine,
@@ -263,7 +358,7 @@ fn machine_ingress_derives_actor_and_raw_body_fingerprint() {
     assert_eq!(context.actor, "automation-42");
     assert_eq!(
         fingerprint,
-        memory_core::events::request_fingerprint(
+        mcpmem_core::events::request_fingerprint(
             "POST",
             "/api/v1/mutations",
             br#"{"operation":"compact"}"#
@@ -285,13 +380,13 @@ fn machine_ingress_derives_actor_and_raw_body_fingerprint() {
 
 #[derive(Clone, Copy)]
 struct StatusConnector(u16, Option<i64>);
-impl webhook_worker::DeliveryConnector for StatusConnector {
+impl mcpmem_webhook::DeliveryConnector for StatusConnector {
     fn send(
         &self,
-        _: &webhook_worker::ValidatedEndpoint,
-        _: webhook_worker::SignedRequest,
-    ) -> Result<webhook_worker::DeliveryResponse, webhook_worker::WorkerError> {
-        Ok(webhook_worker::DeliveryResponse {
+        _: &mcpmem_webhook::ValidatedEndpoint,
+        _: mcpmem_webhook::SignedRequest,
+    ) -> Result<mcpmem_webhook::DeliveryResponse, mcpmem_webhook::WorkerError> {
+        Ok(mcpmem_webhook::DeliveryResponse {
             status: self.0,
             retry_after_us: self.1,
         })
@@ -328,14 +423,14 @@ fn retry_after_is_clamped_and_deleted_subscription_dead_letters() {
         .upsert(subscription(id))
         .unwrap();
     graph.create_entities(&[entity("a")]).unwrap();
-    let worker = webhook_worker::WebhookWorker::new(
+    let worker = mcpmem_webhook::WebhookWorker::new(
         &path,
         StatusConnector(503, Some(99_999_999_999)),
         TestSecrets,
         allowlist(),
         resolver(),
     );
-    let now = memory_core::events::now_us();
+    let now = mcpmem_core::events::now_us();
     assert_eq!(worker.run_once(now).unwrap().retried, 1);
     let next: i64 = conn
         .query_row("SELECT next_attempt_us FROM event_outbox", [], |r| r.get(0))
@@ -362,7 +457,7 @@ fn filters_and_migration_reopen_are_compatible() {
     let graph = graph(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let mut selected = subscription(uuid::Uuid::new_v4());
-    selected.event_operations = vec![memory_core::mutation::ChangeOperation::Delete];
+    selected.event_operations = vec![mcpmem_core::mutation::ChangeOperation::Delete];
     selected.entity_types = vec!["other".into()];
     selected.ignored_origins = vec!["producer".into()];
     SubscriptionRepository::new(&conn).upsert(selected).unwrap();
@@ -378,8 +473,8 @@ fn filters_and_migration_reopen_are_compatible() {
         .unwrap();
     assert_eq!(count(&conn, "event_outbox"), 0);
     drop(graph);
-    memory_core::events::migrate(&conn).unwrap();
-    assert_eq!(count(&conn, "schema_migration"), 2);
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
+    assert_eq!(count(&conn, "schema_migration"), 3);
     assert!(
         conn.query_row::<String, _, _>(
             "SELECT checksum FROM schema_migration WHERE version=1",
@@ -393,7 +488,7 @@ fn filters_and_migration_reopen_are_compatible() {
 }
 
 #[test]
-fn migration_from_a_real_0001_database_applies_only_0002() {
+fn migration_from_a_real_0001_database_applies_remaining_migrations() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -402,19 +497,28 @@ fn migration_from_a_real_0001_database_applies_only_0002() {
     conn.execute_batch(sql).unwrap();
     conn.execute(
         "INSERT INTO schema_migration VALUES(1,?1,1)",
-        [memory_core::events::sha256(sql.as_bytes())],
+        [mcpmem_core::events::sha256(sql.as_bytes())],
     )
     .unwrap();
-    memory_core::events::migrate(&conn).unwrap();
-    assert_eq!(count(&conn, "schema_migration"), 2);
-    assert!(
-        conn.query_row::<String, _, _>(
-            "SELECT endpoint FROM webhook_subscription LIMIT 1",
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
+    assert_eq!(count(&conn, "schema_migration"), 3);
+    assert_eq!(count(&conn, "entity"), 0);
+    assert_eq!(count(&conn, "graph_stat"), 5);
+    let historical: (String, i64) = conn
+        .query_row(
+            "SELECT checksum,applied_at_us FROM schema_migration WHERE version=1",
             [],
-            |r| r.get(0)
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .is_err()
+        .unwrap();
+    assert_eq!(
+        historical,
+        (
+            "a48def8b25e9ecf813d3fa27a785893ba5de346a8b82f012cc543af2fecd5af2".into(),
+            1
+        )
     );
+    assert_eq!(count(&conn, "webhook_subscription"), 0);
 }
 
 #[test]
@@ -424,7 +528,7 @@ fn operation_type_and_ignored_origin_filters_are_independent() {
     let graph = graph(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let mut operation = subscription(uuid::Uuid::new_v4());
-    operation.event_operations = vec![memory_core::mutation::ChangeOperation::Create];
+    operation.event_operations = vec![mcpmem_core::mutation::ChangeOperation::Create];
     let mut kind = subscription(uuid::Uuid::new_v4());
     kind.entity_types = vec!["note".into()];
     let mut ignored = subscription(uuid::Uuid::new_v4());
@@ -463,7 +567,7 @@ fn operation_and_type_filters_each_reject_alone() {
     let graph = graph(&path);
     let conn = rusqlite::Connection::open(&path).unwrap();
     let mut operation = subscription(uuid::Uuid::new_v4());
-    operation.event_operations = vec![memory_core::mutation::ChangeOperation::Delete];
+    operation.event_operations = vec![mcpmem_core::mutation::ChangeOperation::Delete];
     SubscriptionRepository::new(&conn)
         .upsert(operation)
         .unwrap();
@@ -495,7 +599,7 @@ fn operation_and_type_filters_each_reject_alone() {
 #[test]
 fn resolver_rebinding_mixed_private_answer_is_rejected() {
     assert!(
-        webhook_worker::validate_endpoint(
+        mcpmem_webhook::validate_endpoint(
             "https://hooks.example.test",
             &allowlist(),
             &TestResolver(vec![
@@ -517,8 +621,8 @@ fn nonretryable_status_and_attempt_cap_dead_letter() {
         .upsert(subscription(uuid::Uuid::new_v4()))
         .unwrap();
     graph.create_entities(&[entity("a")]).unwrap();
-    let now = memory_core::events::now_us();
-    let worker = webhook_worker::WebhookWorker::new(
+    let now = mcpmem_core::events::now_us();
+    let worker = mcpmem_webhook::WebhookWorker::new(
         &path,
         StatusConnector(400, None),
         TestSecrets,
@@ -531,7 +635,7 @@ fn nonretryable_status_and_attempt_cap_dead_letter() {
         [],
     )
     .unwrap();
-    let worker = webhook_worker::WebhookWorker::new(
+    let worker = mcpmem_webhook::WebhookWorker::new(
         &path,
         StatusConnector(503, None),
         TestSecrets,
@@ -542,15 +646,15 @@ fn nonretryable_status_and_attempt_cap_dead_letter() {
 }
 
 #[derive(Default)]
-struct RecordingHttpsTransport(Mutex<Option<webhook_worker::ValidatedEndpoint>>);
-impl webhook_worker::HttpsTransport for RecordingHttpsTransport {
+struct RecordingHttpsTransport(Mutex<Option<mcpmem_webhook::ValidatedEndpoint>>);
+impl mcpmem_webhook::HttpsTransport for RecordingHttpsTransport {
     fn post(
         &self,
-        endpoint: &webhook_worker::ValidatedEndpoint,
-        _: webhook_worker::SignedRequest,
-    ) -> Result<webhook_worker::DeliveryResponse, webhook_worker::WorkerError> {
+        endpoint: &mcpmem_webhook::ValidatedEndpoint,
+        _: mcpmem_webhook::SignedRequest,
+    ) -> Result<mcpmem_webhook::DeliveryResponse, mcpmem_webhook::WorkerError> {
         *self.0.lock().unwrap() = Some(endpoint.clone());
-        Ok(webhook_worker::DeliveryResponse {
+        Ok(mcpmem_webhook::DeliveryResponse {
             status: 302,
             retry_after_us: None,
         })
@@ -558,19 +662,19 @@ impl webhook_worker::HttpsTransport for RecordingHttpsTransport {
 }
 #[test]
 fn https_connector_hands_pinned_address_to_transport_and_does_not_follow_redirect() {
-    use webhook_worker::DeliveryConnector;
-    let endpoint = webhook_worker::validate_endpoint(
+    use mcpmem_webhook::DeliveryConnector;
+    let endpoint = mcpmem_webhook::validate_endpoint(
         "https://hooks.example.test/path",
         &allowlist(),
         &resolver(),
     )
     .unwrap();
     let transport = RecordingHttpsTransport::default();
-    let connector = webhook_worker::HttpsConnector(transport);
+    let connector = mcpmem_webhook::HttpsConnector(transport);
     let response = connector
         .send(
             &endpoint,
-            webhook_worker::SignedRequest {
+            mcpmem_webhook::SignedRequest {
                 body: b"x".to_vec(),
                 event_id: uuid::Uuid::new_v4().to_string(),
                 timestamp_us: 1,
@@ -586,15 +690,15 @@ fn https_connector_hands_pinned_address_to_transport_and_does_not_follow_redirec
 
 #[test]
 fn production_reqwest_plan_pins_dns_disables_redirects_and_sets_headers() {
-    let endpoint = webhook_worker::validate_endpoint(
+    let endpoint = mcpmem_webhook::validate_endpoint(
         "https://hooks.example.test/path",
         &allowlist(),
         &resolver(),
     )
     .unwrap();
-    let plan = webhook_worker::request_plan(
+    let plan = mcpmem_webhook::request_plan(
         &endpoint,
-        &webhook_worker::SignedRequest {
+        &mcpmem_webhook::SignedRequest {
             body: vec![],
             event_id: "event-1".into(),
             timestamp_us: 42,
@@ -612,7 +716,7 @@ fn production_reqwest_plan_pins_dns_disables_redirects_and_sets_headers() {
 
 #[test]
 fn lease_reclaim_fences_stale_completion_for_webhook_delivery() {
-    use memory_core::events::EventRepository;
+    use mcpmem_core::events::EventRepository;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let graph = graph(&path);

@@ -28,6 +28,88 @@ enum HandlerResult {
     RawResult(String),
 }
 
+// The process has one MCP compatibility mode, fixed at startup. Core and UI
+// reads always keep the canonical metadata-bearing model.
+static LEGACY_OBSERVATIONS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn legacy_observations() -> bool {
+    LEGACY_OBSERVATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Explicit write envelopes keep legacy conversion out of arbitrary JSON data.
+fn legacy_observation_input(tool: &str, args: Option<&Value>) -> Result<Option<Value>> {
+    let Some(mut args) = args.cloned() else {
+        return Ok(None);
+    };
+    let (envelope, field) = match tool {
+        "create_entities" | "upsert_entities" => ("entities", "observations"),
+        "add_observations" => ("observations", "contents"),
+        "delete_observations" => ("deletions", "observations"),
+        _ => return Ok(Some(args)),
+    };
+    let entries = args
+        .get_mut(envelope)
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| MCSError::InvalidParams(format!("Missing or invalid '{envelope}'")))?;
+    for entry in entries {
+        let observations = entry
+            .get_mut(field)
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| MCSError::InvalidParams(format!("Missing or invalid '{field}'")))?;
+        for observation in observations {
+            let body = observation.as_str().ok_or_else(|| {
+                MCSError::InvalidParams("Legacy observations must be strings".into())
+            })?;
+            *observation = json!({"body": body});
+        }
+    }
+    Ok(Some(args))
+}
+
+fn legacy_graph_observations(value: &mut Value) {
+    match value {
+        Value::Array(values) => values.iter_mut().for_each(legacy_graph_observations),
+        Value::Object(object) => {
+            for (key, value) in object {
+                if key == "observations" || key == "addedObservations" {
+                    if let Value::Array(observations) = value {
+                        for observation in observations {
+                            if let Some(body) = observation.get("body").and_then(Value::as_str) {
+                                *observation = Value::String(body.into());
+                            }
+                        }
+                    }
+                } else {
+                    legacy_graph_observations(value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn legacy_observation_output(result: HandlerResult) -> Result<HandlerResult> {
+    // RawResult already contains the MCP content envelope; its text is JSON
+    // once more. Adapt the graph there, not the outer JSON-RPC envelope.
+    let mut value = match result {
+        HandlerResult::Value(value) => value,
+        HandlerResult::RawResult(raw) => serde_json::from_str(&raw)?,
+    };
+    if let Some(contents) = value.get_mut("content").and_then(Value::as_array_mut) {
+        for content in contents {
+            if let Some(text) = content.get_mut("text")
+                && let Some(raw) = text.as_str()
+                && let Ok(mut graph) = serde_json::from_str::<Value>(raw)
+            {
+                legacy_graph_observations(&mut graph);
+                *text = Value::String(serde_json::to_string(&graph)?);
+            }
+        }
+    }
+    Ok(HandlerResult::Value(value))
+}
+
 const BUFFER_CAPACITY: usize = 65536;
 const NEWLINE: &[u8] = b"\n";
 /// Maximum size of a single inbound JSON-RPC message (shared by all transports).
@@ -224,6 +306,20 @@ impl MCPServer {
     /// only constructed when `config.vectors_enabled` is set; `vec_config` is
     /// ignored otherwise.
     pub fn new(config: Config, vec_config: VectorConfig) -> Result<Self> {
+        if config.legacy_observations
+            && !config
+                .roles
+                .roles()
+                .contains(&crate::runtime::RuntimeRole::Mcp)
+        {
+            return Err(MCSError::InvalidParams(
+                "--legacy-observations requires the mcp role".into(),
+            ));
+        }
+        LEGACY_OBSERVATIONS.store(
+            config.legacy_observations,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let path = Path::new(&config.memory_file_path);
         let lru_cache = NonZeroUsize::new(config.lru_cache_size)
             .unwrap_or_else(|| NonZeroUsize::new(10000).expect("10000 > 0"));
@@ -529,7 +625,7 @@ fn handle_initialize(req: &JsonRpcRequest, vectors_enabled: bool) -> Value {
             "tools": { "listChanged": false }
         },
         "serverInfo": {
-            "name": "mcp-memory",
+            "name": "mcpmem",
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": instructions
@@ -603,6 +699,25 @@ fn handle_tools_list(vectors_enabled: bool) -> Value {
         })
         .cloned()
         .collect();
+    if legacy_observations() {
+        for tool in &mut all {
+            let pointer = match tool["name"].as_str() {
+                Some("create_entities" | "upsert_entities") => {
+                    "/inputSchema/properties/entities/items/properties/observations/items"
+                }
+                Some("add_observations") => {
+                    "/inputSchema/properties/observations/items/properties/contents/items"
+                }
+                Some("delete_observations") => {
+                    "/inputSchema/properties/deletions/items/properties/observations/items"
+                }
+                _ => continue,
+            };
+            *tool
+                .pointer_mut(pointer)
+                .expect("compiled observation write schema") = json!({"type":"string"});
+        }
+    }
     if vectors_enabled {
         all.extend(vector_tools().iter().cloned());
     }
@@ -641,6 +756,12 @@ fn handle_tools_call(
         .ok_or_else(|| MCSError::InvalidParams("Missing 'name' parameter".into()))?;
 
     let tool_args = req.params.as_ref().and_then(|p| p.get("arguments"));
+    let adapted_args = if legacy_observations() {
+        legacy_observation_input(tool_name, tool_args)?
+    } else {
+        None
+    };
+    let tool_args = adapted_args.as_ref().or(tool_args);
 
     if tools::is_vector_tool_name(tool_name) {
         let Some(vs) = vs else {
@@ -808,6 +929,7 @@ fn handle_tools_call(
         }
         "export_graph" => memory::handle_export_graph(kg, tool_args).map(HandlerResult::Value),
         "merge_entities" => memory::handle_merge_entities(kg, tool_args).map(HandlerResult::Value),
+        "rename_entity" => memory::handle_rename_entity(kg, tool_args).map(HandlerResult::Value),
         "extract_subgraph" => {
             memory::handle_extract_subgraph(kg, tool_args).map(HandlerResult::Value)
         }
@@ -822,8 +944,13 @@ fn handle_tools_call(
 
     // Tool execution failures become isError CallToolResults so the model can
     // read the message and self-correct, instead of an opaque protocol error.
-    Ok(result.unwrap_or_else(|e| {
+    let result = result.unwrap_or_else(|e| {
         error!("Tool '{tool_name}' error: {e}");
         HandlerResult::Value(tool_error(&e.to_string()))
-    }))
+    });
+    if legacy_observations() {
+        legacy_observation_output(result)
+    } else {
+        Ok(result)
+    }
 }

@@ -7,8 +7,6 @@ use rustc_hash::FxHashMap;
 
 type HybridResult = Vec<(String, String, f64, f64, f64)>;
 
-use rusqlite::params;
-
 const MAX_EMBEDDING_DIMS: usize = 4096;
 const MAX_TOP_K: usize = 100;
 const DEFAULT_TOP_K: usize = 10;
@@ -246,29 +244,8 @@ fn perform_hybrid_search(
     let kg_results = kg.search_nodes_filtered(query_text, None, 0, fetch_k);
     let mut text_matches: Vec<EntityIdAndName> = Vec::with_capacity(kg_results.len());
     for entity in &kg_results {
-        if let Ok(Some(_)) = vs.get_entity_type(
-            vs.name_to_id
-                .get(&entity.name)
-                .map(|r| *r.value())
-                .unwrap_or(-1),
-        ) {
-            let id = vs.name_to_id.get(&entity.name).map(|r| *r.value());
-            text_matches.push(EntityIdAndName {
-                id: id.unwrap_or(-1),
-            });
-        } else {
-            let conn = vs.db.lock();
-            let h = crate::kg::name_hash(&entity.name);
-            let id: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM entity WHERE name_hash = ?1 AND name = ?2 AND flags = 0",
-                    params![h, entity.name],
-                    |row| row.get(0),
-                )
-                .ok();
-            text_matches.push(EntityIdAndName {
-                id: id.unwrap_or(-1),
-            });
+        if let Some(id) = vs.entity_id_of(&entity.name)? {
+            text_matches.push(EntityIdAndName { id });
         }
     }
 
@@ -326,32 +303,12 @@ fn perform_hybrid_search(
         });
     }
 
-    let conn = vs.db.lock();
     let mut results = Vec::with_capacity(top_k.min(scored.len()));
     for entry in scored.iter().take(top_k) {
-        let name = vs
-            .id_to_name
-            .get(&entry.id)
-            .map(|r| r.value().clone())
-            .or_else(|| {
-                conn.query_row(
-                    "SELECT name FROM entity WHERE id = ?1 AND flags = 0",
-                    params![entry.id],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            })
-            .unwrap_or_default();
-
-        let etype: String = conn
-            .query_row(
-                "SELECT t.name FROM entity e JOIN type_dict t ON t.id = e.type_id WHERE e.id = ?1 AND e.flags = 0",
-                params![entry.id],
-                |row| row.get(0),
-            )
-            .unwrap_or_default();
-
-        results.push((name, etype, entry.total, entry.text_score, entry.vec_score));
+        let (name, etype) = vs.resolve_name_type(entry.id);
+        if !name.is_empty() {
+            results.push((name, etype, entry.total, entry.text_score, entry.vec_score));
+        }
     }
 
     Ok(results)

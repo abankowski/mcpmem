@@ -6,7 +6,7 @@ pub mod code_registry;
 #[cfg(feature = "code")]
 pub mod code_vec_registry;
 pub mod config;
-pub use memory_core::errors;
+pub use mcpmem_core::errors;
 pub mod http;
 pub mod ivf;
 pub mod kg;
@@ -16,7 +16,7 @@ pub mod server;
 pub mod tls;
 pub mod tools;
 pub mod turboquant;
-pub use memory_core::types;
+pub use mcpmem_core::types;
 pub mod vector_actions;
 pub mod vector_store;
 pub mod watcher;
@@ -131,6 +131,10 @@ pub struct Args {
     /// Defaults to `mcp`, preserving the existing single-server behavior.
     #[arg(long = "role", value_delimiter = ',', value_name = "ROLE")]
     pub roles: Vec<String>,
+
+    /// Deprecated MCP string observations adapter (1.x only; removed in 2.0.0).
+    #[arg(long)]
+    pub legacy_observations: bool,
 
     /// Bearer token required on the `http` (`Authorization` header) transport.
     /// Overrides `--auth-token-file` and the `MCP_MEMORY_AUTH_TOKEN` env var.

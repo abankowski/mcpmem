@@ -1,9 +1,12 @@
-use memory_core::graph::GraphHandle;
-use memory_core::mutation::{MutationContext, MutationRequest, MutationService, ObservationUpdate};
-use memory_core::storage::{Durability, SqliteTuning};
-use memory_core::types::Entity;
+use mcpmem_core::graph::GraphHandle;
+use mcpmem_core::mutation::{
+    ChangeOperation, MutationContext, MutationRequest, MutationService, ObservationUpdate,
+};
+use mcpmem_core::storage::{Durability, SqliteTuning};
+use mcpmem_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
+use mcpmem_core::types::{EntityInput as Entity, Relation};
 use rusqlite::Connection;
-use std::{num::NonZeroUsize, path::Path};
+use std::{collections::BTreeSet, num::NonZeroUsize, path::Path};
 
 fn graph(path: &Path) -> GraphHandle {
     GraphHandle::new(
@@ -24,11 +27,278 @@ fn entity(name: &str) -> Entity {
     }
 }
 
+fn assert_original_entity(graph: &GraphHandle, name: &str) {
+    let actual = graph.get_entity(name).unwrap().expect("entity exists");
+    assert_eq!(actual.name, name);
+    assert_eq!(actual.entity_type, "test");
+    assert_eq!(
+        actual
+            .observations
+            .iter()
+            .map(|observation| observation.body.as_str())
+            .collect::<Vec<_>>(),
+        ["original"]
+    );
+    assert!(actual.observations[0].created_at_us.is_some());
+}
+
 fn count(conn: &Connection, table: &str) -> i64 {
     conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
         row.get(0)
     })
     .unwrap()
+}
+
+#[test]
+fn graph_bootstrap_precedes_migration_statements() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ordering.db");
+    let conn = Connection::open(&path).unwrap();
+    // Model a pending migration's dependency on the graph without changing
+    // append-only migration files: each ledger insert reads the prerequisite.
+    conn.execute_batch(
+        "CREATE TABLE schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;
+         CREATE TRIGGER require_graph BEFORE INSERT ON schema_migration BEGIN
+           SELECT count(*) FROM entity;
+           SELECT count(*) FROM observation;
+           SELECT count(*) FROM relation;
+           SELECT count(*) FROM name_fts;
+           SELECT count(*) FROM obs_fts;
+           SELECT CASE WHEN (SELECT count(*) FROM graph_stat) != 5
+             THEN RAISE(ABORT, 'graph statistics must be seeded before migrations') END;
+         END;",
+    ).unwrap();
+    let graph = graph(&path);
+    graph.create_entities(&[entity("ready")]).unwrap();
+    assert_original_entity(&graph, "ready");
+    assert_eq!(count(&conn, "schema_migration"), 3);
+}
+
+#[test]
+fn pending_migrations_roll_back_together_after_later_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollback.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;
+         CREATE TRIGGER reject_second BEFORE INSERT ON schema_migration
+           WHEN new.version=2 BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END;",
+    ).unwrap();
+    let error = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        1,
+    )
+    .err()
+    .expect("second migration must fail");
+    assert!(error.to_string().contains("injected migration failure"));
+    let observer = Connection::open(&path).unwrap();
+    assert_eq!(count(&observer, "schema_migration"), 0);
+    let pending_tables: i64 = observer.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name IN ('entity_revision','change_event','webhook_subscription')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(pending_tables, 0, "no earlier migration DDL may remain");
+    conn.execute_batch("DROP TRIGGER reject_second").unwrap();
+    drop(graph(&path));
+    assert_eq!(count(&observer, "schema_migration"), 3);
+}
+
+#[test]
+fn migration_three_rolls_back_its_columns_when_its_ledger_write_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("migration-three-rollback.db");
+    drop(graph(&path));
+    let conn = Connection::open(&path).unwrap();
+    let before: Vec<(i64, String, i64)> = conn
+        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration WHERE version < 3 ORDER BY version")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        before.len(),
+        2,
+        "fixture has the historical migration ledger"
+    );
+    conn.execute("DELETE FROM schema_migration WHERE version=3", [])
+        .unwrap();
+    conn.execute_batch(
+        "ALTER TABLE observation DROP COLUMN origin_entity_id;
+         ALTER TABLE observation DROP COLUMN origin_entity_name;
+         ALTER TABLE observation DROP COLUMN occurred_us;
+         CREATE TRIGGER reject_third BEFORE INSERT ON schema_migration
+           WHEN new.version=3 BEGIN SELECT RAISE(ABORT, 'injected migration three failure'); END;",
+    )
+    .unwrap();
+
+    let error = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        1,
+    )
+    .err()
+    .expect("migration three ledger write must fail after its SQL executes");
+    assert!(
+        error
+            .to_string()
+            .contains("injected migration three failure")
+    );
+
+    let after: Vec<(i64, String, i64)> = conn
+        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration ORDER BY version")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(after, before, "prior ledger rows survive unchanged");
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('observation') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for column in ["origin_entity_id", "origin_entity_name", "occurred_us"] {
+        assert!(
+            !columns.iter().any(|existing| existing == column),
+            "migration three column {column} was rolled back"
+        );
+    }
+}
+
+#[test]
+fn initializer_preserves_legacy_graph_without_migration_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-graph.db");
+    let conn = Connection::open(&path).unwrap();
+    // Independently construct the pre-ledger storage format with live rows.
+    conn.execute_batch(
+        "CREATE TABLE entity(id INTEGER PRIMARY KEY, name_hash INTEGER NOT NULL, name TEXT NOT NULL, type_id INTEGER NOT NULL,
+            obs_count INTEGER NOT NULL DEFAULT 0, out_deg INTEGER NOT NULL DEFAULT 0, in_deg INTEGER NOT NULL DEFAULT 0,
+            created_us INTEGER NOT NULL, updated_us INTEGER NOT NULL, flags INTEGER NOT NULL DEFAULT 0) STRICT;
+         CREATE TABLE observation(id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, idx INTEGER NOT NULL, body TEXT NOT NULL, created_us INTEGER NOT NULL) STRICT;
+         CREATE TABLE relation(from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, type_id INTEGER NOT NULL, created_us INTEGER NOT NULL) STRICT;
+         CREATE TABLE type_dict(id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0) STRICT;
+         CREATE TABLE graph_stat(key TEXT NOT NULL PRIMARY KEY, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;
+         INSERT INTO type_dict VALUES(1,0,'test',1);
+         INSERT INTO graph_stat VALUES('entities',1),('relations',0),('observations',1),('entity_seq',7),('obs_seq',9);
+         INSERT INTO observation VALUES(9,7,0,'original',11);",
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO entity VALUES(7,?1,'legacy',1,1,0,0,11,11,0)",
+        [mcpmem_core::graph::name_hash("legacy")],
+    )
+    .unwrap();
+    assert_eq!(count(&conn, "entity"), 1);
+    assert_eq!(count(&conn, "observation"), 1);
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
+    let graph = graph(&path);
+    assert_original_entity(&graph, "legacy");
+    graph.create_entities(&[entity("new")]).unwrap();
+    assert_eq!(count(&conn, "entity"), 2);
+    assert_eq!(count(&conn, "observation"), 2);
+    assert_eq!(
+        conn.query_row::<i64, _, _>("SELECT id FROM entity WHERE name='new'", [], |r| r.get(0))
+            .unwrap(),
+        8
+    );
+    assert_eq!(
+        conn.query_row::<i64, _, _>(
+            "SELECT value FROM graph_stat WHERE key='obs_seq'",
+            [],
+            |r| r.get(0)
+        )
+        .unwrap(),
+        10
+    );
+    assert_eq!(
+        count(&conn, "change_event"),
+        1,
+        "startup does not invent legacy events"
+    );
+}
+
+#[test]
+fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_tuning() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA cache_size=-321; PRAGMA foreign_keys=ON;")
+        .unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
+    let before: Vec<(i64, String, i64)> = conn
+        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration ORDER BY version")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(before.len(), 3);
+    assert_eq!(
+        before[0].1,
+        "a48def8b25e9ecf813d3fa27a785893ba5de346a8b82f012cc543af2fecd5af2"
+    );
+    assert_eq!(
+        before[1].1,
+        "2c267315d89203d5223895a845b275d8add904310d2c0a5a7a5b0d1873b984ec"
+    );
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
+    let after: Vec<(i64, String, i64)> = conn
+        .prepare("SELECT version,checksum,applied_at_us FROM schema_migration ORDER BY version")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(after, before);
+    for (pragma, expected) in [
+        ("synchronous", 2),
+        ("cache_size", -321),
+        ("foreign_keys", 1),
+    ] {
+        assert_eq!(
+            conn.query_row::<i64, _, _>(&format!("PRAGMA {pragma}"), [], |r| r.get(0))
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(count(&conn, "graph_stat"), 5);
+}
+
+#[cfg(feature = "indexer")]
+#[test]
+fn indexer_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
+    struct UnusedProvider;
+    impl mcpmem_indexer::EmbeddingProvider for UnusedProvider {
+        fn embed(
+            &self,
+            _: &mcpmem_core::jobs::IndexProfile,
+            _: &[mcpmem_indexer::CanonicalDocument],
+        ) -> Result<Vec<Vec<f32>>, mcpmem_indexer::ProviderError> {
+            panic!("empty queue must not call provider")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.db");
+    let worker = mcpmem_indexer::IndexerWorker::new(
+        &path,
+        UnusedProvider,
+        std::time::Duration::from_secs(5),
+    );
+    assert_eq!(worker.run_once(1).unwrap().claimed, 0);
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(count(&conn, "entity"), 0);
+    assert_eq!(count(&conn, "graph_stat"), 5);
+    let graph = graph(&path);
+    graph.create_entities(&[entity("retained")]).unwrap();
+    assert_eq!(worker.run_once(1).unwrap().claimed, 0);
+    assert_original_entity(&graph, "retained");
 }
 
 #[test]
@@ -91,7 +361,14 @@ fn failed_mutation_rolls_back_graph_events_and_jobs() {
     );
     assert!(result.is_err());
     assert_eq!(
-        graph.get_entity("a").unwrap().unwrap().observations,
+        graph
+            .get_entity("a")
+            .unwrap()
+            .unwrap()
+            .observations
+            .iter()
+            .map(|observation| observation.body.as_str())
+            .collect::<Vec<_>>(),
         ["original"]
     );
     assert_eq!(count(&conn, "change_event"), 1);
@@ -114,9 +391,9 @@ fn startup_rejects_changed_migration_and_preserves_legacy_vector_rows() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(versions, [1, 2]);
+    assert_eq!(versions, [1, 2, 3]);
     drop(graph(&path));
-    assert_eq!(count(&conn, "schema_migration"), 2);
+    assert_eq!(count(&conn, "schema_migration"), 3);
     conn.execute("UPDATE schema_migration SET checksum='tampered'", [])
         .unwrap();
     assert!(
@@ -146,7 +423,7 @@ fn separately_opened_writers_do_not_reuse_entity_ids_or_lose_events() {
 
 #[test]
 fn delivery_recovery_fences_expired_tokens_and_serializes_each_subscription() {
-    use memory_core::events::EventRepository;
+    use mcpmem_core::events::EventRepository;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let graph = graph(&path);
@@ -181,7 +458,7 @@ fn delivery_recovery_fences_expired_tokens_and_serializes_each_subscription() {
 
 #[test]
 fn raw_request_idempotency_replays_original_result_and_rejects_changed_bytes() {
-    use memory_core::events::request_fingerprint;
+    use mcpmem_core::events::request_fingerprint;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let graph = graph(&path);
@@ -214,8 +491,8 @@ fn raw_request_idempotency_replays_original_result_and_rejects_changed_bytes() {
     assert_eq!(count(&Connection::open(path).unwrap(), "change_event"), 2);
 }
 
-fn profile() -> memory_core::jobs::IndexProfile {
-    use memory_core::jobs::{DistanceMetric, IndexProfile, Normalization};
+fn profile() -> mcpmem_core::jobs::IndexProfile {
+    use mcpmem_core::jobs::{DistanceMetric, IndexProfile, Normalization};
     IndexProfile {
         id: uuid::Uuid::new_v4(),
         store_key: "default".into(),
@@ -231,7 +508,7 @@ fn profile() -> memory_core::jobs::IndexProfile {
 
 #[test]
 fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
-    use memory_core::jobs::{
+    use mcpmem_core::jobs::{
         AnnGenerationRepository, IndexJobRepository, IndexProfileRegistry, StoreState,
     };
     let dir = tempfile::tempdir().unwrap();
@@ -308,7 +585,7 @@ fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
 
 #[test]
 fn empty_candidate_still_requires_an_explicit_reader_publication() {
-    use memory_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
+    use mcpmem_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let _graph = graph(&path);
@@ -324,8 +601,208 @@ fn empty_candidate_still_requires_an_explicit_reader_publication() {
 }
 
 #[test]
+fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    // This test needs a physical duplicate to preserve legacy rename coverage.
+    // Make `relation` predate bootstrap so fresh-schema uniqueness remains
+    // enforced everywhere outside this explicit legacy fixture.
+    let legacy = Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE relation(
+                 from_id INTEGER NOT NULL,
+                 to_id INTEGER NOT NULL,
+                 type_id INTEGER NOT NULL,
+                 created_us INTEGER NOT NULL
+             ) STRICT;",
+        )
+        .unwrap();
+    drop(legacy);
+    let graph = graph(&path);
+    graph
+        .create_entities(&[entity("old"), entity("incoming"), entity("outgoing")])
+        .unwrap();
+    graph
+        .create_relations(&[
+            Relation {
+                from: "incoming".into(),
+                to: "old".into(),
+                relation_type: "in".into(),
+            },
+            Relation {
+                from: "old".into(),
+                to: "outgoing".into(),
+                relation_type: "out".into(),
+            },
+            Relation {
+                from: "old".into(),
+                to: "old".into(),
+                relation_type: "self".into(),
+            },
+        ])
+        .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO relation SELECT * FROM relation
+         WHERE from_id=(SELECT id FROM entity WHERE name='old')
+           AND to_id=(SELECT id FROM entity WHERE name='outgoing')
+           AND type_id=(SELECT id FROM type_dict WHERE kind=1 AND name='out');",
+    )
+    .unwrap();
+    let old_id: i64 = conn
+        .query_row("SELECT id FROM entity WHERE name='old'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let source_revision: i64 = conn
+        .query_row(
+            "SELECT revision FROM entity_revision WHERE entity_id=?1",
+            [old_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let neighbours: Vec<(i64, i64)> = conn
+        .prepare(
+            "SELECT entity_id, revision FROM entity_revision
+             WHERE entity_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
+             ORDER BY entity_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let neighbour_jobs: Vec<(i64, i64, String)> = conn
+        .prepare(
+            "SELECT entity_id, entity_revision, operation FROM index_job
+             WHERE entity_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
+             ORDER BY entity_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let subscribe = |event_operations| {
+        let subscription = WebhookSubscription {
+            subscription_id: uuid::Uuid::new_v4(),
+            endpoint: "https://hooks.example.test/rename".into(),
+            event_operations,
+            entity_types: vec![],
+            ignored_origins: vec![],
+            consumer_origin: "consumer".into(),
+            secret_ref: "vault://rename".into(),
+            enabled: true,
+        };
+        SubscriptionRepository::new(&conn)
+            .upsert(subscription.clone())
+            .unwrap();
+        subscription.subscription_id
+    };
+    let rename_subscription = subscribe(vec![ChangeOperation::Rename]);
+    let unfiltered_subscription = subscribe(vec![]);
+    let _create_subscription = subscribe(vec![ChangeOperation::Create]);
+    let _update_subscription = subscribe(vec![ChangeOperation::Update]);
+    let _delete_subscription = subscribe(vec![ChangeOperation::Delete]);
+    assert_eq!(
+        serde_json::from_str::<ChangeOperation>("\"rename\"").unwrap(),
+        ChangeOperation::Rename,
+        "operation filters accept exactly the rename value"
+    );
+    let before_events = count(&conn, "change_event");
+    let before_jobs = count(&conn, "index_job");
+
+    let committed = MutationService::new(&graph)
+        .apply(
+            MutationRequest::RenameEntity {
+                old_name: "old".into(),
+                new_name: "new".into(),
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+
+    assert_eq!(committed.changes.len(), 1, "rename has no neighbour events");
+    let change = &committed.changes[0];
+    assert_eq!(change.operation, ChangeOperation::Rename);
+    assert_eq!(change.old_name.as_deref(), Some("old"));
+    assert_eq!(change.new_name.as_deref(), Some("new"));
+    assert!(change.relation_delta.is_none());
+    assert_eq!(count(&conn, "change_event"), before_events + 1);
+    let durable_events: Vec<mcpmem_core::events::ChangeEvent> = conn
+        .prepare("SELECT payload FROM change_event WHERE transaction_id=?1")
+        .unwrap()
+        .query_map([committed.transaction_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+        .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
+        .collect();
+    assert_eq!(durable_events.len(), 1, "no durable neighbour events");
+    let event = &durable_events[0];
+    assert_eq!(event.entity_id, old_id, "rename keeps the stable entity id");
+    assert_eq!(event.entity_revision, source_revision + 1);
+    assert_eq!(event.change.operation, ChangeOperation::Rename);
+    assert_eq!(event.change.old_name.as_deref(), Some("old"));
+    assert_eq!(event.change.new_name.as_deref(), Some("new"));
+    assert_eq!(
+        count(&conn, "event_outbox"),
+        2,
+        "rename filter and an unfiltered subscription receive rename"
+    );
+    let recipients: BTreeSet<String> = conn
+        .prepare("SELECT subscription_id FROM event_outbox")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        recipients,
+        BTreeSet::from([
+            rename_subscription.to_string(),
+            unfiltered_subscription.to_string()
+        ]),
+        "create, update, and delete filters receive no rename delivery"
+    );
+    for (entity_id, revision) in neighbours {
+        assert_eq!(
+            conn.query_row(
+                "SELECT revision FROM entity_revision WHERE entity_id=?1",
+                [entity_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            revision,
+            "rename leaves neighbour revisions unchanged"
+        );
+    }
+    let neighbour_jobs_after: Vec<(i64, i64, String)> = conn
+        .prepare(
+            "SELECT entity_id, entity_revision, operation FROM index_job
+             WHERE entity_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
+             ORDER BY entity_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(neighbour_jobs_after, neighbour_jobs);
+    assert_eq!(
+        conn.query_row("SELECT operation FROM index_job", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "upsert",
+        "the coalesced current job remains an upsert"
+    );
+    assert_eq!(count(&conn, "index_job"), before_jobs);
+}
+
+#[test]
 fn worker_retries_renewal_validation_and_restart_keep_durable_fences() {
-    use memory_core::jobs::{
+    use mcpmem_core::jobs::{
         AnnGenerationRepository, IndexJobRepository, IndexProfileRegistry, Normalization,
     };
     let dir = tempfile::tempdir().unwrap();

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-pub use memory_runtime::{
+pub use mcpmem_runtime::{
     AppServices, ConfigError, RoleFuture, RoleLifecycle, RoleService, RoleSet, RunningRoles,
     RuntimeComposition, RuntimeError, RuntimeRole,
 };
@@ -27,7 +27,7 @@ impl McpTransportService {
 }
 
 impl RoleService for McpTransportService {
-    fn run(&self) -> memory_runtime::RoleFuture {
+    fn run(&self) -> mcpmem_runtime::RoleFuture {
         let server = self.server.clone();
         let transport = self.transport;
         let bind_addr = self.bind_addr.clone();
@@ -62,7 +62,7 @@ impl RoleService for McpTransportService {
 
 #[cfg(feature = "webhooks")]
 pub struct WebhookService {
-    worker: Option<Arc<dyn webhook_worker::WorkerPoll>>,
+    worker: Option<Arc<dyn mcpmem_webhook::WorkerPoll>>,
 }
 
 #[cfg(feature = "webhooks")]
@@ -70,7 +70,7 @@ impl WebhookService {
     pub const fn disabled() -> Self {
         Self { worker: None }
     }
-    pub fn new(worker: Arc<dyn webhook_worker::WorkerPoll>) -> Self {
+    pub fn new(worker: Arc<dyn mcpmem_webhook::WorkerPoll>) -> Self {
         Self {
             worker: Some(worker),
         }
@@ -79,7 +79,7 @@ impl WebhookService {
 
 #[cfg(feature = "webhooks")]
 impl RoleService for WebhookService {
-    fn run(&self) -> memory_runtime::RoleFuture {
+    fn run(&self) -> mcpmem_runtime::RoleFuture {
         let worker = self.worker.clone();
         Box::pin(async move {
             let worker = worker.ok_or_else(|| RuntimeError::RoleFailed {
@@ -88,7 +88,7 @@ impl RoleService for WebhookService {
             })?;
             loop {
                 let worker = worker.clone();
-                tokio::task::spawn_blocking(move || worker.poll(memory_core::events::now_us()))
+                tokio::task::spawn_blocking(move || worker.poll(mcpmem_core::events::now_us()))
                     .await
                     .map_err(|error| RuntimeError::RoleFailed {
                         role: RuntimeRole::Webhooks,
@@ -109,7 +109,7 @@ pub struct IndexerService {
     database: std::path::PathBuf,
     timeout: std::time::Duration,
     vectors: Option<Arc<crate::vector_store::VectorStore>>,
-    provider: Arc<indexer_worker::ProviderRegistry>,
+    provider: Arc<mcpmem_indexer::ProviderRegistry>,
 }
 
 #[cfg(feature = "indexer")]
@@ -119,7 +119,7 @@ impl IndexerService {
         vectors: Option<Arc<crate::vector_store::VectorStore>>,
     ) -> Result<Self, crate::errors::MCSError> {
         let timeout = std::time::Duration::from_secs(10);
-        let provider = indexer_worker::ProviderRegistry::from_environment(timeout)
+        let provider = mcpmem_indexer::ProviderRegistry::from_environment(timeout)
             .map_err(|error| crate::errors::MCSError::MemoryError(error.to_string()))?;
         Ok(Self::with_provider(
             database,
@@ -132,7 +132,7 @@ impl IndexerService {
     fn with_provider(
         database: impl Into<std::path::PathBuf>,
         vectors: Option<Arc<crate::vector_store::VectorStore>>,
-        provider: Arc<indexer_worker::ProviderRegistry>,
+        provider: Arc<mcpmem_indexer::ProviderRegistry>,
         timeout: std::time::Duration,
     ) -> Self {
         Self {
@@ -146,7 +146,7 @@ impl IndexerService {
 
 #[cfg(feature = "indexer")]
 impl RoleService for IndexerService {
-    fn run(&self) -> memory_runtime::RoleFuture {
+    fn run(&self) -> mcpmem_runtime::RoleFuture {
         let database = self.database.clone();
         let timeout = self.timeout;
         let vectors = self.vectors.clone();
@@ -162,7 +162,7 @@ impl RoleService for IndexerService {
                 let vectors = vectors.clone();
                 let provider = provider.clone();
                 tokio::task::spawn_blocking(move || {
-                    let worker = indexer_worker::IndexerWorker::new(database, provider, timeout);
+                    let worker = mcpmem_indexer::IndexerWorker::new(database, provider, timeout);
                     worker.run_once(now).map_err(|error| error.to_string())?;
                     if let Some(vectors) = vectors {
                         vectors
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn indexer_service_reuses_its_provider_registry_across_polls() {
-        let provider = Arc::new(indexer_worker::ProviderRegistry::new(None, None));
+        let provider = Arc::new(mcpmem_indexer::ProviderRegistry::new(None, None));
         let service = IndexerService::with_provider(
             "memory.db",
             None,

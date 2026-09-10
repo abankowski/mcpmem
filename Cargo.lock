@@ -1786,22 +1786,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "indexer-worker"
-version = "0.1.0"
-dependencies = [
- "aws-config",
- "aws-sdk-bedrockruntime",
- "memory-core",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1980,8 +1964,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
-name = "mcp-memory"
-version = "5.2.1"
+name = "mcpmem"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1992,10 +1976,11 @@ dependencies = [
  "futures",
  "hmac 0.12.1",
  "ignore",
- "indexer-worker",
  "lru",
- "memory-core",
- "memory-runtime",
+ "mcpmem-core",
+ "mcpmem-indexer",
+ "mcpmem-runtime",
+ "mcpmem-webhook",
  "notify",
  "parking_lot",
  "petgraph",
@@ -2026,19 +2011,12 @@ dependencies = [
  "tree-sitter-typescript",
  "usearch",
  "uuid",
- "webhook-worker",
  "zerocopy",
 ]
 
 [[package]]
-name = "memchr"
-version = "2.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
-
-[[package]]
-name = "memory-core"
-version = "0.1.0"
+name = "mcpmem-core"
+version = "1.0.0"
 dependencies = [
  "parking_lot",
  "rusqlite",
@@ -2051,13 +2029,50 @@ dependencies = [
 ]
 
 [[package]]
-name = "memory-runtime"
-version = "0.1.0"
+name = "mcpmem-indexer"
+version = "1.0.0"
 dependencies = [
- "memory-core",
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "mcpmem-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "mcpmem-runtime"
+version = "1.0.0"
+dependencies = [
+ "mcpmem-core",
  "thiserror",
  "tokio",
 ]
+
+[[package]]
+name = "mcpmem-webhook"
+version = "1.0.0"
+dependencies = [
+ "hmac 0.12.1",
+ "mcpmem-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "url",
+]
+
+[[package]]
+name = "memchr"
+version = "2.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "mime"
@@ -3519,21 +3534,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "webhook-worker"
-version = "0.1.0"
-dependencies = [
- "hmac 0.12.1",
- "memory-core",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror",
- "url",
 ]
 
 [[package]]

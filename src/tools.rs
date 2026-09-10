@@ -168,6 +168,10 @@ pub const ALL_TOOLS: &[ToolMeta] = &[
         write: true,
     },
     ToolMeta {
+        name: "rename_entity",
+        write: true,
+    },
+    ToolMeta {
         name: "extract_subgraph",
         write: false,
     },

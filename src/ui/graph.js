@@ -1,6 +1,6 @@
 "use strict";
 /*
- * mcp-memory knowledge-graph viewer.
+ * mcpmem knowledge-graph viewer.
  *
  * A dependency-free, Neo4j-Browser-style graph explorer rendered on a <canvas>:
  * force-directed layout, captioned circular nodes coloured by entity type,
@@ -604,7 +604,7 @@
       loadObservations(n);
     } else {
       const obs = n.obs || [];
-      obsHtml = obs.length ? obs.map((o) => `<div class="obs">${escapeHtml(o)}</div>`).join("") : `<div class="meta">No observations.</div>`;
+      obsHtml = obs.length ? obs.map((o) => `<div class="obs">${escapeHtml(o.body)}</div>`).join("") : `<div class="meta">No observations.</div>`;
     }
     $("insBody").innerHTML =
       `<span class="pill" style="background:${n.color}">${escapeHtml(n.type || "—")}</span>` +

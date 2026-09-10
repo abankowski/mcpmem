@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use crate::code::{self, Def, MAX_SYMBOLS_PER_FILE};
 use crate::errors::{MCSError, Result};
 use crate::kg::GraphHandle;
-use crate::types::{Entity, Relation};
+use crate::types::{Entity, EntityInput, Relation};
 
 /// Cap on files processed in a single `code_index` call.
 const MAX_INDEX_FILES: usize = 100_000;
@@ -79,7 +79,7 @@ fn obs_val<'a>(entity: &'a Entity, key: &str) -> Option<&'a str> {
     entity
         .observations
         .iter()
-        .find_map(|o| o.strip_prefix(&prefix))
+        .find_map(|o| o.body.strip_prefix(&prefix))
 }
 
 /// Strip the `code:` prefix from an entity type for display.
@@ -343,13 +343,13 @@ pub(crate) fn index_paths(
     // name and would silently drop against a not-yet-written entity.
 
     // Pass 1: purge changed files and write all entities.
-    let mut ebuf: Vec<Entity> = Vec::with_capacity(WRITE_BATCH);
+    let mut ebuf: Vec<EntityInput> = Vec::with_capacity(WRITE_BATCH);
     let mut symbols = 0usize;
     for fw in &work {
         if fw.existed {
             kg.code_purge_file(&fw.rel)?;
         }
-        ebuf.push(Entity {
+        ebuf.push(EntityInput {
             name: fw.rel.clone(),
             entity_type: "code:file".into(),
             observations: vec![
@@ -357,7 +357,10 @@ pub(crate) fn index_paths(
                 format!("hash: {}", fw.hash),
                 format!("symbols: {}", fw.named.len()),
                 format!("indexed_at: {now}"),
-            ],
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         });
         for (d, q) in &fw.named {
             let mut obs = vec![
@@ -373,10 +376,10 @@ pub(crate) fn index_paths(
             if !d.snippet.is_empty() {
                 obs.push(format!("snippet: {}", d.snippet));
             }
-            ebuf.push(Entity {
+            ebuf.push(EntityInput {
                 name: q.clone(),
                 entity_type: format!("code:{}", d.kind),
-                observations: obs,
+                observations: obs.into_iter().map(Into::into).collect(),
             });
             symbols += 1;
         }
@@ -743,7 +746,8 @@ pub fn handle_code_semantic_search(args: Option<&Value>) -> Result<Value> {
     let mut dist_by_name: std::collections::HashMap<String, f32> =
         std::collections::HashMap::with_capacity(hits.len());
     for (id, dist) in hits {
-        if let Some(name) = vs.id_to_name().get(&id).map(|r| r.value().clone()) {
+        let (name, _) = vs.resolve_name_type(id);
+        if !name.is_empty() {
             dist_by_name.entry(name.clone()).or_insert(dist);
             names.push(name);
         }

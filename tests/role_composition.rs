@@ -1,11 +1,12 @@
 #[cfg(all(feature = "indexer", feature = "webhooks"))]
 use std::sync::Arc;
 
+#[cfg(feature = "indexer")]
+use clap::Parser;
+
 #[cfg(all(feature = "indexer", feature = "webhooks"))]
-use mcp_memory::runtime::{
-    AppServices, RoleFuture, RoleLifecycle, RoleService, RuntimeComposition,
-};
-use mcp_memory::runtime::{ConfigError, RoleSet, RuntimeRole};
+use mcpmem::runtime::{AppServices, RoleFuture, RoleLifecycle, RoleService, RuntimeComposition};
+use mcpmem::runtime::{ConfigError, RoleSet, RuntimeRole};
 
 #[test]
 fn parses_mcp_role() {
@@ -36,6 +37,21 @@ fn parses_indexer_when_the_feature_is_compiled() {
     let roles = RoleSet::parse_csv("indexer").expect("indexer feature is compiled");
 
     assert_eq!(roles.roles(), &[RuntimeRole::Indexer]);
+}
+
+#[cfg(feature = "indexer")]
+#[test]
+fn rejects_legacy_observations_for_a_worker_only_role() {
+    let args =
+        mcpmem::Args::try_parse_from(["mcpmem", "--role", "indexer", "--legacy-observations"])
+            .expect("CLI syntax is valid");
+
+    let error = mcpmem::config::Config::from_args(&args)
+        .expect_err("legacy observation transport requires MCP");
+    assert_eq!(
+        error.to_string(),
+        "Invalid params: --legacy-observations requires the mcp role"
+    );
 }
 
 #[cfg(feature = "webhooks")]
@@ -117,15 +133,15 @@ async fn supervises_selected_roles_and_stops_with_mcp() {
         &[
             RoleLifecycle {
                 role: RuntimeRole::Mcp,
-                state: memory_core::LifecycleState::Running,
+                state: mcpmem_core::LifecycleState::Running,
             },
             RoleLifecycle {
                 role: RuntimeRole::Indexer,
-                state: memory_core::LifecycleState::Running,
+                state: mcpmem_core::LifecycleState::Running,
             },
             RoleLifecycle {
                 role: RuntimeRole::Webhooks,
-                state: memory_core::LifecycleState::Running,
+                state: mcpmem_core::LifecycleState::Running,
             },
         ]
     );

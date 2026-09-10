@@ -55,8 +55,8 @@ fn spawn_vec_server_with(extra: &[&str]) -> VecClient {
         let _ = std::fs::remove_file(&p);
     }
 
-    let bin = std::env::var("CARGO_BIN_EXE_MCP_MEMORY")
-        .unwrap_or_else(|_| "target/debug/mcp-memory".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
 
     let mut cmd = Command::new(&bin);
     cmd.arg("-f")
@@ -77,7 +77,7 @@ fn spawn_vec_server_with(extra: &[&str]) -> VecClient {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn mcp-memory");
+        .expect("failed to spawn mcpmem");
 
     VecClient {
         stdin: child.stdin.take().unwrap(),
@@ -209,8 +209,8 @@ fn test_vector_e2e_upsert_and_search() {
     c.tool_text(
         "create_entities",
         &serde_json::json!({"entities": [
-            {"name": "alice", "entityType": "person", "observations": ["likes math"]},
-            {"name": "bob", "entityType": "person", "observations": ["likes sports"]}
+            {"name": "alice", "entityType": "person", "observations": [{"body":"likes math"}]},
+            {"name": "bob", "entityType": "person", "observations": [{"body":"likes sports"}]}
         ]}),
     );
 
@@ -403,9 +403,9 @@ fn test_vector_e2e_hybrid_search() {
     c.tool_text(
         "create_entities",
         &serde_json::json!({"entities": [
-            {"name": "Einstein", "entityType": "scientist", "observations": ["physics", "relativity", "Nobel prize"]},
-            {"name": "Newton", "entityType": "scientist", "observations": ["physics", "gravity", "calculus"]},
-            {"name": "Mozart", "entityType": "musician", "observations": ["music", "composer", "symphony"]}
+            {"name": "Einstein", "entityType": "scientist", "observations": [{"body":"physics"}, {"body":"relativity"}, {"body":"Nobel prize"}]},
+            {"name": "Newton", "entityType": "scientist", "observations": [{"body":"physics"}, {"body":"gravity"}, {"body":"calculus"}]},
+            {"name": "Mozart", "entityType": "musician", "observations": [{"body":"music"}, {"body":"composer"}, {"body":"symphony"}]}
         ]}),
     );
 
@@ -548,7 +548,7 @@ fn test_vector_e2e_kg_tools_still_work() {
     let text = c.tool_text(
         "create_entities",
         &serde_json::json!({"entities": [
-            {"name": "test", "entityType": "test", "observations": ["obs"]}
+            {"name": "test", "entityType": "test", "observations": [{"body":"obs"}]}
         ]}),
     );
     assert!(!text.contains("error"), "KG create should work: {text}");
