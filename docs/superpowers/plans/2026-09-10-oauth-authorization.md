@@ -834,11 +834,12 @@ Add `oauth` and `bearer_scopes` to the returned `Config`, and to `Default for Co
 - [ ] **Step 9: Run and watch them pass.**
 
 ```text
-cargo test --test oauth_config
-cargo test --test config -- --test-threads=1
+cargo test --test oauth_config --features webhooks
+cargo test -p mcpmem --lib config
 ```
 
-If no `tests/config.rs` exists, run the library tests instead: `cargo test -p mcpmem --lib config`.
+There is no `tests/config.rs`. The `Config` unit tests live in the library, at
+`src/config.rs:218`.
 
 - [ ] **Step 10: Use `bearer_scopes` in the HTTP transport.** In `src/main.rs`, pass `config.bearer_scopes` into `http::run`. Convert it with `Arc::from(config.bearer_scopes)` when you set `HttpState.bearer_scopes`, which Task 1 added as `Arc<[ToolCategory]>`.
 
