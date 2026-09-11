@@ -45,13 +45,11 @@ pub struct PrincipalsStore {
 impl PrincipalsStore {
     /// Open the store against the server's SQLite file. The schema must
     /// already be migrated (build the graph first, which runs
-    /// `initialize_database`), exactly as the OAuth store requires.
+    /// `initialize_database`), exactly as the OAuth store requires. The
+    /// clock is the live wall clock, so TTL expiry and eviction track
+    /// real time.
     pub fn open(db_path: &str, busy_timeout_ms: u64) -> Result<Self> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros() as i64)
-            .unwrap_or(0);
-        Self::open_with_clock(db_path, busy_timeout_ms, Arc::new(move || now))
+        Self::open_with_clock(db_path, busy_timeout_ms, Arc::new(mcpmem_core::events::now_us))
     }
 
     /// Test seam: the clock is injected, so TTL and eviction are
@@ -310,7 +308,7 @@ mod tests {
         (clock, t)
     }
 
-    fn store_at(now: Arc<dyn Fn() -> i64 + Send + Sync>) -> (PrincipalsStore, tempfile::TempDir) {
+    fn migrated_db() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("p.mcpmem");
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -320,11 +318,36 @@ mod tests {
             .expect("migration 5 exists");
         conn.execute_batch(sql).unwrap();
         drop(conn);
+        dir
+    }
+
+    fn store_at(now: Arc<dyn Fn() -> i64 + Send + Sync>) -> (PrincipalsStore, tempfile::TempDir) {
+        let dir = migrated_db();
+        let path = dir.path().join("p.mcpmem");
         (PrincipalsStore::open_with_clock(path.to_str().unwrap(), 5000, now).unwrap(), dir)
     }
 
     fn scopes() -> Vec<String> {
         crate::principals::canonical_scopes(&["graph-read".to_owned()]).unwrap()
+    }
+
+    #[test]
+    fn open_reads_a_live_clock() {
+        // The production open() path must advance with the wall clock:
+        // a clock frozen at boot time would keep every timestamp equal,
+        // so the TTL sweep would never expire rows and the cap trim
+        // would degenerate to insertion order. None of the injected-clock
+        // tests can catch that, so exercise the real path.
+        let dir = migrated_db();
+        let path = dir.path().join("p.mcpmem");
+        let store = PrincipalsStore::open(path.to_str().unwrap(), 5000).unwrap();
+        store.create("iss", "sub", "ada", None, &scopes()).unwrap();
+        // 5 ms is far past the wall clock's native resolution (us).
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.create("iss", "sub2", "ada2", None, &scopes()).unwrap();
+        let first = store.get("iss", "sub").unwrap().unwrap();
+        let second = store.get("iss", "sub2").unwrap().unwrap();
+        assert!(second.created_us > first.created_us);
     }
 
     #[test]
