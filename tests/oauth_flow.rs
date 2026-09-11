@@ -763,6 +763,50 @@ async fn the_bucket_is_the_parsed_address_and_nothing_else() {
     );
 }
 
+/// One host is one bucket however the proxy spelled it.
+///
+/// Three pairs, because each spelling arrives from a real proxy and each was a
+/// separate bucket:
+///
+/// - **Brackets.** `[2001:db8::1]` is how a proxy writes a 16-byte address in
+///   this header. An unstripped bracket fails the parse outright, so the
+///   caller falls back to the connection address — the proxy's — and *every*
+///   client behind that proxy then shares one bucket. That is the damaging
+///   direction: not a caller with too much allowance, but a whole deployment
+///   with one.
+/// - **The v4-mapped form.** `::ffff:203.0.113.7` and `203.0.113.7` are one
+///   host. `IpAddr::to_string` keeps them apart; `IpAddr::to_canonical` does
+///   not.
+/// - **Both at once**, which is what a proxy that writes mapped addresses in
+///   brackets sends.
+///
+/// Twenty requests spend one bucket and the twenty-first names the same host
+/// another way, so a refusal is the assertion that the two are one key.
+#[tokio::test]
+async fn one_host_is_one_bucket_however_the_proxy_spells_it() {
+    let flow = Flow::fresh().await;
+    for (spent, same_host) in [
+        ("[2001:db8::1]", "2001:db8::1"),
+        ("::ffff:203.0.113.7", "203.0.113.7"),
+        ("[::ffff:203.0.113.8]", "203.0.113.8"),
+    ] {
+        for i in 0..20 {
+            let res = flow.register_from(spent).await;
+            assert_eq!(
+                res.status,
+                StatusCode::CREATED,
+                "request {i} from {spent} must pass"
+            );
+        }
+        let blocked = flow.register_from(same_host).await;
+        assert_eq!(
+            blocked.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "{spent} and {same_host} are one host and must be one bucket"
+        );
+    }
+}
+
 /// A clock that steps backwards must not leave every bucket full until it
 /// catches up.
 ///

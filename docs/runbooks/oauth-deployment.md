@@ -598,7 +598,7 @@ Over the limit is `429` with `Retry-After: 60`, and a `WARN` log line naming the
 peer. Registration is the tightest because it is the one anonymous request that
 writes a row nothing expires.
 
-Six things to know before you tune anything:
+Seven things to know before you tune anything:
 
 - **The limits are not configurable.** They are far above any legitimate
   caller — a browser walking one consent page sends a handful, and a connector
@@ -622,9 +622,20 @@ Six things to know before you tune anything:
   that is not an address is ignored, and the caller then counts against the
   connection address instead — the proxy's, so one shared bucket for everyone
   behind it. No caller can mint a bucket, or grow the limiter's map, with
-  arbitrary text. One address has one bucket however it is spelled: the log
-  line for `2001:0db8:0000:0000:0000:0000:0000:0002` reads
-  `peer=2001:db8::2`.
+  arbitrary text.
+- **One host is one bucket however your proxy spells it.** The value is
+  parsed, canonicalised and re-rendered, so all four of these are the key
+  `203.0.113.7`: `203.0.113.7`, `::ffff:203.0.113.7`,
+  `[::ffff:203.0.113.7]` and `::ffff:cb00:7107`. Bracketed IPv6 is unwrapped
+  first, which matters more than it looks: an unrecognised bracket would fail
+  the parse and drop *every* client behind your proxy into the proxy's own
+  bucket. The log line names the key it used, so it is also how you check —
+  `[2001:0db8:0000:0000:0000:0000:0000:0002]` logs as `peer=2001:db8::2`.
+
+One more limiter count for the record: there are **five** limiters behind the
+six endpoints, because `/oauth/token` and `/oauth/revoke` share one. At 8192
+addresses each that is about 3.5 MiB of memory in the worst case, and the maps
+are emptied every minute.
 
 These bound **how many** requests arrive. The size of one request is bounded
 separately and always: 256-byte client name, 8 redirect URIs, 2048-byte URL,

@@ -313,11 +313,18 @@ impl axum::extract::FromRequestParts<HttpState> for Peer {
         if let Some(client) = forwarded {
             return Ok(Peer(client));
         }
+        // The connection address is canonicalised for the same reason the
+        // forwarded one is: a dual-stack listener on `[::]` reports an IPv4
+        // client as `::ffff:a.b.c.d`, and that is the same host as
+        // `a.b.c.d` arriving on an IPv4 listener. One host, one key.
         Ok(Peer(
             parts
                 .extensions
                 .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map_or_else(|| UNKNOWN_PEER.to_owned(), |info| info.0.ip().to_string()),
+                .map_or_else(
+                    || UNKNOWN_PEER.to_owned(),
+                    |info| info.0.ip().to_canonical().to_string(),
+                ),
         ))
     }
 }
@@ -330,13 +337,41 @@ impl axum::extract::FromRequestParts<HttpState> for Peer {
 /// `None` when the header is absent, when its first entry is empty, or when
 /// that entry is not an IP address. The value is caller-chosen and a trusted
 /// proxy that does not overwrite it passes the caller's own text through, so
-/// nothing here may be used as a key on the strength of being present. A
-/// parsed address is re-rendered from [`std::net::IpAddr`] rather than passed
-/// through, so one address has exactly one key however it was written.
+/// nothing here may be used as a key on the strength of being present.
+///
+/// **One host must yield exactly one key**, and three spellings of one host
+/// reach this function from real proxies:
+///
+/// - A **bracketed** IPv6 entry, `[2001:db8::1]`, which is how a proxy writes
+///   a 16-byte address in a header whose separator is a comma. The brackets
+///   are stripped before the parse. Leaving them in is the worst of the three:
+///   the parse fails, so the request falls back to the connection address —
+///   the proxy's — and every client behind that proxy shares one bucket.
+/// - The **v4-mapped** form, `::ffff:203.0.113.7`, which names the same host
+///   as `203.0.113.7`. [`std::net::IpAddr::to_canonical`] folds it; `to_string`
+///   does not.
+/// - Any of the ways RFC 5952 lets a zero run be written. Parsing and
+///   re-rendering folds those by itself.
+///
+/// A port is **not** stripped, and that is deliberate: `X-Forwarded-For`
+/// carries addresses, not endpoints (`Forwarded` is the header that carries
+/// ports, RFC 7239), so `203.0.113.7:9000` here is a misconfigured proxy
+/// rather than a peer. It fails the parse and falls back, which is the safe
+/// answer — accepting it would key on a port and bound nothing.
 fn forwarded_for(headers: &axum::http::HeaderMap) -> Option<String> {
     let value = headers.get("x-forwarded-for")?.to_str().ok()?;
     let client = value.split(',').next()?.trim();
-    Some(client.parse::<std::net::IpAddr>().ok()?.to_string())
+    let client = client
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(client);
+    Some(
+        client
+            .parse::<std::net::IpAddr>()
+            .ok()?
+            .to_canonical()
+            .to_string(),
+    )
 }
 
 /// The RFC 6585 section 4 answer to a caller over its limit.

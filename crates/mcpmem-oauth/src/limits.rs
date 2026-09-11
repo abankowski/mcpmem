@@ -52,14 +52,28 @@ pub const LOGIN_PER_WINDOW: u32 = 60;
 /// boundary, so nothing has to be scanned or evicted to keep this true.
 ///
 /// It bounds **bytes**, not just entries, and only because every key is a
-/// parsed IP address: `src/oauth_routes.rs` turns the caller's address into
-/// its canonical text and nothing else ever reaches [`RateLimiter::check`], so
-/// one key is at most 45 bytes. Six limiters, 8192 keys each, is therefore
-/// well under a megabyte, and each map is emptied every minute. **A caller
-/// that could put arbitrary text in a key would falsify that**, because the
-/// bound would become this number multiplied by the largest header the
-/// transport accepts — which is why the parse is a precondition of this
-/// number rather than a detail of the extractor.
+/// parsed address: `src/oauth_routes.rs` turns the caller's address into its
+/// canonical text and nothing else ever reaches [`RateLimiter::check`]. The
+/// longest such text is **39 bytes** — eight groups of four hex digits and
+/// seven colons, which is the one IPv6 address with no zero run to compress —
+/// and the standard library never zero-pads, so nothing is longer.
+///
+/// The arithmetic, per limiter, for a `HashMap<Box<str>, u32>` at 8192 keys.
+/// It is measured rather than estimated: inserting 8192 39-byte keys reports
+/// `capacity() == 14336`, which hashbrown backs with 16384 buckets, and one
+/// slot is `size_of::<(Box<str>, u32)>() == 24` plus one control byte. So the
+/// table is 16384 × 25 = **400 KiB**, and the key text 8192 × 39 =
+/// **312 KiB**, or 120 KiB when every key is a four-byte address. Call it
+/// **0.7 MiB for one limiter**. [`Limits`] holds **five** — `register`,
+/// `authorize`, `callback`, `consent`, and the `credential` one that the
+/// token and revocation endpoints share — so the worst case is about
+/// **3.5 MiB**, and about 2.5 MiB when every key is a four-byte address. Each
+/// map is emptied every minute.
+///
+/// **A caller that could put arbitrary text in a key would falsify all of
+/// that**, because the bound would become this number multiplied by the
+/// largest header the transport accepts — 16 MiB. That is why the parse is a
+/// precondition of this number rather than a detail of the extractor.
 pub const MAX_KEYS: usize = 8192;
 
 /// The window every key of one limiter is counted against.
