@@ -944,11 +944,12 @@ Tokens: ~14k. Cost: < $1."
 `src/lib.rs`, beside the other `oauth_*` args (`lib.rs:169-205`):
 
 ```rust
-    /// Record a rejected would-be human and answer with a pending page,
-    /// instead of refusing outright. Entries expire after
-    /// `--approval-waitlist-ttl-seconds` and the list holds at most 25.
+    /// `bool`, not `Option<bool>`: clap's SetTrue action yields
+    /// `Some(false)` when the flag is absent, and an absent switch must
+    /// not trip the fail-closed OAuth guard. Same shape as
+    /// `oauth_trust_forwarded_proto`.
     #[arg(long = "approval-waitlist")]
-    pub approval_waitlist: Option<bool>,
+    pub approval_waitlist: bool,
 
     /// How long a waitlist entry lives, measured from first sighting.
     /// 0 disables the TTL sweep; the 25-entry cap always applies.
@@ -1008,7 +1009,7 @@ And in the `[oauth]` assign block, after `trust_forwarded_proto` (`config_file.r
 In `Config::from_args`, in the `Some(OAuthConfig { … })` literal (`config.rs:401-409`):
 
 ```rust
-            approval_waitlist: args.approval_waitlist.unwrap_or(false),
+            approval_waitlist: args.approval_waitlist,
             approval_waitlist_ttl_seconds: args
                 .approval_waitlist_ttl_seconds
                 .unwrap_or(24 * 60 * 60),
