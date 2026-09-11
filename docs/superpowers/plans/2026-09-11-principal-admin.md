@@ -1018,6 +1018,10 @@ In `Config::from_args`, in the `Some(OAuthConfig { … })` literal (`config.rs:4
                 .unwrap_or_else(|| vec!["graph-read".to_owned()]),
 ```
 
+Track the plan's fail-closed guard in the same construction change. `Config::from_args` refuses startup when any OAuth flag is present without `--oidc-issuer` (`config.rs:371-382`): an OAuth flag without the issuer is a misconfiguration, not a no-op. Add the three new flags to that condition, and add the three flag vectors to the orphan enumeration in `tests/oauth_config.rs` (`an_oauth_flag_without_the_issuer_is_refused`).
+
+Also pin the empty-list semantics with a test: `default-new-principal-scopes = []` in the file must yield an empty scopes vec (it clears the default; the `assign_vec` `!value.is_empty()` guard would silently restore `["graph-read"]`, so the `.map(Some)` assign shape must be preserved and tested).
+
 - [ ] **Step 4: Update the test literals**
 
 `tests/support/mod.rs`, `oauth_config_at` (`mod.rs:55-63`):
