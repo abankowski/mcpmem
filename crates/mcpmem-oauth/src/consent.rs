@@ -122,26 +122,42 @@ pub fn offered(requested: &[String], held: &BTreeSet<String>) -> Vec<String> {
 ///
 /// # The property
 ///
-/// *A client name is used only when it proves that it renders, by carrying at
-/// least one character a browser draws as a mark.* Everything else — absent,
-/// empty, whitespace, invisible, or a character nobody here has heard of —
-/// falls back to the identifier, which always names the client.
+/// *A client name is used only when it carries at least one character that is
+/// both in a rendering category and not a default-ignorable code point.*
+/// Everything else — absent, empty, whitespace, a format control, or a letter
+/// a conforming renderer draws no glyph for — falls back to the identifier,
+/// which always names the client.
 ///
-/// # Why this shape, and not a third condition
+/// # Why the property is spelled with two halves
 ///
-/// This check has been wrong three times, and each time the fix was a narrower
-/// deny-list: first `is_empty`, which a name of three spaces defeated; then
-/// `trim().is_empty()`, which follows Unicode `White_Space` and so does not see
-/// `U+200B ZERO WIDTH SPACE` or `U+202E RIGHT-TO-LEFT OVERRIDE`. A deny-list of
-/// things that draw nothing cannot be finished: Unicode keeps adding
-/// characters, and every one of them is allowed by a list written before it
-/// existed.
+/// This check has been wrong four times, and the first three fixes were
+/// deny-lists, each narrower than the last: `is_empty`, defeated by three
+/// spaces; `trim().is_empty()`, which follows Unicode `White_Space` and so does
+/// not see `U+200B ZERO WIDTH SPACE`. A list of things that draw nothing cannot
+/// be finished by enumeration.
 ///
-/// So the test is inverted. A character must prove it renders to count, and
-/// `is_alphanumeric` (every script's letters and digits) or `is_ascii_graphic`
-/// (the printable ASCII punctuation) is that proof. An unknown character does
-/// not count towards naming the client — it neither passes nor needs to be
-/// listed — which is how this covers an input nobody has thought of yet.
+/// So the first half is inverted: a character must be in a category that
+/// carries glyphs before it counts. `is_alphanumeric` is every script's letters
+/// and digits, and `is_ascii_graphic` is the printable ASCII punctuation.
+///
+/// The second half exists because **a category test is not a rendering test**,
+/// and the fourth input proved it. The four Hangul fillers — `U+115F`,
+/// `U+1160`, `U+3164` and `U+FFA0` — are general category `Lo` and Unicode
+/// `Alphabetic`, so `is_alphanumeric` admits all four, and all four are
+/// `Default_Ignorable_Code_Point`, so a conforming renderer draws nothing.
+/// `U+3164` is what people already use to make a blank display name. They are
+/// not obscure new characters either: all four have existed since Unicode 1.1.
+///
+/// [`DEFAULT_IGNORABLE_LETTERS`] is the whole subtraction, and it is small for
+/// a checkable reason rather than a hopeful one: every other
+/// `Default_Ignorable_Code_Point` is `Cf`, `Mn` or `Cn`, and none of those
+/// passes the first half. Unicode reserves ranges for future
+/// default-ignorables, and an unassigned code point in them is `Cn`, so it
+/// fails the first half today. **The residual risk is named rather than
+/// denied**: if a future Unicode assigns a default-ignorable code point an
+/// alphabetic or numeric category, it must be added here. That is the one case
+/// this cannot decide on its own, and it is why the round-3 claim that an
+/// unknown character can never count was wrong.
 ///
 /// The failure direction is the safe one. A name that renders only as symbols
 /// outside ASCII, `"→"` say, is judged to name nothing and the page shows the
@@ -156,11 +172,19 @@ pub fn client_label<'a>(client_name: &'a str, client_id: &'a str) -> &'a str {
     }
 }
 
+/// The `Default_Ignorable_Code_Point` members that a category test admits: the
+/// four Hangul fillers, every one of them a letter that draws no glyph.
+///
+/// See [`client_label`] for why this list is complete against today's Unicode,
+/// and for the one future change that would extend it.
+const DEFAULT_IGNORABLE_LETTERS: [char; 4] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}'];
+
 /// Whether a browser draws this character as a mark a human can see.
 ///
-/// An allow-list, on purpose: see [`client_label`].
+/// A category allow-list, minus the letters that are default-ignorable: see
+/// [`client_label`]. Neither half is enough on its own.
 fn renders(c: char) -> bool {
-    c.is_alphanumeric() || c.is_ascii_graphic()
+    (c.is_alphanumeric() || c.is_ascii_graphic()) && !DEFAULT_IGNORABLE_LETTERS.contains(&c)
 }
 
 /// The consent page for one login.
@@ -427,8 +451,12 @@ mod tests {
         }
     }
 
-    /// Every input that has defeated this check, and one that has not been
-    /// tried. `trim` sees the first four and misses the rest.
+    /// Every input that has defeated this check, in the four rounds it took.
+    ///
+    /// `trim` sees the first four. The next three are `Cf` or `Mn`, so a
+    /// category test excludes them. The last four are `Lo` letters, and a
+    /// category test admits every one of them: that is the case
+    /// `Default_Ignorable_Code_Point` exists to name.
     #[test]
     fn a_name_that_draws_nothing_falls_back_to_the_identifier() {
         for name in [
@@ -440,6 +468,12 @@ mod tests {
             "\u{202e}",
             "\u{feff}",
             "\u{2060}\u{034f}",
+            "\u{115f}",
+            "\u{1160}",
+            "\u{3164}",
+            "\u{ffa0}",
+            // Two of them together, which is what a display name uses.
+            "\u{3164}\u{3164}",
         ] {
             assert_eq!(client_label(name, "the-id"), "the-id", "for {name:?}");
         }

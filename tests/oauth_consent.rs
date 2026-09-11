@@ -44,9 +44,10 @@ async fn the_served_page_escapes_a_hostile_client_name() {
 
 /// Every name that does not name anything, and one that is simply absent.
 ///
-/// One list, because this is one class of input and it has now reopened three
-/// times: an empty name, then a blank one, then an invisible one that `trim`
-/// does not see. Each entry is labelled, so a failure says which input did it.
+/// One list, because this is one class of input and it has now reopened four
+/// times: an empty name, then a blank one, then an invisible format character
+/// that `trim` does not see, then a letter that draws no glyph. Each entry is
+/// labelled, so a failure says which input did it.
 const NAMES_NOBODY: &[(&str, &str)] = &[
     ("no client_name member at all", ""),
     ("an empty name", ""),
@@ -56,6 +57,14 @@ const NAMES_NOBODY: &[(&str, &str)] = &[
     ("U+200B zero width space", "\u{200b}"),
     ("U+202E right-to-left override", "\u{202e}"),
     ("U+FEFF zero width no-break space", "\u{feff}"),
+    // Four letters — general category Lo, and Alphabetic — that are also
+    // `Default_Ignorable_Code_Point`, so a conforming renderer draws no glyph
+    // for them. U+3164 is what people already use to make a blank display
+    // name. A category test admits all four; a rendering test must not.
+    ("U+115F hangul choseong filler", "\u{115f}"),
+    ("U+1160 hangul jungseong filler", "\u{1160}"),
+    ("U+3164 hangul filler", "\u{3164}"),
+    ("U+FFA0 halfwidth hangul filler", "\u{ffa0}"),
 ];
 
 /// RFC 7591 section 2 makes `client_name` optional, and nothing trims or
@@ -86,8 +95,8 @@ async fn a_client_whose_name_draws_nothing_is_named_by_its_identifier() {
 /// this defect reopened.
 fn assert_named_by_identifier(a: &Authorized, label: &str) {
     for element in [
-        format!("<strong>{}</strong>", a.client_id),
-        format!("<h1>Authorize {}</h1>", a.client_id),
+        format!("<strong><bdi>{}</bdi></strong>", a.client_id),
+        format!("<h1>Authorize <bdi>{}</bdi></h1>", a.client_id),
     ] {
         assert!(
             a.body.contains(&element),
@@ -465,6 +474,47 @@ fn the_rendered_page_leaves_no_placeholder_behind() {
         "state-value",
     );
     assert!(!html.contains("{{"), "unfilled placeholder in: {html}");
+}
+
+/// Every value the page draws as text sits inside a `<bdi>`.
+///
+/// A strongly right-to-left name reorders the neutral characters around it, so
+/// a name placed bare in `Authorize <name>` can rearrange the sentence that
+/// tells the human what they are about to grant. `<bdi>` is the isolation that
+/// stops it, and there is nothing else to observe: the effect is the browser's
+/// bidirectional algorithm, so the markup is the assertion.
+#[test]
+fn every_value_the_page_draws_is_isolated_from_the_text_around_it() {
+    let html = page(
+        "שלום",
+        "adam@example.com",
+        &["graph-read".to_string()],
+        "csrf-value",
+        "state-value",
+    );
+    // Each drawn site, not merely one of them: a test for `<bdi>{name}</bdi>`
+    // anywhere passes while the heading is bare, because the paragraph below it
+    // supplies the match.
+    for isolated in [
+        "<h1>Authorize <bdi>שלום</bdi></h1>",
+        "<strong><bdi>שלום</bdi></strong>",
+        "signed in as <bdi>adam@example.com</bdi>",
+        "<code><bdi>graph-read</bdi></code>",
+    ] {
+        assert!(
+            html.contains(isolated),
+            "{isolated} is not isolated: {html}"
+        );
+    }
+    // Three occurrences: the two isolated ones above, and `<title>`, which is
+    // the one context HTML gives no element to wrap. The count is asserted so
+    // that a new un-isolated site fails here rather than shipping; the title is
+    // protected instead by `escape_html` dropping the bidirectional controls.
+    assert_eq!(
+        html.matches("שלום").count(),
+        3,
+        "an unexpected occurrence of the name, or a missing one: {html}"
+    );
 }
 
 #[test]

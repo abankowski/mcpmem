@@ -24,9 +24,18 @@ button[name="approve"] { font-weight: 600; }
 </head>
 <body>
 <main>
-<h1>Authorize {{client_name}}</h1>
-<p><strong>{{client_name}}</strong> asks to use your memory graph on your behalf.</p>
-<p class="who">You are signed in as {{principal_label}}.</p>
+<!--
+  Each substituted value sits in a `<bdi>`. A strongly right-to-left name
+  reorders the neutral characters around it, so a bare name in
+  `Authorize <name>` can rearrange the sentence that tells the human what they
+  are about to grant. `<bdi>` isolates the value's direction from the sentence.
+  It does not make the value itself safe: `consent.rs` still drops the twelve
+  bidirectional controls, because an override inside an isolate still reverses
+  the run it opens, and `<title>` below takes text with no element to wrap it.
+-->
+<h1>Authorize <bdi>{{client_name}}</bdi></h1>
+<p><strong><bdi>{{client_name}}</bdi></strong> asks to use your memory graph on your behalf.</p>
+<p class="who">You are signed in as <bdi>{{principal_label}}</bdi>.</p>
 <!--
   The action is relative on purpose. This page is served from
   `GET /oauth/callback`, so `consent` resolves to `/oauth/consent` at the same
