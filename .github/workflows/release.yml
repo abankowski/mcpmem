@@ -96,6 +96,44 @@ jobs:
             scripts/publish-crates.sh
           fi
 
+  # crates.io ships source only, so every `cargo install` recompiles the whole
+  # workspace on the client. This job builds the binary once, per target, and
+  # attaches it to the GitHub release, so an install can download the artefact
+  # instead of compressing. The crates.io publisher stays the source of record.
+  binaries:
+    needs: publish
+    if: github.event_name == 'release'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build the release binary
+        run: cargo build --release --all-features --locked --target "${{ matrix.target }}"
+      - name: Archive and attach
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          archive="/tmp/mcpmem-${TAG}-${{ matrix.target }}.tar.gz"
+          tar -C "target/${{ matrix.target }}/release" -czf "${archive}" mcpmem
+          gh release upload "${TAG}" "${archive}" --clobber
+
   # After a release, `main` names the version that is coming next, never the one
   # already published. Owner decision, 2026-09-10, after two releases failed
   # because a tag moved and the manifests did not.

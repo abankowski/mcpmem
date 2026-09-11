@@ -107,6 +107,21 @@ graph-only build links neither an HTTP client nor an AWS client.
 already on by default, and `bedrock` pulls `indexer` with it. CI compiles and lints that whole
 set on every push.
 
+Prebuilt binaries are attached to every GitHub release, one per target:
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
+and `x86_64-apple-darwin`. Download the one for your platform and unpack it —
+no compilation:
+
+```sh
+curl -fL -o mcpmem.tar.gz \
+  "https://github.com/abankowski/mcpmem/releases/latest/download/mcpmem-v1.0.2-aarch64-apple-darwin.tar.gz"
+tar -xzf mcpmem.tar.gz && sudo mv mcpmem /usr/local/bin/
+```
+
+`cargo install mcpmem` stays an option. It always recompiles from crates.io,
+which ships source only, and the options above tell it which features to build
+in.
+
 To build from a clone instead of crates.io:
 
 ```sh
