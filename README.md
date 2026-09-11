@@ -248,6 +248,118 @@ after eight attempts. The full contract is in [`crates/mcpmem-webhook/README.md`
 > nothing is delivered, no error is raised. An allowlisted host and a signing key are what make
 > it act.
 
+#### What the worker will and will not deliver to
+
+The endpoint policy is DNS-verified before **every** delivery:
+
+| Rule | Why |
+|---|---|
+| `https` on port 443 only | TLS is the transport, no exceptions |
+| hostname, never an IP literal | the hostname is what the allowlist matches |
+| the hostname must resolve to a **public** address | private, loopback, link-local, multicast and unspecified addresses are refused |
+| no credentials and no fragment in the URL | nothing to leak into logs |
+
+So Node-RED on `:1880` and n8n on `:5678` are unreachable directly: put a TLS
+reverse proxy (Caddy, nginx, Traefik) or a tunnel in front of them, and put
+the proxy's public hostname in the `allowlist`.
+
+#### Receiver recipe: Node-RED
+
+1. **Expose Node-RED over HTTPS.** Behind Caddy, one Caddyfile line does it
+   for a domain pointing at the machine:
+
+   ```
+   hooks.example.com  {
+       reverse_proxy localhost:1880
+   }
+   ```
+
+   The `/mcpmem` path on that domain is the endpoint.
+
+2. **mcpmem side.** The example at the top of this section already matches:
+   `allowlist = ["hooks.example.com"]`, one key file. Install
+   `webhook-add-subscription` from the MCP client once, with
+   `endpoint = "https://hooks.example.com/mcpmem"`,
+   `secretRef = "my-consumer"`.
+
+3. **The Node-RED flow.** One **HTTP in** node (`POST`, URL `/mcpmem`) and
+   one **function** node that verifies the signature before the flow
+   continues:
+
+   ```js
+   const crypto = global.get('crypto') || require('crypto');
+   const timestamp = msg.headers['x-memory-timestamp'];
+   const received  = msg.headers['x-memory-signature'];
+   // The MAC covers the raw body. `msg.req.body` is that raw string; a flow
+   // that instead reads `msg.payload` may already hold a parsed object, and
+   // HMAC over a re-serialized JSON object will NOT match.
+   const body = msg.req.body;
+
+   const expected = crypto
+     .createHmac('sha256', process.env.WEBHOOK_KEY)
+     .update(timestamp + '.' + body)
+     .digest('hex');
+
+   if (received !== expected) {
+     throw new Error('bad signature');
+   }
+   msg.payload = JSON.parse(body); // the event envelope
+   return msg;
+   ```
+
+   Set `WEBHOOK_KEY` to the contents of your key file (or use a function-global
+   read of it). A browser-simulated POST without the header now fails closed.
+
+#### Receiver recipe: n8n
+
+1. **Expose n8n over HTTPS.** Same idea as Node-RED — domain + reverse proxy
+   (n8n listens on `:5678`):
+
+   ```
+   hooks.example.com  {
+       reverse_proxy localhost:5678
+   }
+   ```
+
+   Register the webhook URL in n8n as `POST https://hooks.example.com` and
+   enable **Respond: using Respond to Webhook** if you want a 200 to the
+   worker (the worker only needs a non-2xx to retry; the default response is
+   fine).
+
+2. **mcpmem side.** Identical to the Node-RED recipe: same allowlist, any
+   `secretRef`. Point `webhook_add_subscription` at
+   `https://hooks.example.com` (n8n folds the path into its own URL space).
+
+3. **Verify the signature in the flow.** After the **Webhook** trigger, add
+   a **Code node**:
+
+   ```js
+   const crypto = require('crypto');
+   const headers = $input.all()[0].body.headers; // n8n exposes raw headers here
+   // The MAC covers the raw request body as a string. n8n keeps it at
+   // body.body in raw form; a flow that reads a parsed object instead will
+   // never produce a matching signature.
+   const body = $input.all()[0].body.body;
+
+   const expected = crypto
+     .createHmac('sha256', 'exact-webhook-key-contents')
+     .update(headers['x-memory-timestamp'] + '.' + body)
+     .digest('hex');
+
+   if (headers['x-memory-signature'] !== expected) {
+     throw new Error('bad signature');
+   }
+   return $input.all()[0];
+   ```
+
+   Paste your key file's contents where the example says. A retry from the
+   worker carries a fresh timestamp, so the signature check is replay-safe on
+   its own; `Idempotency-Key` (the event id) is available if you want
+   cross-node deduplication too.
+
+Both recipes make the same three decisions: get a public HTTPS URL, name it
+in `allowlist`, and treat every unsigned POST as invalid.
+
 ## Quick start
 
 ```sh
