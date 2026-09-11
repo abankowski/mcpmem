@@ -107,11 +107,37 @@ impl ProviderRegistry {
             }
         };
         let registry = Self::new(ollama, openai);
+        // Bedrock resolves the AWS credential chain when it is constructed, and
+        // that fails on a host with no AWS credentials. Building it
+        // unconditionally therefore broke an Ollama-only deployment that merely
+        // happened to compile the `bedrock` feature. It is built only when the
+        // caller asks for it.
         #[cfg(feature = "bedrock")]
-        let registry = registry.with_bedrock(Arc::new(
-            BedrockEmbeddingProvider::from_standard_chain(timeout)?,
-        ));
+        let registry = if settings.bedrock {
+            registry.with_bedrock(Arc::new(BedrockEmbeddingProvider::from_standard_chain(
+                timeout,
+            )?))
+        } else {
+            registry
+        };
         Ok(registry)
+    }
+}
+
+impl ProviderRegistry {
+    /// Whether this registry could serve a profile of the given provider kind.
+    /// The strict kind mapping lives here, where the provider fields are, so
+    /// no caller outside the crate re-derives which kind answers to which
+    /// provider.
+    #[must_use]
+    pub fn supports_provider_kind(&self, kind: &str) -> bool {
+        match kind {
+            "ollama" => self.ollama.is_some(),
+            "openai" | "openai-compatible" => self.openai.is_some(),
+            #[cfg(feature = "bedrock")]
+            "bedrock" => self.bedrock.is_some(),
+            _ => false,
+        }
     }
 }
 
@@ -130,6 +156,10 @@ pub struct ProviderSettings {
     pub ollama_url: Option<String>,
     pub openai_url: Option<String>,
     pub openai_api_key: Option<String>,
+    /// Whether the deployment wants the Bedrock provider. It names no URL and
+    /// no key: it reads the standard AWS chain instead. So the caller states
+    /// the intent here, and the profile's `provider_kind` is what sets it.
+    pub bedrock: bool,
 }
 
 /// Hand-written so the key can never reach a log line through `{:?}`.
@@ -142,6 +172,7 @@ impl std::fmt::Debug for ProviderSettings {
                 "openai_api_key",
                 &self.openai_api_key.as_ref().map(|_| "<redacted>"),
             )
+            .field("bedrock", &self.bedrock)
             .finish()
     }
 }
@@ -156,6 +187,9 @@ impl ProviderSettings {
             ollama_url: read(OLLAMA_URL_ENV),
             openai_url: read(OPENAI_URL_ENV),
             openai_api_key: read(OPENAI_API_KEY_ENV),
+            // No environment variable selects Bedrock. The index profile names
+            // the provider kind, so the server sets this from the profile.
+            bedrock: false,
         }
     }
 
@@ -174,6 +208,7 @@ impl ProviderSettings {
         self.ollama_url = self.ollama_url.or(lower.ollama_url);
         self.openai_url = self.openai_url.or(lower.openai_url);
         self.openai_api_key = self.openai_api_key.or(lower.openai_api_key);
+        self.bedrock = self.bedrock || lower.bedrock;
         self
     }
 }

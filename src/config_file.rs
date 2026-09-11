@@ -561,17 +561,31 @@ pub fn indexer_settings(file: Option<&FileConfig>) -> Result<mcpmem_indexer::Pro
     let Some(section) = file.map(|file| &file.indexer) else {
         return Ok(environment);
     };
-    if environment.is_complete() {
-        return Ok(environment);
-    }
-    let openai_api_key = match (&environment.openai_api_key, &section.openai_api_key_file) {
-        (None, Some(path)) => Some(read_secret_file("indexer.openai-api-key-file", path)?),
+    // Bedrock names no URL and no key: it reads the standard AWS chain. So the
+    // profile's provider kind is the only thing that can select it, and the
+    // registry builds it only when this flag is set. Without the flag an
+    // Ollama deployment on a `bedrock` build would fail to construct a
+    // registry at all, because the AWS chain resolves on construction.
+    let bedrock = profile_spec(file)?.is_some_and(|spec| spec.provider_kind == "bedrock");
+    // The key file is read only when a profile actually selects OpenAI, or
+    // when the environment already points at OpenAI without a key. A stale or
+    // missing `openai-api-key-file` next to an Ollama deployment is a stray
+    // path, not a reason to abort a process that never needed the file.
+    let openai_selected = profile_spec(file)?
+        .is_some_and(|spec| matches!(spec.provider_kind.as_str(), "openai" | "openai-compatible"));
+    let openai_api_key = match (
+        &environment.openai_api_key,
+        &section.openai_api_key_file,
+        openai_selected,
+    ) {
+        (None, Some(path), true) => Some(read_secret_file("indexer.openai-api-key-file", path)?),
         _ => None,
     };
     Ok(environment.or(mcpmem_indexer::ProviderSettings {
         ollama_url: section.ollama_url.clone(),
         openai_url: section.openai_url.clone(),
         openai_api_key,
+        bedrock,
     }))
 }
 

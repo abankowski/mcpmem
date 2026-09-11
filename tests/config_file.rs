@@ -351,3 +351,45 @@ fn every_key_documented_in_the_example_is_a_real_key() {
     file.apply(&mut args, &explicit, &|_| true)
         .expect("every value documented in the example must be accepted");
 }
+
+// --- the provider-publication gate ------------------------------------------
+
+/// `main` publishes the provider registry only when the resolved settings are
+/// not the default value. Bedrock names no URL and no key, so without the
+/// `bedrock` flag a correct Bedrock deployment would resolve to the default
+/// value, publish nothing, and hide `semantic_search`.
+#[cfg(feature = "indexer")]
+#[test]
+fn a_bedrock_profile_produces_settings_that_the_publication_gate_accepts() {
+    let file: FileConfig = toml::from_str(
+        "[indexer]\nprovider = \"bedrock\"\nmodel = \"amazon.titan-embed-text-v2:0\"\ndimensions = 1024\n",
+    )
+    .expect("parses");
+    let settings = mcpmem::config_file::indexer_settings(Some(&file)).expect("settings");
+
+    assert!(settings.bedrock, "the profile kind must select Bedrock");
+    assert_ne!(
+        settings,
+        mcpmem_indexer::ProviderSettings::default(),
+        "the gate in main publishes only a non-default value"
+    );
+}
+
+/// The mirror case, and the reason the flag exists at all: an Ollama profile
+/// must not ask for Bedrock. Building the Bedrock provider resolves the AWS
+/// credential chain, which fails on a host that has none.
+#[cfg(feature = "indexer")]
+#[test]
+fn an_ollama_profile_never_asks_for_bedrock() {
+    let file: FileConfig = toml::from_str(
+        "[indexer]\nollama-url = \"http://127.0.0.1:11434\"\nprovider = \"ollama\"\nmodel = \"nomic-embed-text\"\ndimensions = 768\n",
+    )
+    .expect("parses");
+    let settings = mcpmem::config_file::indexer_settings(Some(&file)).expect("settings");
+
+    assert!(!settings.bedrock);
+    assert_eq!(
+        settings.ollama_url.as_deref(),
+        Some("http://127.0.0.1:11434")
+    );
+}

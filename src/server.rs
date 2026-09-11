@@ -681,10 +681,7 @@ fn process_request(
 ) -> Result<HandlerResult> {
     match req.method.as_str() {
         "initialize" => Ok(HandlerResult::Value(handle_initialize(req, vs.is_some()))),
-        "tools/list" => Ok(HandlerResult::Value(handle_tools_list(
-            vs.is_some(),
-            principal,
-        ))),
+        "tools/list" => Ok(HandlerResult::Value(handle_tools_list(vs, principal))),
         "tools/call" => handle_tools_call(req, kg, vs, principal),
         "ping" => Ok(HandlerResult::Value(Value::Null)),
         method if method.starts_with("notifications/") => {
@@ -799,7 +796,7 @@ fn code_tools() -> &'static Vec<Value> {
 /// enabled *and* the caller's scopes cover it, so the server never lists a tool
 /// it would reject. Knowledge-graph tools are gated by the graph-read /
 /// graph-write flags; vector and code tools by their subsystems being enabled.
-fn handle_tools_list(vectors_enabled: bool, principal: &Principal) -> Value {
+fn handle_tools_list(vs: Option<&VectorStore>, principal: &Principal) -> Value {
     let (read, write) = (graph_read_enabled(), graph_write_enabled());
     let mut all: Vec<Value> = base_tools()
         .iter()
@@ -830,11 +827,11 @@ fn handle_tools_list(vectors_enabled: bool, principal: &Principal) -> Value {
                 .expect("compiled observation write schema") = json!({"type":"string"});
         }
     }
-    if vectors_enabled {
+    if vs.is_some() {
         all.extend(
             vector_tools()
                 .iter()
-                .filter(|t| in_scope(t, principal) && vector_tool_listed(t))
+                .filter(|t| in_scope(t, principal) && vector_tool_listed(t, vs))
                 .cloned(),
         );
     }
@@ -859,26 +856,32 @@ fn in_scope(tool: &Value, principal: &Principal) -> bool {
 }
 
 /// `false` for a vector tool this process cannot run. Only `semantic_search`
-/// carries such a condition: it embeds the query itself, so it needs an
-/// embedding provider. Listing it without one would advertise a call that
-/// always fails.
+/// carries a profile-specific condition. It needs a serving profile and a
+/// provider that can embed for that profile kind.
 #[inline]
-fn vector_tool_listed(tool: &Value) -> bool {
+fn vector_tool_listed(tool: &Value, vs: Option<&VectorStore>) -> bool {
     match tool.get("name").and_then(Value::as_str) {
-        Some(tools::SEMANTIC_SEARCH) => semantic_search_available(),
+        Some(tools::SEMANTIC_SEARCH) => semantic_search_available(vs),
         _ => true,
     }
 }
 
-/// Whether `semantic_search` can work here. The tool needs the `indexer`
-/// feature at build time and a provider at run time. A build without the
-/// feature has no handler at all, so it never lists the tool.
+/// Whether `semantic_search` can work with this store. The tool needs the
+/// `indexer` feature, a serving profile and a provider for the profile kind.
+/// A profile read error hides the tool, because the handler cannot work.
 #[cfg(feature = "indexer")]
-fn semantic_search_available() -> bool {
-    crate::indexer_provider::is_configured()
+fn semantic_search_available(vs: Option<&VectorStore>) -> bool {
+    if !crate::indexer_provider::is_configured() {
+        return false;
+    }
+    let Some(profile) = vs.and_then(|store| store.serving_profile().ok().flatten()) else {
+        return false;
+    };
+    crate::indexer_provider::get()
+        .is_some_and(|provider| provider.supports_provider_kind(&profile.provider_kind))
 }
 #[cfg(not(feature = "indexer"))]
-const fn semantic_search_available() -> bool {
+fn semantic_search_available(_vs: Option<&VectorStore>) -> bool {
     false
 }
 

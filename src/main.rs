@@ -77,14 +77,47 @@ async fn inner_main() -> Result<()> {
     // default single-role shape too.
     #[cfg(feature = "indexer")]
     let loaded = file.as_ref().map(|(_, loaded)| loaded);
+    // Adoption uses this validated profile after the provider registry exists.
+    #[cfg(feature = "indexer")]
+    let spec = config_file::profile_spec(loaded)?;
+    #[cfg(feature = "indexer")]
+    let profile_uses_bedrock = spec
+        .as_ref()
+        .is_some_and(|spec| spec.provider_kind == "bedrock");
+    #[cfg(feature = "indexer")]
+    if profile_uses_bedrock && !cfg!(feature = "bedrock") {
+        return Err(mcpmem::errors::MCSError::InvalidParams(
+            "config 'indexer.provider': 'bedrock' needs the `bedrock` Cargo feature".into(),
+        )
+        .into());
+    }
     #[cfg(feature = "indexer")]
     let provider = {
-        let settings = config_file::indexer_settings(loaded)?;
-        // A named endpoint is what names a provider. A key on its own names
-        // none, and `from_settings` rejects a key that arrives without its URL.
-        // So a stray `MCP_MEMORY_OPENAI_API_KEY` must never reach it: it would
-        // stop a startup that needs no provider at all.
-        if settings.ollama_url.is_some() || settings.openai_url.is_some() {
+        let environment = mcpmem_indexer::ProviderSettings::from_environment();
+        let file_names_endpoint = loaded.is_some_and(|file| {
+            file.indexer.ollama_url.is_some() || file.indexer.openai_url.is_some()
+        });
+        let file_supplies_openai_key = environment.openai_url.is_some()
+            && environment.openai_api_key.is_none()
+            && loaded.is_some_and(|file| file.indexer.openai_api_key_file.is_some());
+        // Read the key file only when an endpoint can use it. A key by itself
+        // names no provider, so a stale key file must not stop this process.
+        let settings = if file_names_endpoint || profile_uses_bedrock || file_supplies_openai_key {
+            config_file::indexer_settings(loaded)?
+        } else {
+            environment
+        };
+        // Publication decides whether a query tool is advertised at all, so it
+        // must never publish a registry that holds no provider.
+        //
+        // A named endpoint is the signal for every provider that has one. A key
+        // on its own names none, and `from_settings` rejects a key that arrives
+        // without its URL.
+        //
+        // Bedrock names no endpoint. The validated profile selects it after the
+        // feature check above.
+        let bedrock = profile_uses_bedrock;
+        if settings.ollama_url.is_some() || settings.openai_url.is_some() || bedrock {
             let provider = runtime::IndexerService::provider_registry(settings).await?;
             mcpmem::indexer_provider::init(Arc::clone(&provider));
             info!("Embedding provider published: this process can embed a query text");
@@ -103,7 +136,7 @@ async fn inner_main() -> Result<()> {
         .contains(&runtime::RuntimeRole::Indexer)
     {
         let vectors = mcp_server.vector_store();
-        adopt_index_profile(loaded, vectors.as_deref())?;
+        adopt_index_profile(spec, vectors.as_deref())?;
         services.with_indexer(Arc::new(runtime::IndexerService::with_provider(
             config.memory_file_path.clone(),
             vectors,
@@ -145,12 +178,12 @@ async fn inner_main() -> Result<()> {
 /// answer a search over one embedding space with vectors from another.
 #[cfg(feature = "indexer")]
 fn adopt_index_profile(
-    file: Option<&config_file::FileConfig>,
+    spec: Option<config_file::ProfileSpec>,
     vectors: Option<&mcpmem::vector_store::VectorStore>,
 ) -> Result<()> {
     use mcpmem::vector_store::AdoptOutcome;
 
-    let Some(spec) = config_file::profile_spec(file)? else {
+    let Some(spec) = spec else {
         return Ok(());
     };
     let Some(vectors) = vectors else {

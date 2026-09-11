@@ -157,6 +157,150 @@ fn semantic_search_is_absent_from_tools_list_without_a_provider() {
     );
 }
 
+/// The provider cell is a process-wide `OnceLock`. This test runs the mismatch
+/// in a child process, so its registry cannot change the no-provider tests.
+#[cfg(feature = "indexer")]
+const PROVIDER_KIND_MISMATCH_CHILD: &str = "MCPMEM_PROVIDER_KIND_MISMATCH_CHILD";
+#[cfg(feature = "indexer")]
+const PROVIDER_KIND_MATCH_CHILD: &str = "MCPMEM_PROVIDER_KIND_MATCH_CHILD";
+
+#[cfg(feature = "indexer")]
+fn activate_serving_profile(dir: &tempfile::TempDir, profile: &mcpmem_core::jobs::IndexProfile) {
+    use mcpmem_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
+    use rusqlite::Connection;
+
+    let conn = Connection::open(dir.path().join("memory.db")).expect("open the test database");
+    let registry = IndexProfileRegistry::new(&conn);
+    let ann = AnnGenerationRepository::new(&conn);
+    registry.begin_rebuild(profile).expect("start the profile");
+    ann.verify_full_scan(profile.id)
+        .expect("verify the empty generation");
+    assert!(
+        ann.mark_published(profile.id, 0)
+            .expect("publish the empty generation")
+    );
+    registry.activate(profile.id).expect("activate the profile");
+}
+
+#[cfg(feature = "indexer")]
+fn openai_profile() -> mcpmem_core::jobs::IndexProfile {
+    use mcpmem_core::jobs::{DistanceMetric, IndexProfile, Normalization};
+    use uuid::Uuid;
+
+    IndexProfile {
+        id: Uuid::new_v4(),
+        store_key: "default".into(),
+        provider_kind: "openai".into(),
+        model: "test-model".into(),
+        dimensions: DIMS,
+        representation_version: "test-v1".into(),
+        normalization: Normalization::None,
+        distance_metric: DistanceMetric::Cosine,
+        vector_encoding_version: "f32le-v1".into(),
+    }
+}
+
+#[cfg(feature = "indexer")]
+fn hide_tool_for_provider_kind_mismatch() {
+    use mcpmem_indexer::{OllamaProvider, ProviderRegistry};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("make a temporary database");
+    let (kg, vs) = vector_server(&dir);
+    let profile = openai_profile();
+    activate_serving_profile(&dir, &profile);
+    let serving = vs
+        .serving_profile()
+        .expect("read the serving profile")
+        .expect("the profile is active");
+    assert_eq!(serving.provider_kind, "openai");
+
+    let ollama = OllamaProvider::new("http://127.0.0.1:11434", Duration::from_secs(1))
+        .expect("make an Ollama provider without a request");
+    mcpmem::indexer_provider::init(Arc::new(ProviderRegistry::new(
+        Some(Arc::new(ollama)),
+        None,
+    )));
+
+    let names = listed_tool_names(&kg, &vs);
+    assert!(
+        !names.iter().any(|name| name == SEMANTIC_SEARCH),
+        "the registry has Ollama, but the serving profile names OpenAI: {names:?}"
+    );
+}
+
+/// An available registry is not enough. The registry must hold the provider
+/// the serving profile names, or the handler will fail after `tools/list`.
+#[cfg(feature = "indexer")]
+#[test]
+fn semantic_search_is_hidden_when_registry_lacks_serving_provider() {
+    if std::env::var_os(PROVIDER_KIND_MISMATCH_CHILD).is_some() {
+        hide_tool_for_provider_kind_mismatch();
+        return;
+    }
+
+    let status = std::process::Command::new(
+        std::env::current_exe().expect("find the semantic search test binary"),
+    )
+    .arg("semantic_search_is_hidden_when_registry_lacks_serving_provider")
+    .arg("--exact")
+    .env(PROVIDER_KIND_MISMATCH_CHILD, "1")
+    .status()
+    .expect("run the isolated mismatch test");
+    assert!(status.success(), "the isolated mismatch test must pass");
+}
+
+#[cfg(feature = "indexer")]
+fn list_tool_for_matching_provider() {
+    use mcpmem_indexer::{OpenAiCompatibleProvider, ProviderRegistry};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("make a temporary database");
+    let (kg, vs) = vector_server(&dir);
+    let profile = openai_profile();
+    activate_serving_profile(&dir, &profile);
+    let openai = OpenAiCompatibleProvider::new(
+        "http://127.0.0.1:8000/v1/embeddings".into(),
+        "test-key".into(),
+        Duration::from_secs(1),
+    )
+    .expect("make an OpenAI provider without a request");
+    mcpmem::indexer_provider::init(Arc::new(ProviderRegistry::new(
+        None,
+        Some(Arc::new(openai)),
+    )));
+
+    let names = listed_tool_names(&kg, &vs);
+    assert!(
+        names.iter().any(|name| name == SEMANTIC_SEARCH),
+        "the registry and the serving profile both name OpenAI: {names:?}"
+    );
+}
+
+/// A matching registry must list the tool. This control keeps the mismatch
+/// test from passing because a future gate hides semantic search everywhere.
+#[cfg(feature = "indexer")]
+#[test]
+fn semantic_search_is_listed_when_registry_supports_serving_provider() {
+    if std::env::var_os(PROVIDER_KIND_MATCH_CHILD).is_some() {
+        list_tool_for_matching_provider();
+        return;
+    }
+
+    let status = std::process::Command::new(
+        std::env::current_exe().expect("find the semantic search test binary"),
+    )
+    .arg("semantic_search_is_listed_when_registry_supports_serving_provider")
+    .arg("--exact")
+    .env(PROVIDER_KIND_MATCH_CHILD, "1")
+    .status()
+    .expect("run the isolated matching-provider test");
+    assert!(
+        status.success(),
+        "the isolated matching-provider test must pass"
+    );
+}
+
 /// Hidden from `tools/list` is not enough. The name is still a known vector
 /// tool, so a client that calls it anyway must be refused rather than served.
 #[test]
