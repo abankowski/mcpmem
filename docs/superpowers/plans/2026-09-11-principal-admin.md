@@ -190,8 +190,9 @@ pub fn is_known_scope(slug: &str) -> bool {
     slug == ADMIN_SCOPE || slug.parse::<ToolCategory>().is_ok()
 }
 
-/// Canonicalize a scope list: trim, reject unknown slugs, keep input order.
-/// The caller decides whether an empty result is allowed.
+/// Canonicalize a scope list: trim, convert each known tool category to
+/// its slug, reject unknown slugs, keep input order. The caller decides
+/// whether an empty result is allowed.
 pub fn canonical_scopes(raw: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(raw.len());
     for slug in raw {
@@ -199,10 +200,13 @@ pub fn canonical_scopes(raw: &[String]) -> Result<Vec<String>> {
         if slug.is_empty() {
             continue;
         }
-        if !is_known_scope(slug) {
+        if slug == ADMIN_SCOPE {
+            out.push(ADMIN_SCOPE.to_owned());
+        } else if let Ok(category) = slug.parse::<ToolCategory>() {
+            out.push(category.slug().to_owned());
+        } else {
             return Err(MCSError::InvalidParams(format!("unknown scope '{slug}'")));
         }
-        out.push(slug.to_owned());
     }
     Ok(out)
 }
@@ -214,8 +218,13 @@ Replace `scope_set`:
 pub fn scope_set(&self) -> BTreeSet<String> {
     self.scopes
         .iter()
-        .filter(|s| is_known_scope(s))
-        .cloned()
+        .filter_map(|s| {
+            if s == ADMIN_SCOPE {
+                Some(ADMIN_SCOPE.to_owned())
+            } else {
+                s.parse::<ToolCategory>().ok().map(|c| c.slug().to_owned())
+            }
+        })
         .collect()
 }
 ```
@@ -243,9 +252,9 @@ Expected: PASS.
 
 - [ ] **Step 5: Verify an existing built-in entry still loads with new scopes**
 
-Run: `cargo test -p mcpmem test_` (any existing principals/config_file tests)
+Run: `cargo test --test oauth_config` (the principals-file tests live here: `principal_scopes_are_stored_as_canonical_slugs`, `scope_set_canonicalizes_an_entry_that_did_not_come_from_load`, rejection tests)
 
-Expected: PASS — `config_file.rs` tests load principal files and must still pass.
+Expected: PASS — the canonical-slug contract the loader pins is preserved.
 
 - [ ] **Step 6: Commit**
 
