@@ -18,6 +18,8 @@ use mcpmem_oauth::registration::RegistrationError;
 #[cfg(feature = "oauth")]
 use mcpmem_oauth::store::LoginRecord;
 #[cfg(feature = "oauth")]
+use mcpmem_oauth::token::TokenError;
+#[cfg(feature = "oauth")]
 use mcpmem_oauth::upstream::{IdentityClaims, Provider, UpstreamError};
 use parking_lot::Mutex;
 #[cfg(feature = "oauth")]
@@ -70,6 +72,20 @@ impl OauthState {
     /// path silently stops matching.
     pub fn resource(&self) -> String {
         format!("{}/mcp", self.config.public_url)
+    }
+
+    /// The grant behind a bearer token presented to this server, or `None`
+    /// when the token is not one this server will honour.
+    ///
+    /// The audience it compares against is [`OauthState::resource`] and
+    /// nothing else. A caller cannot pass one, so no transport path can come
+    /// to compare against a value that has drifted from the one the discovery
+    /// document publishes — which is the whole point of there being one
+    /// spelling.
+    pub fn validate(&self, token: &str) -> Option<mcpmem_oauth::store::Grant> {
+        let now_us = (self.now_us)();
+        let resource = self.resource();
+        self.with_store(|store| mcpmem_oauth::token::validate(store, token, &resource, now_us))
     }
 
     /// Run `f` with the store locked, and drop the guard before returning.
@@ -169,10 +185,11 @@ fn open_failed(e: &rusqlite::Error) -> MCSError {
 /// route answers 404 when OAuth is off, so a server without OAuth advertises no
 /// authorization server at all.
 ///
-/// The three login routes are absent from a build without the `oauth`
-/// feature, and that is their intended meaning: such a build carries no HTTP
-/// client, so it can reach no OpenID Connect provider, can serve no login, and
-/// so has nothing to ask a human to consent to.
+/// The three login routes, the token endpoint and the revocation endpoint are
+/// absent from a build without the `oauth` feature, and that is their intended
+/// meaning: such a build carries no HTTP client, so it can reach no OpenID
+/// Connect provider, can serve no login, has nothing to ask a human to consent
+/// to, and so can never hold an authorization code to exchange.
 pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
     let router = router
         .route(
@@ -196,7 +213,9 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
     let router = router
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/callback", get(callback))
-        .route("/oauth/consent", post(consent));
+        .route("/oauth/consent", post(consent))
+        .route("/oauth/token", post(token))
+        .route("/oauth/revoke", post(revoke_token));
     router
 }
 
@@ -962,6 +981,202 @@ fn client_redirect(
     let separator = if base.contains('?') { '&' } else { '?' };
     let location = format!("{base}{separator}{}", query.finish());
     (StatusCode::FOUND, [(header::LOCATION, location)]).into_response()
+}
+
+// ── Tokens ──────────────────────────────────────────────────────────────────
+
+/// What a token or revocation request may carry.
+///
+/// Parsed as pairs rather than deserialized into a shape, for a reason no
+/// `Deserialize` implementation gives: RFC 6749 section 3.1 forbids a repeated
+/// parameter, and every form deserializer silently keeps one of the two. Which
+/// one it keeps decides whether a smuggled second `code_verifier` is the one
+/// checked, so the repeat is recorded here and refused rather than resolved.
+#[cfg(feature = "oauth")]
+#[derive(Default)]
+struct TokenForm {
+    grant_type: Option<String>,
+    code: Option<String>,
+    code_verifier: Option<String>,
+    client_id: Option<String>,
+    redirect_uri: Option<String>,
+    refresh_token: Option<String>,
+    /// RFC 7009's one required parameter, on the revocation endpoint.
+    token: Option<String>,
+    /// A parameter arrived more than once. Recorded rather than acted on
+    /// here, so the parser has one job and the refusal stays with the others.
+    repeated: bool,
+}
+
+#[cfg(feature = "oauth")]
+fn parse_token_form(body: &[u8]) -> TokenForm {
+    let mut form = TokenForm::default();
+    for (key, value) in url::form_urlencoded::parse(body) {
+        let slot = match key.as_ref() {
+            "grant_type" => &mut form.grant_type,
+            "code" => &mut form.code,
+            "code_verifier" => &mut form.code_verifier,
+            "client_id" => &mut form.client_id,
+            "redirect_uri" => &mut form.redirect_uri,
+            "refresh_token" => &mut form.refresh_token,
+            "token" => &mut form.token,
+            // `token_type_hint` (RFC 7009 section 2.1) is accepted and
+            // ignored: it is an optimization for a server that keeps its two
+            // kinds in different tables, and this one finds the row either
+            // way. Everything else a client sends is ignored as well, which
+            // is what RFC 6749 section 3.1 asks for.
+            _ => continue,
+        };
+        if slot.is_some() {
+            form.repeated = true;
+        }
+        *slot = Some(value.into_owned());
+    }
+    form
+}
+
+/// The value of a required parameter. An empty value is a missing one: a
+/// client whose variable was never filled in sends `client_id=`, and reading
+/// that as a present value turns a malformed request into a refused grant.
+#[cfg(feature = "oauth")]
+fn required<'a>(
+    value: Option<&'a String>,
+    missing: &'static str,
+) -> std::result::Result<&'a str, TokenError> {
+    value
+        .map(String::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or(TokenError::InvalidRequest(missing))
+}
+
+/// `POST /oauth/token` — RFC 6749 section 3.2.
+///
+/// The endpoint is unauthenticated, because every client this server
+/// registers is public: it runs on somebody's laptop and can keep no secret,
+/// which is why the discovery document advertises
+/// `token_endpoint_auth_methods_supported: ["none"]`. PKCE stands in for
+/// client authentication — the code is redeemable only by whoever holds the
+/// verifier behind the challenge the authorization request carried.
+#[cfg(feature = "oauth")]
+async fn token(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let form = parse_token_form(&body);
+    let now_us = (oauth.now_us)();
+    match oauth.with_store(|store| granted(store, &form, now_us)) {
+        Ok(response) => (
+            StatusCode::OK,
+            // RFC 6749 section 5.1. The body carries two live credentials, so
+            // nothing between here and the client may keep a copy.
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(response),
+        )
+            .into_response(),
+        Err(e) => token_refused(&e),
+    }
+}
+
+/// Dispatch one token request to the grant it names.
+///
+/// It runs under the store lock, and everything it calls is one statement
+/// group against that store — no `await`, no network, nothing that blocks.
+#[cfg(feature = "oauth")]
+fn granted(
+    store: &mcpmem_oauth::store::Store,
+    form: &TokenForm,
+    now_us: i64,
+) -> std::result::Result<mcpmem_oauth::token::TokenResponse, TokenError> {
+    if form.repeated {
+        return Err(TokenError::InvalidRequest(
+            "a parameter arrived more than once",
+        ));
+    }
+    match form.grant_type.as_deref() {
+        Some("authorization_code") => mcpmem_oauth::token::grant_authorization_code(
+            store,
+            &mcpmem_oauth::token::CodeExchange {
+                code: required(form.code.as_ref(), "code is required")?,
+                code_verifier: required(form.code_verifier.as_ref(), "code_verifier is required")?,
+                client_id: required(form.client_id.as_ref(), "client_id is required")?,
+                redirect_uri: required(form.redirect_uri.as_ref(), "redirect_uri is required")?,
+            },
+            now_us,
+        ),
+        Some("refresh_token") => mcpmem_oauth::token::grant_refresh(
+            store,
+            &mcpmem_oauth::token::RefreshExchange {
+                refresh_token: required(form.refresh_token.as_ref(), "refresh_token is required")?,
+                client_id: required(form.client_id.as_ref(), "client_id is required")?,
+            },
+            now_us,
+        ),
+        _ => Err(TokenError::UnsupportedGrantType),
+    }
+}
+
+/// `POST /oauth/revoke` — RFC 7009.
+///
+/// Unauthenticated for the same reason the token endpoint is, and it gives
+/// nobody a power they did not have: the only value that revokes a family is a
+/// live token from it, and whoever holds one of those can already spend it.
+#[cfg(feature = "oauth")]
+async fn revoke_token(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let form = parse_token_form(&body);
+    if form.repeated {
+        return token_refused(&TokenError::InvalidRequest(
+            "a parameter arrived more than once",
+        ));
+    }
+    let token = match required(form.token.as_ref(), "token is required") {
+        Ok(token) => token,
+        Err(e) => return token_refused(&e),
+    };
+    let now_us = (oauth.now_us)();
+    match oauth.with_store(|store| mcpmem_oauth::token::revoke(store, token, now_us)) {
+        // RFC 7009 section 2.2: an empty 200, including for a token this
+        // server has never heard of.
+        Ok(()) => (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")]).into_response(),
+        Err(e) => token_refused(&e),
+    }
+}
+
+/// The RFC 6749 section 5.2 error object for a refused token request.
+///
+/// A description accompanies the two codes that describe the *request*: both
+/// are a developer's own mistake and neither says anything about anybody's
+/// credential. `invalid_grant` carries none. Unknown, expired, already spent,
+/// revoked, issued to another client, issued for another redirect URI, or
+/// presented with the wrong verifier are one answer to an unauthenticated
+/// caller, and which of the seven it was is the one thing a guesser wants.
+/// The reason goes to the log instead.
+#[cfg(feature = "oauth")]
+fn token_refused(e: &TokenError) -> Response {
+    let description = match e {
+        TokenError::InvalidRequest(reason) => Some(*reason),
+        TokenError::UnsupportedGrantType => {
+            Some("this server issues the authorization_code and refresh_token grants")
+        }
+        TokenError::InvalidGrant(_) => None,
+        TokenError::Store(inner) => {
+            tracing::error!(error = %inner, "the OAuth store refused a token request");
+            return server_error();
+        }
+    };
+    tracing::debug!(error = %e, "a token request was refused");
+    let mut body = json!({ "error": e.code() });
+    if let Some(description) = description {
+        body["error_description"] = json!(description);
+    }
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(body),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

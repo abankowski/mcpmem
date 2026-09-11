@@ -10,6 +10,8 @@ pub mod consent;
 pub mod metadata;
 pub mod registration;
 pub mod store;
+/// Issuing, refreshing, revoking and validating the tokens this server mints.
+pub mod token;
 /// The upstream OpenID Connect provider that authenticates the human.
 ///
 /// Behind a feature because it is the only part of this crate that speaks

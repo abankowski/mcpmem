@@ -35,6 +35,7 @@ use tokio::net::TcpListener;
 use tower_http::compression::CompressionLayer;
 use tracing::{error, info};
 
+use crate::authz::Principal;
 use crate::errors::{MCSError, Result};
 use crate::kg::GraphHandle;
 use crate::oauth_routes::OauthState;
@@ -274,21 +275,40 @@ fn wants_sse(headers: &HeaderMap) -> bool {
         .is_some_and(|a| a.contains("text/event-stream"))
 }
 
-/// `true` when the request is allowed: either the server has no credential
-/// configured at all, or the `Authorization` header carries the expected static
-/// bearer token.
+/// Resolve the caller, or `None` when the request is unauthorized.
+///
+/// The order is OAuth token, then the static bearer, then the fully open
+/// case, and it is the order of specificity: a value that validates as an
+/// issued token is one, and nothing else can be tried for it.
 ///
 /// With OAuth on and no static token, a request without a credential is not
-/// allowed: an OAuth server refuses anonymous access even before it can verify
-/// an issued token. With neither configured the server stays open, which is the
-/// behaviour every existing deployment has.
-fn authorized(state: &HttpState, headers: &HeaderMap) -> bool {
-    match &state.auth_token {
-        None => state.oauth.is_none(),
-        Some(expected) => headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|presented| server::token_matches(presented, expected)),
+/// allowed: an OAuth server refuses anonymous access even before it can
+/// verify an issued token. With neither configured the server stays open,
+/// which is the behaviour every existing deployment has — and the open
+/// caller holds `bearer_scopes`, so `--static-bearer-scopes` narrows `/mcp`
+/// and `/ui` alike rather than one of the two.
+fn principal_of(state: &HttpState, headers: &HeaderMap) -> Option<Principal> {
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().strip_prefix("Bearer ").unwrap_or(v).trim());
+
+    if let (Some(oauth), Some(token)) = (state.oauth.as_ref(), presented)
+        && let Some(grant) = oauth.validate(token)
+    {
+        return Some(crate::authz::oauth_principal(
+            &grant.principal,
+            grant.scopes.into_iter().collect(),
+        ));
+    }
+    match (state.auth_token.as_ref(), presented) {
+        (Some(expected), Some(token)) if server::token_matches(token, expected) => {
+            Some(crate::authz::bearer_principal(&state.bearer_scopes))
+        }
+        (None, _) if state.oauth.is_none() => {
+            Some(crate::authz::bearer_principal(&state.bearer_scopes))
+        }
+        _ => None,
     }
 }
 
@@ -324,17 +344,41 @@ fn unauthorized(state: &HttpState) -> Response {
         .into_response()
 }
 
+/// The RFC 6750 section 3.1 `insufficient_scope` challenge, which is the 403
+/// a connector parses to learn what to ask the human for next.
+///
+/// The order of the parameters is the contract, and it is fixed here rather
+/// than assembled by the caller: `error`, then `scope`, then — with OAuth on
+/// — `resource_metadata`. The last one is what makes the 403 actionable: a
+/// client that has been refused for a scope it does not hold needs the
+/// document naming the authorization server to go and get one.
+fn insufficient_scope(state: &HttpState, scopes: &[&'static str]) -> Response {
+    let scope = scopes.join(" ");
+    let mut value = format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\"");
+    if let Some(oauth) = state.oauth.as_ref() {
+        value.push_str(&format!(
+            ", resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+            oauth.config.public_url
+        ));
+    }
+    (
+        StatusCode::FORBIDDEN,
+        [(header::WWW_AUTHENTICATE, value)],
+        "insufficient scope",
+    )
+        .into_response()
+}
+
 async fn post_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if !authorized(&state, &headers) {
+    let Some(principal) = principal_of(&state, &headers) else {
         return unauthorized(&state);
-    }
-    let kg = state.kg;
-    let vs = state.vs;
-    let principal = crate::authz::bearer_principal(&state.bearer_scopes);
+    };
+    let kg = state.kg.clone();
+    let vs = state.vs.clone();
     // The dispatch path locks the graph and may perform a blocking fsync, so
     // run it off the async worker pool (keeps the HTTP reactor responsive).
     let result = tokio::task::spawn_blocking(move || {
@@ -365,18 +409,7 @@ async fn post_handler(
                 Json(value).into_response()
             }
         }
-        Ok(HttpOutcome::InsufficientScope(scopes)) => {
-            let scope = scopes.join(" ");
-            (
-                StatusCode::FORBIDDEN,
-                [(
-                    header::WWW_AUTHENTICATE,
-                    format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\""),
-                )],
-                "insufficient scope",
-            )
-                .into_response()
-        }
+        Ok(HttpOutcome::InsufficientScope(scopes)) => insufficient_scope(&state, &scopes),
         Err(e) => {
             // Malformed JSON body → JSON-RPC parse error.
             let resp = json!({
@@ -390,7 +423,7 @@ async fn post_handler(
 }
 
 async fn get_handler(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if !authorized(&state, &headers) {
+    if principal_of(&state, &headers).is_none() {
         return unauthorized(&state);
     }
     // No server-initiated messages: an open, keep-alive'd stream for compliance.
@@ -400,17 +433,23 @@ async fn get_handler(State(state): State<HttpState>, headers: HeaderMap) -> Resp
         .into_response()
 }
 
-/// Like [`authorized`], but also accepts the bearer token from a `token` query
-/// parameter. A browser navigating to `/ui/graph` can't set request headers, so
-/// the viewer passes the token this way (or via the `Authorization` header when
-/// scripted). When no credential is configured, access is open (as with
-/// [`authorized`]).
-fn authorized_ui(state: &HttpState, headers: &HeaderMap, query_token: Option<&str>) -> bool {
-    authorized(state, headers)
-        || matches!(
-            &state.auth_token,
-            Some(expected) if query_token.is_some_and(|t| server::token_matches(t, expected))
-        )
+/// Like [`principal_of`], but also accepting the static bearer token from a
+/// `token` query parameter. A browser navigating to `/ui/graph` cannot set
+/// request headers, so the viewer passes the token this way (or in the
+/// `Authorization` header when scripted). The fallback is the static token
+/// alone: an OAuth token belongs in the header, and a credential in a URL is
+/// a credential in a history file and a referrer.
+fn principal_of_ui(
+    state: &HttpState,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> Option<Principal> {
+    principal_of(state, headers).or_else(|| match (state.auth_token.as_ref(), query_token) {
+        (Some(expected), Some(token)) if server::token_matches(token, expected) => {
+            Some(crate::authz::bearer_principal(&state.bearer_scopes))
+        }
+        _ => None,
+    })
 }
 
 /// `GET /ui` — serve the browser graph viewer's HTML shell. The shell and its
@@ -456,9 +495,10 @@ fn ui_data_gate(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
 ) -> Option<Response> {
-    if !authorized_ui(state, headers, params.get("token").map(String::as_str)) {
+    let Some(principal) = principal_of_ui(state, headers, params.get("token").map(String::as_str))
+    else {
         return Some(unauthorized(state));
-    }
+    };
     if !server::graph_read_enabled() {
         return Some(
             (
@@ -468,7 +508,7 @@ fn ui_data_gate(
                 .into_response(),
         );
     }
-    if !state.bearer_scopes.contains(&ToolCategory::GraphRead) {
+    if !principal.scopes.contains(ToolCategory::GraphRead.slug()) {
         return Some(
             (
                 StatusCode::FORBIDDEN,

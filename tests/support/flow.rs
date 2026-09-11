@@ -30,6 +30,7 @@ use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use mcpmem_oauth::store::{CodeGrant, Grant, Store};
+use serde_json::Value;
 
 use super::fake_idp::{FakeIdp, IdpBehaviour};
 use super::{Clock, Scopes, Server};
@@ -65,9 +66,10 @@ pub const NOW: i64 = 1_700_000_000_000_000;
 /// One authorization request, and what the client registered to make it.
 ///
 /// Build it with [`Flow::new`] and change one thing at a time. Every field is
-/// something a conforming client may vary, and each of the four that are
+/// something a conforming client may vary, and each of the five that are
 /// optional in the specifications — the client name, the client's state, the
-/// redirect URI's own query, the requested scope — has a test that needs it.
+/// redirect URI's own query, the requested scope, the resource — has a test
+/// that needs it.
 pub struct Flow {
     /// `None` means the registration body carries no `client_name` at all,
     /// which RFC 7591 section 2 allows.
@@ -77,6 +79,9 @@ pub struct Flow {
     /// `None` means the authorization request sends no `state`, which RFC 6749
     /// section 4.1.1 allows.
     client_state: Option<String>,
+    /// The resource the authorization request names, under RFC 8707. It is
+    /// the one this server protects unless a test names another.
+    resource: String,
 }
 
 impl Flow {
@@ -87,6 +92,7 @@ impl Flow {
             redirect_uri: CLIENT_REDIRECT.to_owned(),
             scope: scope.to_owned(),
             client_state: Some(CLIENT_STATE.to_owned()),
+            resource: format!("{}/mcp", super::PUBLIC_URL),
         }
     }
 
@@ -116,11 +122,20 @@ impl Flow {
         self
     }
 
-    /// Register a client, start a login, walk the provider, and come back.
+    /// Name `resource` on the authorization request instead of the one this
+    /// server protects. A token is bound to that value, so a request that
+    /// asks for a different one must never reach a human.
+    pub fn resource(mut self, resource: &str) -> Flow {
+        self.resource = resource.to_owned();
+        self
+    }
+
+    /// Stand the server and the provider up, and send nothing yet.
     ///
-    /// It asserts only that the authorization request was accepted. What the
-    /// callback made of the identity token is the caller's to judge.
-    pub async fn into_callback(self) -> Callback {
+    /// The conformance walk needs this: its first hops are the 401 challenge
+    /// on `/mcp` and the two discovery documents, and all of them happen
+    /// before any client exists.
+    pub async fn start(self) -> Started {
         let idp = FakeIdp::start(IdpBehaviour::default()).await;
         let server = super::server(
             Some(super::oauth_config(&idp.issuer)),
@@ -128,35 +143,34 @@ impl Flow {
             Some(Clock::at(NOW)),
         )
         .await;
-        let client_id = register_body(&server, &self.registration_body()).await;
+        Started {
+            flow: self,
+            server,
+            idp,
+        }
+    }
 
-        let started = server.request(self.authorize_request(&client_id)).await;
+    /// Register a client, start a login, walk the provider, and come back.
+    ///
+    /// It asserts only that the authorization request was accepted. What the
+    /// callback made of the identity token is the caller's to judge. Every
+    /// hop is a [`Started`] method, so the conformance test can send exactly
+    /// these requests and assert on each answer itself.
+    pub async fn into_callback(self) -> Callback {
+        let flow = self.start().await;
+        let client_id = flow.register().await;
+
+        let started = flow.authorize(&client_id).await;
         assert_eq!(
             started.status(),
             StatusCode::FOUND,
             "the authorization request must be accepted: {}",
             body_text(started).await
         );
-        let back = idp.login(&super::header(&started, "location")).await;
+        let back = flow.idp().login(&super::header(&started, "location")).await;
 
-        let response = server
-            .request(
-                Request::get(format!(
-                    "/oauth/callback?code={}&state={}",
-                    back.code, back.state
-                ))
-                .body(Body::empty())
-                .unwrap(),
-            )
-            .await;
-        Callback {
-            response,
-            state: back.state,
-            client_id,
-            client_state: self.client_state,
-            server,
-            idp,
-        }
+        let response = flow.callback(&back.code, &back.state).await;
+        flow.into_stage(response, back.state, client_id)
     }
 
     /// The whole flow up to a rendered consent page.
@@ -178,9 +192,9 @@ impl Flow {
         .to_string()
     }
 
-    /// A `GET /oauth/authorize` this server accepts.
+    /// A `GET /oauth/authorize` this server accepts, unless a builder has
+    /// changed one of its values.
     fn authorize_request(&self, client_id: &str) -> Request<Body> {
-        let resource = format!("{}/mcp", super::PUBLIC_URL);
         let challenge = code_challenge();
         let mut fields = vec![
             ("response_type", "code"),
@@ -189,7 +203,7 @@ impl Flow {
             ("code_challenge", challenge.as_str()),
             ("code_challenge_method", "S256"),
             ("scope", self.scope.as_str()),
-            ("resource", resource.as_str()),
+            ("resource", self.resource.as_str()),
         ];
         if let Some(client_state) = &self.client_state {
             fields.push(("state", client_state));
@@ -197,6 +211,73 @@ impl Flow {
         Request::get(format!("/oauth/authorize?{}", query_string(&fields)))
             .body(Body::empty())
             .unwrap()
+    }
+}
+
+/// The server and the provider, up, with no request sent yet.
+///
+/// Each method here is one hop, and it returns what that hop answered rather
+/// than judging it. [`Flow::into_callback`] chains exactly these calls and
+/// adds the assertions a flow that must succeed needs, so the conformance
+/// test can send the same requests and make its own assertions at every one.
+pub struct Started {
+    flow: Flow,
+    server: Server,
+    idp: FakeIdp,
+}
+
+impl Started {
+    /// The server this flow runs against, for the discovery hops that come
+    /// before any client exists.
+    pub const fn server(&self) -> &Server {
+        &self.server
+    }
+
+    /// The upstream provider this server was configured against.
+    pub const fn idp(&self) -> &FakeIdp {
+        &self.idp
+    }
+
+    /// `POST /oauth/register`, and the identifier this server issued.
+    pub async fn register(&self) -> String {
+        register_body(&self.server, &self.flow.registration_body()).await
+    }
+
+    /// `GET /oauth/authorize`.
+    pub async fn authorize(&self, client_id: &str) -> Response<Body> {
+        self.server
+            .request(self.flow.authorize_request(client_id))
+            .await
+    }
+
+    /// `GET /oauth/callback`, the hop the provider redirects the human to.
+    pub async fn callback(&self, code: &str, state: &str) -> Response<Body> {
+        self.server
+            .request(
+                Request::get(format!("/oauth/callback?code={code}&state={state}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+    }
+
+    /// Carry the callback's answer into the stage that owns the server, so a
+    /// test that drove the hops itself can go on to consent.
+    pub fn into_stage(
+        self,
+        response: Response<Body>,
+        state: String,
+        client_id: String,
+    ) -> Callback {
+        Callback {
+            response,
+            state,
+            client_id,
+            client_state: self.flow.client_state,
+            redirect_uri: self.flow.redirect_uri,
+            server: self.server,
+            idp: self.idp,
+        }
     }
 }
 
@@ -213,6 +294,7 @@ pub struct Callback {
     /// The identifier this server issued to the test client.
     pub client_id: String,
     client_state: Option<String>,
+    redirect_uri: String,
     server: Server,
     /// The provider must outlive the flow: the discovered `Provider` holds its
     /// URLs, and Task 8's token exchange runs against this server afterwards.
@@ -233,6 +315,7 @@ impl Callback {
             state,
             client_id,
             client_state,
+            redirect_uri,
             server,
             idp,
         } = self;
@@ -254,6 +337,7 @@ impl Callback {
             state: form_state,
             client_state,
             client_id,
+            redirect_uri,
             now: NOW,
             server,
             idp,
@@ -274,6 +358,9 @@ pub struct Authorized {
     pub client_state: Option<String>,
     /// The identifier this server issued to the test client.
     pub client_id: String,
+    /// The redirect URI the client registered, and so the one an accepted
+    /// token request repeats.
+    pub redirect_uri: String,
     /// What the clock reads. Fixed for the whole flow.
     pub now: i64,
     server: Server,
@@ -333,6 +420,156 @@ impl Authorized {
         code_from(&super::header(&res, "location"))
     }
 
+    /// `POST /oauth/token` as an authorization code exchange, carrying this
+    /// flow's defaults with `fields` replacing any key it names.
+    ///
+    /// The defaults are one accepted exchange apart from `code`, which every
+    /// caller supplies, so a test that changes the verifier changes only the
+    /// verifier. An unknown key is added rather than dropped: a test about a
+    /// parameter this server does not send by default needs to send it.
+    pub async fn token(&self, fields: &[(&str, &str)]) -> Reply {
+        let mut form: Vec<(&str, &str)> = vec![
+            ("grant_type", "authorization_code"),
+            ("client_id", self.client_id.as_str()),
+            ("redirect_uri", self.redirect_uri.as_str()),
+            ("code_verifier", CODE_VERIFIER),
+        ];
+        for (key, value) in fields {
+            match form.iter_mut().find(|pair| pair.0 == *key) {
+                Some(pair) => pair.1 = value,
+                None => form.push((key, value)),
+            }
+        }
+        self.post_form("/oauth/token", &form).await
+    }
+
+    /// Exchange `code` for a live pair, and assert the exchange succeeded.
+    /// The hop every test of a bearer token starts from.
+    pub async fn exchange(&self, code: &str) -> Tokens {
+        let res = self.token(&[("code", code)]).await;
+        assert_eq!(
+            res.status,
+            StatusCode::OK,
+            "the exchange must succeed: {}",
+            res.body
+        );
+        Tokens {
+            access_token: string_member(&res.body, "access_token"),
+            refresh_token: string_member(&res.body, "refresh_token"),
+        }
+    }
+
+    /// `POST /oauth/token` as a refresh grant.
+    pub async fn refresh(&self, refresh_token: &str) -> Reply {
+        self.post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token),
+                ("client_id", self.client_id.as_str()),
+            ],
+        )
+        .await
+    }
+
+    /// `POST /oauth/revoke`. RFC 7009 takes either kind of token, so the
+    /// caller names which one it is presenting.
+    pub async fn revoke(&self, token: &str) -> Reply {
+        self.post_form(
+            "/oauth/revoke",
+            &[("token", token), ("client_id", self.client_id.as_str())],
+        )
+        .await
+    }
+
+    /// `POST path` with `fields` as the whole form body, verbatim. A repeated
+    /// key stays repeated, which is what a test of RFC 6749 section 3.1 needs
+    /// and what [`Authorized::token`] cannot produce.
+    pub async fn post_form(&self, path: &str, fields: &[(&str, &str)]) -> Reply {
+        let res = self
+            .server
+            .request(
+                Request::post(path)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(query_string(fields)))
+                    .unwrap(),
+            )
+            .await;
+        Reply::of(res).await
+    }
+
+    /// `POST /mcp` carrying `body`, as the holder of `token` when there is
+    /// one. `None` is the anonymous request the 401 challenge answers.
+    pub async fn mcp(&self, token: Option<&str>, body: &str) -> Reply {
+        let mut req = Request::post("/mcp").header("content-type", "application/json");
+        if let Some(token) = token {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        let res = self
+            .server
+            .request(req.body(Body::from(body.to_owned())).unwrap())
+            .await;
+        Reply::of(res).await
+    }
+
+    /// `tools/list` as the holder of `token`.
+    pub async fn mcp_tools_list(&self, token: &str) -> Reply {
+        self.mcp(
+            Some(token),
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        )
+        .await
+    }
+
+    /// `tools/call` for `tool` as the holder of `token`.
+    ///
+    /// The whole body is screened against the caller's scopes before anything
+    /// is dispatched (`mcpmem::server::dispatch_http_body`), so a refused call
+    /// never reaches the tool's own argument checks and `arguments` matters
+    /// only for a call this principal may make.
+    pub async fn mcp_call(&self, token: &str, tool: &str, arguments: Value) -> Reply {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments },
+        });
+        self.mcp(Some(token), &body.to_string()).await
+    }
+
+    /// The tool names `tools/list` advertises to the holder of `token`.
+    pub async fn tool_names(&self, token: &str) -> Vec<String> {
+        let res = self.mcp_tools_list(token).await;
+        assert_eq!(
+            res.status,
+            StatusCode::OK,
+            "tools/list must answer: {}",
+            res.body
+        );
+        res.body["result"]["tools"]
+            .as_array()
+            .expect("tools/list answers an array of tools")
+            .iter()
+            .map(|tool| string_member(tool, "name"))
+            .collect()
+    }
+
+    /// Rewrite the audience of every token this flow has been issued.
+    ///
+    /// That is what a token minted by another instance of this server would
+    /// carry, and it is the only way to produce one here: this server binds
+    /// every token it issues to its own resource, so no request can ask for
+    /// another.
+    pub fn rebind_resource(&self, resource: &str) {
+        with_store(&self.server, |store| {
+            let rows = store
+                .connection()
+                .execute("UPDATE oauth_token SET resource = ?1", [resource])
+                .expect("the store rewrites the audience");
+            assert!(rows > 0, "this flow has been issued no token to rebind");
+        });
+    }
+
     /// The grant stored under `code`, read **without** spending it.
     ///
     /// A test asserts on a grant and then exchanges the same code at the token
@@ -379,6 +616,56 @@ impl Authorized {
     pub fn count_logins(&self) -> i64 {
         count_rows(&self.server, "oauth_login")
     }
+}
+
+/// What one request answered, in the three parts a token test asks about.
+pub struct Reply {
+    pub status: StatusCode,
+    /// The body parsed as JSON, or `Value::Null` when it was not JSON. The
+    /// token endpoint answers JSON on every path, including its refusals; the
+    /// transport answers text on some, and a test that reads the body of one
+    /// of those is reading the wrong thing.
+    pub body: Value,
+    /// The `WWW-Authenticate` header, or the empty string when the response
+    /// carried none.
+    ///
+    /// A `String` rather than an `Option<String>` because every assertion on
+    /// it is either an equality against the whole header or a substring
+    /// check, and an empty header value is not a thing this server sends —
+    /// so the empty string means *absent* with nothing to confuse it with.
+    pub www_authenticate: String,
+}
+
+impl Reply {
+    async fn of(res: Response<Body>) -> Reply {
+        let status = res.status();
+        let www_authenticate = res
+            .headers()
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let text = body_text(res).await;
+        Reply {
+            status,
+            body: serde_json::from_str(&text).unwrap_or(Value::Null),
+            www_authenticate,
+        }
+    }
+}
+
+/// The pair one accepted token request hands back.
+pub struct Tokens {
+    pub access_token: String,
+    pub refresh_token: String,
+}
+
+/// The string member `name` of `value`, or a panic naming the whole body.
+fn string_member(value: &Value, name: &str) -> String {
+    value[name]
+        .as_str()
+        .unwrap_or_else(|| panic!("the body must carry a string {name}: {value}"))
+        .to_owned()
 }
 
 /// Run `f` with the store locked. The store is private behind
