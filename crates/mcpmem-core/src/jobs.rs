@@ -342,7 +342,12 @@ impl<'a> IndexJobRepository<'a> {
         // snapshot serving an outdated embedding. Its next write re-enqueues
         // the entity from scratch.
         if changed == 1 && dead {
-            self.conn.execute("DELETE FROM profile_vector WHERE profile_id=?1 AND entity_id=?2", params![job.profile_id.to_string(), job.entity_id]).map_err(sql_error)?;
+            self.conn
+                .execute(
+                    "DELETE FROM profile_vector WHERE profile_id=?1 AND entity_id=?2",
+                    params![job.profile_id.to_string(), job.entity_id],
+                )
+                .map_err(sql_error)?;
         }
         tx.commit()?;
         Ok(changed == 1)

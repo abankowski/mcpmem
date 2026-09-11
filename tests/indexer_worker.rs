@@ -299,7 +299,10 @@ fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
             break;
         }
     }
-    assert!(dead_seen, "the job must be dead-lettered after max attempts");
+    assert!(
+        dead_seen,
+        "the job must be dead-lettered after max attempts"
+    );
     let (state, attempts): (String, i64) = conn
         .query_row(
             "SELECT state, attempts FROM index_job WHERE entity_id=1 AND profile_id=?1",
@@ -335,10 +338,13 @@ fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
     assert_eq!(vectors.search_embeddings(&[1.0, 1.0], 10).unwrap().len(), 0);
     // A later write to the same entity re-enqueues it with a fresh budget.
     graph
-        .add_observations("poisoned", &[mcpmem::types::ObservationInput {
-            body: "changed".into(),
-            occurred_at_us: None,
-        }])
+        .add_observations(
+            "poisoned",
+            &[mcpmem::types::ObservationInput {
+                body: "changed".into(),
+                occurred_at_us: None,
+            }],
+        )
         .unwrap();
     let (state, attempts): (String, i64) = conn
         .query_row(
