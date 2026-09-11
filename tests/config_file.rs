@@ -143,6 +143,40 @@ fn durability_comes_from_the_file_and_a_bad_value_stops_the_server() {
     assert!(error.to_string().contains("unknown durability"), "{error}");
 }
 
+#[test]
+fn the_oauth_waitlist_keys_reach_the_args() {
+    let args = merge(
+        &[],
+        "[oauth]\napproval-waitlist = true\napproval-waitlist-ttl-seconds = 3600\ndefault-new-principal-scopes = [\"graph-read\", \"graph-write\"]\n",
+    );
+    assert_eq!(args.approval_waitlist, Some(true));
+    assert_eq!(args.approval_waitlist_ttl_seconds, Some(3600));
+    assert_eq!(
+        args.default_new_principal_scopes,
+        Some(vec!["graph-read".to_string(), "graph-write".to_string()])
+    );
+}
+
+#[test]
+fn an_oauth_waitlist_flag_beats_the_file() {
+    let args = merge(
+        &[
+            "--approval-waitlist",
+            "--approval-waitlist-ttl-seconds",
+            "60",
+            "--default-new-principal-scope",
+            "graph-write",
+        ],
+        "[oauth]\napproval-waitlist = false\napproval-waitlist-ttl-seconds = 3600\ndefault-new-principal-scopes = [\"graph-read\"]\n",
+    );
+    assert_eq!(args.approval_waitlist, Some(true));
+    assert_eq!(args.approval_waitlist_ttl_seconds, Some(60));
+    assert_eq!(
+        args.default_new_principal_scopes,
+        Some(vec!["graph-write".to_string()])
+    );
+}
+
 // --- precedence against the environment, with an injected probe -------------
 
 #[test]

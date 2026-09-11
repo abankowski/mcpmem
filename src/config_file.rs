@@ -244,6 +244,9 @@ pub struct OAuthSection {
     pub principals_file: Option<String>,
     pub cimd_allowed_domains: Option<Vec<String>>,
     pub trust_forwarded_proto: Option<bool>,
+    pub approval_waitlist: Option<bool>,
+    pub approval_waitlist_ttl_seconds: Option<u64>,
+    pub default_new_principal_scopes: Option<Vec<String>>,
 }
 
 /// Settings for the embedding worker. They apply only to a build carrying the
@@ -537,6 +540,21 @@ impl FileConfig {
             &mut args.oauth_trust_forwarded_proto,
             oauth.trust_forwarded_proto,
             cli.absent("oauth_trust_forwarded_proto"),
+        );
+        assign(
+            &mut args.approval_waitlist,
+            oauth.approval_waitlist.map(Some),
+            cli.absent("approval_waitlist"),
+        );
+        assign(
+            &mut args.approval_waitlist_ttl_seconds,
+            oauth.approval_waitlist_ttl_seconds.map(Some),
+            cli.absent("approval_waitlist_ttl_seconds"),
+        );
+        assign(
+            &mut args.default_new_principal_scopes,
+            oauth.default_new_principal_scopes.clone().map(Some),
+            cli.absent("default_new_principal_scopes"),
         );
 
         Ok(())

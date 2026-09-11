@@ -61,6 +61,9 @@ pub fn oauth_config_at(public_url: &str, upstream_issuer: &str) -> OAuthConfig {
         principals: principals(upstream_issuer),
         cimd_allowed_domains: vec!["claude.ai".into(), "chatgpt.com".into()],
         trust_forwarded_proto: true,
+        approval_waitlist: false,
+        approval_waitlist_ttl_seconds: 24 * 60 * 60,
+        default_new_principal_scopes: vec!["graph-read".to_owned()],
     }
 }
 

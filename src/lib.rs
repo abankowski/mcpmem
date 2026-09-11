@@ -197,6 +197,22 @@ pub struct Args {
     #[arg(long = "oauth-trust-forwarded-proto")]
     pub oauth_trust_forwarded_proto: bool,
 
+    /// Record a rejected would-be human and answer with a pending page,
+    /// instead of refusing outright. Entries expire after
+    /// `--approval-waitlist-ttl-seconds` and the list holds at most 25.
+    #[arg(long = "approval-waitlist", action = clap::ArgAction::SetTrue)]
+    pub approval_waitlist: Option<bool>,
+
+    /// How long a waitlist entry lives, measured from first sighting.
+    /// 0 disables the TTL sweep; the 25-entry cap always applies.
+    #[arg(long = "approval-waitlist-ttl-seconds")]
+    pub approval_waitlist_ttl_seconds: Option<u64>,
+
+    /// A scope a promoted entry starts with. Repeatable; defaults to
+    /// graph-read.
+    #[arg(long = "default-new-principal-scope")]
+    pub default_new_principal_scopes: Option<Vec<String>>,
+
     /// Scopes granted to the static bearer token. Defaults to every category.
     #[arg(
         long = "static-bearer-scopes",

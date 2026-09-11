@@ -101,6 +101,13 @@ pub struct OAuthConfig {
     ///   where only the proxy can reach it: a caller that connects directly
     ///   writes its own header and so chooses its own bucket.
     pub trust_forwarded_proto: bool,
+    /// Record a rejected would-be human instead of refusing outright.
+    pub approval_waitlist: bool,
+    /// Waitlist TTL in seconds, measured from first sighting. 0 disables
+    /// the TTL sweep; the 25-entry cap always applies.
+    pub approval_waitlist_ttl_seconds: u64,
+    /// Scopes a promoted waitlist entry starts with.
+    pub default_new_principal_scopes: Vec<String>,
 }
 
 /// Normalize an HTTPS URL given on the command line so that later string
@@ -348,6 +355,14 @@ impl Config {
                 principals,
                 cimd_allowed_domains,
                 trust_forwarded_proto: args.oauth_trust_forwarded_proto,
+                approval_waitlist: args.approval_waitlist.unwrap_or(false),
+                approval_waitlist_ttl_seconds: args
+                    .approval_waitlist_ttl_seconds
+                    .unwrap_or(24 * 60 * 60),
+                default_new_principal_scopes: args
+                    .default_new_principal_scopes
+                    .clone()
+                    .unwrap_or_else(|| vec!["graph-read".to_owned()]),
             })
         } else {
             // Fail closed, as `--auth-token-file` does above: an OAuth flag

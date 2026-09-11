@@ -131,6 +131,18 @@
 # A reverse proxy terminates TLS in front of this server.
 # trust-forwarded-proto = false
 
+# Refuse a would-be user but record the attempt, so an admin can promote
+# the entry in the web UI. Default false (hard refusal).
+# approval-waitlist = false
+
+# How long a waitlist entry lives, from first attempt. 0 disables the TTL
+# sweep. The list holds at most 25 entries, so the size is always bounded.
+# approval-waitlist-ttl-seconds = 86400
+
+# Scopes a promoted entry starts with. The Approve button offers these
+# pre-checked.
+# default-new-principal-scopes = ["graph-read"]
+
 
 [indexer]
 # Settings for the embedding worker. Needs the `indexer` Cargo feature and the

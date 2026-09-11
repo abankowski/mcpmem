@@ -267,6 +267,70 @@ fn the_client_metadata_domain_allowlist_has_a_default() {
     assert!(oauth.trust_forwarded_proto);
 }
 
+#[cfg(feature = "oauth")]
+#[test]
+fn the_waitlist_settings_have_defaults() {
+    let p = write_tmp(
+        "p-wl-default.json",
+        r#"[{"name":"a","iss":"https://i","sub":"1","scopes":["graph-read"]}]"#,
+    );
+    let cfg = Config::from_args(&args(&[
+        "--transport",
+        "http",
+        "--oauth-trust-forwarded-proto",
+        "--oidc-issuer",
+        "https://idp.example",
+        "--oidc-client-id",
+        "abc",
+        "--public-url",
+        "https://mem.example.com",
+        "--principals-file",
+        &p,
+    ]))
+    .unwrap();
+    let oauth = cfg.oauth.unwrap();
+    assert!(!oauth.approval_waitlist);
+    assert_eq!(oauth.approval_waitlist_ttl_seconds, 24 * 60 * 60);
+    assert_eq!(oauth.default_new_principal_scopes, vec!["graph-read"]);
+}
+
+#[cfg(feature = "oauth")]
+#[test]
+fn the_waitlist_flags_flow_into_the_config() {
+    let p = write_tmp(
+        "p-wl-on.json",
+        r#"[{"name":"a","iss":"https://i","sub":"1","scopes":["graph-read"]}]"#,
+    );
+    let cfg = Config::from_args(&args(&[
+        "--transport",
+        "http",
+        "--oauth-trust-forwarded-proto",
+        "--oidc-issuer",
+        "https://idp.example",
+        "--oidc-client-id",
+        "abc",
+        "--public-url",
+        "https://mem.example.com",
+        "--principals-file",
+        &p,
+        "--approval-waitlist",
+        "--approval-waitlist-ttl-seconds",
+        "0",
+        "--default-new-principal-scope",
+        "graph-read",
+        "--default-new-principal-scope",
+        "graph-write",
+    ]))
+    .unwrap();
+    let oauth = cfg.oauth.unwrap();
+    assert!(oauth.approval_waitlist);
+    assert_eq!(oauth.approval_waitlist_ttl_seconds, 0);
+    assert_eq!(
+        oauth.default_new_principal_scopes,
+        vec!["graph-read", "graph-write"]
+    );
+}
+
 // ── Fix round 1 ──────────────────────────────────────────────────────────
 
 /// A principals file holding one valid entry.

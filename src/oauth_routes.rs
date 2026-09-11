@@ -1753,6 +1753,9 @@ mod tests {
             principals: Vec::new(),
             cimd_allowed_domains: Vec::new(),
             trust_forwarded_proto: false,
+            approval_waitlist: false,
+            approval_waitlist_ttl_seconds: 24 * 60 * 60,
+            default_new_principal_scopes: vec!["graph-read".to_owned()],
         }
     }
 
