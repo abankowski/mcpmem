@@ -320,7 +320,7 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                                     .sqrt();
                                 if norm > 0.0 {
                                     for value in &mut vector {
-                                        *value = (*value as f64 / norm) as f32;
+                                        *value = (f64::from(*value) / norm) as f32;
                                     }
                                 }
                             }
