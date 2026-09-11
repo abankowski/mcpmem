@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS oauth_code(
   scopes         TEXT NOT NULL,
   principal      TEXT NOT NULL,
   family         TEXT NOT NULL,
+  spent          INTEGER NOT NULL DEFAULT 0,
   created_us     INTEGER NOT NULL,
   expires_us     INTEGER NOT NULL
 ) STRICT;

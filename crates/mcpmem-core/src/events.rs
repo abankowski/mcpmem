@@ -85,7 +85,7 @@ mod migration_inventory {
                 ),
                 (
                     4,
-                    "18371cb1a53d5aba1aa68d95d8ae9cd9da9295fe93cddaf2036e5ab296cf1f34".to_string()
+                    "5d18e23d999661dda33bfd2358659530760afec0a079c3a1b96689b537af28a2".to_string()
                 ),
             ],
             "a migration was added, removed, renumbered or edited"

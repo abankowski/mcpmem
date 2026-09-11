@@ -1,5 +1,5 @@
 use mcpmem_oauth::store::{
-    ClientRecord, CodeGrant, Grant, LoginRecord, RefreshOutcome, Store, TokenKind,
+    ClientRecord, CodeGrant, CodeOutcome, Grant, LoginRecord, RefreshOutcome, Store, TokenKind,
 };
 use mcpmem_oauth::{digest, digest_eq, new_token, s256_challenge};
 
@@ -404,8 +404,41 @@ fn an_authorization_code_is_single_use() {
         code_challenge: "the-challenge".into(),
     };
     s.put_code(&code, &cg, 1, 10_000).unwrap();
-    assert_eq!(s.take_code(&code, 2).unwrap().unwrap(), cg);
-    assert!(s.take_code(&code, 3).unwrap().is_none());
+    assert_eq!(s.take_code(&code, 2).unwrap(), CodeOutcome::Valid(cg));
+    assert_eq!(s.take_code(&code, 3).unwrap(), CodeOutcome::Replayed);
+}
+
+/// RFC 6749 section 4.1.2: a code used more than once must be denied, and the
+/// tokens already issued from it should be revoked. The second presentation is
+/// the only evidence that the code leaked, and by then the winner holds a pair
+/// that lives an hour and thirty days. The refresh path has treated the same
+/// signal as fatal to the family since Task 3; this is the other half of it.
+#[test]
+fn a_replayed_authorization_code_revokes_the_family_it_already_produced() {
+    let (_d, s) = store();
+    let code = new_token();
+    let cg = CodeGrant {
+        grant: grant("fam", &["graph-read"]),
+        redirect_uri: "https://claude.ai/api/mcp/auth_callback".into(),
+        code_challenge: "the-challenge".into(),
+    };
+    s.put_code(&code, &cg, 1, 10_000).unwrap();
+    assert_eq!(
+        s.take_code(&code, 2).unwrap(),
+        CodeOutcome::Valid(cg.clone())
+    );
+
+    // What the winner of the race walked away with.
+    let access = new_token();
+    s.put_token(&access, TokenKind::Access, &cg.grant, 2, 10_000)
+        .unwrap();
+    assert!(s.find_access(&access, 3).unwrap().is_some());
+
+    assert_eq!(s.take_code(&code, 3).unwrap(), CodeOutcome::Replayed);
+    assert!(
+        s.find_access(&access, 4).unwrap().is_none(),
+        "the replay must revoke the tokens the first exchange issued"
+    );
 }
 
 #[test]
@@ -418,7 +451,28 @@ fn an_expired_authorization_code_is_not_returned() {
         code_challenge: "the-challenge".into(),
     };
     s.put_code(&code, &cg, 1, 10).unwrap();
-    assert!(s.take_code(&code, 11).unwrap().is_none());
+    assert_eq!(s.take_code(&code, 11).unwrap(), CodeOutcome::Unknown);
+}
+
+/// An expired code that was never spent names no family either. A caller that
+/// read the family out of a dead row would let anyone holding a stale code
+/// revoke the live session of the human who abandoned it.
+#[test]
+fn an_expired_authorization_code_revokes_nothing() {
+    let (_d, s) = store();
+    let code = new_token();
+    let cg = CodeGrant {
+        grant: grant("fam", &["graph-read"]),
+        redirect_uri: "https://claude.ai/api/mcp/auth_callback".into(),
+        code_challenge: "the-challenge".into(),
+    };
+    s.put_code(&code, &cg, 1, 10).unwrap();
+    let access = new_token();
+    s.put_token(&access, TokenKind::Access, &cg.grant, 1, 10_000)
+        .unwrap();
+
+    assert_eq!(s.take_code(&code, 11).unwrap(), CodeOutcome::Unknown);
+    assert!(s.find_access(&access, 12).unwrap().is_some());
 }
 
 #[test]

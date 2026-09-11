@@ -175,18 +175,45 @@ async fn a_wrong_code_verifier_is_refused() {
     assert_eq!(res.body["error"], "invalid_grant");
 }
 
-/// A code is spent by the request that redeems it, so the second attempt finds
-/// nothing whether it came from the client or from whoever read the redirect
-/// out of a proxy log.
+/// RFC 6749 section 4.1.2, both halves: a code used more than once is denied,
+/// **and** the tokens already issued from it are revoked.
+///
+/// A code reaches the client through a browser redirect, so it lands in
+/// history, in a referrer and in every proxy log on the path. A second
+/// presentation is the only evidence this server ever gets that the code
+/// leaked, and by then one of the two parties is holding a live pair. The
+/// refresh path treats the same signal the same way.
 #[tokio::test]
-async fn a_replayed_authorization_code_is_refused() {
+async fn a_replayed_authorization_code_is_refused_and_kills_the_family() {
     let (authorized, code) = to_code(&["graph-read"]).await;
     let first = authorized.token(&[("code", code.as_str())]).await;
     assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    let access = first.body["access_token"]
+        .as_str()
+        .expect("the exchange carries an access token")
+        .to_owned();
+    let refresh = first.body["refresh_token"]
+        .as_str()
+        .expect("the exchange carries a refresh token")
+        .to_owned();
+    assert_eq!(
+        authorized.mcp_tools_list(&access).await.status,
+        StatusCode::OK,
+        "the winner's token works before the replay"
+    );
 
     let second = authorized.token(&[("code", code.as_str())]).await;
     assert_eq!(second.status, StatusCode::BAD_REQUEST);
     assert_eq!(second.body["error"], "invalid_grant");
+
+    assert_eq!(
+        authorized.mcp_tools_list(&access).await.status,
+        StatusCode::UNAUTHORIZED,
+        "the access token the first exchange issued must die with the family"
+    );
+    let after = authorized.refresh(&refresh).await;
+    assert_eq!(after.status, StatusCode::BAD_REQUEST);
+    assert_eq!(after.body["error"], "invalid_grant");
 }
 
 /// `mcpmem_oauth::consent::CODE_TTL_US` is sixty seconds, so a code is dead at
@@ -478,6 +505,52 @@ async fn a_read_only_token_does_not_see_write_tools_in_the_list() {
     assert!(!names.contains(&"delete_entities".to_owned()), "{names:?}");
 }
 
+// ── The viewer's data endpoints ─────────────────────────────────────────────
+//
+// An OAuth token in the `Authorization` header reaches `/ui/graph` and its
+// three neighbours. Before Task 8 they answered 401 for every OAuth
+// deployment with no static token, so this is the one externally reachable
+// authorization path this work adds, and these two tests are its whole
+// coverage: `tests/ui_http.rs` spawns the binary without OAuth.
+//
+// The gate is `authz::allows_tool(principal, "read_graph")`, so the viewer and
+// the tool it stands for cannot come to disagree.
+
+#[tokio::test]
+async fn a_graph_read_token_may_read_the_viewer_graph() {
+    let (authorized, tokens) = to_tokens(&["graph-read"]).await;
+    let res = authorized
+        .get("/ui/graph", Some(&tokens.access_token))
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(res.body["entities"].is_array(), "{}", res.body);
+}
+
+/// The viewer reads the whole graph, so a token that holds only the write
+/// scope is refused — the same answer `read_graph` itself would give.
+#[tokio::test]
+async fn a_write_only_token_is_refused_by_the_viewer() {
+    let (authorized, tokens) = to_tokens(&["graph-write"]).await;
+    let res = authorized
+        .get("/ui/graph", Some(&tokens.access_token))
+        .await;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+}
+
+/// And no token at all is the same 401 challenge `/mcp` sends, so a scripted
+/// viewer client can discover the authorization server from here too.
+#[tokio::test]
+async fn the_viewer_refuses_an_anonymous_request_with_the_challenge() {
+    let (authorized, _tokens) = to_tokens(&["graph-read"]).await;
+    let res = authorized.get("/ui/graph", None).await;
+    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
+    assert!(
+        res.www_authenticate.contains("resource_metadata="),
+        "{}",
+        res.www_authenticate
+    );
+}
+
 /// Both scopes granted, so the write tool is listed and it answers. Without
 /// this the tests above would pass on a transport that refuses everything.
 #[tokio::test]
@@ -589,8 +662,15 @@ async fn a_revocation_with_no_token_is_refused() {
 /// With neither OAuth nor a static token the server stays open, which is the
 /// behaviour every deployment that predates this work has. The static bearer
 /// half runs against the real binary, in `tests/ui_http.rs`.
+///
+/// It asserts the scopes rather than the status, because the status cannot
+/// see the thing that changed. A principal holding nothing at all also gets
+/// 200 here: `tools/list` filters by scope and answers an empty array. What
+/// deviation 2 decided is *which* scopes the open caller holds — the
+/// configured `bearer_scopes`, not every category — and only the list shows
+/// it.
 #[tokio::test]
-async fn an_open_server_needs_no_credential() {
+async fn an_open_server_grants_the_configured_scopes_with_no_credential() {
     let server = support::open_server().await;
     let res = server
         .request(
@@ -601,4 +681,16 @@ async fn an_open_server_needs_no_credential() {
         )
         .await;
     assert_eq!(res.status(), StatusCode::OK);
+
+    let body = json_body(res).await;
+    let names: Vec<&str> = body["result"]["tools"]
+        .as_array()
+        .expect("tools/list answers an array of tools")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    // `support::open_server` configures every category on the bearer list, so
+    // the open caller holds both halves of the graph.
+    assert!(names.contains(&"read_graph"), "{names:?}");
+    assert!(names.contains(&"delete_entities"), "{names:?}");
 }

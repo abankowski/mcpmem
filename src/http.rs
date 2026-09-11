@@ -323,8 +323,8 @@ fn unauthorized(state: &HttpState) -> Response {
     let mut value = String::from("Bearer");
     if let Some(oauth) = state.oauth.as_ref() {
         value.push_str(&format!(
-            " resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
-            oauth.config.public_url
+            " resource_metadata=\"{}\"",
+            oauth.resource_metadata()
         ));
         let scope = state
             .enabled_categories
@@ -357,8 +357,8 @@ fn insufficient_scope(state: &HttpState, scopes: &[&'static str]) -> Response {
     let mut value = format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\"");
     if let Some(oauth) = state.oauth.as_ref() {
         value.push_str(&format!(
-            ", resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
-            oauth.config.public_url
+            ", resource_metadata=\"{}\"",
+            oauth.resource_metadata()
         ));
     }
     (
@@ -481,11 +481,17 @@ async fn ui_js_handler() -> Response {
         .into_response()
 }
 
-/// Shared auth + `graph-read` gate for the viewer's data endpoints
-/// (`/ui/graph`, `/ui/search`, `/ui/node`, `/ui/expand`). The viewer reads the
-/// whole graph, so it needs both the process-wide category and the
-/// `graph-read` scope on the presented credential. Returns the error
-/// `Response` to send back, or `None` when the request may proceed.
+/// Shared auth + scope gate for the viewer's data endpoints (`/ui/graph`,
+/// `/ui/search`, `/ui/node`, `/ui/expand`). The viewer reads the whole graph,
+/// so it needs both the process-wide category and the scope `read_graph`
+/// needs. Returns the error `Response` to send back, or `None` when the
+/// request may proceed.
+///
+/// The scope decision is [`crate::authz::allows_tool`]'s and is asked about
+/// `read_graph` by name, never spelled here. `src/authz.rs` is the one place
+/// that decision is made, and asking it about the tool the viewer stands for
+/// is what keeps the two provably in step: a tool moved to another scope
+/// moves the viewer with it.
 ///
 /// The 401 is [`unauthorized`], the same challenge `/mcp` sends: one server
 /// answers with one shape, and a scripted viewer client can discover the
@@ -508,7 +514,7 @@ fn ui_data_gate(
                 .into_response(),
         );
     }
-    if !principal.scopes.contains(ToolCategory::GraphRead.slug()) {
+    if !crate::authz::allows_tool(&principal, "read_graph") {
         return Some(
             (
                 StatusCode::FORBIDDEN,

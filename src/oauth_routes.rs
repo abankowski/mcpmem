@@ -74,6 +74,20 @@ impl OauthState {
         format!("{}/mcp", self.config.public_url)
     }
 
+    /// The URL of the protected-resource metadata document, which is what
+    /// both `WWW-Authenticate` challenges point a client at.
+    ///
+    /// One spelling, for the reason [`OauthState::resource`] gives. A
+    /// connector parses this value out of the 401 and out of the 403, and a
+    /// change to the well-known path must not have to find two hand-built
+    /// copies of it in the transport.
+    pub fn resource_metadata(&self) -> String {
+        format!(
+            "{}/.well-known/oauth-protected-resource",
+            self.config.public_url
+        )
+    }
+
     /// The grant behind a bearer token presented to this server, or `None`
     /// when the token is not one this server will honour.
     ///

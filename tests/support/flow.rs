@@ -498,6 +498,17 @@ impl Authorized {
         Reply::of(res).await
     }
 
+    /// `GET path` as the holder of `token` when there is one, for the
+    /// viewer's data endpoints. `None` is the anonymous request.
+    pub async fn get(&self, path: &str, token: Option<&str>) -> Reply {
+        let mut req = Request::get(path);
+        if let Some(token) = token {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        let res = self.server.request(req.body(Body::empty()).unwrap()).await;
+        Reply::of(res).await
+    }
+
     /// `POST /mcp` carrying `body`, as the holder of `token` when there is
     /// one. `None` is the anonymous request the 401 challenge answers.
     pub async fn mcp(&self, token: Option<&str>, body: &str) -> Reply {
@@ -573,12 +584,12 @@ impl Authorized {
     /// The grant stored under `code`, read **without** spending it.
     ///
     /// A test asserts on a grant and then exchanges the same code at the token
-    /// endpoint, so this must not consume the row: `Store::take_code` is a
-    /// `DELETE ... RETURNING`, and an inspection through it would make the
-    /// exchange that follows fail with `invalid_grant`. It reads by digest, the
-    /// way the store keys the row, and ignores the expiry — an expired code is
-    /// still a row, and whether it may be redeemed is the endpoint's answer to
-    /// give.
+    /// endpoint, so this must not spend the row: `Store::take_code` marks the
+    /// row spent, and an inspection through it would make the exchange that
+    /// follows fail with `invalid_grant` — and revoke the family with it. It
+    /// reads by digest, the way the store keys the row, and ignores both the
+    /// expiry and `spent`: whether a code may be redeemed is the endpoint's
+    /// answer to give, not this reader's.
     pub fn code_grant(&self, code: &str) -> CodeGrant {
         with_store(&self.server, |store| {
             store

@@ -64,6 +64,22 @@ pub struct CodeGrant {
     pub code_challenge: String,
 }
 
+/// What one authorization-code presentation means.
+///
+/// It mirrors [`RefreshOutcome`], because the two credentials are the same
+/// kind of thing: single-use, and a second presentation means two parties hold
+/// one value. RFC 6749 section 4.1.2 asks for the same answer in both cases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CodeOutcome {
+    /// The code was live. Here is its grant, and the code is now spent.
+    Valid(CodeGrant),
+    /// The code was already spent. The store has revoked the family, so the
+    /// tokens the first exchange issued are dead too.
+    Replayed,
+    /// Unknown or expired.
+    Unknown,
+}
+
 /// What one refresh-token presentation means.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RefreshOutcome {
@@ -439,32 +455,70 @@ impl Store {
         Ok(())
     }
 
-    /// Redeem an authorization code. The row is deleted in the statement that
-    /// reads it, so a replay finds nothing. An expired code is never returned.
-    pub fn take_code(&self, code: &str, now_us: i64) -> Result<Option<CodeGrant>> {
-        let row: Option<(GrantColumns, String, String)> = self
+    /// Redeem an authorization code, once.
+    ///
+    /// One immediate transaction reads the row and writes the decision, so two
+    /// concurrent presentations cannot both succeed. The row is **kept** and
+    /// marked, rather than deleted: a deleted row leaves the second
+    /// presentation with no family and nothing to revoke, and RFC 6749 section
+    /// 4.1.2 asks for both halves — deny the replay, and revoke what the first
+    /// exchange already issued. [`Store::sweep`] clears the table by expiry, so
+    /// the kept row does not accumulate.
+    ///
+    /// An expired code is [`CodeOutcome::Unknown`] whatever its `spent` column
+    /// says, and so revokes nothing. Letting a dead row name a family would let
+    /// anyone holding a stale code end the live session of the human who
+    /// abandoned it.
+    pub fn take_code(&self, code: &str, now_us: i64) -> Result<CodeOutcome> {
+        let code_digest = digest(code);
+        let tx = Tx::begin(&self.conn)?;
+        let row: Option<(i64, GrantColumns, String, String)> = self
             .conn
-            .prepare(
-                "DELETE FROM oauth_code WHERE code_digest = ?1 AND expires_us > ?2
-                 RETURNING client_id, principal, scopes, resource, family,
-                           redirect_uri, code_challenge",
-            )?
-            .query_row(params![digest(code), now_us], |r| {
-                Ok((
-                    grant_columns(r)?,
-                    r.get("redirect_uri")?,
-                    r.get("code_challenge")?,
-                ))
-            })
+            .query_row(
+                "SELECT spent, client_id, principal, scopes, resource, family,
+                        redirect_uri, code_challenge
+                 FROM oauth_code WHERE code_digest = ?1 AND expires_us > ?2",
+                params![code_digest, now_us],
+                |r| {
+                    Ok((
+                        r.get("spent")?,
+                        grant_columns(r)?,
+                        r.get("redirect_uri")?,
+                        r.get("code_challenge")?,
+                    ))
+                },
+            )
             .optional()?;
-        let Some((columns, redirect_uri, code_challenge)) = row else {
-            return Ok(None);
+        let outcome = match row {
+            None => CodeOutcome::Unknown,
+            Some((spent, columns, redirect_uri, code_challenge)) => {
+                let grant = grant_from_columns(columns)?;
+                if spent == 0 {
+                    self.conn.execute(
+                        "UPDATE oauth_code SET spent = 1 WHERE code_digest = ?1",
+                        params![code_digest],
+                    )?;
+                    CodeOutcome::Valid(CodeGrant {
+                        grant,
+                        redirect_uri,
+                        code_challenge,
+                    })
+                } else {
+                    let killed = self.conn.execute(
+                        "UPDATE oauth_token SET revoked = 1 WHERE family = ?1",
+                        params![grant.family],
+                    )?;
+                    tracing::warn!(
+                        client_id = %grant.client_id,
+                        revoked = killed,
+                        "authorization code replay: the token family is revoked"
+                    );
+                    CodeOutcome::Replayed
+                }
+            }
         };
-        Ok(Some(CodeGrant {
-            grant: grant_from_columns(columns)?,
-            redirect_uri,
-            code_challenge,
-        }))
+        tx.commit()?;
+        Ok(outcome)
     }
 
     // ── Tokens ────────────────────────────────────────────────────────────

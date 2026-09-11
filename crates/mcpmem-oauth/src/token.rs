@@ -26,7 +26,7 @@
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::store::{Grant, RefreshOutcome, Store, StoreError, TokenKind};
+use crate::store::{CodeOutcome, Grant, RefreshOutcome, Store, StoreError, TokenKind};
 
 /// How long an access token stays valid, in microseconds.
 ///
@@ -141,22 +141,44 @@ pub struct RefreshExchange<'a> {
 
 /// Redeem an authorization code for a token pair.
 ///
-/// The code is consumed by the read that fetches it, **before** any of the
-/// three checks below runs. That is deliberate: a code presented with the wrong
-/// verifier has been presented by somebody, and RFC 6749 section 4.1.2 asks for
-/// a code used more than once to be refused. Whoever can burn a code this way
-/// already holds it, so nothing is given away — and the client's retry is one
-/// authorization request, while the alternative leaves a code alive after an
-/// attacker has been seen guessing at it.
+/// The code is spent by the read that fetches it, **before** any of the three
+/// checks below runs, and a second presentation revokes the whole family.
+/// Both halves are RFC 6749 section 4.1.2.
+///
+/// # What the ordering costs
+///
+/// A code reaches the client through a browser redirect, so it lands in
+/// browser history, in a referrer and in every proxy log on the path. PKCE is
+/// what makes holding it worthless — and this ordering is the one thing a
+/// holder can still do with it. Anyone who reads a code there can post
+/// `code=<stolen>&code_verifier=x&client_id=x&redirect_uri=x` and burn it. The
+/// burn precedes the `client_id` and `redirect_uri` checks too, so none of
+/// those three values has to be right.
+///
+/// The cost is therefore a forced re-authorization for the legitimate client:
+/// a new authorization request, with a human at the keyboard. That is
+/// accepted, because the alternative is worse. A code presented with a wrong
+/// verifier is an attack signal, and a code that has been seen guessed at
+/// should not survive to be redeemed by whoever guesses next.
 pub fn grant_authorization_code(
     store: &Store,
     params: &CodeExchange<'_>,
     now_us: i64,
 ) -> Result<TokenResponse, TokenError> {
-    let Some(code) = store.take_code(params.code, now_us)? else {
-        return Err(TokenError::InvalidGrant(
-            "no live authorization code carries this value",
-        ));
+    let code = match store.take_code(params.code, now_us)? {
+        CodeOutcome::Valid(code) => code,
+        // The store has already revoked the family, so the pair the first
+        // exchange handed over is dead. Nothing more to do here.
+        CodeOutcome::Replayed => {
+            return Err(TokenError::InvalidGrant(
+                "this authorization code was already redeemed",
+            ));
+        }
+        CodeOutcome::Unknown => {
+            return Err(TokenError::InvalidGrant(
+                "no live authorization code carries this value",
+            ));
+        }
     };
 
     // RFC 7636 section 4.6, in constant time. Both sides are the base64url of
