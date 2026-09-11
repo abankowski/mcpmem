@@ -778,7 +778,12 @@ fn consent_page(
             // with an empty name. Name it by its identifier instead: a page
             // that names nobody is the more dangerous prompt of the two,
             // because an attacker would reach it by leaving one field out.
-            if client.client_name.is_empty() {
+            //
+            // Blank, not merely empty. `register` applies no trim and bounds
+            // only the length, so `"client_name": "   "` is stored as it
+            // stands — and HTML collapses whitespace, so it draws the same
+            // unnamed page as no name at all.
+            if client.client_name.trim().is_empty() {
                 &client.client_id
             } else {
                 &client.client_name

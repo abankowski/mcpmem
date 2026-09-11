@@ -42,9 +42,22 @@ pub const CLIENT_REDIRECT: &str = "https://claude.ai/api/mcp/auth_callback";
 pub const CLIENT_STATE: &str = "the-client-state";
 /// The name the test client registers under.
 pub const CLIENT_NAME: &str = "Test client";
-/// The PKCE challenge the client sends. Task 8 verifies a code against the
-/// challenge stored with it, so the value has to survive the whole flow.
-pub const CODE_CHALLENGE: &str = "the-client-challenge";
+/// The PKCE verifier the test client keeps. It never leaves the client: a
+/// token request presents this, and the endpoint recomputes the challenge from
+/// it. 44 unreserved characters, inside RFC 7636 section 4.1's 43 to 128.
+pub const CODE_VERIFIER: &str = "the-client-verifier-for-the-mcpmem-test-flow";
+/// The PKCE challenge the client sends, which is the S256 digest of
+/// [`CODE_VERIFIER`].
+///
+/// Derived, never written out. `GET /oauth/authorize` stores this value
+/// verbatim under `code_challenge_method=S256`, so a token request must
+/// present a verifier whose digest equals it. A literal here would be the
+/// digest of nothing, and no exchange could ever succeed against it.
+///
+/// A function rather than a constant, because a `const` cannot hash.
+pub fn code_challenge() -> String {
+    mcpmem_oauth::s256_challenge(CODE_VERIFIER)
+}
 /// What the clock reads for the whole of a flow. A fixed value, so a code
 /// minted at [`NOW`] is live at `NOW + 1` and no test races the wall clock.
 pub const NOW: i64 = 1_700_000_000_000_000;
@@ -168,11 +181,12 @@ impl Flow {
     /// A `GET /oauth/authorize` this server accepts.
     fn authorize_request(&self, client_id: &str) -> Request<Body> {
         let resource = format!("{}/mcp", super::PUBLIC_URL);
+        let challenge = code_challenge();
         let mut fields = vec![
             ("response_type", "code"),
             ("client_id", client_id),
             ("redirect_uri", self.redirect_uri.as_str()),
-            ("code_challenge", CODE_CHALLENGE),
+            ("code_challenge", challenge.as_str()),
             ("code_challenge_method", "S256"),
             ("scope", self.scope.as_str()),
             ("resource", resource.as_str()),

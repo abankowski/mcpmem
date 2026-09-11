@@ -52,14 +52,37 @@ async fn a_client_that_registered_no_name_is_named_by_its_identifier() {
         .without_client_name()
         .into_consent()
         .await;
+    assert_named_by_identifier(&a);
+}
+
+/// A name of only whitespace is the same page as no name at all: HTML collapses
+/// it, so the human reads `Authorize` and is asked to grant access to nobody.
+/// `register` applies no trim and bounds only the length, so this body
+/// registers as it stands.
+#[tokio::test]
+async fn a_client_whose_name_is_only_whitespace_is_named_by_its_identifier() {
+    let a = Flow::new("graph-read")
+        .client_name(" \t \n ")
+        .into_consent()
+        .await;
+    assert_named_by_identifier(&a);
+}
+
+/// The page names the client by its identifier, and the element that names it
+/// is not blank. Testing for `<strong></strong>` alone would pass for a name of
+/// three spaces, which is the input that reopened this defect.
+fn assert_named_by_identifier(a: &Authorized) {
+    let named = format!("<strong>{}</strong>", a.client_id);
     assert!(
-        a.body.contains(&a.client_id),
+        a.body.contains(&named),
         "the page must name the client it cannot name by name: {}",
         a.body
     );
     assert!(
-        !a.body.contains("<strong></strong>"),
-        "the page must not ask the human to grant access to nobody"
+        a.body
+            .contains(&format!("<h1>Authorize {}</h1>", a.client_id)),
+        "the heading must name it too: {}",
+        a.body
     );
 }
 
@@ -107,7 +130,12 @@ async fn the_code_grant_binds_the_client_the_resource_and_the_challenge() {
         "a code opens a token family"
     );
     assert_eq!(stored.redirect_uri, flow::CLIENT_REDIRECT);
-    assert_eq!(stored.code_challenge, flow::CODE_CHALLENGE);
+    // The challenge must be the digest of the verifier the client keeps, or
+    // Task 8's first exchange cannot present anything this code accepts.
+    assert_eq!(
+        stored.code_challenge,
+        mcpmem_oauth::s256_challenge(flow::CODE_VERIFIER)
+    );
     // The offered order, not the order the form happened to send.
     assert_eq!(stored.grant.scopes, vec!["graph-read", "graph-write"]);
 }
@@ -338,7 +366,7 @@ async fn a_loopback_redirect_uri_differing_only_in_port_is_refused() {
         ("response_type", "code"),
         ("client_id", &client_id),
         ("redirect_uri", "http://127.0.0.1:41235/cb"),
-        ("code_challenge", flow::CODE_CHALLENGE),
+        ("code_challenge", &flow::code_challenge()),
         ("code_challenge_method", "S256"),
         ("scope", "graph-read"),
     ]);
