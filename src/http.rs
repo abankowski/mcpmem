@@ -239,16 +239,23 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
         info!(
             "Listening for HTTPS (Streamable) MCP on https://{socket_addr}/mcp (TLS, auth {auth})"
         );
+        // `into_make_service_with_connect_info` rather than
+        // `into_make_service`: without it no handler can see the peer address,
+        // and `oauth_routes::Peer` would count every anonymous caller in one
+        // bucket — a rate limit that one client can use to lock out the rest.
         axum_server::bind_rustls(socket_addr, tls)
-            .serve(router(state).into_make_service())
+            .serve(router(state).into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
             .map_err(MCSError::IoError)?;
     } else {
         let listener = TcpListener::bind(&addr).await.map_err(MCSError::IoError)?;
         info!("Listening for HTTP (Streamable) MCP on http://{addr}/mcp (auth {auth})");
-        axum::serve(listener, router(state))
-            .await
-            .map_err(MCSError::IoError)?;
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(MCSError::IoError)?;
     }
     Ok(())
 }

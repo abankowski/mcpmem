@@ -642,7 +642,10 @@ impl Store {
     }
 
     /// Delete expired logins, codes and tokens, and return how many rows went.
-    /// `oauth_client` has no expiry: a registration lives until it is revoked.
+    ///
+    /// `oauth_client` has no `expires_us` and so is untouched here: a
+    /// registration has no lifetime, only a last use.
+    /// [`Store::evict_clients`] is the rule that reaches it.
     pub fn sweep(&self, now_us: i64) -> Result<u64> {
         let tx = Tx::begin(&self.conn)?;
         let mut removed = 0u64;
@@ -652,5 +655,36 @@ impl Store {
         }
         tx.commit()?;
         Ok(removed)
+    }
+
+    /// Delete every client last used more than `max_idle_us` ago that holds no
+    /// token row, and return how many went.
+    ///
+    /// Registration is unauthenticated, so the number of client rows is a cost
+    /// a stranger chooses and something has to reclaim them. Both halves of the
+    /// predicate are load-bearing:
+    ///
+    /// - **Idle for longer than `max_idle_us`.** A client is registered one
+    ///   request before it starts an authorization request, so anything
+    ///   shorter would evict a client that has reached no token *yet*.
+    /// - **Holding no token.** A connector that has been quiet for a month
+    ///   still holds a thirty-day refresh token, and evicting its registration
+    ///   would answer that refresh with `invalid_client` — a working session
+    ///   ended by maintenance.
+    ///
+    /// The token check reads `oauth_token`, which [`Store::sweep`] empties by
+    /// expiry, so the order of one maintenance pass decides what a client
+    /// whose last token expired looks like here. `OauthState::maintain` in
+    /// `src/oauth_routes.rs` is that pass, and it evicts **before** it sweeps:
+    /// a client is then judged against the tokens it held when the pass
+    /// started, rather than against whatever that same pass has just deleted.
+    pub fn evict_clients(&self, now_us: i64, max_idle_us: i64) -> Result<u64> {
+        let removed = self.conn.execute(
+            "DELETE FROM oauth_client
+             WHERE last_used_us <= ?1
+               AND client_id NOT IN (SELECT client_id FROM oauth_token)",
+            params![now_us.saturating_sub(max_idle_us)],
+        )?;
+        Ok(removed as u64)
     }
 }

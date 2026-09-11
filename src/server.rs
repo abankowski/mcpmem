@@ -463,7 +463,10 @@ impl MCPServer {
 
     /// stdio transport: newline-delimited JSON-RPC over stdin/stdout.
     pub async fn run_stdio(&self) -> Result<()> {
-        spawn_maintenance(self.kg.clone());
+        // No OAuth on the stdio transport: it serves one local process over a
+        // pipe, `run_http` is the only path that opens an OAuth store, and so
+        // there is nothing here to sweep.
+        spawn_maintenance(self.kg.clone(), None);
         spawn_wal_flush(self.kg.clone(), self.config.wal_flush_ms);
         let stdin = tokio::io::stdin();
         let reader = BufReader::with_capacity(BUFFER_CAPACITY, stdin);
@@ -480,10 +483,9 @@ impl MCPServer {
 
     /// MCP Streamable HTTP transport (POST/GET `/mcp`, JSON or SSE responses).
     pub async fn run_http(&self, addr: &str) -> Result<()> {
-        spawn_maintenance(self.kg.clone());
-        spawn_wal_flush(self.kg.clone(), self.config.wal_flush_ms);
         // The graph handle above already migrated the schema, so the four
-        // `oauth_*` tables exist by the time the store opens.
+        // `oauth_*` tables exist by the time the store opens. It is built
+        // before the maintenance task because that task sweeps it.
         let oauth = match self.config.oauth.clone() {
             Some(cfg) => Some(Arc::new(crate::oauth_routes::OauthState::open(
                 cfg,
@@ -492,6 +494,8 @@ impl MCPServer {
             )?)),
             None => None,
         };
+        spawn_maintenance(self.kg.clone(), oauth.clone());
+        spawn_wal_flush(self.kg.clone(), self.config.wal_flush_ms);
         crate::http::run(crate::http::HttpRunConfig {
             addr: addr.to_owned(),
             kg: self.graph(),
@@ -536,16 +540,36 @@ fn spawn_wal_flush(kg: Arc<GraphHandle>, interval_ms: u64) {
 
 /// Spawn a background task that runs periodic database maintenance every
 /// 5 minutes until the runtime shuts down.
-fn spawn_maintenance(kg: Arc<GraphHandle>) {
+///
+/// It carries the OAuth store's maintenance too, on the same tick and the same
+/// blocking thread rather than a second task: both are one SQLite statement
+/// group against one file, five minutes apart, and a table that is swept only
+/// while the graph is also being maintained is a table swept exactly as often
+/// as it needs to be. `OauthState::maintain` holds the whole of that work, so
+/// this function decides only *when*.
+fn spawn_maintenance(kg: Arc<GraphHandle>, oauth: Option<Arc<crate::oauth_routes::OauthState>>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(300));
         interval.tick().await; // skip immediate first tick
         loop {
             interval.tick().await;
             let kg = kg.clone();
+            let oauth = oauth.clone();
             tokio::task::spawn_blocking(move || {
                 if let Err(e) = kg.run_maintenance() {
                     tracing::warn!("Maintenance error: {e}");
+                }
+                // Under `spawn_blocking`, so taking the store lock here cannot
+                // stall a request on the async reactor.
+                if let Some(oauth) = oauth {
+                    let removed = oauth.maintain();
+                    if !removed.is_empty() {
+                        tracing::info!(
+                            swept = removed.swept,
+                            evicted = removed.evicted,
+                            "OAuth maintenance"
+                        );
+                    }
                 }
             })
             .await

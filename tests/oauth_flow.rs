@@ -657,6 +657,134 @@ async fn a_revocation_with_no_token_is_refused() {
     assert_eq!(res.body["error"], "invalid_request");
 }
 
+// ── The bounds on what an anonymous caller costs ────────────────────────────
+
+/// `POST /oauth/register` writes a client row for whoever asks, so the number
+/// of rows one peer may write in a minute is bounded.
+///
+/// Four things in one test, because each needs the state the one before it
+/// left: the allowance is spent, the refusal carries `Retry-After`, a second
+/// peer is counted separately, and the window rolls. Splitting them would
+/// rebuild the same twenty requests three more times.
+#[tokio::test]
+async fn registration_is_rate_limited_per_peer() {
+    let flow = Flow::fresh().await;
+    for i in 0..20 {
+        let res = flow.register_from("203.0.113.7").await;
+        assert_eq!(res.status, StatusCode::CREATED, "request {i} must pass");
+    }
+
+    let blocked = flow.register_from("203.0.113.7").await;
+    assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        !blocked.retry_after.is_empty(),
+        "a 429 must say when to come back"
+    );
+
+    // Another peer is unaffected by the first peer's window.
+    let other = flow.register_from("203.0.113.8").await;
+    assert_eq!(other.status, StatusCode::CREATED);
+
+    // The window rolls over.
+    flow.server().clock().advance_seconds(61);
+    let later = flow.register_from("203.0.113.7").await;
+    assert_eq!(later.status, StatusCode::CREATED);
+}
+
+/// Without `--oauth-trust-forwarded-proto`, `X-Forwarded-For` buys a caller
+/// nothing.
+///
+/// This is the whole difference between a limit and a decoration: the header
+/// is client-chosen, so a server that reads it from an untrusted hop lets one
+/// caller mint a fresh bucket per request and send as many registrations as it
+/// likes. Twenty-one requests, each naming a different address, and the last
+/// one must still be refused — the connection they share is the peer.
+///
+/// It builds its own server rather than using `Flow`, because
+/// `support::oauth_config` trusts the proxy as every real deployment behind
+/// one does, and this is the other deployment.
+#[tokio::test]
+async fn a_forwarded_for_header_from_an_untrusted_hop_does_not_change_the_bucket() {
+    let mut config = support::oauth_config("https://idp.invalid");
+    config.trust_forwarded_proto = false;
+    let server = support::server(
+        Some(config),
+        support::Scopes::all(),
+        Some(support::Clock::at(flow::NOW)),
+    )
+    .await;
+
+    let register = |peer: &str| {
+        server.request(
+            Request::post("/oauth/register")
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", peer)
+                .body(Body::from(
+                    r#"{"client_name":"Claude","redirect_uris":["https://claude.ai/api/mcp/auth_callback"]}"#,
+                ))
+                .unwrap(),
+        )
+    };
+    for i in 0..20 {
+        let res = register(&format!("203.0.113.{i}")).await;
+        assert_eq!(res.status(), StatusCode::CREATED, "request {i} must pass");
+    }
+    let blocked = register("203.0.113.99").await;
+    assert_eq!(
+        blocked.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a self-chosen address must not open a second allowance"
+    );
+}
+
+/// The periodic maintenance removes what has expired and nothing else.
+///
+/// It calls `OauthState::maintain`, which is the whole of what the five-minute
+/// tick in `src/server.rs` runs — so this covers the scheduled work rather
+/// than the store method under it, and a tick that read the wrong clock would
+/// fail here.
+///
+/// It is asserted through the transport as well as through the row count,
+/// because the two answer different questions: the count says the row went,
+/// and `tools/list` says the credential a client is holding still works. A
+/// sweep that took the live pair would pass a count assertion written the
+/// obvious way.
+#[tokio::test]
+async fn the_maintenance_removes_expired_rows_and_keeps_live_ones() {
+    let (authorized, tokens) = to_tokens(&["graph-read"]).await;
+    let live = tokens.access_token.clone();
+
+    // A second, already-expired family.
+    authorized.insert_expired_family("dead");
+    assert_eq!(
+        authorized.count("oauth_token"),
+        3,
+        "one live pair plus one dead access"
+    );
+
+    let removed = authorized.server().oauth().maintain().swept;
+    assert_eq!(removed, 1);
+    assert_eq!(
+        authorized.mcp_tools_list(&live).await.status,
+        StatusCode::OK,
+        "the live pair must survive the sweep"
+    );
+
+    // After an hour every access token is gone, and the refresh token remains.
+    authorized.clock().advance_seconds(3601);
+    let removed = authorized.server().oauth().maintain().swept;
+    assert!(removed >= 1, "the expired access token must go");
+    assert_eq!(
+        authorized.mcp_tools_list(&live).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        authorized.count("oauth_token"),
+        1,
+        "the refresh token outlives the access token"
+    );
+}
+
 // ── The paths OAuth must not have broken ────────────────────────────────────
 
 /// With neither OAuth nor a static token the server stays open, which is the

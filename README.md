@@ -169,6 +169,50 @@ mcpmem --enable-all --transport http --auth-token "s3cr3t" \
   --static-bearer-scopes graph-read,vectors
 ```
 
+### OAuth 2.1 (remote connectors)
+
+`--oidc-issuer` makes `mcpmem` its own **OAuth 2.1 authorization server**, so a
+remote MCP connector — Claude's custom connectors, ChatGPT's — can discover it,
+register itself, send its human to your OpenID Connect provider, take consent
+for a subset of scopes, and call tools under an issued token. `mcpmem` mints
+its own opaque tokens and stores only their digests; the provider authenticates
+the human and nothing more.
+
+The shortest configuration that works:
+
+```sh
+mcpmem --enable-all --transport http --bind 0.0.0.0:8443 \
+  --public-url https://mem.example.com \
+  --oidc-issuer https://accounts.example.com \
+  --oidc-client-id mcpmem-prod \
+  --principals-file ./principals.json \
+  --tls-cert ./cert.pem --tls-key ./key.pem
+```
+
+Register the redirect URI `https://mem.example.com/oauth/callback` at the
+provider, and list the humans who may authorize — identity is `iss` plus `sub`,
+and their `scopes` is the ceiling a connector may be granted:
+
+```json
+[{ "name": "adam", "iss": "https://accounts.example.com",
+   "sub": "109876543210987654321", "scopes": ["graph-read", "graph-write"] }]
+```
+
+Behind a proxy that ends TLS, pass `--oauth-trust-forwarded-proto` instead of
+`--tls-cert`/`--tls-key`. That flag also decides which address the per-peer
+request limits count, so the proxy must **set** `X-Forwarded-For` rather than
+append to a client-supplied one.
+
+**The static bearer token above still works, unchanged.** A server may run both:
+a request carrying an issued OAuth token is resolved as that token, and anything
+else falls back to the static token. The graph viewer's `?token=` fallback takes
+the static token alone — an OAuth token belongs in the `Authorization` header —
+so a deployment that wants a human to open `/ui` in a browser configures
+`--auth-token-file` as well.
+
+Deployment, connector setup, revocation, and what each refusal means:
+[`docs/runbooks/oauth-deployment.md`](docs/runbooks/oauth-deployment.md).
+
 ### TLS (HTTPS)
 
 The `http` transport can be served over TLS (rustls, `ring` provider). Provide a PEM certificate
@@ -534,6 +578,9 @@ All transports share one transport-agnostic dispatch core (`dispatch_line()` /
 | Max embedding dimensions *(vectors)* | 4,096 |
 | Max `topK` *(vectors)* | 100 |
 | Max items per `vector_batch_upsert` | 1,024 |
+| Max `POST /oauth/register` per minute per peer *(oauth)* | 20 |
+| Max requests per minute per peer on the other OAuth endpoints *(oauth)* | 60 |
+| Client name / redirect URIs / URL bytes *(oauth)* | 256 / 8 / 2,048 |
 
 ## Development
 

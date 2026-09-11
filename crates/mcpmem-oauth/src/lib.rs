@@ -7,6 +7,8 @@
 /// template engine: the page is two compiled-in files and one substitution
 /// pass, so a build without an HTTP client still carries the whole decision.
 pub mod consent;
+/// Per-peer request limits for the endpoints that answer an anonymous caller.
+pub mod limits;
 pub mod metadata;
 pub mod registration;
 pub mod store;

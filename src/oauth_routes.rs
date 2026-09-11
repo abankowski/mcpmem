@@ -60,6 +60,9 @@ pub struct OauthState {
     /// leaves the cell empty so the next login retries.
     #[cfg(feature = "oauth")]
     provider: tokio::sync::OnceCell<Provider>,
+    /// The per-peer request limits on the endpoints that answer an anonymous
+    /// caller. In memory and per process: see `mcpmem_oauth::limits`.
+    pub limits: mcpmem_oauth::limits::Limits,
 }
 
 impl OauthState {
@@ -167,8 +170,47 @@ impl OauthState {
             config,
             store: Mutex::new(mcpmem_oauth::store::Store::new(conn)),
             now_us,
+            limits: mcpmem_oauth::limits::Limits::new(),
             #[cfg(feature = "oauth")]
             provider: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    /// One pass of periodic maintenance over the OAuth tables, at this
+    /// server's own clock reading.
+    ///
+    /// This is the whole of what the five-minute tick in
+    /// [`crate::server`] runs, and it lives here rather than there so that it
+    /// is reachable without a bound socket: `tests/oauth_flow.rs` drives it
+    /// against a moved clock, which a test of the tick itself could only do
+    /// by waiting five minutes.
+    ///
+    /// Eviction runs **before** the sweep, and the order is the contract
+    /// [`mcpmem_oauth::store::Store::evict_clients`] states: a client is
+    /// judged against the tokens it held when the pass started, not against
+    /// the ones this pass has just deleted.
+    ///
+    /// One lock acquisition for both, so no request can interleave between
+    /// them and see a client evicted while its expired tokens are still
+    /// there.
+    pub fn maintain(&self) -> Maintenance {
+        let now_us = (self.now_us)();
+        self.with_store(|store| {
+            let evicted = match store.evict_clients(now_us, CLIENT_MAX_IDLE_US) {
+                Ok(evicted) => evicted,
+                Err(e) => {
+                    tracing::warn!("the OAuth client eviction failed: {e}");
+                    0
+                }
+            };
+            let swept = match store.sweep(now_us) {
+                Ok(swept) => swept,
+                Err(e) => {
+                    tracing::warn!("the OAuth sweep failed: {e}");
+                    0
+                }
+            };
+            Maintenance { swept, evicted }
         })
     }
 
@@ -183,6 +225,118 @@ impl OauthState {
 
 fn open_failed(e: &rusqlite::Error) -> MCSError {
     MCSError::MemoryError(format!("failed to open the OAuth store: {e}"))
+}
+
+/// How long a client registration survives without being used, in
+/// microseconds. Thirty days, which is the life of a refresh token: a client
+/// that has not presented itself for longer than the longest credential it
+/// could be holding is holding nothing.
+const CLIENT_MAX_IDLE_US: i64 = 30 * 24 * 60 * 60 * 1_000_000;
+
+/// What one [`OauthState::maintain`] pass removed. Two named counts, because
+/// both are `u64` and a tuple would let a log line report one as the other.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Maintenance {
+    /// Expired logins, authorization codes and tokens.
+    pub swept: u64,
+    /// Client registrations idle past [`CLIENT_MAX_IDLE_US`] holding no token.
+    pub evicted: u64,
+}
+
+impl Maintenance {
+    /// Whether this pass removed anything, which is what decides if it is
+    /// worth a log line.
+    pub const fn is_empty(&self) -> bool {
+        self.swept == 0 && self.evicted == 0
+    }
+}
+
+/// The address a request is counted against by `mcpmem_oauth::limits`.
+///
+/// It is an extractor rather than a helper each handler calls, because the
+/// rule has two sources and picking the wrong one is a security bug in both
+/// directions. Reading `X-Forwarded-For` when nothing sets it lets any caller
+/// choose its own bucket, and so bypass every limit with one header. Reading
+/// the connection when a proxy terminated it counts every caller as the proxy,
+/// and so locks the whole internet out of the endpoint the moment one client
+/// misbehaves.
+///
+/// So the source is the deployment's, not the handler's:
+/// `--oauth-trust-forwarded-proto` says a trusted proxy sits in front, and it
+/// is the same flag that already decides whether this server believes
+/// `X-Forwarded-Proto` about TLS. With it set, the leftmost `X-Forwarded-For`
+/// entry is the client the proxy saw. Without it, the peer of the connection.
+///
+/// The port is dropped: a peer is an address, and counting `ip:port` would
+/// give every request its own bucket and bound nothing at all.
+///
+/// [`UNKNOWN_PEER`] is the fallback, and it is one shared bucket. A request
+/// with no address reaches here only when a caller sent no
+/// `X-Forwarded-For` behind a proxy that was trusted to set it, or when the
+/// transport was built without connection information — `crate::http::run`
+/// supplies it on both the TLS and the plaintext path.
+struct Peer(String);
+
+/// The bucket a request whose address cannot be established is counted
+/// against. Not an address, so no real peer shares it.
+const UNKNOWN_PEER: &str = "unknown";
+
+impl axum::extract::FromRequestParts<HttpState> for Peer {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &HttpState,
+    ) -> std::result::Result<Peer, Self::Rejection> {
+        let forwarded = state
+            .oauth
+            .as_ref()
+            .filter(|oauth| oauth.config.trust_forwarded_proto)
+            .and_then(|_| forwarded_for(&parts.headers));
+        if let Some(client) = forwarded {
+            return Ok(Peer(client));
+        }
+        Ok(Peer(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map_or_else(|| UNKNOWN_PEER.to_owned(), |info| info.0.ip().to_string()),
+        ))
+    }
+}
+
+/// The leftmost `X-Forwarded-For` entry, which is the client the outermost
+/// trusted proxy saw. Later entries are that proxy's own upstreams and the
+/// header may repeat, so the first value of the first header wins.
+///
+/// `None` for an absent or empty header. An empty entry is not an address, and
+/// counting it would put every such caller in one bucket that a single client
+/// can then fill for everybody.
+fn forwarded_for(headers: &axum::http::HeaderMap) -> Option<String> {
+    let value = headers.get("x-forwarded-for")?.to_str().ok()?;
+    let client = value.split(',').next()?.trim();
+    (!client.is_empty()).then(|| client.to_owned())
+}
+
+/// The RFC 6585 section 4 answer to a caller over its limit.
+///
+/// `Retry-After` is the whole window rather than the time left in it: see
+/// `mcpmem_oauth::limits::RateLimiter::retry_after_seconds`. The body is an
+/// OAuth error object, because every endpoint this guards answers JSON and a
+/// connector that parses the refusals must not meet a different shape here.
+fn too_many_requests(limiter: &mcpmem_oauth::limits::RateLimiter) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            axum::http::header::RETRY_AFTER,
+            limiter.retry_after_seconds().to_string(),
+        )],
+        Json(json!({
+            "error": "temporarily_unavailable",
+            "error_description": "too many requests from this address",
+        })),
+    )
+        .into_response()
 }
 
 /// Add the discovery documents and the registration endpoint.
@@ -240,22 +394,32 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
 /// credential to authenticate a registration with. Nothing in the body is
 /// trusted — see `mcpmem_oauth::registration::RegistrationRequest` — and the
 /// cost of one request is one bounded row: `register` caps the name, the
-/// number of redirect URIs and the length of each. Task 9 bounds how many
-/// requests arrive; a rate limit cannot bound the size of a row, which is why
-/// the caps live in `register` and not here.
+/// number of redirect URIs and the length of each. `mcpmem_oauth::limits`
+/// bounds how many requests arrive; a rate limit cannot bound the size of a
+/// row, which is why the caps live in `register` and not here.
 ///
 /// The body is read as bytes rather than through the `Json` extractor. A
 /// malformed body must answer with the RFC 7591 section 3.2.2 error object,
 /// and the extractor's own rejection is a different shape a client cannot
 /// parse.
-async fn register(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+async fn register(
+    State(state): State<HttpState>,
+    Peer(peer): Peer,
+    body: axum::body::Bytes,
+) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let now_us = (oauth.now_us)();
+    // Before the body is parsed: parsing is the work a limited caller must not
+    // be able to make this server do.
+    if !oauth.limits.register.check(&peer, now_us) {
+        tracing::warn!(%peer, "registration rate limit reached");
+        return too_many_requests(&oauth.limits.register);
+    }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return registration_refused(&RegistrationError::InvalidClientMetadata);
     };
-    let now_us = (oauth.now_us)();
     match oauth.with_store(|store| mcpmem_oauth::registration::register(store, &value, now_us)) {
         Ok(document) => (StatusCode::CREATED, Json(document)).into_response(),
         Err(e) => registration_refused(&e),
@@ -481,10 +645,18 @@ struct CallbackParams {
 /// fragment (`mcpmem_oauth::registration`), so nothing here can be smuggled
 /// past the equality.
 #[cfg(feature = "oauth")]
-async fn authorize(State(state): State<HttpState>, Query(q): Query<AuthorizeParams>) -> Response {
+async fn authorize(
+    State(state): State<HttpState>,
+    Peer(peer): Peer,
+    Query(q): Query<AuthorizeParams>,
+) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if !oauth.limits.authorize.check(&peer, (oauth.now_us)()) {
+        tracing::warn!(%peer, "authorization rate limit reached");
+        return too_many_requests(&oauth.limits.authorize);
+    }
     start_login(oauth, q).await
 }
 
@@ -892,10 +1064,23 @@ fn parse_consent_form(body: &[u8]) -> ConsentForm {
 /// not been shown to hold this login, and sending them anywhere — even to a
 /// registered URI — would answer a question about somebody else's session.
 #[cfg(feature = "oauth")]
-async fn consent(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+async fn consent(
+    State(state): State<HttpState>,
+    Peer(peer): Peer,
+    body: axum::body::Bytes,
+) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    // Bounded because a form carrying the wrong `csrf` is refused and leaves
+    // the login row in place — by design, so a human whose browser lost the
+    // page can come back — which also means a guess costs the guesser nothing
+    // and may be repeated. The window is ten minutes wide; this bounds how
+    // many guesses fit in it.
+    if !oauth.limits.consent.check(&peer, (oauth.now_us)()) {
+        tracing::warn!(%peer, "consent rate limit reached");
+        return too_many_requests(&oauth.limits.consent);
+    }
     let form = parse_consent_form(&body);
     if form.too_many_scopes {
         return refused("too many scopes");
@@ -1072,12 +1257,23 @@ fn required<'a>(
 /// client authentication — the code is redeemable only by whoever holds the
 /// verifier behind the challenge the authorization request carried.
 #[cfg(feature = "oauth")]
-async fn token(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+async fn token(
+    State(state): State<HttpState>,
+    Peer(peer): Peer,
+    body: axum::body::Bytes,
+) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let form = parse_token_form(&body);
     let now_us = (oauth.now_us)();
+    // Unauthenticated, so a caller may present a guess. One authorization code
+    // has a sixty-second life and one refresh token is a 32-byte random value,
+    // so guessing was never the threat this bounds; the cost of the attempt is.
+    if !oauth.limits.credential.check(&peer, now_us) {
+        tracing::warn!(%peer, "token rate limit reached");
+        return too_many_requests(&oauth.limits.credential);
+    }
+    let form = parse_token_form(&body);
     match oauth.with_store(|store| granted(store, &form, now_us)) {
         Ok(response) => (
             StatusCode::OK,
@@ -1135,10 +1331,22 @@ fn granted(
 /// nobody a power they did not have: the only value that revokes a family is a
 /// live token from it, and whoever holds one of those can already spend it.
 #[cfg(feature = "oauth")]
-async fn revoke_token(State(state): State<HttpState>, body: axum::body::Bytes) -> Response {
+async fn revoke_token(
+    State(state): State<HttpState>,
+    Peer(peer): Peer,
+    body: axum::body::Bytes,
+) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let now_us = (oauth.now_us)();
+    // The same limiter as the token endpoint: both are one caller presenting
+    // one credential, and neither is reached from a browser, so one budget for
+    // "present a credential" is what a legitimate client needs.
+    if !oauth.limits.credential.check(&peer, now_us) {
+        tracing::warn!(%peer, "revocation rate limit reached");
+        return too_many_requests(&oauth.limits.credential);
+    }
     let form = parse_token_form(&body);
     if form.repeated {
         return token_refused(&TokenError::InvalidRequest(
@@ -1149,7 +1357,6 @@ async fn revoke_token(State(state): State<HttpState>, body: axum::body::Bytes) -
         Ok(token) => token,
         Err(e) => return token_refused(&e),
     };
-    let now_us = (oauth.now_us)();
     match oauth.with_store(|store| mcpmem_oauth::token::revoke(store, token, now_us)) {
         // RFC 7009 section 2.2: an empty 200, including for a token this
         // server has never heard of.

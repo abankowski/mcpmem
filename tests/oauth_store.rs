@@ -394,6 +394,54 @@ fn the_sweep_covers_logins_and_codes_too() {
     assert!(s.take_login("live", 101).unwrap().is_some());
 }
 
+/// `oauth_client` is the one OAuth table with no `expires_us`, so the sweep
+/// cannot reach it and a separate rule does: a client last used more than
+/// `max_idle_us` ago **and** holding no token row at all.
+///
+/// Both halves are asserted, because either one alone is wrong. Without the
+/// token check, a connector that has been quiet for a month and still holds a
+/// thirty-day refresh token loses its registration and its next refresh
+/// answers `invalid_client`. Without the idle check, a client is evicted in
+/// the seconds between its registration and its first exchange, when it has
+/// by definition reached no token yet.
+#[test]
+fn the_eviction_removes_only_idle_clients_that_hold_no_token() {
+    let (_d, s) = store();
+    let day_us = 24 * 60 * 60 * 1_000_000_i64;
+    let now = 400 * day_us;
+    let max_idle_us = 30 * day_us;
+    for id in ["forgotten", "recent", "holder"] {
+        s.put_client(&ClientRecord {
+            client_id: id.into(),
+            client_name: "Claude".into(),
+            redirect_uris: vec!["https://claude.ai/api/mcp/auth_callback".into()],
+            source: "dcr".into(),
+            created_us: now - 31 * day_us,
+            last_used_us: now - 31 * day_us,
+        })
+        .unwrap();
+    }
+    s.touch_client("recent", now - max_idle_us + 1).unwrap();
+    let mut holder = grant("fam", &["graph-read"]);
+    holder.client_id = "holder".into();
+    s.put_token(&new_token(), TokenKind::Refresh, &holder, 1, now + day_us)
+        .unwrap();
+
+    assert_eq!(s.evict_clients(now, max_idle_us).unwrap(), 1);
+    assert!(
+        s.get_client("forgotten").unwrap().is_none(),
+        "a client idle past the bound and holding nothing must go"
+    );
+    assert!(
+        s.get_client("recent").unwrap().is_some(),
+        "one microsecond inside the bound is not idle"
+    );
+    assert!(
+        s.get_client("holder").unwrap().is_some(),
+        "a client holding a token must survive however long it has been quiet"
+    );
+}
+
 #[test]
 fn an_authorization_code_is_single_use() {
     let (_d, s) = store();

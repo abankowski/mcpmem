@@ -150,6 +150,17 @@ impl Flow {
         }
     }
 
+    /// The server and the provider, up, with no client registered and this
+    /// flow's defaults behind them.
+    ///
+    /// [`Flow::start`] with nothing to configure. A test about what an
+    /// anonymous caller may do to `POST /oauth/register` needs the router and
+    /// no client, and naming that here keeps the scope — which such a test
+    /// never reaches — out of it.
+    pub async fn fresh() -> Started {
+        Flow::new("graph-read").start().await
+    }
+
     /// Register a client, start a login, walk the provider, and come back.
     ///
     /// It asserts only that the authorization request was accepted. What the
@@ -241,6 +252,31 @@ impl Started {
     /// `POST /oauth/register`, and the identifier this server issued.
     pub async fn register(&self) -> String {
         register_body(&self.server, &self.flow.registration_body()).await
+    }
+
+    /// `POST /oauth/register` as a caller at `peer`, and the whole answer
+    /// rather than the identifier.
+    ///
+    /// The peer travels in `X-Forwarded-For`, which is where this server reads
+    /// it from: `support::oauth_config` sets `trust_forwarded_proto`, as every
+    /// deployment behind a TLS-terminating proxy does. A `oneshot` request
+    /// carries no connection, so it is also the only address a test can name.
+    ///
+    /// It returns a [`Reply`] because a refused registration is the point: the
+    /// status and `Retry-After` are what a rate-limited caller sees, and
+    /// [`Started::register`] asserts the identifier it cannot have.
+    pub async fn register_from(&self, peer: &str) -> Reply {
+        let res = self
+            .server
+            .request(
+                Request::post("/oauth/register")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", peer)
+                    .body(Body::from(self.flow.registration_body()))
+                    .unwrap(),
+            )
+            .await;
+        Reply::of(res).await
     }
 
     /// `GET /oauth/authorize`.
@@ -338,7 +374,6 @@ impl Callback {
             client_state,
             client_id,
             redirect_uri,
-            now: NOW,
             server,
             idp,
         }
@@ -361,8 +396,6 @@ pub struct Authorized {
     /// The redirect URI the client registered, and so the one an accepted
     /// token request repeats.
     pub redirect_uri: String,
-    /// What the clock reads. Fixed for the whole flow.
-    pub now: i64,
     server: Server,
     idp: FakeIdp,
 }
@@ -381,6 +414,14 @@ impl Authorized {
     /// The clock this flow reads, for a test that has to age a code out.
     pub const fn clock(&self) -> &Clock {
         self.server.clock()
+    }
+
+    /// What the clock reads now, which is what a store call a test makes must
+    /// pass. It moves with [`Authorized::clock`], so a helper reading it after
+    /// an `advance_seconds` sees the moved value — which a constant captured
+    /// when the page rendered would not.
+    pub fn now(&self) -> i64 {
+        self.clock().now_us()
     }
 
     /// The state the client sent, which every accepted redirect echoes.
@@ -627,9 +668,48 @@ impl Authorized {
     pub fn count_logins(&self) -> i64 {
         count_rows(&self.server, "oauth_login")
     }
+
+    /// How many rows `table` holds. The general form of [`Authorized::count_codes`]
+    /// and [`Authorized::count_logins`], for a test that names more than one
+    /// table in one assertion.
+    pub fn count(&self, table: &str) -> i64 {
+        count_rows(&self.server, table)
+    }
+
+    /// Write one access token belonging to `family` that expired a second ago.
+    ///
+    /// Planted rather than walked, and it is the one thing in this file that
+    /// is: the flow that mints an expired token is a flow whose clock has
+    /// already passed the expiry, and by then every token it holds is expired
+    /// too. A sweep test needs one dead row **beside** a live one, so the dead
+    /// one is written directly.
+    ///
+    /// The value is derived from `family` rather than random, so a test can
+    /// present it. It is no use to its holder: the row is expired, and
+    /// `Store::find_access` refuses it.
+    pub fn insert_expired_family(&self, family: &str) {
+        let now = self.now();
+        with_store(&self.server, |store| {
+            store
+                .put_token(
+                    &format!("{family}-access-token"),
+                    mcpmem_oauth::store::TokenKind::Access,
+                    &Grant {
+                        client_id: self.client_id.clone(),
+                        principal: "someone-who-left".to_owned(),
+                        scopes: vec!["graph-read".to_owned()],
+                        resource: format!("{}/mcp", super::PUBLIC_URL),
+                        family: family.to_owned(),
+                    },
+                    now - 2_000_000,
+                    now - 1_000_000,
+                )
+                .expect("the store writes a token row");
+        });
+    }
 }
 
-/// What one request answered, in the three parts a token test asks about.
+/// What one request answered, in the four parts a test here asks about.
 pub struct Reply {
     pub status: StatusCode,
     /// The body parsed as JSON, or `Value::Null` when it was not JSON. The
@@ -645,22 +725,29 @@ pub struct Reply {
     /// check, and an empty header value is not a thing this server sends —
     /// so the empty string means *absent* with nothing to confuse it with.
     pub www_authenticate: String,
+    /// The `Retry-After` header, or the empty string when the response carried
+    /// none. Empty means *absent*, for the reason `www_authenticate` gives.
+    pub retry_after: String,
 }
 
 impl Reply {
     async fn of(res: Response<Body>) -> Reply {
         let status = res.status();
-        let www_authenticate = res
-            .headers()
-            .get(axum::http::header::WWW_AUTHENTICATE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_owned();
+        let header = |name: axum::http::HeaderName| {
+            res.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let www_authenticate = header(axum::http::header::WWW_AUTHENTICATE);
+        let retry_after = header(axum::http::header::RETRY_AFTER);
         let text = body_text(res).await;
         Reply {
             status,
             body: serde_json::from_str(&text).unwrap_or(Value::Null),
             www_authenticate,
+            retry_after,
         }
     }
 }

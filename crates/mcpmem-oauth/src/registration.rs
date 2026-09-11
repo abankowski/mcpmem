@@ -280,10 +280,14 @@ const MAX_URL_BYTES: usize = 2048;
 /// registration path and client-chosen on the metadata-document path, where it
 /// is the document URL.
 ///
-/// Registration is unauthenticated and nothing evicts a client, so the size of
-/// one row is a cost a stranger chooses. The only cap above this point is the
+/// Registration is unauthenticated, so the size of one row is a cost a
+/// stranger chooses, and nothing reclaims a row for thirty days —
+/// [`Store::evict_clients`] is the only thing that does, and only for a client
+/// that is idle and holds no token. The only cap above this point is the
 /// transport's global body limit, which is 16 MiB and bounds a request rather
-/// than a row; a rate limit bounds how many rows arrive, not how large one is.
+/// than a row; `crate::limits` bounds how many rows arrive, not how large one
+/// is.
+///
 /// The `client_name` is also the text a consent screen asks a human to trust,
 /// and an unbounded string is not that.
 ///
