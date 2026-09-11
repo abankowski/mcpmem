@@ -60,6 +60,16 @@ pub struct OauthState {
     /// leaves the cell empty so the next login retries.
     #[cfg(feature = "oauth")]
     provider: tokio::sync::OnceCell<Provider>,
+    /// How a client identifier metadata document is read.
+    ///
+    /// A trait object rather than a concrete fetcher, for the reason the trait
+    /// itself states: the transport is chosen once, by the process that owns
+    /// it. A build with the `oauth` feature holds
+    /// [`mcpmem_oauth::upstream::MetadataFetch`]; a graph-only build holds a
+    /// fetcher that refuses, and never reaches it, because that build serves
+    /// no authorization endpoint at all. A test substitutes a document
+    /// without a network.
+    metadata_fetch: Arc<dyn mcpmem_oauth::registration::Fetch>,
     /// The per-peer request limits on the endpoints that answer an anonymous
     /// caller. In memory and per process: see `mcpmem_oauth::limits`.
     pub limits: mcpmem_oauth::limits::Limits,
@@ -127,6 +137,24 @@ impl OauthState {
     ///   sleep. Blocking under the lock is exactly what holding the guard
     ///   across an `await` would have done, and the type only rules out the
     ///   spelling with `await` in it.
+    ///
+    /// # The one thing under this lock that does wait
+    ///
+    /// Every `f` here runs SQLite statements, and a statement is not
+    /// instantaneous. A WAL point lookup is microseconds and a reader never
+    /// waits on a writer, so the cost is a throughput ceiling on this one
+    /// mutex rather than a stalled reactor — but it is a wait, and the rule
+    /// above would read as a denial of it.
+    ///
+    /// So it is named instead. `POST /mcp` — every tool call this server
+    /// answers — resolves its caller inside the blocking task it already has
+    /// (`crate::http::post_handler`), so the hottest path takes this lock off
+    /// the reactor. The SSE `GET /mcp`, which is one request per session, and
+    /// the four `/ui` data endpoints, whose gate runs before the payload
+    /// builder they spawn, still validate inline. Moving those would put the
+    /// authorization decision of four handlers into blocking tasks for a
+    /// microsecond lookup, which buys less than the gate ordering it would
+    /// disturb.
     pub fn with_store<T>(&self, f: impl FnOnce(&mcpmem_oauth::store::Store) -> T) -> T {
         f(&self.store.lock())
     }
@@ -173,7 +201,25 @@ impl OauthState {
             limits: mcpmem_oauth::limits::Limits::new(),
             #[cfg(feature = "oauth")]
             provider: tokio::sync::OnceCell::new(),
+            metadata_fetch: default_metadata_fetch(),
         })
+    }
+
+    /// Read client identifier metadata documents with `fetch` instead of the
+    /// shipped one.
+    ///
+    /// For a test. The real fetcher speaks `https` to a host on the operator's
+    /// allow-list, which no loopback fixture can be, so a test that drives the
+    /// authorization endpoint with a metadata-document identifier supplies the
+    /// document here.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_metadata_fetch(
+        mut self,
+        fetch: Arc<dyn mcpmem_oauth::registration::Fetch>,
+    ) -> OauthState {
+        self.metadata_fetch = fetch;
+        self
     }
 
     /// One pass of periodic maintenance over the OAuth tables, at this
@@ -227,6 +273,30 @@ fn open_failed(e: &rusqlite::Error) -> MCSError {
     MCSError::MemoryError(format!("failed to open the OAuth store: {e}"))
 }
 
+/// The fetcher a server reads client identifier metadata documents with.
+///
+/// With the `oauth` feature this is the shipped one. Without it there is no
+/// authorization endpoint to resolve a document for — `attach` compiles the
+/// route out — so the only honest fetcher is one that refuses, and it is never
+/// reached.
+#[cfg(feature = "oauth")]
+fn default_metadata_fetch() -> Arc<dyn mcpmem_oauth::registration::Fetch> {
+    Arc::new(mcpmem_oauth::upstream::MetadataFetch::new())
+}
+
+#[cfg(not(feature = "oauth"))]
+fn default_metadata_fetch() -> Arc<dyn mcpmem_oauth::registration::Fetch> {
+    /// This build carries no HTTP client, by construction: see
+    /// `.github/workflows/ci.yml`.
+    struct NoFetch;
+    impl mcpmem_oauth::registration::Fetch for NoFetch {
+        fn get(&self, _url: &str) -> std::result::Result<String, String> {
+            Err("this build carries no HTTP client".to_owned())
+        }
+    }
+    Arc::new(NoFetch)
+}
+
 /// How long a client registration survives without being used, in
 /// microseconds. Thirty days, which is the life of a refresh token: a client
 /// that has not presented itself for longer than the longest credential it
@@ -262,10 +332,16 @@ impl Maintenance {
 /// misbehaves.
 ///
 /// So the source is the deployment's, not the handler's:
-/// `--oauth-trust-forwarded-proto` says a trusted proxy sits in front, and it
-/// is the same flag that already decides whether this server believes
-/// `X-Forwarded-Proto` about TLS. With it set, the leftmost `X-Forwarded-For`
-/// entry is the client the proxy saw. Without it, the peer of the connection.
+/// `--oauth-trust-forwarded-proto` says a trusted proxy sits in front. With it
+/// set, the leftmost `X-Forwarded-For` entry is the client the proxy saw.
+/// Without it, the peer of the connection.
+///
+/// The flag is named for a header this server never reads. `X-Forwarded-Proto`
+/// appears nowhere in this workspace, and nothing needs it: the canonical URL
+/// is `--public-url` and is never derived from the request, so there is no
+/// question about the scheme for a header to answer. What the flag declares is
+/// the deployment — a proxy terminates TLS and forwards — and this extractor
+/// is the one place that declaration changes what a request means.
 ///
 /// **The key is always a parsed address, never the text that named it.** Both
 /// halves of that matter:
@@ -769,15 +845,9 @@ async fn start_login(oauth: &Arc<OauthState>, q: AuthorizeParams) -> Response {
         return refused("resource does not name this server");
     }
 
-    let client = match oauth.with_store(|store| store.get_client(&client_id)) {
+    let client = match client_of(oauth, &client_id, (oauth.now_us)()).await {
         Ok(client) => client,
-        Err(e) => {
-            tracing::error!(error = %e, "the OAuth store refused to read a client");
-            return server_error();
-        }
-    };
-    let Some(client) = client else {
-        return refused("unknown client_id");
+        Err(refusal) => return refusal.response(),
     };
     // Byte for byte, including the port of a loopback URI. That declines half
     // of RFC 8252 section 7.3, deliberately;
@@ -848,6 +918,108 @@ async fn start_login(oauth: &Arc<OauthState>, q: AuthorizeParams) -> Response {
     (StatusCode::FOUND, [(header::LOCATION, url)]).into_response()
 }
 
+/// The client behind `client_id`, resolving a client identifier metadata
+/// document when the store holds no row for it.
+///
+/// Two ways a client becomes known, and the store is asked first. A client
+/// that registered under RFC 7591 has a row; a client that publishes its
+/// metadata at an https URL and presents that URL as its identifier has none
+/// on its first authorization request, and one on every later one — the
+/// resolved record is stored, so a document is read once per client and not
+/// once per login.
+///
+/// An identifier that is not an https URL cannot be a document, so it is
+/// refused here without a request. Everything else about the document —
+/// the host against `--cimd-allowed-domain`, the length of the URL, the
+/// members, the redirect URIs — is
+/// [`mcpmem_oauth::registration::resolve_metadata_document`]'s, and it checks
+/// the host before anything leaves this process.
+///
+/// The resolution runs on a blocking thread. `Fetch::get` is synchronous and
+/// reaches a host this server does not control, and the reactor may not wait
+/// on one. The wait is bounded by the fetcher's own 5 second timeout, and how
+/// many of them one peer may start is bounded by the authorization endpoint's
+/// rate limit.
+///
+/// A refused document is one plain 400. It names the document rather than the
+/// identifier, because the caller chose the URL and learns nothing from being
+/// told what it already sent; the reason goes to the log.
+#[cfg(feature = "oauth")]
+async fn client_of(
+    oauth: &Arc<OauthState>,
+    client_id: &str,
+    now_us: i64,
+) -> std::result::Result<mcpmem_oauth::store::ClientRecord, ClientRefusal> {
+    match oauth.with_store(|store| store.get_client(client_id)) {
+        Ok(Some(client)) => return Ok(client),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "the OAuth store refused to read a client");
+            return Err(ClientRefusal::Store);
+        }
+    }
+    if !client_id.starts_with("https://") {
+        return Err(ClientRefusal::Request("unknown client_id"));
+    }
+
+    let fetch = Arc::clone(&oauth.metadata_fetch);
+    let allowed = oauth.config.cimd_allowed_domains.clone();
+    let url = client_id.to_owned();
+    let resolved = tokio::task::spawn_blocking(move || {
+        mcpmem_oauth::registration::resolve_metadata_document(
+            &url,
+            &allowed,
+            fetch.as_ref(),
+            now_us,
+        )
+    })
+    .await;
+    let record = match resolved {
+        Ok(Ok(record)) => record,
+        Ok(Err(e)) => {
+            tracing::warn!(client_id = %client_id, error = %e,
+                           "a client identifier metadata document was refused");
+            return Err(ClientRefusal::Request(
+                "this client identifier metadata document could not be used",
+            ));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "the metadata document resolution panicked");
+            return Err(ClientRefusal::Store);
+        }
+    };
+    if let Err(e) = oauth.with_store(|store| store.put_client(&record)) {
+        tracing::error!(error = %e, "the OAuth store refused to record a client");
+        return Err(ClientRefusal::Store);
+    }
+    Ok(record)
+}
+
+/// Why [`client_of`] could not name the client of an authorization request.
+///
+/// The reason rather than the built response, because an `Err` carrying a whole
+/// `Response` is 128 bytes on every return of a function whose happy path is
+/// the common one — the same argument [`start_login`] makes for shaping its own
+/// answer.
+#[cfg(feature = "oauth")]
+enum ClientRefusal {
+    /// A plain 400 naming this reason. The caller chose the identifier, so
+    /// nothing here discloses anything it did not send.
+    Request(&'static str),
+    /// The store failed. One 500, and the detail is in the log.
+    Store,
+}
+
+#[cfg(feature = "oauth")]
+impl ClientRefusal {
+    fn response(self) -> Response {
+        match self {
+            ClientRefusal::Request(reason) => refused(reason),
+            ClientRefusal::Store => server_error(),
+        }
+    }
+}
+
 /// `GET /oauth/callback` — the upstream provider sends the human back here.
 ///
 /// **Every outcome that is not a successful login of an allowed human is the
@@ -906,11 +1078,16 @@ async fn finish_login(
     login_state: &str,
 ) -> std::result::Result<Response, String> {
     let now_us = (oauth.now_us)();
-    // Taken, not read: the row is consumed here whatever happens next, so no
-    // second exchange is ever attempted for one login. A login that reaches
-    // consent is written back below, with the human attached and its scopes
-    // narrowed to what that human may be offered, and that is the row
-    // `POST /oauth/consent` consumes.
+    // Taken, not read: one login row can drive at most one exchange, so no
+    // concurrent second callback can reach the provider with the same state.
+    //
+    // It is put back on the two paths that are not an outcome about the human.
+    // A login that already names its human is waiting for consent, and a
+    // login whose exchange never succeeded is still in flight — the `state`
+    // travels through the provider, so whoever sees it there could otherwise
+    // end a human's login with one bogus code. Every later failure keeps the
+    // row consumed: by then the upstream code is spent, and what is left is an
+    // answer about the human that a second callback must not ask again.
     let login = oauth
         .with_store(|store| store.take_login(login_state, now_us))
         .map_err(|e| format!("the store refused to read the login: {e}"))?
@@ -921,14 +1098,18 @@ async fn finish_login(
         // login that already names its human is waiting for consent, not for a
         // second callback: put it back, so that anyone holding the callback
         // URL cannot destroy a completed login or spend its code twice.
-        oauth
-            .with_store(|store| store.put_login(&login))
-            .map_err(|e| format!("the store refused to restore the login: {e}"))?;
-        return Err("this login was already completed".to_owned());
+        return Err(restored(
+            oauth,
+            &login,
+            "this login was already completed".to_owned(),
+        ));
     }
 
-    let provider = oauth.provider().await.map_err(|e| e.to_string())?;
-    let claims = provider
+    let provider = match oauth.provider().await {
+        Ok(provider) => provider,
+        Err(e) => return Err(restored(oauth, &login, e.to_string())),
+    };
+    let claims = match provider
         .exchange(
             code,
             &login.upstream_verifier,
@@ -938,7 +1119,10 @@ async fn finish_login(
             &login.nonce,
         )
         .await
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(claims) => claims,
+        Err(e) => return Err(restored(oauth, &login, e.to_string())),
+    };
 
     let principal = principal_of(oauth, &claims)?;
     // The offered set is decided here, once, because this is where the human
@@ -971,6 +1155,21 @@ async fn finish_login(
         })
         .map_err(|e| format!("the store refused to record the human: {e}"))?;
     Ok(page)
+}
+
+/// Put `login` back and return `reason`, for a callback that failed before it
+/// learned anything about the human.
+///
+/// The reason is the caller's; a store that refuses the restore appends its
+/// own, because the two are different problems and the operator reading the
+/// log needs both. Neither reaches the caller: [`callback`] answers one page
+/// whatever this says.
+#[cfg(feature = "oauth")]
+fn restored(oauth: &OauthState, login: &LoginRecord, reason: String) -> String {
+    match oauth.with_store(|store| store.put_login(login)) {
+        Ok(()) => reason,
+        Err(e) => format!("{reason}; and the store refused to restore the login: {e}"),
+    }
 }
 
 /// The allowed human this identity belongs to.
@@ -1072,6 +1271,11 @@ fn consent_page(
             // input; it is not a condition to reproduce here.
             mcpmem_oauth::consent::client_label(&client.client_name, &client.client_id),
             principal.label.as_deref().unwrap_or(&principal.name),
+            // The destination of the grant, which the page names beside the
+            // client's self-chosen name. It is the login row's own value,
+            // matched byte for byte against the registered set at
+            // `start_login`, and never the one a consent form sent.
+            &login.redirect_uri,
             offered,
             &login.csrf,
             &login.state,
@@ -1529,6 +1733,8 @@ mod tests {
         let state = HttpState::for_test(crate::http::TestSetup {
             db_path: dir.path().join("t.mcpmem"),
             oauth: Some(config()),
+            auth_token: None,
+            metadata_fetch: None,
             bearer_scopes: vec![ToolCategory::GraphRead],
             enabled_categories: ToolCategory::ALL.to_vec(),
             now_us: Some(Arc::new(|| FIXED)),
@@ -1545,6 +1751,8 @@ mod tests {
         let state = HttpState::for_test(crate::http::TestSetup {
             db_path: dir.path().join("t.mcpmem"),
             oauth: Some(config()),
+            auth_token: None,
+            metadata_fetch: None,
             bearer_scopes: ToolCategory::ALL.to_vec(),
             enabled_categories: ToolCategory::ALL.to_vec(),
             now_us: None,

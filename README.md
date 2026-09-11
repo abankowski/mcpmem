@@ -207,10 +207,15 @@ it directly chooses their own bucket, and every limit is then bypassable.
 
 **The static bearer token above still works, unchanged.** A server may run both:
 a request carrying an issued OAuth token is resolved as that token, and anything
-else falls back to the static token. The graph viewer's `?token=` fallback takes
-the static token alone — an OAuth token belongs in the `Authorization` header —
-so a deployment that wants a human to open `/ui` in a browser configures
-`--auth-token-file` as well.
+else falls back to the static token.
+
+The graph viewer takes **either** credential in the `Authorization` header, so
+OAuth alone is enough for a human at `/ui`: open
+`https://mem.example.com/ui#token=<access token>`, and the viewer keeps the
+token client-side and sends it as a header. The fragment never reaches the
+server, so the token stays out of the proxy log. The `?token=` query fallback on
+the data endpoints takes the static token alone — an OAuth token in a URL is
+refused.
 
 Deployment, connector setup, revocation, and what each refusal means:
 [`docs/runbooks/oauth-deployment.md`](docs/runbooks/oauth-deployment.md).

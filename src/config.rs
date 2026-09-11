@@ -84,7 +84,21 @@ pub struct OAuthConfig {
     /// `auth.claude.ai`, which needs its own entry. See
     /// `mcpmem_oauth::registration::resolve_metadata_document`.
     pub cimd_allowed_domains: Vec<String>,
-    /// Trust `X-Forwarded-Proto` from a reverse proxy that terminates TLS.
+    /// Declares that a reverse proxy terminates TLS in front of this server.
+    ///
+    /// Two effects, and neither of them reads `X-Forwarded-Proto`. The header
+    /// is not read anywhere in this workspace, and it does not need to be: the
+    /// canonical URL every document and every token is bound to comes from
+    /// `--public-url`, never from the request.
+    ///
+    /// - It stands in for `--tls-cert`/`--tls-key` at startup, so that
+    ///   `--oidc-issuer` is not refused for want of TLS this process does not
+    ///   terminate.
+    /// - It selects `X-Forwarded-For` as the peer source the per-peer request
+    ///   limits count against (`crate::oauth_routes::Peer`). That is the whole
+    ///   of its runtime effect, and it is why the process must then be bound
+    ///   where only the proxy can reach it: a caller that connects directly
+    ///   writes its own header and so chooses its own bucket.
     pub trust_forwarded_proto: bool,
 }
 
@@ -242,6 +256,25 @@ impl Config {
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(MCSError::InvalidParams)?
         };
+
+        // A `--no-default-features` build compiles out `/oauth/authorize`,
+        // `/oauth/callback`, `/oauth/consent`, `/oauth/token` and
+        // `/oauth/revoke` (`src/oauth_routes::attach`) while the two discovery
+        // documents and `POST /oauth/register` still answer. Serving half an
+        // authorization server is worse than refusing to start: a connector
+        // discovers this server, registers, and then fails at the login hop
+        // with nothing to read. It fails closed on `/mcp` — no credential can
+        // ever be issued — so this is a startup footgun rather than an
+        // exposure, and a refusal here is the only answer an operator can act
+        // on.
+        #[cfg(not(feature = "oauth"))]
+        if args.oidc_issuer.is_some() {
+            return Err(MCSError::InvalidParams(
+                "--oidc-issuer needs the `oauth` feature; this build serves no \
+                 authorization, consent or token endpoint"
+                    .into(),
+            ));
+        }
 
         let oauth = if let Some(issuer) = args.oidc_issuer.clone() {
             if !roles.roles().contains(&crate::runtime::RuntimeRole::Mcp) {

@@ -511,6 +511,21 @@ fn a_metadata_document_on_a_domain_outside_the_list_is_never_fetched() {
     assert!(matches!(err, RegistrationError::DomainNotAllowed));
 }
 
+/// The cap on the document URL is applied before the request, not only when
+/// the record is built. The URL is the `client_id` an anonymous authorization
+/// request chose; a URL past the cap can never produce a storable record, so
+/// fetching it first would spend this server's time and an allow-listed host's
+/// bandwidth for nothing.
+#[test]
+fn a_metadata_document_url_past_the_length_cap_is_never_fetched() {
+    let url = format!("https://claude.ai/{}", "c".repeat(2049));
+    let err = resolve_metadata_document(&url, &allowed(), &PanicFetch, NOW_US).unwrap_err();
+    assert!(
+        matches!(err, RegistrationError::MalformedDocument),
+        "{err:?}"
+    );
+}
+
 /// The allowed list holds domains, and the comparison is the whole host. A
 /// suffix match would accept `claude.ai.evil.example`, and a prefix match
 /// would accept a subdomain of an allowed domain that its owner never

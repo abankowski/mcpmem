@@ -616,3 +616,158 @@ async fn read_capped(mut response: reqwest::Response) -> Result<Vec<u8>, Upstrea
     }
     Ok(body)
 }
+
+// ── The client identifier metadata document fetcher ──────────────────────────
+
+/// The longest client identifier metadata document this server reads, in
+/// bytes. The document carries a name and a handful of redirect URIs, all of
+/// them bounded again by `crate::registration`; the cap is here because the
+/// URL is client-chosen, so the host may stream without end.
+const MAX_METADATA_DOCUMENT_BYTES: usize = 64 * 1024;
+
+/// How long one metadata-document request may take. Shorter than
+/// [`REQUEST_TIMEOUT`]: the provider is the operator's own and its reply is
+/// worth waiting for, while this host is named by an anonymous authorization
+/// request and a human is holding a browser open behind it.
+const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The shipped [`crate::registration::Fetch`]: one bounded `https` GET.
+///
+/// It lives here, behind the `upstream` feature, because this module is the
+/// only part of the crate allowed an HTTP client — a graph-only build of
+/// `mcpmem` must carry none, and `.github/workflows/ci.yml` checks that.
+///
+/// # The four limits the trait states, and where each one is
+///
+/// - **`https` only** — `https_only` on the client, and the scheme test in
+///   [`MetadataFetch::get`] before the request is built. Two, because the
+///   first is a property of the client a later edit could drop and the second
+///   is visible at the call.
+/// - **No redirect followed** — [`reqwest::redirect::Policy::none`]. A
+///   redirect moves the response off the host
+///   `crate::registration::resolve_metadata_document` just checked against the
+///   allow-list, which would make that check decide nothing.
+/// - **A 64 KB body cap** — [`read_capped_blocking`], reading through
+///   [`std::io::Read::take`] rather than trusting `Content-Length`.
+/// - **A 5 second timeout** — [`METADATA_TIMEOUT`] on the client.
+///
+/// # Where it may be called
+///
+/// [`crate::registration::Fetch::get`] is synchronous and reaches the network,
+/// so it must not run on an async reactor thread. Its caller in `mcpmem`
+/// (`src/oauth_routes.rs`) runs the whole resolution inside
+/// `tokio::task::spawn_blocking`.
+///
+/// The client is one per process, built on first use: a deployment that never
+/// meets a metadata-document client identifier never creates it, and never
+/// pays for the thread the blocking client runs its own runtime on. The type
+/// is therefore empty, and exists to name the trait implementation.
+#[derive(Default)]
+pub struct MetadataFetch;
+
+/// The one blocking client, and the four limits the trait states, in the one
+/// place a later edit has to pass through.
+///
+/// A build failure is remembered rather than retried: it means the TLS backend
+/// could not start, which is a property of this process and not of the
+/// request, so a second attempt would fail the same way and cost another one.
+static METADATA_CLIENT: std::sync::LazyLock<
+    std::result::Result<reqwest::blocking::Client, String>,
+> = std::sync::LazyLock::new(|| {
+    reqwest::blocking::Client::builder()
+        .timeout(METADATA_TIMEOUT)
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("the HTTP client could not be built: {e}"))
+});
+
+impl MetadataFetch {
+    /// The fetcher. It holds nothing; the client is [`METADATA_CLIENT`].
+    pub const fn new() -> MetadataFetch {
+        MetadataFetch
+    }
+}
+
+impl crate::registration::Fetch for MetadataFetch {
+    fn get(&self, url: &str) -> std::result::Result<String, String> {
+        if !url.starts_with("https://") {
+            return Err("a client identifier metadata document must be https".to_owned());
+        }
+        let response = METADATA_CLIENT
+            .as_ref()
+            .map_err(Clone::clone)?
+            .get(url)
+            .send()
+            .map_err(|e| format!("{url}: {e}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            // Before the body is read: nothing in the body of a refusal is
+            // worth this process's memory.
+            return Err(format!("{url} answered {status}"));
+        }
+        read_capped_blocking(response)
+    }
+}
+
+/// The body, up to [`MAX_METADATA_DOCUMENT_BYTES`], as text.
+///
+/// The read goes through [`std::io::Read::take`] rather than `Response::text`,
+/// and the limit is one byte above the cap so that a document sitting exactly
+/// on it is accepted and the first byte past it is refused. `Content-Length` is
+/// not consulted: it is the host's own claim about a body it is still sending.
+fn read_capped_blocking(reader: impl std::io::Read) -> std::result::Result<String, String> {
+    use std::io::Read;
+
+    let mut body = Vec::new();
+    reader
+        .take(MAX_METADATA_DOCUMENT_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|e| format!("the document could not be read: {e}"))?;
+    if body.len() > MAX_METADATA_DOCUMENT_BYTES {
+        return Err(format!(
+            "the document is longer than {MAX_METADATA_DOCUMENT_BYTES} bytes"
+        ));
+    }
+    String::from_utf8(body).map_err(|_| "the document is not UTF-8".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+
+    use super::*;
+    use crate::registration::Fetch;
+
+    /// The cap is on the bytes read, not on what the host says it will send.
+    #[test]
+    fn a_document_past_the_cap_is_refused() {
+        let err = read_capped_blocking(
+            std::io::repeat(b'x').take(MAX_METADATA_DOCUMENT_BYTES as u64 + 1),
+        )
+        .unwrap_err();
+        assert!(err.contains("longer than"), "{err}");
+    }
+
+    /// And a document exactly on it is read, so the cap refuses one byte past
+    /// rather than the last byte of a legitimate document.
+    #[test]
+    fn a_document_exactly_on_the_cap_is_read() {
+        let body =
+            read_capped_blocking(std::io::repeat(b'x').take(MAX_METADATA_DOCUMENT_BYTES as u64))
+                .unwrap();
+        assert_eq!(body.len(), MAX_METADATA_DOCUMENT_BYTES);
+    }
+
+    /// A plain-http URL is refused before the client is reached, so nothing
+    /// leaves this process. `https_only` on the client would refuse it too;
+    /// the test is on the explicit check, which is the one visible at the call
+    /// and the one that holds if the client is ever rebuilt.
+    #[test]
+    fn a_plain_http_url_is_refused_without_a_request() {
+        let err = MetadataFetch::new()
+            .get("http://claude.ai/client.json")
+            .unwrap_err();
+        assert!(err.contains("https"), "{err}");
+    }
+}

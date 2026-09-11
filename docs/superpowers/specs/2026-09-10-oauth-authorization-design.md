@@ -60,6 +60,11 @@ client on the consent page.
 
 **D5. Client ID Metadata Documents are honoured only from allowed domains.**
 `--cimd-allowed-domain` defaults to `claude.ai` and `chatgpt.com`.
+`GET /oauth/authorize` resolves one when the presented `client_id` is an https
+URL the store holds no row for: the host is checked against the list before any
+request leaves the process, the document is read by
+`mcpmem_oauth::upstream::MetadataFetch`, and the record it yields is stored, so
+a document is read once per client rather than once per login.
 
 **D6. The static bearer token stays, and stays independent.**
 It works when OAuth is off. It works beside OAuth. It resolves to a principal
@@ -245,8 +250,22 @@ Rules that hold for every table:
 | `--oidc-client-secret-file` | client secret, read from a file |
 | `--principals-file` | JSON file of allowed humans and their scopes |
 | `--cimd-allowed-domain` | repeatable; defaults to `claude.ai` and `chatgpt.com` |
-| `--oauth-trust-forwarded-proto` | accept `X-Forwarded-Proto` from a reverse proxy |
+| `--oauth-trust-forwarded-proto` | a reverse proxy terminates TLS in front of this server |
 | `--static-bearer-scopes` | scopes for the principal named `static` |
+
+`--oauth-trust-forwarded-proto` is named for a header this server does not
+read. Nothing reads `X-Forwarded-Proto`, and nothing needs to: the canonical
+URL comes from `--public-url` and never from the request. The flag has two
+effects. It stands in for `--tls-cert`/`--tls-key` at startup, and it makes the
+per-peer request limits count `X-Forwarded-For` instead of the connection
+address — which is why the process must then be bound where only the proxy can
+reach it.
+
+`--oidc-issuer` is refused at startup by a build without the `oauth` feature.
+Such a build compiles out the authorization, consent, token and revocation
+endpoints while the discovery documents and `POST /oauth/register` still
+answer, so accepting the flag would advertise an authorization server whose
+authorization endpoint does not exist.
 
 The principals file:
 
@@ -397,5 +416,11 @@ documented, and no local test replaces this step.
    contract as a major version. This change adds behaviour and does not break
    the existing static bearer path, so a minor version fits. The operator
    decides.
-2. Whether the browser viewer at `/ui` should also accept an OAuth token. The
-   viewer uses the static bearer today. This design leaves it unchanged.
+2. ~~Whether the browser viewer at `/ui` should also accept an OAuth token.~~
+   **Settled: it does.** The viewer sends whatever token it holds in the
+   `Authorization` header (`src/ui/graph.js`), and `principal_of` resolves an
+   issued token from that header before it compares the static one, so a human
+   at `/ui` needs no static bearer token. The split that stays is the
+   `?token=` query fallback on the data endpoints, which takes the static token
+   alone: an issued token in a URL is a credential in a log. The runbook and
+   the README state the settled rule.

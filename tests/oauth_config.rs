@@ -58,6 +58,10 @@ fn args(extra: &[&str]) -> Args {
     Args::parse_from(argv)
 }
 
+// The refusals below all pass `--oidc-issuer`, which a build without the
+// `oauth` feature refuses before any of them is reached — see
+// `an_oidc_issuer_is_refused_by_a_build_without_the_oauth_feature`.
+#[cfg(feature = "oauth")]
 #[test]
 fn oauth_without_tls_is_refused() {
     let p = write_tmp(
@@ -81,6 +85,7 @@ fn oauth_without_tls_is_refused() {
     assert!(err.contains("TLS"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn oauth_without_public_url_is_refused() {
     let p = write_tmp(
@@ -106,6 +111,7 @@ fn oauth_without_public_url_is_refused() {
 // `webhooks` is not a default feature, and `RoleSet::parse_csv` rejects a role
 // that is not compiled. Without this gate the test would fail on the role name
 // rather than on the refusal it exists to prove.
+#[cfg(feature = "oauth")]
 #[cfg(feature = "webhooks")]
 #[test]
 fn oauth_without_the_mcp_role_is_refused() {
@@ -133,6 +139,7 @@ fn oauth_without_the_mcp_role_is_refused() {
     assert!(err.contains("mcp role"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn a_public_url_with_a_trailing_slash_is_normalized() {
     let p = write_tmp(
@@ -178,6 +185,7 @@ fn an_unknown_static_bearer_scope_is_refused() {
     assert!(err.contains("graph-admin"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn a_plaintext_public_url_is_refused() {
     let p = write_tmp(
@@ -202,6 +210,7 @@ fn a_plaintext_public_url_is_refused() {
     assert!(err.contains("https"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn an_empty_client_secret_file_is_refused() {
     let p = write_tmp(
@@ -229,6 +238,7 @@ fn an_empty_client_secret_file_is_refused() {
     assert!(err.contains("is empty"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn the_client_metadata_domain_allowlist_has_a_default() {
     let p = write_tmp(
@@ -287,6 +297,7 @@ fn valid_oauth<'a>(p: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
     v
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn oauth_on_the_stdio_transport_is_refused() {
     let p = one_principal("f1.json");
@@ -325,6 +336,7 @@ fn an_oauth_flag_without_the_issuer_is_refused() {
     }
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn a_public_url_with_a_query_or_a_fragment_is_refused() {
     let p = one_principal("f3.json");
@@ -339,6 +351,7 @@ fn a_public_url_with_a_query_or_a_fragment_is_refused() {
     }
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn a_public_url_keeps_its_path_and_lowercases_its_scheme_and_host() {
     let p = one_principal("f4.json");
@@ -356,6 +369,7 @@ fn a_public_url_keeps_its_path_and_lowercases_its_scheme_and_host() {
     );
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn a_public_url_with_no_host_is_refused() {
     let p = one_principal("f5.json");
@@ -365,6 +379,7 @@ fn a_public_url_with_no_host_is_refused() {
     assert!(err.contains("host"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn a_plaintext_issuer_is_refused() {
     let p = one_principal("f6.json");
@@ -377,6 +392,7 @@ fn a_plaintext_issuer_is_refused() {
     assert!(err.contains("https"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn a_populated_client_secret_file_is_trimmed_and_kept() {
     let p = one_principal("f7.json");
@@ -392,6 +408,7 @@ fn a_populated_client_secret_file_is_trimmed_and_kept() {
     );
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn oauth_without_the_client_id_is_refused() {
     let p = one_principal("f8.json");
@@ -411,6 +428,7 @@ fn oauth_without_the_client_id_is_refused() {
     assert!(err.contains("--oidc-client-id"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn oauth_without_the_principals_file_is_refused() {
     let err = Config::from_args(&args(&[
@@ -472,6 +490,7 @@ fn principal_scopes_are_stored_as_canonical_slugs() {
     assert_eq!(list[0].scopes, vec!["graph-read", "code"]);
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn a_public_url_with_userinfo_is_refused() {
     let p = one_principal("f13.json");
@@ -484,6 +503,7 @@ fn a_public_url_with_userinfo_is_refused() {
     assert!(err.contains("userinfo"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn an_issuer_with_userinfo_is_refused() {
     let p = one_principal("f14.json");
@@ -496,6 +516,7 @@ fn an_issuer_with_userinfo_is_refused() {
     assert!(err.contains("userinfo"), "message was: {err}");
 }
 
+#[cfg(feature = "oauth")]
 #[test]
 fn a_public_url_of_nothing_but_the_scheme_names_the_host() {
     let p = one_principal("f15.json");
@@ -519,4 +540,24 @@ fn scope_set_canonicalizes_an_entry_that_did_not_come_from_load() {
     assert!(set.contains("graph-read"), "{set:?}");
     // An unknown scope grants nothing rather than being carried through.
     assert_eq!(set.len(), 1, "{set:?}");
+}
+
+/// A build without the `oauth` feature compiles out `/oauth/authorize`,
+/// `/oauth/callback`, `/oauth/consent`, `/oauth/token` and `/oauth/revoke`,
+/// while the two discovery documents and `POST /oauth/register` still answer.
+/// Starting such a server with `--oidc-issuer` advertises an authorization
+/// server whose authorization and token endpoints do not exist, so a connector
+/// discovers it and then fails at the login hop with nothing to read.
+/// Refusing at startup is the only answer an operator can act on.
+#[cfg(not(feature = "oauth"))]
+#[test]
+fn an_oidc_issuer_is_refused_by_a_build_without_the_oauth_feature() {
+    let p = one_principal("no-oauth.json");
+    let err = Config::from_args(&args(&valid_oauth(&p, &[])))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("oauth") && err.contains("feature"),
+        "the refusal must name the feature this build lacks: {err}"
+    );
 }

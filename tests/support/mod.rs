@@ -209,7 +209,47 @@ impl Drop for Server {
 pub async fn server(oauth: Option<OAuthConfig>, scopes: Scopes, clock: Option<Clock>) -> Server {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("t.mcpmem");
-    build(dir, db_path, oauth, scopes, clock).await
+    build(dir, db_path, oauth, None, None, scopes, clock).await
+}
+
+/// Like [`server`], and carrying `auth_token` as the static bearer token as
+/// well. `--auth-token-file` and `--oidc-issuer` are independent flags, so a
+/// deployment may configure both, and this is the only way to build that pair
+/// behind the router.
+pub async fn server_with_static_token(
+    oauth: Option<OAuthConfig>,
+    auth_token: &str,
+    scopes: Scopes,
+    clock: Option<Clock>,
+) -> Server {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("t.mcpmem");
+    build(
+        dir,
+        db_path,
+        oauth,
+        Some(Arc::from(auth_token)),
+        None,
+        scopes,
+        clock,
+    )
+    .await
+}
+
+/// Like [`server`], reading client identifier metadata documents with `fetch`.
+///
+/// The shipped fetcher speaks `https` to a host on the operator's allow-list,
+/// which no loopback fixture can be, so a test that drives the authorization
+/// endpoint with a metadata-document identifier supplies the document here.
+pub async fn server_with_fetch(
+    oauth: Option<OAuthConfig>,
+    fetch: Arc<dyn mcpmem_oauth::registration::Fetch>,
+    scopes: Scopes,
+    clock: Option<Clock>,
+) -> Server {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("t.mcpmem");
+    build(dir, db_path, oauth, None, Some(fetch), scopes, clock).await
 }
 
 /// A construction that panics inside `HttpState::for_test`: the database path
@@ -220,13 +260,15 @@ pub async fn server(oauth: Option<OAuthConfig>, scopes: Scopes, clock: Option<Cl
 pub async fn server_that_fails_to_build() -> Server {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("no-such-directory/t.mcpmem");
-    build(dir, db_path, None, Scopes::all(), None).await
+    build(dir, db_path, None, None, None, Scopes::all(), None).await
 }
 
 async fn build(
     dir: TempDir,
     db_path: std::path::PathBuf,
     oauth: Option<OAuthConfig>,
+    auth_token: Option<Arc<str>>,
+    metadata_fetch: Option<Arc<dyn mcpmem_oauth::registration::Fetch>>,
     scopes: Scopes,
     clock: Option<Clock>,
 ) -> Server {
@@ -247,6 +289,8 @@ async fn build(
     let state = HttpState::for_test(TestSetup {
         db_path,
         oauth,
+        auth_token,
+        metadata_fetch,
         bearer_scopes: scopes.bearer,
         enabled_categories: scopes.enabled,
         now_us: clock.as_ref().map(Clock::as_fn),

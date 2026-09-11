@@ -173,6 +173,14 @@ pub fn resolve_metadata_document(
     {
         return Err(RegistrationError::DomainNotAllowed);
     }
+    // Before the fetch, not only in `within_bounds` below. `url` is the
+    // `client_id` an anonymous authorization request chose, and a URL past the
+    // cap is refused whatever the document at it says — so paying for the
+    // request first would let a caller spend this server's time and an
+    // allow-listed host's bandwidth on a record that can never be stored.
+    if url.len() > MAX_URL_BYTES {
+        return Err(RegistrationError::MalformedDocument);
+    }
 
     let body = fetch.get(url).map_err(RegistrationError::Fetch)?;
     let document: MetadataDocument =

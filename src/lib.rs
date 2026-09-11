@@ -176,7 +176,9 @@ pub struct Args {
     #[arg(long = "cimd-allowed-domain", value_name = "DOMAIN")]
     pub cimd_allowed_domains: Vec<String>,
 
-    /// Trust X-Forwarded-Proto from a reverse proxy that terminates TLS.
+    /// A reverse proxy terminates TLS in front of this server. Stands in for
+    /// --tls-cert/--tls-key, and makes the per-peer request limits count
+    /// X-Forwarded-For instead of the connection address.
     #[arg(long = "oauth-trust-forwarded-proto")]
     pub oauth_trust_forwarded_proto: bool,
 

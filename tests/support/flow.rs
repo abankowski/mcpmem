@@ -82,6 +82,10 @@ pub struct Flow {
     /// The resource the authorization request names, under RFC 8707. It is
     /// the one this server protects unless a test names another.
     resource: String,
+    /// The static bearer token this server also carries, when a test needs the
+    /// deployment the runbook sells: `--auth-token-file` beside
+    /// `--oidc-issuer`. `None` is OAuth alone.
+    static_token: Option<String>,
 }
 
 impl Flow {
@@ -93,7 +97,14 @@ impl Flow {
             scope: scope.to_owned(),
             client_state: Some(CLIENT_STATE.to_owned()),
             resource: format!("{}/mcp", super::PUBLIC_URL),
+            static_token: None,
         }
+    }
+
+    /// Configure `token` as the static bearer token beside OAuth.
+    pub fn static_token(mut self, token: &str) -> Flow {
+        self.static_token = Some(token.to_owned());
+        self
     }
 
     /// Register under `name`. A client name reaches the consent page from an
@@ -137,12 +148,14 @@ impl Flow {
     /// before any client exists.
     pub async fn start(self) -> Started {
         let idp = FakeIdp::start(IdpBehaviour::default()).await;
-        let server = super::server(
-            Some(super::oauth_config(&idp.issuer)),
-            Scopes::all(),
-            Some(Clock::at(NOW)),
-        )
-        .await;
+        let config = super::oauth_config(&idp.issuer);
+        let clock = Some(Clock::at(NOW));
+        let server = match &self.static_token {
+            None => super::server(Some(config), Scopes::all(), clock).await,
+            Some(token) => {
+                super::server_with_static_token(Some(config), token, Scopes::all(), clock).await
+            }
+        };
         Started {
             flow: self,
             server,

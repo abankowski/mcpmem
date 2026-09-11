@@ -84,6 +84,16 @@ pub struct TestSetup {
     pub db_path: std::path::PathBuf,
     /// `Some` turns OAuth on for this state.
     pub oauth: Option<crate::config::OAuthConfig>,
+    /// The static bearer token, when the deployment under test configures one
+    /// beside OAuth. `--auth-token-file` and `--oidc-issuer` are independent
+    /// flags and the runbook sells the pair, so the combination has to be
+    /// reachable from a fixture.
+    pub auth_token: Option<Arc<str>>,
+    /// How the OAuth state reads a client identifier metadata document.
+    /// `None` is the shipped fetcher, which speaks `https` to a host on the
+    /// operator's allow-list — so a test that drives the authorization
+    /// endpoint with a metadata-document identifier names one here.
+    pub metadata_fetch: Option<Arc<dyn mcpmem_oauth::registration::Fetch>>,
     /// Scopes the presented credential holds. With no static token configured
     /// these are the scopes of the anonymous principal an open server
     /// dispatches with, and the `/ui` gate reads them.
@@ -116,14 +126,18 @@ impl HttpState {
     /// Those flags are process-wide, so two tests in one binary that need
     /// different category sets must not run at the same time.
     ///
-    /// The state carries no static bearer token: the credential under test is
-    /// the OAuth one. The static-token paths run against the real binary in
-    /// `tests/ui_http.rs`.
+    /// `TestSetup::auth_token` decides whether the state carries a static
+    /// bearer token beside the OAuth one. A fixture that names none tests the
+    /// OAuth credential alone; one that names it tests the deployment the
+    /// runbook sells, where both are configured and `principal_of` falls
+    /// through from the first to the second.
     #[doc(hidden)]
     pub fn for_test(setup: TestSetup) -> HttpState {
         let TestSetup {
             db_path,
             oauth,
+            auth_token,
+            metadata_fetch,
             bearer_scopes,
             enabled_categories,
             now_us,
@@ -144,12 +158,16 @@ impl HttpState {
                 }
                 None => OauthState::open(config, &db_path, busy_timeout_ms),
             };
-            Arc::new(state.expect("open the test OAuth store"))
+            let state = state.expect("open the test OAuth store");
+            Arc::new(match metadata_fetch {
+                Some(fetch) => state.with_metadata_fetch(fetch),
+                None => state,
+            })
         });
         HttpState {
             kg,
             vs: None,
-            auth_token: None,
+            auth_token,
             bearer_scopes: Arc::from(bearer_scopes),
             enabled_categories: Arc::from(enabled_categories),
             oauth,
@@ -376,25 +394,45 @@ fn insufficient_scope(state: &HttpState, scopes: &[&'static str]) -> Response {
         .into_response()
 }
 
+/// `POST /mcp` — the one request every tool call arrives on.
+///
+/// Resolving the caller and dispatching happen in one blocking task, and the
+/// order inside it is the order it was before: no body is dispatched for a
+/// caller this server will not honour.
+///
+/// The reason they share the task is [`OauthState::validate`]. It takes the
+/// single store mutex and runs a SQLite query under it, which is what
+/// `OauthState::with_store` tells its callers not to do on the reactor. On
+/// this path there is already a blocking task to put it in, so it goes there.
+/// A WAL point lookup is microseconds and a reader never waits on a writer, so
+/// what this removes is a ceiling rather than a stall — but the ceiling is on
+/// every authenticated request in the process, and the rule the crate states
+/// about its own lock should hold where the transport can make it hold.
 async fn post_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let Some(principal) = principal_of(&state, &headers) else {
-        return unauthorized(&state);
-    };
     let kg = state.kg.clone();
     let vs = state.vs.clone();
-    // The dispatch path locks the graph and may perform a blocking fsync, so
-    // run it off the async worker pool (keeps the HTTP reactor responsive).
+    let auth = state.clone();
+    // Read before `headers` moves into the task. One header lookup, and the
+    // alternative is cloning the whole map per request.
+    let sse = wants_sse(&headers);
     let result = tokio::task::spawn_blocking(move || {
-        server::dispatch_http_body(&body, &kg, vs.as_deref(), &principal)
+        let principal = principal_of(&auth, &headers)?;
+        Some(server::dispatch_http_body(
+            &body,
+            &kg,
+            vs.as_deref(),
+            &principal,
+        ))
     })
     .await;
 
     let outcome = match result {
-        Ok(inner) => inner,
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => return unauthorized(&state),
         Err(join_err) => {
             error!("dispatch task panicked: {join_err}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
@@ -405,7 +443,7 @@ async fn post_handler(
         // Body held only notifications → nothing to return.
         Ok(HttpOutcome::Accepted) => StatusCode::ACCEPTED.into_response(),
         Ok(HttpOutcome::Body(value)) => {
-            if wants_sse(&headers) {
+            if sse {
                 // One JSON-RPC reply delivered as a single SSE event, then close.
                 let json = serde_json::to_string(&value).unwrap();
                 let stream = futures::stream::once(async move {
@@ -441,11 +479,15 @@ async fn get_handler(State(state): State<HttpState>, headers: HeaderMap) -> Resp
 }
 
 /// Like [`principal_of`], but also accepting the static bearer token from a
-/// `token` query parameter. A browser navigating to `/ui/graph` cannot set
-/// request headers, so the viewer passes the token this way (or in the
-/// `Authorization` header when scripted). The fallback is the static token
-/// alone: an OAuth token belongs in the header, and a credential in a URL is
-/// a credential in a history file and a referrer.
+/// `token` query parameter.
+///
+/// The shipped viewer does not use that fallback. `src/ui/graph.js` reads
+/// `#token=` from the URL fragment — which a browser never sends to a server —
+/// keeps it in `sessionStorage`, and puts it in the `Authorization` header of
+/// every data request, so a human at `/ui` is resolved by [`principal_of`] and
+/// may present either credential. The query fallback is for a script, and it
+/// takes the static token alone: an issued token in a URL is a credential in a
+/// history file, a proxy log and a `Referer` header.
 fn principal_of_ui(
     state: &HttpState,
     headers: &HeaderMap,
@@ -500,9 +542,10 @@ async fn ui_js_handler() -> Response {
 /// is what keeps the two provably in step: a tool moved to another scope
 /// moves the viewer with it.
 ///
-/// The 401 is [`unauthorized`], the same challenge `/mcp` sends: one server
-/// answers with one shape, and a scripted viewer client can discover the
-/// authorization server from here too.
+/// The 401 is [`unauthorized`] and the scope refusal is [`insufficient_scope`],
+/// the same two challenges `/mcp` sends: one server answers with one shape, so
+/// a scripted viewer client can discover the authorization server from the 401
+/// and learn the scope to ask for from the 403.
 fn ui_data_gate(
     state: &HttpState,
     headers: &HeaderMap,
@@ -522,13 +565,13 @@ fn ui_data_gate(
         );
     }
     if !crate::authz::allows_tool(&principal, "read_graph") {
-        return Some(
-            (
-                StatusCode::FORBIDDEN,
-                "the presented credential does not hold the graph-read scope",
-            )
-                .into_response(),
-        );
+        // The scope the challenge names is the one `authz` reports missing, so
+        // the header cannot drift from the decision that produced it. The
+        // fallback is unreachable while `read_graph` is a tool this server
+        // knows, and names the category the viewer stands for.
+        let missing = crate::authz::missing_scope(&principal, "read_graph")
+            .unwrap_or(ToolCategory::GraphRead.slug());
+        return Some(insufficient_scope(state, &[missing]));
     }
     None
 }

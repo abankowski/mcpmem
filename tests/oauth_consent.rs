@@ -8,7 +8,7 @@
 //! would have been handed and the values posted back are the ones it carried.
 
 use axum::http::StatusCode;
-use mcpmem_oauth::consent::{escape_html, page};
+use mcpmem_oauth::consent::{destination, escape_html, page};
 
 mod support;
 use support::flow::{self, Authorized, Flow};
@@ -27,6 +27,24 @@ async fn the_consent_page_offers_only_the_intersection() {
     assert!(a.body.contains(r#"value="graph-read""#));
     assert!(a.body.contains(r#"value="graph-write""#));
     assert!(!a.body.contains(r#"value="code""#), "code was not granted");
+}
+
+/// Registration is open and the client name is the registrant's own choice, so
+/// the page must name where the grant is delivered and not only who claims to
+/// be asking. A crafted link from a client calling itself `Claude` is otherwise
+/// indistinguishable from the genuine connector's.
+#[tokio::test]
+async fn the_consent_page_names_where_the_grant_is_delivered() {
+    let a = Flow::new("graph-read")
+        .client_name("Claude")
+        .redirect_uri("https://evil.example/cb")
+        .into_consent()
+        .await;
+    assert!(
+        a.body.contains("<bdi>evil.example</bdi>"),
+        "the page must name the destination of the grant: {}",
+        a.body
+    );
 }
 
 /// The client name arrives from an unauthenticated registration request and
@@ -431,6 +449,7 @@ fn a_hostile_client_name_is_escaped() {
     let html = page(
         "<script>alert(1)</script>",
         "adam@example.com",
+        "https://claude.ai/api/mcp/auth_callback",
         &["graph-read".to_string()],
         "csrf-value",
         "state-value",
@@ -447,6 +466,7 @@ fn a_client_name_that_looks_like_a_placeholder_stays_text() {
     let html = page(
         "{{csrf}}",
         "{{state}}",
+        "https://{{csrf}}/cb",
         &["graph-read".to_string()],
         "the-secret-token",
         "the-login-state",
@@ -469,11 +489,66 @@ fn the_rendered_page_leaves_no_placeholder_behind() {
     let html = page(
         "Test client",
         "adam@example.com",
+        "https://claude.ai/api/mcp/auth_callback",
         &["graph-read".to_string(), "graph-write".to_string()],
         "csrf-value",
         "state-value",
     );
     assert!(!html.contains("{{"), "unfilled placeholder in: {html}");
+}
+
+/// The page names the authority of the redirect URI, not the whole URI and not
+/// only its host: a loopback client is the human's own machine, and the port
+/// is the only part that tells two of them apart.
+#[test]
+fn the_page_names_the_destination_authority_including_its_port() {
+    let html = page(
+        "Test client",
+        "adam@example.com",
+        "http://127.0.0.1:41234/cb?tenant=acme",
+        &["graph-read".to_string()],
+        "csrf-value",
+        "state-value",
+    );
+    assert!(
+        html.contains("<bdi>127.0.0.1:41234</bdi>"),
+        "the destination must carry its port: {html}"
+    );
+    assert!(
+        !html.contains("tenant=acme"),
+        "only the authority is drawn: {html}"
+    );
+}
+
+/// A redirect URI this cannot read an authority from is shown whole. Nothing
+/// registrable reaches the page in that shape — `is_acceptable_redirect_uri`
+/// refuses a userinfo authority — and a destination the human cannot see at
+/// all is the defect the line exists to close.
+#[test]
+fn a_redirect_uri_with_no_readable_authority_is_drawn_whole() {
+    assert_eq!(
+        destination("https://claude.ai@evil.example/cb"),
+        "https://claude.ai@evil.example/cb"
+    );
+    assert_eq!(destination("not-a-url"), "not-a-url");
+    assert_eq!(destination("https:///cb"), "https:///cb");
+}
+
+/// The destination is escaped like every other drawn value. A redirect URI is
+/// checked for its scheme and its fragment at registration, not for what its
+/// authority spells, so it reaches this page as hostile as the client name.
+#[test]
+fn a_hostile_destination_is_escaped() {
+    let html = page(
+        "Test client",
+        "adam@example.com",
+        "https://<script>alert(1)</script>/cb",
+        &["graph-read".to_string()],
+        "csrf-value",
+        "state-value",
+    );
+    assert!(!html.contains("<script>alert(1)</script>"), "{html}");
+    assert!(html.contains("&lt;script&gt;"), "{html}");
 }
 
 /// Every value the page draws as text sits inside a `<bdi>`.
@@ -488,6 +563,7 @@ fn every_value_the_page_draws_is_isolated_from_the_text_around_it() {
     let html = page(
         "שלום",
         "adam@example.com",
+        "https://claude.ai/api/mcp/auth_callback",
         &["graph-read".to_string()],
         "csrf-value",
         "state-value",

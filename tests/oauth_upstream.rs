@@ -890,6 +890,54 @@ async fn a_refused_callback_consumes_the_login() {
     );
 }
 
+/// A failed exchange is not an outcome about the human, and it must not end
+/// their login.
+///
+/// The `state` travels through the provider, so the provider itself, a browser
+/// extension or a referrer leak from the provider's page can hand it to
+/// somebody else. If a callback that fails upstream consumed the row, anyone
+/// holding that value could end a login in flight with one bogus code. The
+/// row therefore goes back, and only an exchange that succeeded may consume
+/// it — which is what `a_refused_callback_consumes_the_login` above fixes at
+/// the other end.
+#[tokio::test]
+async fn a_failed_upstream_exchange_leaves_the_login_in_flight() {
+    let idp = FakeIdp::start(IdpBehaviour {
+        sign_with_foreign_key: true,
+        ..IdpBehaviour::default()
+    })
+    .await;
+    let server = support::oauth_server_with(&idp.issuer).await;
+    let client_id = register(&server).await;
+
+    let params = good_params(&client_id);
+    let started = server.request(authorize_request(&as_pairs(&params))).await;
+    let back = idp.login(&support::header(&started, "location")).await;
+    let res = server
+        .request(
+            Request::get(format!(
+                "/oauth/callback?code={}&state={}",
+                back.code, back.state
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let now = (server.oauth().now_us)();
+    let login = server
+        .oauth()
+        .with_store(|s| s.take_login(&back.state, now))
+        .unwrap()
+        .expect("a login whose exchange failed must still be in flight");
+    assert!(
+        login.principal.is_none(),
+        "the restored login must name no human: {:?}",
+        login.principal
+    );
+}
+
 /// The callback with no parameters is a malformed request, not an identity
 /// outcome, so it says so. Nothing about a human is disclosed either way.
 #[tokio::test]

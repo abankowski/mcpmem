@@ -35,6 +35,13 @@ button[name="approve"] { font-weight: 600; }
 -->
 <h1>Authorize <bdi>{{client_name}}</bdi></h1>
 <p><strong><bdi>{{client_name}}</bdi></strong> asks to use your memory graph on your behalf.</p>
+<!--
+  The destination, not only the name. Registration is open and unauthenticated,
+  so the name above is whatever the registrant chose; the authority below is
+  the one the authorization code is actually delivered to, taken from the
+  login row and matched byte for byte against the registered set.
+-->
+<p>Approving sends your authorization to <strong><bdi>{{destination}}</bdi></strong>.</p>
 <p class="who">You are signed in as <bdi>{{principal_label}}</bdi>.</p>
 <!--
   The action is relative on purpose. This page is served from

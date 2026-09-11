@@ -187,14 +187,48 @@ fn renders(c: char) -> bool {
     (c.is_alphanumeric() || c.is_ascii_graphic()) && !DEFAULT_IGNORABLE_LETTERS.contains(&c)
 }
 
+/// Where an approval delivers the authorization code, as a human should read
+/// it: the authority of the redirect URI — its host, and its port when it
+/// names one.
+///
+/// The page needs this because registration is open and unauthenticated, so
+/// the client name is the registrant's own choice. A client calling itself
+/// `Claude` and redirecting to its own host renders a page a human cannot tell
+/// from the genuine connector's, unless the page also says where the grant
+/// goes.
+///
+/// The port stays. A loopback client runs on the human's own machine, and the
+/// port is the only part of `http://127.0.0.1:41234/cb` that distinguishes one
+/// such client from another.
+///
+/// The argument is the login row's `redirect_uri`, which
+/// `GET /oauth/authorize` matched byte for byte against the registered set and
+/// which [`crate::registration`] already refused a fragment and a userinfo
+/// part in. A URI this cannot read an authority from is shown whole: the whole
+/// URI is harder to read and never wrong, and a destination the human cannot
+/// see at all is the defect this exists to close.
+pub fn destination(redirect_uri: &str) -> &str {
+    let Some((_, rest)) = redirect_uri.split_once("://") else {
+        return redirect_uri;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return redirect_uri;
+    }
+    authority
+}
+
 /// The consent page for one login.
 ///
-/// `offered` is the set from [`offered`]; every other argument is text. All
-/// five are escaped here, and no substituted value is scanned again, so a
-/// client name spelling `{{csrf}}` stays those eight characters.
+/// `offered` is the set from [`offered`]; every other argument is text.
+/// `redirect_uri` is the login row's, and the page draws
+/// [`destination`] of it rather than the whole URI. All six drawn values are
+/// escaped here, and no substituted value is scanned again, so a client name
+/// spelling `{{csrf}}` stays those eight characters.
 pub fn page(
     client_name: &str,
     principal_label: &str,
+    redirect_uri: &str,
     offered: &[String],
     csrf: &str,
     state: &str,
@@ -208,6 +242,7 @@ pub fn page(
         &[
             ("client_name", &escape_html(client_name)),
             ("principal_label", &escape_html(principal_label)),
+            ("destination", &escape_html(destination(redirect_uri))),
             ("csrf", &escape_html(csrf)),
             ("state", &escape_html(state)),
             // Markup, not text: the rows are built above, and each value in

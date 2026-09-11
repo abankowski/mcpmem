@@ -349,35 +349,46 @@ The 21st must be `429`. Then repeat with a **different** forged address. If
 that one is `201`, the header is being trusted; make sure that is what you
 intended, and that your proxy overwrites it.
 
-### The browser-navigable viewer needs the static token
+### Opening the viewer in a browser
 
-`GET /ui/graph` and the viewer's other data endpoints accept a `?token=`
-query parameter, because a browser navigating to a URL cannot set an
-`Authorization` header. **That fallback takes the static bearer token alone.**
-An issued OAuth token in a query string is refused.
+**The viewer takes either credential, and it takes it in the `Authorization`
+header.** `src/ui/graph.js` reads `#token=` out of the URL fragment, keeps it in
+`sessionStorage`, removes it from the address bar, and sends it as
+`Authorization: Bearer …` on every data request. The server resolves that
+header as an issued OAuth token first and as the static bearer token second, so
+**OAuth alone is enough for a human at `/ui`** — you do not need
+`--auth-token-file` for the viewer.
 
-That is deliberate — a credential in a URL is a credential in a history file, a
-proxy log and a `Referer` header, and an OAuth token belongs in the header. The
-consequence for an operator: **a deployment that wants a human to open the
-viewer in a browser must configure `--auth-token-file` as well as OAuth.**
-OAuth alone gives a viewer that only a scripted client can reach.
+The browser route:
 
 ```sh
-# Identical in Bash and fish. fish has supported `$(…)` inside a double-quoted
-# string since 3.4, so this one line is the same text in both.
-echo "https://mem.example.com/ui?token=$(cat /etc/mcpmem/token)"
+# Identical in Bash and fish.
+echo 'https://mem.example.com/ui#token=<paste the access token>'
 ```
 
-The older fish spelling, which also works and is what `(…)` alone requires —
-bare parentheses do not interpolate inside quotes, so the quoted part ends
-first:
+The fragment is the part of a URL a browser never sends to the server, so the
+token does not reach your proxy log, your access log or a `Referer` header. The
+viewer also offers a box to paste a token into when a request comes back 401,
+which avoids putting it in the address bar at all.
 
-```fish
-# fish
-echo "https://mem.example.com/ui?token="(cat /etc/mcpmem/token)
+A human gets an access token the same way a connector does: by completing the
+consent flow. There is no separate viewer login.
+
+**The `?token=` query fallback is for the static bearer token alone**, and it
+works on the data endpoints (`/ui/graph`, `/ui/search`, `/ui/node`,
+`/ui/expand`), not on `/ui` itself — `/ui` is an unauthenticated shell, and
+`graph.js` never reads the query string. It exists for scripts and for
+deployments with no OAuth:
+
+```sh
+# Identical in Bash and fish. The static token only; an OAuth token in a query
+# string is refused.
+curl "https://mem.example.com/ui/graph?token=$(cat /etc/mcpmem/token)"
 ```
 
-Narrow what that token reaches with `--static-bearer-scopes graph-read`.
+A credential in a query string is a credential in a history file, a proxy log
+and a `Referer` header, which is why the issued token is not accepted there.
+Narrow what the static token reaches with `--static-bearer-scopes graph-read`.
 
 ## 5. Add the connector
 
@@ -430,8 +441,18 @@ mcpmem ... --cimd-allowed-domain chatgpt.com --cimd-allowed-domain auth.chatgpt.
 ```
 
 A suffix match would admit `chatgpt.com.evil.example`, which is why the rule is
-a whole host. Record whether the connector used a document or dynamic
-registration; the `source` column says which (`cimd` or `dcr`):
+a whole host.
+
+The document is read at `GET /oauth/authorize`, on the connector's first
+login, and only when the identifier it presents is an https URL this server
+holds no client row for. The host is checked against your list **before**
+anything leaves the process, the request is https with no redirect followed, a
+64 KB body cap and a 5 second timeout, and the record it produces is stored —
+so the connector's later logins cost its host no request at all. A refused
+document is one `400` naming no reason; the log line names it.
+
+Record whether the connector used a document or dynamic registration; the
+`source` column says which (`cimd` or `dcr`):
 
 ```sh
 # Identical in Bash and fish.

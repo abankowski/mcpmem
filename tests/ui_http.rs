@@ -490,14 +490,17 @@ fn test_ui_graph_requires_graph_read() {
 #[test]
 fn test_ui_graph_honours_static_bearer_scopes_not_enabled_categories() {
     let srv = spawn_http_server(&["--enable-all", "--static-bearer-scopes", "vectors"], None);
-    let (status, _, body) = get(srv.port, "/ui/graph", None);
+    let (status, headers, body) = get(srv.port, "/ui/graph", None);
     assert_eq!(
         status, 403,
         "a credential without graph-read must be refused: {body}"
     );
     assert!(
-        body.contains("does not hold the graph-read scope"),
-        "the refusal must come from the scope gate, not the category gate: {body}"
+        headers.to_lowercase().contains(
+            "www-authenticate: bearer error=\"insufficient_scope\", scope=\"graph-read\""
+        ),
+        "the refusal must come from the scope gate with its challenge, not from \
+         the category gate: {headers}"
     );
 }
 

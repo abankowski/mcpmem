@@ -527,7 +527,9 @@ async fn a_graph_read_token_may_read_the_viewer_graph() {
 }
 
 /// The viewer reads the whole graph, so a token that holds only the write
-/// scope is refused — the same answer `read_graph` itself would give.
+/// scope is refused — the same answer `read_graph` itself would give, and with
+/// the same challenge. A scripted viewer client learns what to ask its human
+/// for from this header and from nowhere else.
 #[tokio::test]
 async fn a_write_only_token_is_refused_by_the_viewer() {
     let (authorized, tokens) = to_tokens(&["graph-write"]).await;
@@ -535,6 +537,14 @@ async fn a_write_only_token_is_refused_by_the_viewer() {
         .get("/ui/graph", Some(&tokens.access_token))
         .await;
     assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        res.www_authenticate,
+        format!(
+            "Bearer error=\"insufficient_scope\", scope=\"graph-read\", \
+             resource_metadata=\"{}\"",
+            resource_metadata()
+        )
+    );
 }
 
 /// And no token at all is the same 401 challenge `/mcp` sends, so a scripted
@@ -1076,4 +1086,73 @@ async fn an_open_server_grants_the_configured_scopes_with_no_credential() {
     // the open caller holds both halves of the graph.
     assert!(names.contains(&"read_graph"), "{names:?}");
     assert!(names.contains(&"delete_entities"), "{names:?}");
+}
+
+/// The static bearer token this server configures beside OAuth.
+const STATIC_TOKEN: &str = "a-static-bearer-token";
+
+/// R15's other half: a server running OAuth **and** `--auth-token-file`.
+///
+/// The runbook and the README both sell this deployment, and `principal_of` is
+/// a two-arm fallthrough — the OAuth arm first, the constant-time static
+/// compare second. Only a fixture carrying both credentials can reach the
+/// second arm with OAuth on, and the ordering matters in both directions: an
+/// issued token must not be compared against the static one, and a static
+/// token must not be refused because the OAuth lookup came first and failed.
+///
+/// One test rather than three, because all three requests need the one server
+/// that holds both credentials, and two `Server` values on one thread
+/// deadlock.
+#[tokio::test]
+async fn a_static_bearer_works_beside_oauth_and_neither_credential_shadows_the_other() {
+    let authorized = Flow::new("graph-read")
+        .static_token(STATIC_TOKEN)
+        .into_consent()
+        .await;
+    let code = authorized.approve(&["graph-read"]).await;
+    let tokens = authorized.exchange(&code).await;
+
+    assert_eq!(
+        authorized.mcp_tools_list(&tokens.access_token).await.status,
+        StatusCode::OK,
+        "an issued token must still be resolved as one with a static token configured"
+    );
+    assert_eq!(
+        authorized.mcp_tools_list(STATIC_TOKEN).await.status,
+        StatusCode::OK,
+        "the static bearer must still be honoured with OAuth on"
+    );
+    assert_eq!(
+        authorized.mcp_tools_list("neither-credential").await.status,
+        StatusCode::UNAUTHORIZED,
+        "a token that is neither must fall through both arms"
+    );
+}
+
+/// The static bearer's scopes are the operator's `--static-bearer-scopes`, and
+/// they are not the scopes of the human's grant. A server holding both
+/// credentials must keep the two principals apart.
+#[tokio::test]
+async fn the_static_bearer_holds_its_own_scopes_beside_an_oauth_grant() {
+    let authorized = Flow::new("graph-read")
+        .static_token(STATIC_TOKEN)
+        .into_consent()
+        .await;
+    let code = authorized.approve(&["graph-read"]).await;
+    let tokens = authorized.exchange(&code).await;
+
+    let granted = authorized.tool_names(&tokens.access_token).await;
+    assert!(granted.contains(&"read_graph".to_owned()), "{granted:?}");
+    assert!(
+        !granted.contains(&"delete_entities".to_owned()),
+        "the human granted graph-read alone: {granted:?}"
+    );
+
+    // `support::Scopes::all` puts every category on the static list, so the
+    // static caller reaches the write tools the human's grant does not.
+    let static_names = authorized.tool_names(STATIC_TOKEN).await;
+    assert!(
+        static_names.contains(&"delete_entities".to_owned()),
+        "the static bearer keeps its own scopes: {static_names:?}"
+    );
 }
