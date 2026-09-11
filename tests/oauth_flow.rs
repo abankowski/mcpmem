@@ -691,6 +691,209 @@ async fn registration_is_rate_limited_per_peer() {
     assert_eq!(later.status, StatusCode::CREATED);
 }
 
+/// `GET /oauth/callback` is the sixth endpoint an anonymous caller reaches,
+/// and the most expensive: it reads the store on every request, and a request
+/// naming a live login makes **this** server call somebody else's provider.
+///
+/// A state this server never issued is refused without any of that, which is
+/// what makes the loop cheap enough to be worth bounding — a caller can send
+/// it as fast as the socket allows.
+#[tokio::test]
+async fn the_callback_is_rate_limited_per_peer() {
+    let flow = Flow::fresh().await;
+    for i in 0..60 {
+        let res = flow
+            .callback_from("203.0.113.7", "any-code", "never-issued")
+            .await;
+        assert_eq!(
+            res.status,
+            StatusCode::FORBIDDEN,
+            "request {i} must reach the refusal page"
+        );
+    }
+
+    let blocked = flow
+        .callback_from("203.0.113.7", "any-code", "never-issued")
+        .await;
+    assert_eq!(blocked.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        !blocked.retry_after.is_empty(),
+        "a 429 must say when to come back"
+    );
+
+    let other = flow
+        .callback_from("203.0.113.8", "any-code", "never-issued")
+        .await;
+    assert_eq!(other.status, StatusCode::FORBIDDEN);
+}
+
+/// The bucket is an address, not the header text that named it.
+///
+/// Two consequences, one test. Text that is not an address must not mint a
+/// bucket at all: a caller that sends a fresh 8 KB string each time would
+/// otherwise both bypass the limit and grow the map by the size of its own
+/// header. And one address spelled two ways must be one bucket, or the split
+/// is a free doubling of the allowance for anyone who knows how RFC 5952
+/// compresses a zero run.
+#[tokio::test]
+async fn the_bucket_is_the_parsed_address_and_nothing_else() {
+    let flow = Flow::fresh().await;
+    for i in 0..20 {
+        let res = flow.register_from("not-an-address").await;
+        assert_eq!(res.status, StatusCode::CREATED, "request {i} must pass");
+    }
+    let blocked = flow.register_from("also-not-an-address").await;
+    assert_eq!(
+        blocked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "text that is not an address must fall to the shared bucket"
+    );
+
+    for i in 0..20 {
+        let res = flow.register_from("2001:db8::1").await;
+        assert_eq!(res.status, StatusCode::CREATED, "request {i} must pass");
+    }
+    let blocked = flow
+        .register_from("2001:0db8:0000:0000:0000:0000:0000:0001")
+        .await;
+    assert_eq!(
+        blocked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "one address spelled two ways must be one bucket"
+    );
+}
+
+/// A clock that steps backwards must not leave every bucket full until it
+/// catches up.
+///
+/// The window is fixed, so the roll is decided by how far `now` is from the
+/// window's start. A wall clock that an operator or an NTP step moves back an
+/// hour makes that distance negative, and a limiter that only rolls forward
+/// then refuses every request for an hour — a self-inflicted outage on the
+/// endpoints a connector needs to recover.
+#[tokio::test]
+async fn a_backward_clock_step_does_not_freeze_the_window() {
+    let flow = Flow::fresh().await;
+    for i in 0..20 {
+        let res = flow.register_from("203.0.113.7").await;
+        assert_eq!(res.status, StatusCode::CREATED, "request {i} must pass");
+    }
+    assert_eq!(
+        flow.register_from("203.0.113.7").await.status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
+    flow.server().clock().advance_seconds(-61);
+    assert_eq!(
+        flow.register_from("203.0.113.7").await.status,
+        StatusCode::CREATED,
+        "a clock that stepped backwards must open a fresh window, not freeze one"
+    );
+}
+
+/// Presenting a client at `GET /oauth/authorize` records the use the eviction
+/// measures, so a client in daily service is not evicted for being thirty days
+/// old.
+///
+/// Two clients registered together and one of them used, because the eviction
+/// has to keep one and take the other: a test that only kept would pass
+/// against an eviction that never runs, and one that only evicted would pass
+/// against a `last_used_us` nothing writes.
+///
+/// Neither client ever reaches a token, which is deliberate — the token
+/// subquery would otherwise decide the outcome and the last-use half would go
+/// untested.
+#[tokio::test]
+async fn authorizing_records_the_use_the_eviction_measures() {
+    const DAY: i64 = 24 * 60 * 60;
+    let flow = Flow::fresh().await;
+    let used = flow.register().await;
+    let forgotten = flow.register().await;
+    assert_eq!(flow::count_rows(flow.server(), "oauth_client"), 2);
+
+    // Twenty-nine days later, one of them comes back.
+    flow.server().clock().advance_seconds(29 * DAY);
+    assert_eq!(flow.authorize(&used).await.status(), StatusCode::FOUND);
+
+    // Two days after that: thirty-one days since both registered, two days
+    // since the one was used.
+    flow.server().clock().advance_seconds(2 * DAY);
+    assert_eq!(flow.server().oauth().maintain().evicted, 1);
+    assert_eq!(flow::count_rows(flow.server(), "oauth_client"), 1);
+    assert_eq!(
+        flow.authorize(&used).await.status(),
+        StatusCode::FOUND,
+        "the client that was used must still be registered"
+    );
+    assert_eq!(
+        flow.authorize(&forgotten).await.status(),
+        StatusCode::BAD_REQUEST,
+        "the client that was never used must be gone"
+    );
+}
+
+/// A granted token exchange records the client's use.
+///
+/// Asserted on the column rather than through the eviction, and that is not a
+/// shortcut: a client that has just been granted a token **holds** one, so the
+/// eviction's token subquery decides its fate for as long as that token lives
+/// and no end-to-end outcome can tell the two implementations apart. The
+/// column has a second consumer — an operator asking which registrations are
+/// in use, which the runbook shows — and that one is real.
+#[tokio::test]
+async fn a_granted_token_exchange_records_the_use() {
+    let (authorized, code) = to_code(&["graph-read"]).await;
+    let authorized_at = authorized.now();
+
+    authorized.clock().advance_seconds(30);
+    let granted = authorized.exchange(&code).await;
+    assert!(!granted.access_token.is_empty());
+    assert_eq!(
+        last_used(&authorized),
+        authorized_at + 30_000_000,
+        "a granted exchange must record the moment it was granted"
+    );
+}
+
+/// A **refused** token request does not.
+///
+/// This is the half that makes the touch safe rather than merely present: a
+/// refused request names a `client_id` too, and honouring that would let
+/// anybody keep any registration alive for ever with one well-formed refusal a
+/// month — the exact opposite of what the eviction exists for.
+#[tokio::test]
+async fn a_refused_token_request_does_not_record_a_use() {
+    let (authorized, code) = to_code(&["graph-read"]).await;
+    let authorized_at = authorized.now();
+
+    authorized.clock().advance_seconds(30);
+    let refused = authorized
+        .token(&[
+            ("code", code.as_str()),
+            ("code_verifier", "the-wrong-verifier"),
+        ])
+        .await;
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        last_used(&authorized),
+        authorized_at,
+        "a refused exchange must not refresh the registration"
+    );
+}
+
+/// The `last_used_us` of this flow's client, which is what
+/// `Store::evict_clients` measures and what an operator reads.
+fn last_used(authorized: &Authorized) -> i64 {
+    let client_id = authorized.client_id.clone();
+    flow::with_store(authorized.server(), |store| {
+        store
+            .get_client(&client_id)
+            .expect("the store reads its own client")
+            .expect("this flow registered a client")
+            .last_used_us
+    })
+}
+
 /// Without `--oauth-trust-forwarded-proto`, `X-Forwarded-For` buys a caller
 /// nothing.
 ///
@@ -698,7 +901,15 @@ async fn registration_is_rate_limited_per_peer() {
 /// is client-chosen, so a server that reads it from an untrusted hop lets one
 /// caller mint a fresh bucket per request and send as many registrations as it
 /// likes. Twenty-one requests, each naming a different address, and the last
-/// one must still be refused — the connection they share is the peer.
+/// one must still be refused.
+///
+/// **What they share here is the unknown bucket, not a connection.** A
+/// `oneshot` request carries no `ConnectInfo`, so with the header ignored
+/// there is no address left and `oauth_routes::UNKNOWN_PEER` is what counts
+/// them — and that is exactly as much as this test can prove. That the real
+/// transport supplies a connection address instead is `crate::http::run`'s
+/// job, and it is verified by hand against the running binary rather than
+/// here; see the task report.
 ///
 /// It builds its own server rather than using `Flow`, because
 /// `support::oauth_config` trusts the proxy as every real deployment behind

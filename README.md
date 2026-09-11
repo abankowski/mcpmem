@@ -201,7 +201,9 @@ and their `scopes` is the ceiling a connector may be granted:
 Behind a proxy that ends TLS, pass `--oauth-trust-forwarded-proto` instead of
 `--tls-cert`/`--tls-key`. That flag also decides which address the per-peer
 request limits count, so the proxy must **set** `X-Forwarded-For` rather than
-append to a client-supplied one.
+append to a client-supplied one, **and the process must be bound where only the
+proxy can reach it** (`--bind 127.0.0.1:8080`). Anyone who can open a socket to
+it directly chooses their own bucket, and every limit is then bypassable.
 
 **The static bearer token above still works, unchanged.** A server may run both:
 a request carrying an issued OAuth token is resolved as that token, and anything
@@ -579,7 +581,7 @@ All transports share one transport-agnostic dispatch core (`dispatch_line()` /
 | Max `topK` *(vectors)* | 100 |
 | Max items per `vector_batch_upsert` | 1,024 |
 | Max `POST /oauth/register` per minute per peer *(oauth)* | 20 |
-| Max requests per minute per peer on the other OAuth endpoints *(oauth)* | 60 |
+| Max requests per minute per peer on the other five OAuth endpoints *(oauth)* | 60 |
 | Client name / redirect URIs / URL bytes *(oauth)* | 256 / 8 / 2,048 |
 
 ## Development

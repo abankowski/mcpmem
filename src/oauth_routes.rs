@@ -267,14 +267,31 @@ impl Maintenance {
 /// `X-Forwarded-Proto` about TLS. With it set, the leftmost `X-Forwarded-For`
 /// entry is the client the proxy saw. Without it, the peer of the connection.
 ///
-/// The port is dropped: a peer is an address, and counting `ip:port` would
-/// give every request its own bucket and bound nothing at all.
+/// **The key is always a parsed address, never the text that named it.** Both
+/// halves of that matter:
 ///
-/// [`UNKNOWN_PEER`] is the fallback, and it is one shared bucket. A request
-/// with no address reaches here only when a caller sent no
-/// `X-Forwarded-For` behind a proxy that was trusted to set it, or when the
-/// transport was built without connection information — `crate::http::run`
-/// supplies it on both the TLS and the plaintext path.
+/// - The port is dropped. A peer is an address, and counting `ip:port` would
+///   give every request its own bucket and bound nothing at all.
+/// - A forwarded value that does not parse as an IP address is **not** used.
+///   It is caller-chosen text of caller-chosen length, so using it verbatim
+///   would let one caller bypass the limit with a fresh random string per
+///   request *and* grow the limiter's map by the size of its own header —
+///   which is exactly the bound `mcpmem_oauth::limits::MAX_KEYS` claims to
+///   state. Parsing also collapses the spellings of one address: RFC 5952
+///   lets `2001:db8::1` be written a dozen ways, and each way would otherwise
+///   be a fresh allowance.
+///
+/// The fallback is a chain, not a single value. A forwarded header that is
+/// absent or unusable leaves the connection address, which is the proxy's and
+/// therefore one shared bucket for every caller behind it; only a request with
+/// no connection address either reaches [`UNKNOWN_PEER`]. Both ends of that
+/// chain are one bucket, which is the point — a caller can influence neither,
+/// and a trusted proxy that stops setting the header degrades to counting
+/// everybody together rather than to counting nobody.
+///
+/// `crate::http::run` supplies the connection address on both the TLS and the
+/// plaintext path, so [`UNKNOWN_PEER`] is reached in practice only by a test
+/// driving the router directly.
 struct Peer(String);
 
 /// The bucket a request whose address cannot be established is counted
@@ -305,17 +322,21 @@ impl axum::extract::FromRequestParts<HttpState> for Peer {
     }
 }
 
-/// The leftmost `X-Forwarded-For` entry, which is the client the outermost
-/// trusted proxy saw. Later entries are that proxy's own upstreams and the
-/// header may repeat, so the first value of the first header wins.
+/// The leftmost `X-Forwarded-For` entry as a canonical address, which is the
+/// client the outermost trusted proxy saw. Later entries are that proxy's own
+/// upstreams and the header may repeat, so the first value of the first header
+/// wins.
 ///
-/// `None` for an absent or empty header. An empty entry is not an address, and
-/// counting it would put every such caller in one bucket that a single client
-/// can then fill for everybody.
+/// `None` when the header is absent, when its first entry is empty, or when
+/// that entry is not an IP address. The value is caller-chosen and a trusted
+/// proxy that does not overwrite it passes the caller's own text through, so
+/// nothing here may be used as a key on the strength of being present. A
+/// parsed address is re-rendered from [`std::net::IpAddr`] rather than passed
+/// through, so one address has exactly one key however it was written.
 fn forwarded_for(headers: &axum::http::HeaderMap) -> Option<String> {
     let value = headers.get("x-forwarded-for")?.to_str().ok()?;
     let client = value.split(',').next()?.trim();
-    (!client.is_empty()).then(|| client.to_owned())
+    Some(client.parse::<std::net::IpAddr>().ok()?.to_string())
 }
 
 /// The RFC 6585 section 4 answer to a caller over its limit.
@@ -769,7 +790,23 @@ async fn start_login(oauth: &Arc<OauthState>, q: AuthorizeParams) -> Response {
         &login.nonce,
         &mcpmem_oauth::s256_challenge(&login.upstream_verifier),
     );
-    if let Err(e) = oauth.with_store(|store| store.put_login(&login)) {
+    // The login row and the client's last use, under one lock: the client just
+    // presented itself and was accepted, which is what `last_used_us` records
+    // and what `Store::evict_clients` measures against. Without this write the
+    // column never moves past registration, and a connector in daily service
+    // is evicted thirty days after it registered — it re-registers
+    // automatically, but the human consents again for no reason.
+    //
+    // A failed touch is not a failed login. The row it updates is a
+    // housekeeping timestamp; refusing a human who has done nothing wrong
+    // because a `UPDATE` failed would trade a real outcome for a bookkeeping
+    // one.
+    if let Err(e) = oauth.with_store(|store| {
+        if let Err(e) = store.touch_client(&login.client_id, now_us) {
+            tracing::warn!(error = %e, "the OAuth store refused to record a client use");
+        }
+        store.put_login(&login)
+    }) {
         tracing::error!(error = %e, "the OAuth store refused to record a login");
         return server_error();
     }
@@ -789,11 +826,27 @@ async fn start_login(oauth: &Arc<OauthState>, q: AuthorizeParams) -> Response {
 /// It never redirects. The client's `redirect_uri` is reached only after
 /// consent, in Task 7, and a redirect from here would carry the outcome of an
 /// identity check to a party that has not been granted anything yet.
+///
+/// It is bounded per peer like the other five anonymous endpoints, and it is
+/// the one that most needs it: every request reads the store, and a request
+/// naming a live login makes **this** server call the upstream provider — so
+/// an unbounded loop here is a loop against somebody else's infrastructure
+/// with this server's name on it. The check comes before the parameters are
+/// judged, because a refusal the caller can trigger for free is exactly what
+/// a loop sends.
 #[cfg(feature = "oauth")]
-async fn callback(State(state): State<HttpState>, Query(q): Query<CallbackParams>) -> Response {
+async fn callback(
+    State(state): State<HttpState>,
+    Peer(peer): Peer,
+    Query(q): Query<CallbackParams>,
+) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if !oauth.limits.callback.check(&peer, (oauth.now_us)()) {
+        tracing::warn!(%peer, "callback rate limit reached");
+        return too_many_requests(&oauth.limits.callback);
+    }
     let (Some(code), Some(login_state)) = (q.code, q.state) else {
         // Not an identity outcome: no login was even named, so this discloses
         // nothing that the request itself did not already contain.
@@ -1287,7 +1340,14 @@ async fn token(
     }
 }
 
-/// Dispatch one token request to the grant it names.
+/// Dispatch one token request to the grant it names, and record the client's
+/// use when one is granted.
+///
+/// The touch is on the **granted** path alone. A refused request names a
+/// `client_id` too, and honouring that would let anyone keep any registration
+/// alive for ever with one well-formed refusal a month — the opposite of what
+/// the eviction is for. A grant, by contrast, has already been shown to belong
+/// to that client.
 ///
 /// It runs under the store lock, and everything it calls is one statement
 /// group against that store — no `await`, no network, nothing that blocks.
@@ -1302,7 +1362,7 @@ fn granted(
             "a parameter arrived more than once",
         ));
     }
-    match form.grant_type.as_deref() {
+    let granted = match form.grant_type.as_deref() {
         Some("authorization_code") => mcpmem_oauth::token::grant_authorization_code(
             store,
             &mcpmem_oauth::token::CodeExchange {
@@ -1322,7 +1382,13 @@ fn granted(
             now_us,
         ),
         _ => Err(TokenError::UnsupportedGrantType),
+    }?;
+    if let Some(client_id) = form.client_id.as_deref()
+        && let Err(e) = store.touch_client(client_id, now_us)
+    {
+        tracing::warn!(error = %e, "the OAuth store refused to record a client use");
     }
+    Ok(granted)
 }
 
 /// `POST /oauth/revoke` — RFC 7009.

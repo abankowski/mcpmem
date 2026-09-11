@@ -1,11 +1,13 @@
 //! Per-peer request limits for the endpoints no credential guards.
 //!
-//! Five OAuth endpoints answer an anonymous caller, because the
+//! Six OAuth endpoints answer an anonymous caller, because the
 //! specifications say they must: a client that has just discovered this server
 //! holds nothing to authenticate a registration, an authorization request or a
-//! token exchange with. Each of those requests costs this server a row or a
-//! database round trip, so the number of them one peer may send in a minute is
-//! bounded here.
+//! token exchange with, and the hop a provider redirects a human back to
+//! carries no credential at all. Each of those requests costs this server a
+//! row or a database round trip, and the callback can cost it a call to the
+//! provider, so the number of them one peer may send in a minute is bounded
+//! here.
 //!
 //! This bounds **how many** requests arrive. It does not bound how large one
 //! request is: `crate::registration::register` caps the fields of a client
@@ -32,7 +34,7 @@ pub const WINDOW_US: i64 = 60 * 1_000_000;
 /// Lower than the rest because a registration is the one anonymous request
 /// that writes a row nothing expires: `oauth_client` has no `expires_us`
 /// column, and a registered client leaves only by the eviction in
-/// [`crate::store::Store::evict_stale_clients`].
+/// [`crate::store::Store::evict_clients`].
 pub const REGISTER_PER_WINDOW: u32 = 20;
 
 /// How many requests one peer may send in a window to each of the endpoints
@@ -47,9 +49,17 @@ pub const LOGIN_PER_WINDOW: u32 = 60;
 ///
 /// A bound on memory, and the reason [`RateLimiter`] counts against a shared
 /// window rather than a per-key one: the whole map is dropped at the window
-/// boundary, so nothing has to be scanned or evicted to keep this true. At
-/// this size the five limiters together hold tens of thousands of short keys,
-/// which is under a megabyte, and the map is emptied every minute.
+/// boundary, so nothing has to be scanned or evicted to keep this true.
+///
+/// It bounds **bytes**, not just entries, and only because every key is a
+/// parsed IP address: `src/oauth_routes.rs` turns the caller's address into
+/// its canonical text and nothing else ever reaches [`RateLimiter::check`], so
+/// one key is at most 45 bytes. Six limiters, 8192 keys each, is therefore
+/// well under a megabyte, and each map is emptied every minute. **A caller
+/// that could put arbitrary text in a key would falsify that**, because the
+/// bound would become this number multiplied by the largest header the
+/// transport accepts — which is why the parse is a precondition of this
+/// number rather than a detail of the extractor.
 pub const MAX_KEYS: usize = 8192;
 
 /// The window every key of one limiter is counted against.
@@ -132,9 +142,28 @@ impl RateLimiter {
     /// anyway, and failing closed would let such a caller lock every
     /// legitimate peer out of the endpoint. The state ends by itself at the
     /// next window boundary.
+    ///
+    /// # A clock that steps backwards
+    ///
+    /// `now_us` is the server's clock, which is the wall clock in a running
+    /// server and can move **backwards** — an NTP step, or an operator setting
+    /// the time. A window is therefore retired when `now_us` is outside
+    /// `[started_us, started_us + window_us)` in **either** direction, not
+    /// when enough time has passed.
+    ///
+    /// Rolling backwards is the safe way round, and the alternative is not
+    /// merely untidy: a limiter that only rolls forward stays frozen with
+    /// every counter full until the clock catches back up to where it was, so
+    /// a one-hour backward step is a one-hour refusal of registration, of
+    /// login and of token refresh — an outage on exactly the endpoints a
+    /// connector needs to recover. The cost of rolling is that one caller gets
+    /// one extra allowance per backward step, which is nothing.
+    ///
+    /// `key` must already be a canonical peer address; see [`MAX_KEYS`].
     pub fn check(&self, key: &str, now_us: i64) -> bool {
         let mut window = self.window.lock().unwrap_or_else(PoisonError::into_inner);
-        if now_us.saturating_sub(window.started_us) >= self.window_us {
+        let elapsed_us = now_us.saturating_sub(window.started_us);
+        if !(0..self.window_us).contains(&elapsed_us) {
             window.counts.clear();
             window.started_us = now_us;
         }
@@ -155,16 +184,22 @@ impl RateLimiter {
 /// The limiter behind each anonymous endpoint.
 ///
 /// One per endpoint rather than one shared counter, because the budgets are
-/// not interchangeable: a client walks `authorize`, `consent` and `token` once
-/// each in a single login, and a shared counter would let a loop against one
-/// of them refuse the other two. `token` and `revoke` do share a limiter —
-/// both are one caller presenting one credential, and neither is reached in a
-/// browser.
+/// not interchangeable: a client walks `authorize`, the callback, `consent`
+/// and `token` once each in a single login, and a shared counter would let a
+/// loop against one of them refuse the rest. `token` and `revoke` do share a
+/// limiter — both are one caller presenting one credential, and neither is
+/// reached in a browser.
 pub struct Limits {
     /// `POST /oauth/register`, which writes a client row.
     pub register: RateLimiter,
     /// `GET /oauth/authorize`, which writes a ten-minute login row.
     pub authorize: RateLimiter,
+    /// `GET /oauth/callback`, the hop the provider redirects the human to. It
+    /// is anonymous — whoever holds the URL can send it — it reads the store
+    /// on every request, and a request naming a live login makes this server
+    /// call the upstream provider. It gets its own budget rather than sharing
+    /// `authorize`'s, so a loop here cannot stop a human starting a login.
+    pub callback: RateLimiter,
     /// `POST /oauth/consent`. Bounded because a form carrying the wrong token
     /// is refused *and* leaves the login row in place, so a guess costs the
     /// guesser nothing and may be retried.
@@ -180,6 +215,7 @@ impl Limits {
         Limits {
             register: RateLimiter::per_window(REGISTER_PER_WINDOW),
             authorize: RateLimiter::per_window(LOGIN_PER_WINDOW),
+            callback: RateLimiter::per_window(LOGIN_PER_WINDOW),
             consent: RateLimiter::per_window(LOGIN_PER_WINDOW),
             credential: RateLimiter::per_window(LOGIN_PER_WINDOW),
         }

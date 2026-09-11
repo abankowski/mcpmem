@@ -297,6 +297,25 @@ impl Started {
             .await
     }
 
+    /// `GET /oauth/callback` as a caller at `peer`, and the whole answer.
+    ///
+    /// The peer travels in `X-Forwarded-For`, for the reason
+    /// [`Started::register_from`] gives. The callback is anonymous — whoever
+    /// holds the URL can send it — so a test about what one caller may cost
+    /// this endpoint needs to name the caller.
+    pub async fn callback_from(&self, peer: &str, code: &str, state: &str) -> Reply {
+        let res = self
+            .server
+            .request(
+                Request::get(format!("/oauth/callback?code={code}&state={state}"))
+                    .header("x-forwarded-for", peer)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        Reply::of(res).await
+    }
+
     /// Carry the callback's answer into the stage that owns the server, so a
     /// test that drove the hops itself can go on to consent.
     pub fn into_stage(

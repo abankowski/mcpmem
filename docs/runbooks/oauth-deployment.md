@@ -299,6 +299,10 @@ catches for you:
 
 - The flag set, and the proxy **not** overwriting `X-Forwarded-For`: any caller
   chooses its own bucket with one header, and every limit is bypassable.
+- The flag set, and the process reachable **without** going through the proxy:
+  the same bypass, and overwriting the header at the proxy does not close it.
+  Binding where only the proxy can reach you is a requirement of using this
+  flag, not a hardening step — [section 8](#8-the-limits) gives the addresses.
 - The flag unset behind a proxy: every caller counts as the proxy, so one
   misbehaving client locks the whole internet out of the endpoint.
 
@@ -467,8 +471,12 @@ sqlite3 /var/lib/mcpmem/memory.mcpmem \
 systemctl restart mcpmem
 ```
 
-**`&&` is the same in both shells**; the difference above is only fish's
-preference for `and` on its own line after a redirect.
+**`&&` on one line is the same in both shells.** What differs is the
+continuation: fish **rejects** a line that begins with `&&`
+(`fish: Expected a string, but found '&&'`), so the second command must start
+with `and`. That is a syntax requirement, not a style choice — a `\`
+continuation would also work, but `and` is what reads correctly when the first
+line already ends in a redirect.
 
 The revocation takes effect on the **next request**: every access token is
 checked against `revoked` on each call, with no cache in front of it. Confirm:
@@ -517,11 +525,13 @@ Take a copy of the database first. That is not reversible.
 
 ### Turning OAuth off entirely
 
-Drop `--oidc-issuer` and every other OAuth flag, and restart. All five OAuth
-routes and both discovery documents then answer `404`, so the server advertises
-no authorization server at all. Issued tokens stop working because nothing
-validates them any more. Configure a static token first, or the server becomes
-either open or unreachable depending on your other flags.
+Drop `--oidc-issuer` and every other OAuth flag, and restart. All six
+`/oauth/*` routes then answer `404`, as do the two discovery documents at all
+four of their paths (each is published at a bare path and at a `{*suffix}`
+one), so the server advertises no authorization server at all. Issued tokens
+stop working because nothing validates them any more. Configure a static token
+first, or the server becomes either open or unreachable depending on your
+other flags.
 
 ## 7. What each refusal means
 
@@ -572,13 +582,14 @@ proxy — the well-known paths in section 4 are the usual cause.
 
 ## 8. The limits
 
-Five endpoints answer an anonymous caller, because the specifications require
+Six endpoints answer an anonymous caller, because the specifications require
 it. Each is bounded per peer address, in a fixed one-minute window:
 
 | Endpoint | Requests per minute per peer |
 | --- | --- |
 | `POST /oauth/register` | 20 |
 | `GET /oauth/authorize` | 60 |
+| `GET /oauth/callback` | 60 |
 | `POST /oauth/consent` | 60 |
 | `POST /oauth/token` | 60 (shared with `/oauth/revoke`) |
 | `POST /oauth/revoke` | 60 (shared with `/oauth/token`) |
@@ -587,7 +598,7 @@ Over the limit is `429` with `Retry-After: 60`, and a `WARN` log line naming the
 peer. Registration is the tightest because it is the one anonymous request that
 writes a row nothing expires.
 
-Four things to know before you tune anything:
+Six things to know before you tune anything:
 
 - **The limits are not configurable.** They are far above any legitimate
   caller — a browser walking one consent page sends a handful, and a connector
@@ -601,10 +612,60 @@ Four things to know before you tune anything:
   construction. If that is your threat, put a limit at the proxy. When more
   than 8192 distinct addresses are counted inside one window the limiter stops
   tracking new ones and admits them, rather than locking out legitimate peers.
+- **A backward clock step opens a fresh window rather than freezing the old
+  one.** The window is fixed, so an NTP step or a manual time change that moves
+  the clock back would otherwise leave every counter full until the clock
+  caught up. One extra allowance per step is the cost, and it is the right way
+  round: the alternative is a self-inflicted outage on registration, login and
+  token refresh.
+- **The bucket is a parsed IP address, not the header text.** A forwarded value
+  that is not an address is ignored, and the caller then counts against the
+  connection address instead — the proxy's, so one shared bucket for everyone
+  behind it. No caller can mint a bucket, or grow the limiter's map, with
+  arbitrary text. One address has one bucket however it is spelled: the log
+  line for `2001:0db8:0000:0000:0000:0000:0000:0002` reads
+  `peer=2001:db8::2`.
 
 These bound **how many** requests arrive. The size of one request is bounded
 separately and always: 256-byte client name, 8 redirect URIs, 2048-byte URL,
 16 scopes, and a 16 MiB body limit on the transport.
+
+### With the trust flag set, bind where only the proxy can reach you
+
+**This is a requirement, not a hardening step.** With
+`--oauth-trust-forwarded-proto` the peer address comes from a header the caller
+wrote, so anyone who can open a socket to the process directly chooses their
+own bucket and **every limit in the table above is bypassable**. Making the
+proxy overwrite `X-Forwarded-For` fixes nothing for a caller that skips the
+proxy.
+
+So the proxy must be the only route to the process. Bind loopback:
+
+```sh
+# Identical in Bash and fish.
+mcpmem ... --bind 127.0.0.1:8080 --oauth-trust-forwarded-proto
+```
+
+`127.0.0.1:8080` when the proxy runs on the same host — the default `--bind` is
+already this, so the mistake is overriding it with `0.0.0.0`. When the proxy is
+on another host, bind the one interface that reaches it, never `0.0.0.0`, and
+put a firewall rule in front:
+
+```sh
+# Identical in Bash and fish.
+mcpmem ... --bind 10.0.1.5:8080 --oauth-trust-forwarded-proto
+```
+
+Check it from anywhere that is not the proxy:
+
+```sh
+# Identical in Bash and fish. Must fail to connect.
+curl -sS --max-time 3 http://<host>:8080/.well-known/oauth-authorization-server
+```
+
+If that answers, the limits are decoration. Either fix the bind, or drop
+`--oauth-trust-forwarded-proto` and give the process its own TLS certificate —
+then the peer is the connection and the header is ignored.
 
 ## 9. What maintenance deletes
 
