@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mcpmem_core::jobs::{IndexJobRepository, IndexOperation, IndexProfileRegistry};
+use mcpmem_core::jobs::{IndexJobRepository, IndexOperation, IndexProfileRegistry, Normalization};
 use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
@@ -303,6 +303,27 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                             if vectors.len() != 1 {
                                 return Err("provider returned wrong embedding count".into());
                             }
+                            let mut vector = vectors.pop().expect("len checked above");
+                            // The profile's L2 contract is a promise the worker
+                            // makes before storing: OpenAI returns vectors that
+                            // are only *roughly* unit-norm (measured off by up
+                            // to 5e-4), and the stored-vector validation demands
+                            // |norm-1| < 1e-4. Normalize here so a provider's
+                            // approximation cannot fail the gate. A zero vector
+                            // cannot be normalized and will be rejected by the
+                            // stored-vector validation.
+                            if profile.normalization == Normalization::L2 {
+                                let norm: f64 = vector
+                                    .iter()
+                                    .map(|value| f64::from(*value).powi(2))
+                                    .sum::<f64>()
+                                    .sqrt();
+                                if norm > 0.0 {
+                                    for value in &mut vector {
+                                        *value = (*value as f64 / norm) as f32;
+                                    }
+                                }
+                            }
                             let before_commit = current_us();
                             if !jobs
                                 .renew(&job, before_commit, self.lease_us)
@@ -310,13 +331,8 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                             {
                                 return Ok(false);
                             }
-                            jobs.commit_vector(
-                                &job,
-                                current_us(),
-                                vectors.pop().as_deref(),
-                                "indexer",
-                            )
-                            .map_err(|error| error.to_string())
+                            jobs.commit_vector(&job, current_us(), Some(&vector), "indexer")
+                                .map_err(|error| error.to_string())
                         }),
                     // The entity vanished or was superseded before this claim
                     // ran. Retrying the same text can never succeed, so it must

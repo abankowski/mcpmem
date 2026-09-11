@@ -84,6 +84,14 @@ This entry lists every change since that snapshot. The version line restarts at
   sends the profile's `dimensions`. The live API was probed to confirm both
   ends: the field is honored by `text-embedding-3-small` and reduces the
   return to the declared length.
+- **The OpenAI provider's L2-normalization contract was enforced without
+  normalization.** The profile promises unit-norm vectors (`|norm-1| < 1e-4`)
+  and `validate_vector` enforces it at commit, but the worker stored
+  whatever the provider returned. OpenAI's embeddings are only *roughly*
+  unit-norm — measured off by up to 5e-4 on the live API — so jobs
+  committed or failed depending on per-vector rounding. The worker now
+  normalizes to unit length before commit when the profile declares L2,
+  so the provider's approximation can no longer fail the gate.
 - **A permanently failing job blocked the whole store, silently.** The worker
   retried a failed job every second with no console output and no bound, and
   the full-scan gate requires *every* job to be `done`. One poisoned entity

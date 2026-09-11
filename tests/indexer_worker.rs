@@ -358,6 +358,57 @@ fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
 }
 
 #[test]
+fn worker_normalizes_l2_vectors_before_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    graph
+        .create_entities(&[Entity {
+            name: "a".into(),
+            entity_type: "Person".into(),
+            observations: vec![],
+        }])
+        .unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let mut profile = profile();
+    profile.normalization = Normalization::L2;
+    IndexProfileRegistry::new(&conn)
+        .begin_rebuild(&profile)
+        .unwrap();
+    // A provider that returns approximately-unit vectors, as OpenAI does
+    // (measured off by up to 5e-4). The stored-vector gate demands
+    // |norm-1| < 1e-4; the worker must normalize before committing.
+    struct ApproxUnit;
+    impl EmbeddingProvider for ApproxUnit {
+        fn embed_texts(
+            &self,
+            _profile: &IndexProfile,
+            texts: &[String],
+        ) -> Result<Vec<Vec<f32>>, ProviderError> {
+            Ok(texts.iter().map(|_| vec![0.9996441, 0.0003]).collect())
+        }
+    }
+    let report = IndexerWorker::new(&database, ApproxUnit, Duration::from_secs(1))
+        .run_once(now_us())
+        .unwrap();
+    assert_eq!(report.committed, 1);
+    let blob: Vec<u8> = conn
+        .query_row(
+            "SELECT blob FROM profile_vector WHERE profile_id=?1",
+            [profile.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let (chunks, _) = blob.as_chunks::<4>();
+    let vector: Vec<f32> = chunks.iter().map(|b| f32::from_le_bytes(*b)).collect();
+    let norm: f64 = vector.iter().map(|x| f64::from(*x).powi(2)).sum();
+    assert!(
+        (norm - 1.0).abs() < 1e-6,
+        "stored vector must be unit norm, got {norm}"
+    );
+}
+
+#[test]
 fn ollama_rejects_url_credentials() {
     assert!(
         mcpmem_indexer::OllamaProvider::new("http://token@127.0.0.1:11434", Duration::from_secs(1))
