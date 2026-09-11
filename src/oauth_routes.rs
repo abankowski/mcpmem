@@ -47,6 +47,13 @@ use crate::http::HttpState;
 pub struct OauthState {
     pub config: crate::config::OAuthConfig,
     store: Mutex<mcpmem_oauth::store::Store>,
+    /// The runtime principals store (same SQLite file, own connection).
+    /// In a `Mutex`: the connection is not `Sync` and the store uses
+    /// `unchecked_transaction`, which needs exclusive access.
+    pub(crate) runtime: std::sync::Mutex<crate::runtime_principals::PrincipalsStore>,
+    /// The keys the principals file owns. A runtime row whose key is here
+    /// is masked: unreachable for login, still listed in the admin API.
+    pub(crate) builtin_keys: Arc<std::collections::BTreeSet<(String, String)>>,
     pub now_us: Arc<dyn Fn() -> i64 + Send + Sync>,
     /// The upstream provider, discovered on the first authorization request
     /// and kept for the lifetime of the process.
@@ -159,6 +166,26 @@ impl OauthState {
         f(&self.store.lock())
     }
 
+    /// Run `f` with exclusive access to the runtime principals store.
+    ///
+    /// The same two rules [`OauthState::with_store`] states apply: `f` must
+    /// not call back into this state (the mutex is not reentrant), and it
+    /// must not block. The std mutex is a deliberate departure from the
+    /// parking-lot one the OAuth store sits behind: the principals store uses
+    /// `unchecked_transaction`, and a poisoned lock here would take down
+    /// every login on the worker — a panicking caller is a defect that must
+    /// not end the process, so the poison is recovered from.
+    pub fn with_principals<R>(
+        &self,
+        f: impl FnOnce(&crate::runtime_principals::PrincipalsStore) -> R,
+    ) -> R {
+        let guard = self
+            .runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&guard)
+    }
+
     /// Revoke every live token family that names `principal`, and return how
     /// many families were revoked.
     pub fn revoke_principal(&self, principal: &str) -> std::result::Result<usize, String> {
@@ -219,9 +246,30 @@ impl OauthState {
                     "failed to seed the admin UI client: {e}"
                 ))
             })?;
+        // The runtime store opens the same file on its own connection, like
+        // every other holder of this database. It must not change the file's
+        // durability setting — the OAuth store and the graph each set what
+        // their own writes need, and a third opinion would race them.
+        let runtime = std::sync::Mutex::new(crate::runtime_principals::PrincipalsStore::open(
+            db_path.to_str().ok_or_else(|| {
+                crate::errors::MCSError::MemoryError(
+                    "the memory file path is not valid UTF-8".to_owned(),
+                )
+            })?,
+            busy_timeout_ms,
+        )?);
+        let builtin_keys = Arc::new(
+            config
+                .principals
+                .iter()
+                .map(|p| (p.iss.clone(), p.sub.clone()))
+                .collect::<std::collections::BTreeSet<(String, String)>>(),
+        );
         Ok(OauthState {
             config,
             store: Mutex::new(store),
+            runtime,
+            builtin_keys,
             now_us,
             limits: mcpmem_oauth::limits::Limits::new(),
             #[cfg(feature = "oauth")]
@@ -1158,7 +1206,30 @@ async fn finish_login(
         Err(e) => return Err(restored(oauth, &login, e.to_string())),
     };
 
-    let principal = principal_of(oauth, &claims)?;
+    let principal = match principal_of(oauth, &claims) {
+        Ok(p) => p,
+        Err(e) => {
+            if !oauth.config.approval_waitlist {
+                return Err(e);
+            }
+            // The waitlist is on: record the would-be human and answer
+            // with a pending page instead of a refusal. No token is ever
+            // minted on this path.
+            let name = claims.email.clone().unwrap_or_else(|| claims.sub.clone());
+            let ttl_us = oauth.config.approval_waitlist_ttl_seconds.saturating_mul(1_000_000);
+            oauth
+                .with_principals(|s| {
+                    s.record_waitlist(
+                        &claims.iss,
+                        &claims.sub,
+                        &name,
+                        i64::try_from(ttl_us).unwrap_or(i64::MAX),
+                    )
+                })
+                .map_err(|err| format!("the principals store refused a write: {err}"))?;
+            return Ok(waiting_page(&name));
+        }
+    };
     // The offered set is decided here, once, because this is where the human
     // becomes known. It is stored on the login row, so the set the page shows
     // and the set `mcpmem_oauth::consent::approve` validates against are one
@@ -1178,7 +1249,7 @@ async fn finish_login(
         .map_err(|e| format!("the store refused to read the client: {e}"))?
         .ok_or_else(|| "the client of this login is no longer registered".to_owned())?;
 
-    let page = consent_page(&login, &client, principal, &offered);
+    let page = consent_page(&login, &client, &principal, &offered);
     oauth
         .with_store(|store| {
             store.put_login(&LoginRecord {
@@ -1212,25 +1283,44 @@ fn restored(oauth: &OauthState, login: &LoginRecord, reason: String) -> String {
 /// provider — one an operator added later, or one an attacker stood up —
 /// mint a subject that names somebody here.
 ///
+/// Built-ins win on a key collision; the runtime row for that key is masked
+/// and unreachable here. The runtime store is consulted only when no built-in
+/// matches, because a row the principals file owns is the operator's source
+/// of truth and a runtime row with the same key could only have been written
+/// by an older, less careful code path.
+///
 /// The whole entry comes back, not the name alone: the consent page needs the
 /// label and the offered set needs the scopes, and a second lookup for each
 /// could find a different entry from the one that admitted the login.
 #[cfg(feature = "oauth")]
-fn principal_of<'a>(
-    oauth: &'a OauthState,
+fn principal_of(
+    oauth: &OauthState,
     claims: &IdentityClaims,
-) -> std::result::Result<&'a crate::principals::PrincipalEntry, String> {
-    oauth
+) -> std::result::Result<crate::principals::PrincipalEntry, String> {
+    if let Some(p) = oauth
         .config
         .principals
         .iter()
         .find(|p| p.key() == (claims.iss.as_str(), claims.sub.as_str()))
-        .ok_or_else(|| {
-            format!(
-                "no principal is registered for {} {}",
-                claims.iss, claims.sub
-            )
-        })
+    {
+        return Ok(p.clone());
+    }
+    let row = oauth
+        .with_principals(|s| s.get(&claims.iss, &claims.sub))
+        .map_err(|e| format!("the principals store refused a read: {e}"))?;
+    match row {
+        Some(row) => Ok(crate::principals::PrincipalEntry {
+            name: row.name,
+            iss: row.iss,
+            sub: row.sub,
+            label: row.label,
+            scopes: row.scopes,
+        }),
+        None => Err(format!(
+            "no principal is registered for {} {}",
+            claims.iss, claims.sub
+        )),
+    }
 }
 
 /// The redirect URI this server registers at the upstream provider. One
@@ -1271,6 +1361,35 @@ fn login_refused() -> Response {
          </body></html>",
     )
         .into_response()
+}
+
+/// The page a would-be user sees while an entry sits on the waitlist.
+/// 200, not the refusal page: the sign-in was understood, it is just not
+/// approved yet.
+#[cfg(feature = "oauth")]
+fn waiting_page(name: &str) -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        format!(
+            "<!doctype html><html><head><meta charset=\"utf-8\"><title>Pending approval</title></head>\
+         <body><h1>Sign-in pending</h1>\
+         <p>{}</p>\
+         <p>An administrator must approve the request before this sign-in can continue.</p></body></html>",
+            html_escape(name)
+        ),
+    )
+        .into_response()
+}
+
+/// Escape the few HTML-significant characters; the name comes from an
+/// upstream identity provider.
+#[cfg(feature = "oauth")]
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// What the human sees once the provider has vouched for them: the consent
