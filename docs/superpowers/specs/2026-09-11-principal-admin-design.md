@@ -183,12 +183,21 @@ Notes that fell out of the review:
 
 Deleting a runtime principal revokes its live token families immediately.
 The rows needed are already there: `oauth_token.principal` names the human,
-`family` groups the grant (`store.rs:536-539`). One query collects the
-families, `revoke_family` kills them (`consent.rs:297-299`). Worst case an
+`family` groups the grant (`crates/mcpmem-oauth/src/store.rs:536-539`). The
+delete handler collects the live families for that name
+(`SELECT DISTINCT family FROM oauth_token WHERE principal = ?1 AND revoked = 0`)
+and calls `Store::revoke_family` on each (`store.rs:617-620`). Worst case an
 already-minted access token lives out its one-hour TTL; every refresh and
 new login is refused from the moment of deletion. Renaming or rescoping a
 principal changes only future grants (a granted scope is the grant's own
 value, by design).
+
+Known limitation, v1: the match is by the entry's display `name`, which is
+what `oauth_token.principal` stores. A principal renamed, then deleted,
+leaves token families under the old name alive until they expire (access
+TTL ≤ 1 h; a rotating refresh family ≤ 30 d). Precise revocation needs
+`(iss, sub)` carried on the token rows, which touches the published
+`mcpmem-oauth` grant structs (a semver decision). Tracked as follow-up.
 
 ### UI
 
