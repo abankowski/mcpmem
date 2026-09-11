@@ -1521,46 +1521,14 @@ Expected: FAIL — routes return 404 / compile errors for missing handlers.
 
 - [ ] **Step 3: Implement the handlers in `src/http.rs`**
 
-Extend the router (`http.rs:197-263`), before `crate::oauth_routes::attach(router)` at `:260`:
+Extend the router (`http.rs:197-263`), before `crate::oauth_routes::attach(router)` at `:260` — API routes only; the static `/ui/admin*` routes and the `include_str!` consts arrive with the assets in Task 8:
 
 ```rust
-        .route("/ui/admin", get(admin_page_handler))
-        .route("/ui/admin/callback", get(admin_page_handler))
-        .route("/ui/admin.js", get(admin_js_handler))
-        .route("/ui/admin.css", get(admin_css_handler))
         .route("/ui/api/principals", get(admin_list_principals).post(admin_create_principal))
         .route("/ui/api/principals/{id}", patch(admin_update_principal).delete(admin_delete_principal))
         .route("/ui/api/waitlist", get(admin_list_waitlist))
         .route("/ui/api/waitlist/{id}/approve", post(admin_approve_waitlist))
         .route("/ui/api/waitlist/{id}", delete(admin_dismiss_waitlist))
-```
-
-Static consts beside the UI consts (`http.rs:47-49`) — Task 8 creates the assets; add the consts now and put the real files in Task 8:
-
-```rust
-const ADMIN_INDEX_HTML: &str = include_str!("ui/admin.html");
-const ADMIN_JS: &str = include_str!("ui/admin.js");
-const ADMIN_CSS: &str = include_str!("ui/admin.css");
-```
-
-Static handlers, mirroring `ui_handler` (`http.rs:508-533`):
-
-```rust
-/// `GET /ui/admin` and `/ui/admin/callback` — the administration SPA.
-/// Static asset, no auth; the JSON endpoints are the gate.
-async fn admin_page_handler() -> Response {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], ADMIN_INDEX_HTML).into_response()
-}
-
-/// `GET /ui/admin.js` — the administration application script.
-async fn admin_js_handler() -> Response {
-    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], ADMIN_JS).into_response()
-}
-
-/// `GET /ui/admin.css` — the administration stylesheet.
-async fn admin_css_handler() -> Response {
-    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], ADMIN_CSS).into_response()
-}
 ```
 
 The gate (beside `principal_of_ui`, `http.rs:491-504`):
@@ -1953,12 +1921,29 @@ Tokens: ~22k. Cost: < $1."
 
 **Files:**
 - Create: `src/ui/admin.html`, `src/ui/admin.js`, `src/ui/admin.css`
-- Modify: `src/http.rs` (the `include_str!` consts added in Task 7 now resolve; no logic change)
+- Modify: `src/http.rs` (static consts + routes; Task 7 mounted only the API routes)
 - Verify: `tests/principal_admin.rs` adds a static-serving assertion
 
 **Interfaces:**
-- Consumes: the routes and API contract from Task 7; the OAuth endpoints (`/oauth/authorize`, `/oauth/token`); the seeded client id `mcpmem-admin-ui` (Task 3).
-- Produces: the browser app that performs the PKCE dance, lists/edit/adds/removes principals, and lists/approves/dismisses waitlist entries.
+- Consumes: the API routes and contract from Task 7; the OAuth endpoints (`/oauth/authorize`, `/oauth/token`); the seeded client id `mcpmem-admin-ui` (Task 3).
+- Produces: the browser app that performs the PKCE dance, lists/edit/adds/removes principals, and lists/approves/dismisses waitlist entries. Alongside the assets, mount the static routes in `http.rs` (consts beside the UI consts at `http.rs:47-49`):
+
+```rust
+const ADMIN_INDEX_HTML: &str = include_str!("ui/admin.html");
+const ADMIN_JS: &str = include_str!("ui/admin.js");
+const ADMIN_CSS: &str = include_str!("ui/admin.css");
+```
+
+and in `router()` (before `crate::oauth_routes::attach(router)`):
+
+```rust
+        .route("/ui/admin", get(admin_page_handler))
+        .route("/ui/admin/callback", get(admin_page_handler))
+        .route("/ui/admin.js", get(admin_js_handler))
+        .route("/ui/admin.css", get(admin_css_handler))
+```
+
+with the three handlers mirroring `ui_handler` (`http.rs:508-533`) — static, no auth; the JSON endpoints are the gate (content types: `text/html; charset=utf-8`, `text/javascript; charset=utf-8`, `text/css; charset=utf-8`).
 
 - [ ] **Step 1: Write the failing test**
 
