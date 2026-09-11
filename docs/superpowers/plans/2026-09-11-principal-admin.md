@@ -402,7 +402,7 @@ In `OauthState::open_with_clock` (which opens the connection at `oauth_routes.rs
         .put_client(&mcpmem_oauth::store::ClientRecord {
             client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
             client_name: "mcpmem admin UI".to_owned(),
-            redirect_uris: vec![format!("{}/ui/admin/callback", cfg.public_url)],
+            redirect_uris: vec![format!("{}/ui/admin/callback", config.public_url)],
             source: mcpmem_oauth::store::ClientRecord::RESERVED.to_owned(),
             created_us: now,
             last_used_us: now,
@@ -415,6 +415,8 @@ In `OauthState::open_with_clock` (which opens the connection at `oauth_routes.rs
 ```
 
 Either compute `now` from the clock already in scope or call the same `now_us()` the file uses elsewhere. Add `pub const ADMIN_CLIENT_ID: &str = "mcpmem-admin-ui";` to `crates/mcpmem-oauth/src/lib.rs`.
+
+**Exempt the reserved client from eviction.** The 30-day `evict_clients` sweep (`store.rs:681`) would remove the seeded row from a long-running server that saw no admin authorization, silently breaking `/ui/admin` until a restart re-seeds it. The reserved client is server-owned infrastructure, not a registration; the sweep exists to bound anonymous DCR/CIMD rows. In `Store::evict_clients`, exclude it — add `AND source <> 'reserved'` to the eviction query. Update `tests/oauth_flow.rs`'s eviction-count assertion to count only non-reserved clients (restore the pre-seed expectation) and say the exemption in its comment.
 
 Add the revocation wrapper on `OauthState` (beside `with_store`):
 
@@ -430,7 +432,7 @@ pub fn revoke_principal(&self, principal: &str) -> std::result::Result<usize, St
 
 Run: `cargo test -p mcpmem-oauth && cargo test -p mcpmem oauth_routes`
 
-Expected: PASS. The metadata docs now list `admin` when OAuth is on (covered by the existing metadata tests asserting the scope list — update those if they pin the exact list, e.g. `tests/oauth_upstream.rs` discovery assertions; if an assertion breaks, the new scope is the cause, so widen the expected list to include `admin` where the test builds an OAuth server).
+Expected: PASS. The metadata docs now list `admin` when OAuth is on. The scope-list pins live in `tests/oauth_discovery.rs` — widen each `scopes_supported` expectation to include `"admin"` at the end for OAuth-enabled servers. The seed adds one `oauth_client` row to every OAuth-enabled test server: switch row-count assertions that count registrations to a helper that excludes `source = 'reserved'` (a `count_registered_clients` helper in `tests/support/flow.rs`), preserving each test's original number and intent.
 
 - [ ] **Step 7: Commit**
 
