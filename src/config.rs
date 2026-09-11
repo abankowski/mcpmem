@@ -57,6 +57,92 @@ pub struct Config {
     pub roles: RoleSet,
     /// MCP-only string observation adapter; deprecated and removed in 2.0.0.
     pub legacy_observations: bool,
+    /// OAuth authorization server settings. `None` keeps OAuth off.
+    pub oauth: Option<OAuthConfig>,
+    /// Scopes granted to the static bearer principal.
+    pub bearer_scopes: Vec<ToolCategory>,
+}
+
+/// Settings for the OAuth 2.1 authorization server. Present only when
+/// `--oidc-issuer` is given, which is what turns OAuth on.
+#[derive(Debug, Clone)]
+pub struct OAuthConfig {
+    /// Canonical HTTPS URL of this server: scheme and host lowercased, no
+    /// trailing slash, no query and no fragment. A path prefix is legal — the
+    /// MCP authorization specification names `https://mcp.example.com/server/mcp`
+    /// as a canonical resource URI. Never derived from the Host header.
+    pub public_url: String,
+    /// Upstream OpenID Connect issuer, normalized the same way as `public_url`.
+    pub oidc_issuer: String,
+    pub oidc_client_id: String,
+    /// `None` for a public client.
+    pub oidc_client_secret: Option<Arc<str>>,
+    /// The humans allowed to authorize, and the scopes each one may grant.
+    pub principals: Vec<crate::principals::PrincipalEntry>,
+    /// Hosts allowed to host a client metadata document. Each entry is matched
+    /// as a whole host, case-insensitively: `claude.ai` does not admit
+    /// `auth.claude.ai`, which needs its own entry. See
+    /// `mcpmem_oauth::registration::resolve_metadata_document`.
+    pub cimd_allowed_domains: Vec<String>,
+    /// Declares that a reverse proxy terminates TLS in front of this server.
+    ///
+    /// Two effects, and neither of them reads `X-Forwarded-Proto`. The header
+    /// is not read anywhere in this workspace, and it does not need to be: the
+    /// canonical URL every document and every token is bound to comes from
+    /// `--public-url`, never from the request.
+    ///
+    /// - It stands in for `--tls-cert`/`--tls-key` at startup, so that
+    ///   `--oidc-issuer` is not refused for want of TLS this process does not
+    ///   terminate.
+    /// - It selects `X-Forwarded-For` as the peer source the per-peer request
+    ///   limits count against (`crate::oauth_routes::Peer`). That is the whole
+    ///   of its runtime effect, and it is why the process must then be bound
+    ///   where only the proxy can reach it: a caller that connects directly
+    ///   writes its own header and so chooses its own bucket.
+    pub trust_forwarded_proto: bool,
+}
+
+/// Normalize an HTTPS URL given on the command line so that later string
+/// comparisons (the `aud` claim, the resource indicator, a concatenated
+/// discovery path) can be plain equality: strip the trailing slash, lowercase
+/// the scheme and the host, and refuse anything that cannot identify one
+/// server. `flag` names the flag in the message. A path prefix is kept, and
+/// keeps its case; a query, a fragment or a userinfo part is refused, because
+/// RFC 8707 forbids all three in a resource indicator and the OpenID Connect
+/// issuer rule forbids them in an issuer identifier.
+fn normalize_https_url(flag: &str, value: &str) -> Result<String> {
+    if value.contains('?') || value.contains('#') {
+        return Err(MCSError::InvalidParams(format!(
+            "{flag} must carry no query string and no fragment"
+        )));
+    }
+    let (scheme, rest) = value
+        .split_once("://")
+        .ok_or_else(|| MCSError::InvalidParams(format!("{flag} must be an absolute https URL")))?;
+    if !scheme.eq_ignore_ascii_case("https") {
+        return Err(MCSError::InvalidParams(format!(
+            "{flag} must use the https scheme"
+        )));
+    }
+    // Trim below the scheme, not above it: trimming the whole value would eat
+    // the `//` of a bare `https://` and report a missing scheme instead of a
+    // missing host.
+    let rest = rest.trim_end_matches('/');
+    let (host, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    if host.is_empty() {
+        return Err(MCSError::InvalidParams(format!("{flag} must name a host")));
+    }
+    if host.contains('@') {
+        // Lowercasing the authority would silently rewrite a case-sensitive
+        // password, and neither specification allows userinfo here anyway.
+        return Err(MCSError::InvalidParams(format!(
+            "{flag} must carry no userinfo; remove the part before the '@'"
+        )));
+    }
+    Ok(format!("https://{}{path}", host.to_ascii_lowercase()))
 }
 
 /// Resolve the read-only connection-pool size. `0` means "auto": scale to the
@@ -161,6 +247,117 @@ impl Config {
             ));
         }
 
+        let bearer_scopes = if args.static_bearer_scopes.is_empty() {
+            ToolCategory::ALL.to_vec()
+        } else {
+            args.static_bearer_scopes
+                .iter()
+                .map(|s| s.parse::<ToolCategory>())
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(MCSError::InvalidParams)?
+        };
+
+        // A `--no-default-features` build compiles out `/oauth/authorize`,
+        // `/oauth/callback`, `/oauth/consent`, `/oauth/token` and
+        // `/oauth/revoke` (`src/oauth_routes::attach`) while the two discovery
+        // documents and `POST /oauth/register` still answer. Serving half an
+        // authorization server is worse than refusing to start: a connector
+        // discovers this server, registers, and then fails at the login hop
+        // with nothing to read. It fails closed on `/mcp` — no credential can
+        // ever be issued — so this is a startup footgun rather than an
+        // exposure, and a refusal here is the only answer an operator can act
+        // on.
+        #[cfg(not(feature = "oauth"))]
+        if args.oidc_issuer.is_some() {
+            return Err(MCSError::InvalidParams(
+                "--oidc-issuer needs the `oauth` feature; this build serves no \
+                 authorization, consent or token endpoint"
+                    .into(),
+            ));
+        }
+
+        let oauth = if let Some(issuer) = args.oidc_issuer.clone() {
+            if !roles.roles().contains(&crate::runtime::RuntimeRole::Mcp) {
+                return Err(MCSError::InvalidParams(
+                    "--oidc-issuer requires the mcp role".into(),
+                ));
+            }
+            if args.transport != crate::Transport::Http {
+                return Err(MCSError::InvalidParams(
+                    "--oidc-issuer requires --transport http; stdio is local and \
+                     already holds every scope"
+                        .into(),
+                ));
+            }
+            if tls_cert.is_none() && !args.oauth_trust_forwarded_proto {
+                return Err(MCSError::InvalidParams(
+                    "--oidc-issuer needs TLS; pass --tls-cert and --tls-key, or \
+                     --oauth-trust-forwarded-proto behind a proxy that terminates TLS"
+                        .into(),
+                ));
+            }
+            let oidc_issuer = normalize_https_url("--oidc-issuer", &issuer)?;
+            let public_url = args.public_url.clone().ok_or_else(|| {
+                MCSError::InvalidParams("--oidc-issuer requires --public-url".into())
+            })?;
+            let public_url = normalize_https_url("--public-url", &public_url)?;
+            let client_id = args.oidc_client_id.clone().ok_or_else(|| {
+                MCSError::InvalidParams("--oidc-issuer requires --oidc-client-id".into())
+            })?;
+            let principals_path = args.principals_file.clone().ok_or_else(|| {
+                MCSError::InvalidParams("--oidc-issuer requires --principals-file".into())
+            })?;
+            let principals = crate::principals::load(&principals_path)?;
+            let oidc_client_secret = match args.oidc_client_secret_file.clone() {
+                None => None,
+                Some(path) => {
+                    let text = std::fs::read_to_string(&path).map_err(|e| {
+                        MCSError::InvalidParams(format!(
+                            "failed to read --oidc-client-secret-file '{path}': {e}"
+                        ))
+                    })?;
+                    let secret = text.trim();
+                    if secret.is_empty() {
+                        return Err(MCSError::InvalidParams(format!(
+                            "--oidc-client-secret-file '{path}' is empty"
+                        )));
+                    }
+                    Some(Arc::from(secret))
+                }
+            };
+            let cimd_allowed_domains = if args.cimd_allowed_domains.is_empty() {
+                vec!["claude.ai".to_string(), "chatgpt.com".to_string()]
+            } else {
+                args.cimd_allowed_domains.clone()
+            };
+            Some(OAuthConfig {
+                public_url,
+                oidc_issuer,
+                oidc_client_id: client_id,
+                oidc_client_secret,
+                principals,
+                cimd_allowed_domains,
+                trust_forwarded_proto: args.oauth_trust_forwarded_proto,
+            })
+        } else {
+            // Fail closed, as `--auth-token-file` does above: an OAuth flag
+            // without `--oidc-issuer` is a misconfiguration, not a no-op. The
+            // principals file would never be opened, so its errors would go
+            // unseen while the server ran with OAuth off.
+            if args.public_url.is_some()
+                || args.oidc_client_id.is_some()
+                || args.oidc_client_secret_file.is_some()
+                || args.principals_file.is_some()
+                || !args.cimd_allowed_domains.is_empty()
+                || args.oauth_trust_forwarded_proto
+            {
+                return Err(MCSError::InvalidParams(
+                    "the OAuth flags need --oidc-issuer, which turns OAuth on".into(),
+                ));
+            }
+            None
+        };
+
         Ok(Config {
             memory_file_path,
             transport: args.transport,
@@ -183,6 +380,8 @@ impl Config {
             enabled_categories,
             roles,
             legacy_observations: args.legacy_observations,
+            oauth,
+            bearer_scopes,
         })
     }
 }
@@ -211,6 +410,8 @@ impl Default for Config {
             enabled_categories: Vec::new(),
             roles: RoleSet::mcp_only(),
             legacy_observations: false,
+            oauth: None,
+            bearer_scopes: ToolCategory::ALL.to_vec(),
         }
     }
 }

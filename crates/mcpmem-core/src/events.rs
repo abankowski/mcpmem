@@ -42,7 +42,7 @@ pub fn request_fingerprint(method: &str, normalized_path: &str, raw_body: &[u8])
 /// to this crate, and `cargo package` copies only the files under one crate
 /// root, so an `include_str!` from another crate ships a crate that cannot
 /// compile. That is how the `v1.0.0-rc.1` release failed.
-pub const MIGRATIONS: [(i64, &str); 3] = [
+pub const MIGRATIONS: [(i64, &str); 4] = [
     (1, include_str!("../migrations/0001_change_events.sql")),
     (
         2,
@@ -52,7 +52,46 @@ pub const MIGRATIONS: [(i64, &str); 3] = [
         3,
         include_str!("../migrations/0003_observation_metadata.sql"),
     ),
+    (4, include_str!("../migrations/0004_oauth.sql")),
 ];
+
+#[cfg(test)]
+mod migration_inventory {
+    /// The one inventory anchor for the migration set. Every other test derives
+    /// its expectation from [`super::MIGRATIONS`], so a registry entry deleted
+    /// by a bad merge, misnumbered, or edited in place would otherwise pass the
+    /// whole suite. Checksums are what production verifies at every startup, so
+    /// pinning them here pins count, order and content together.
+    #[test]
+    fn every_migration_version_and_checksum_is_pinned() {
+        let inventory: Vec<(i64, String)> = super::MIGRATIONS
+            .iter()
+            .map(|(version, sql)| (*version, super::sha256(sql.as_bytes())))
+            .collect();
+        assert_eq!(
+            inventory,
+            vec![
+                (
+                    1,
+                    "a48def8b25e9ecf813d3fa27a785893ba5de346a8b82f012cc543af2fecd5af2".to_string()
+                ),
+                (
+                    2,
+                    "2c267315d89203d5223895a845b275d8add904310d2c0a5a7a5b0d1873b984ec".to_string()
+                ),
+                (
+                    3,
+                    "0b82809aca1b4e90edfea4796e33a9c32963e055b7b57b8524b86dcb580bd454".to_string()
+                ),
+                (
+                    4,
+                    "5d18e23d999661dda33bfd2358659530760afec0a079c3a1b96689b537af28a2".to_string()
+                ),
+            ],
+            "a migration was added, removed, renumbered or edited"
+        );
+    }
+}
 
 /// Apply all pending ordered migrations in one transaction, including their
 /// ledger entries. Any failure rolls the entire pending set back; historical

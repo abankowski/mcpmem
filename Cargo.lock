@@ -1855,6 +1855,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64",
+ "js-sys",
+ "ring",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1970,20 +1983,26 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "base64",
  "blake3",
  "clap",
  "dashmap",
  "futures",
  "hmac 0.12.1",
+ "http-body-util",
  "ignore",
+ "jsonwebtoken",
  "lru",
  "mcpmem-core",
  "mcpmem-indexer",
+ "mcpmem-oauth",
  "mcpmem-runtime",
  "mcpmem-webhook",
  "notify",
  "parking_lot",
  "petgraph",
+ "reqwest",
+ "ring",
  "rusqlite",
  "rustc-hash",
  "rustls 0.23.40",
@@ -1994,6 +2013,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2009,6 +2029,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-tags",
  "tree-sitter-typescript",
+ "url",
  "usearch",
  "uuid",
  "zerocopy",
@@ -2041,6 +2062,25 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "url",
+]
+
+[[package]]
+name = "mcpmem-oauth"
+version = "1.0.1"
+dependencies = [
+ "base64",
+ "getrandom 0.4.3",
+ "jsonwebtoken",
+ "mcpmem-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror",
+ "tracing",
  "url",
 ]
 
@@ -2440,6 +2480,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls 0.23.40",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",

@@ -35,9 +35,12 @@ use tokio::net::TcpListener;
 use tower_http::compression::CompressionLayer;
 use tracing::{error, info};
 
+use crate::authz::Principal;
 use crate::errors::{MCSError, Result};
 use crate::kg::GraphHandle;
-use crate::server;
+use crate::oauth_routes::OauthState;
+use crate::server::{self, HttpOutcome};
+use crate::tools::ToolCategory;
 use crate::vector_store::VectorStore;
 
 /// The graph viewer's static assets, embedded at build time (served from `/ui`).
@@ -55,19 +58,144 @@ const MAX_UI_NODES: usize = 1000;
 /// bounds a single interaction's payload.
 const MAX_UI_EXPAND_DEPTH: u32 = 3;
 
-/// Shared state for the HTTP handlers: the graph, the optional vector store, and
-/// an optional bearer token required on every request when present.
+/// Shared state for the HTTP handlers: the graph, the optional vector store,
+/// an optional bearer token required on every request when present, the scopes
+/// that token grants, the categories this server advertises, and the OAuth
+/// authorization server when it is on.
 #[derive(Clone)]
 pub struct HttpState {
     kg: Arc<GraphHandle>,
     vs: Option<Arc<VectorStore>>,
     auth_token: Option<Arc<str>>,
+    bearer_scopes: Arc<[ToolCategory]>,
+    /// The tool categories enabled on this server. These are the scopes the
+    /// discovery documents and the 401 challenge advertise.
+    pub(crate) enabled_categories: Arc<[ToolCategory]>,
+    /// `Some` turns OAuth on: the discovery routes answer, and the challenge
+    /// names them.
+    pub(crate) oauth: Option<Arc<OauthState>>,
+}
+
+/// What a test wants its [`HttpState`] to hold. Named fields, because
+/// `bearer_scopes` and `enabled_categories` are two lists of one type and a
+/// positional call cannot show which is which.
+#[doc(hidden)]
+pub struct TestSetup {
+    pub db_path: std::path::PathBuf,
+    /// `Some` turns OAuth on for this state.
+    pub oauth: Option<crate::config::OAuthConfig>,
+    /// The static bearer token, when the deployment under test configures one
+    /// beside OAuth. `--auth-token-file` and `--oidc-issuer` are independent
+    /// flags and the runbook sells the pair, so the combination has to be
+    /// reachable from a fixture.
+    pub auth_token: Option<Arc<str>>,
+    /// How the OAuth state reads a client identifier metadata document.
+    /// `None` is the shipped fetcher, which speaks `https` to a host on the
+    /// operator's allow-list — so a test that drives the authorization
+    /// endpoint with a metadata-document identifier names one here.
+    pub metadata_fetch: Option<Arc<dyn mcpmem_oauth::registration::Fetch>>,
+    /// Scopes the presented credential holds. With no static token configured
+    /// these are the scopes of the anonymous principal an open server
+    /// dispatches with, and the `/ui` gate reads them.
+    pub bearer_scopes: Vec<ToolCategory>,
+    /// Categories this server exposes. These are the advertised OAuth scopes,
+    /// and they publish the process-wide category flags.
+    pub enabled_categories: Vec<ToolCategory>,
+    /// The clock the OAuth state reads. `None` uses the wall clock.
+    pub now_us: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+}
+
+impl HttpState {
+    /// The OAuth state, or `None` when OAuth is off. For a test that inspects
+    /// the store or the clock behind a router.
+    #[doc(hidden)]
+    pub const fn oauth(&self) -> Option<&Arc<OauthState>> {
+        self.oauth.as_ref()
+    }
+
+    /// Build a state over a fresh database, for integration tests that drive
+    /// [`router`] with `tower::ServiceExt::oneshot`.
+    ///
+    /// The graph is opened through [`crate::server::MCPServer::new_kg`], the
+    /// same entry point `src/main.rs` uses. That matters twice: it migrates the
+    /// schema the OAuth store needs, and it publishes the process-wide tool
+    /// category flags that `dispatch_http_body` consults before any scope
+    /// check. Building the graph directly leaves those flags `false`, and every
+    /// `tools/call` through the router then answers `MethodNotFound`.
+    ///
+    /// Those flags are process-wide, so two tests in one binary that need
+    /// different category sets must not run at the same time.
+    ///
+    /// `TestSetup::auth_token` decides whether the state carries a static
+    /// bearer token beside the OAuth one. A fixture that names none tests the
+    /// OAuth credential alone; one that names it tests the deployment the
+    /// runbook sells, where both are configured and `principal_of` falls
+    /// through from the first to the second.
+    #[doc(hidden)]
+    pub fn for_test(setup: TestSetup) -> HttpState {
+        let TestSetup {
+            db_path,
+            oauth,
+            auth_token,
+            metadata_fetch,
+            bearer_scopes,
+            enabled_categories,
+            now_us,
+        } = setup;
+        let config = crate::config::Config {
+            memory_file_path: db_path.to_string_lossy().into_owned(),
+            enabled_categories: enabled_categories.clone(),
+            ..crate::config::Config::default()
+        };
+        let busy_timeout_ms = config.busy_timeout_ms;
+        let kg = crate::server::MCPServer::new_kg(config)
+            .expect("build the test server")
+            .graph();
+        let oauth = oauth.map(|config| {
+            let state = match now_us {
+                Some(clock) => {
+                    OauthState::open_with_clock(config, &db_path, busy_timeout_ms, clock)
+                }
+                None => OauthState::open(config, &db_path, busy_timeout_ms),
+            };
+            let state = state.expect("open the test OAuth store");
+            Arc::new(match metadata_fetch {
+                Some(fetch) => state.with_metadata_fetch(fetch),
+                None => state,
+            })
+        });
+        HttpState {
+            kg,
+            vs: None,
+            auth_token,
+            bearer_scopes: Arc::from(bearer_scopes),
+            enabled_categories: Arc::from(enabled_categories),
+            oauth,
+        }
+    }
+}
+
+/// Everything [`run`] needs. One struct rather than positional parameters:
+/// `bearer_scopes` and `enabled_categories` have the same type, and no
+/// compiler catches a swap between two arguments of one type.
+pub struct HttpRunConfig {
+    pub addr: String,
+    pub kg: Arc<GraphHandle>,
+    pub vs: Option<Arc<VectorStore>>,
+    pub auth_token: Option<Arc<str>>,
+    /// Scopes granted to the static bearer token.
+    pub bearer_scopes: Arc<[ToolCategory]>,
+    /// Tool categories enabled on this server, advertised as OAuth scopes.
+    pub enabled_categories: Arc<[ToolCategory]>,
+    pub oauth: Option<Arc<OauthState>>,
+    pub tls_cert: Option<std::path::PathBuf>,
+    pub tls_key: Option<std::path::PathBuf>,
 }
 
 /// Build the axum router for the HTTP transport. Exposed so tests can drive it
 /// with `tower::ServiceExt::oneshot` without binding a socket.
 pub fn router(state: HttpState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/mcp", post(post_handler).get(get_handler))
         .route("/", post(post_handler).get(get_handler))
         .route("/ui", get(ui_handler))
@@ -76,7 +204,10 @@ pub fn router(state: HttpState) -> Router {
         .route("/ui/graph", get(ui_graph_handler))
         .route("/ui/search", get(ui_search_handler))
         .route("/ui/node", get(ui_node_handler))
-        .route("/ui/expand", get(ui_expand_handler))
+        .route("/ui/expand", get(ui_expand_handler));
+    // The two `.well-known` documents. With OAuth off both answer 404, so a
+    // server without OAuth advertises no authorization server.
+    crate::oauth_routes::attach(router)
         // Compress responses when the client advertises support. The graph JSON
         // and the embedded HTML/CSS/JS are highly compressible; the default
         // predicate skips already-compressed types and, importantly, SSE
@@ -86,40 +217,63 @@ pub fn router(state: HttpState) -> Router {
         .with_state(state)
 }
 
-/// Bind `addr` and serve the HTTP transport until the process is killed.
+/// Bind `config.addr` and serve the HTTP transport until the process is killed.
 ///
 /// When `tls_cert` and `tls_key` are both set, the transport is served over TLS
 /// (HTTPS); otherwise it stays plaintext. The caller (`config.rs`) guarantees
 /// the two are set together.
-pub async fn run(
-    addr: &str,
-    kg: Arc<GraphHandle>,
-    vs: Option<Arc<VectorStore>>,
-    auth_token: Option<Arc<str>>,
-    tls_cert: Option<std::path::PathBuf>,
-    tls_key: Option<std::path::PathBuf>,
-) -> Result<()> {
-    let auth = if auth_token.is_some() { "on" } else { "off" };
-    let state = HttpState { kg, vs, auth_token };
+pub async fn run(config: HttpRunConfig) -> Result<()> {
+    let HttpRunConfig {
+        addr,
+        kg,
+        vs,
+        auth_token,
+        bearer_scopes,
+        enabled_categories,
+        oauth,
+        tls_cert,
+        tls_key,
+    } = config;
+    let auth = match (auth_token.is_some(), oauth.is_some()) {
+        (true, true) => "static bearer + oauth",
+        (true, false) => "static bearer",
+        (false, true) => "oauth",
+        (false, false) => "off",
+    };
+    let state = HttpState {
+        kg,
+        vs,
+        auth_token,
+        bearer_scopes,
+        enabled_categories,
+        oauth,
+    };
 
     if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
         let tls = crate::tls::server_config(&cert, &key)
             .await
             .map_err(MCSError::IoError)?;
-        let socket_addr = resolve_addr(addr)?;
+        let socket_addr = resolve_addr(&addr)?;
         info!(
             "Listening for HTTPS (Streamable) MCP on https://{socket_addr}/mcp (TLS, auth {auth})"
         );
+        // `into_make_service_with_connect_info` rather than
+        // `into_make_service`: without it no handler can see the peer address,
+        // and `oauth_routes::Peer` would count every anonymous caller in one
+        // bucket — a rate limit that one client can use to lock out the rest.
         axum_server::bind_rustls(socket_addr, tls)
-            .serve(router(state).into_make_service())
+            .serve(router(state).into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
             .map_err(MCSError::IoError)?;
     } else {
-        let listener = TcpListener::bind(addr).await.map_err(MCSError::IoError)?;
+        let listener = TcpListener::bind(&addr).await.map_err(MCSError::IoError)?;
         info!("Listening for HTTP (Streamable) MCP on http://{addr}/mcp (auth {auth})");
-        axum::serve(listener, router(state))
-            .await
-            .map_err(MCSError::IoError)?;
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(MCSError::IoError)?;
     }
     Ok(())
 }
@@ -146,36 +300,139 @@ fn wants_sse(headers: &HeaderMap) -> bool {
         .is_some_and(|a| a.contains("text/event-stream"))
 }
 
-/// `true` when the request is allowed: either no token is configured, or the
-/// `Authorization` header carries the expected bearer token.
-fn authorized(state: &HttpState, headers: &HeaderMap) -> bool {
-    match state.auth_token {
-        None => true,
-        Some(ref expected) => headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|presented| server::token_matches(presented, expected)),
+/// Resolve the caller, or `None` when the request is unauthorized.
+///
+/// The order is OAuth token, then the static bearer, then the fully open
+/// case, and it is the order of specificity: a value that validates as an
+/// issued token is one, and nothing else can be tried for it.
+///
+/// With OAuth on and no static token, a request without a credential is not
+/// allowed: an OAuth server refuses anonymous access even before it can
+/// verify an issued token. With neither configured the server stays open,
+/// which is the behaviour every existing deployment has — and the open
+/// caller holds `bearer_scopes`, so `--static-bearer-scopes` narrows `/mcp`
+/// and `/ui` alike rather than one of the two.
+fn principal_of(state: &HttpState, headers: &HeaderMap) -> Option<Principal> {
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().strip_prefix("Bearer ").unwrap_or(v).trim());
+
+    if let (Some(oauth), Some(token)) = (state.oauth.as_ref(), presented)
+        && let Some(grant) = oauth.validate(token)
+    {
+        return Some(crate::authz::oauth_principal(
+            &grant.principal,
+            grant.scopes.into_iter().collect(),
+        ));
+    }
+    match (state.auth_token.as_ref(), presented) {
+        (Some(expected), Some(token)) if server::token_matches(token, expected) => {
+            Some(crate::authz::bearer_principal(&state.bearer_scopes))
+        }
+        (None, _) if state.oauth.is_none() => {
+            Some(crate::authz::bearer_principal(&state.bearer_scopes))
+        }
+        _ => None,
     }
 }
 
+/// The RFC 6750 challenge. With OAuth on it names the resource metadata, so the
+/// client can discover the authorization server. With OAuth off it is bare.
+///
+/// The `scope` parameter is omitted when no category is enabled. RFC 6749
+/// section 3.3, which RFC 6750 section 3 defers to, admits no empty scope
+/// list, and a parser that rejects the malformed parameter discards the whole
+/// header — including the only discovery pointer the client has.
+fn unauthorized(state: &HttpState) -> Response {
+    let mut value = String::from("Bearer");
+    if let Some(oauth) = state.oauth.as_ref() {
+        value.push_str(&format!(
+            " resource_metadata=\"{}\"",
+            oauth.resource_metadata()
+        ));
+        let scope = state
+            .enabled_categories
+            .iter()
+            .map(|c| c.slug())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !scope.is_empty() {
+            value.push_str(&format!(", scope=\"{scope}\""));
+        }
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, value)],
+        "Unauthorized",
+    )
+        .into_response()
+}
+
+/// The RFC 6750 section 3.1 `insufficient_scope` challenge, which is the 403
+/// a connector parses to learn what to ask the human for next.
+///
+/// The order of the parameters is the contract, and it is fixed here rather
+/// than assembled by the caller: `error`, then `scope`, then — with OAuth on
+/// — `resource_metadata`. The last one is what makes the 403 actionable: a
+/// client that has been refused for a scope it does not hold needs the
+/// document naming the authorization server to go and get one.
+fn insufficient_scope(state: &HttpState, scopes: &[&'static str]) -> Response {
+    let scope = scopes.join(" ");
+    let mut value = format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\"");
+    if let Some(oauth) = state.oauth.as_ref() {
+        value.push_str(&format!(
+            ", resource_metadata=\"{}\"",
+            oauth.resource_metadata()
+        ));
+    }
+    (
+        StatusCode::FORBIDDEN,
+        [(header::WWW_AUTHENTICATE, value)],
+        "insufficient scope",
+    )
+        .into_response()
+}
+
+/// `POST /mcp` — the one request every tool call arrives on.
+///
+/// Resolving the caller and dispatching happen in one blocking task, and the
+/// order inside it is the order it was before: no body is dispatched for a
+/// caller this server will not honour.
+///
+/// The reason they share the task is [`OauthState::validate`]. It takes the
+/// single store mutex and runs a SQLite query under it, which is what
+/// `OauthState::with_store` tells its callers not to do on the reactor. On
+/// this path there is already a blocking task to put it in, so it goes there.
+/// A WAL point lookup is microseconds and a reader never waits on a writer, so
+/// what this removes is a ceiling rather than a stall — but the ceiling is on
+/// every authenticated request in the process, and the rule the crate states
+/// about its own lock should hold where the transport can make it hold.
 async fn post_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if !authorized(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-    }
-    let kg = state.kg;
-    let vs = state.vs;
-    // The dispatch path locks the graph and may perform a blocking fsync, so
-    // run it off the async worker pool (keeps the HTTP reactor responsive).
-    let result =
-        tokio::task::spawn_blocking(move || server::dispatch_http_body(&body, &kg, vs.as_deref()))
-            .await;
+    let kg = state.kg.clone();
+    let vs = state.vs.clone();
+    let auth = state.clone();
+    // Read before `headers` moves into the task. One header lookup, and the
+    // alternative is cloning the whole map per request.
+    let sse = wants_sse(&headers);
+    let result = tokio::task::spawn_blocking(move || {
+        let principal = principal_of(&auth, &headers)?;
+        Some(server::dispatch_http_body(
+            &body,
+            &kg,
+            vs.as_deref(),
+            &principal,
+        ))
+    })
+    .await;
 
     let outcome = match result {
-        Ok(inner) => inner,
+        Ok(Some(outcome)) => outcome,
+        Ok(None) => return unauthorized(&state),
         Err(join_err) => {
             error!("dispatch task panicked: {join_err}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
@@ -184,9 +441,9 @@ async fn post_handler(
 
     match outcome {
         // Body held only notifications → nothing to return.
-        Ok(None) => StatusCode::ACCEPTED.into_response(),
-        Ok(Some(value)) => {
-            if wants_sse(&headers) {
+        Ok(HttpOutcome::Accepted) => StatusCode::ACCEPTED.into_response(),
+        Ok(HttpOutcome::Body(value)) => {
+            if sse {
                 // One JSON-RPC reply delivered as a single SSE event, then close.
                 let json = serde_json::to_string(&value).unwrap();
                 let stream = futures::stream::once(async move {
@@ -197,6 +454,7 @@ async fn post_handler(
                 Json(value).into_response()
             }
         }
+        Ok(HttpOutcome::InsufficientScope(scopes)) => insufficient_scope(&state, &scopes),
         Err(e) => {
             // Malformed JSON body → JSON-RPC parse error.
             let resp = json!({
@@ -210,8 +468,8 @@ async fn post_handler(
 }
 
 async fn get_handler(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if !authorized(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    if principal_of(&state, &headers).is_none() {
+        return unauthorized(&state);
     }
     // No server-initiated messages: an open, keep-alive'd stream for compliance.
     let stream = futures::stream::pending::<std::result::Result<Event, Infallible>>();
@@ -220,16 +478,27 @@ async fn get_handler(State(state): State<HttpState>, headers: HeaderMap) -> Resp
         .into_response()
 }
 
-/// Like [`authorized`], but also accepts the bearer token from a `token` query
-/// parameter. A browser navigating to `/ui/graph` can't set request headers, so
-/// the viewer passes the token this way (or via the `Authorization` header when
-/// scripted). When no token is configured, access is open (as with `authorized`).
-fn authorized_ui(state: &HttpState, headers: &HeaderMap, query_token: Option<&str>) -> bool {
-    authorized(state, headers)
-        || matches!(
-            state.auth_token,
-            Some(ref expected) if query_token.is_some_and(|t| server::token_matches(t, expected))
-        )
+/// Like [`principal_of`], but also accepting the static bearer token from a
+/// `token` query parameter.
+///
+/// The shipped viewer does not use that fallback. `src/ui/graph.js` reads
+/// `#token=` from the URL fragment — which a browser never sends to a server —
+/// keeps it in `sessionStorage`, and puts it in the `Authorization` header of
+/// every data request, so a human at `/ui` is resolved by [`principal_of`] and
+/// may present either credential. The query fallback is for a script, and it
+/// takes the static token alone: an issued token in a URL is a credential in a
+/// history file, a proxy log and a `Referer` header.
+fn principal_of_ui(
+    state: &HttpState,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> Option<Principal> {
+    principal_of(state, headers).or_else(|| match (state.auth_token.as_ref(), query_token) {
+        (Some(expected), Some(token)) if server::token_matches(token, expected) => {
+            Some(crate::authz::bearer_principal(&state.bearer_scopes))
+        }
+        _ => None,
+    })
 }
 
 /// `GET /ui` — serve the browser graph viewer's HTML shell. The shell and its
@@ -261,17 +530,31 @@ async fn ui_js_handler() -> Response {
         .into_response()
 }
 
-/// Shared auth + `graph-read` gate for the viewer's data endpoints
-/// (`/ui/graph`, `/ui/search`, `/ui/expand`). Returns the error `Response` to
-/// send back, or `None` when the request may proceed.
+/// Shared auth + scope gate for the viewer's data endpoints (`/ui/graph`,
+/// `/ui/search`, `/ui/node`, `/ui/expand`). The viewer reads the whole graph,
+/// so it needs both the process-wide category and the scope `read_graph`
+/// needs. Returns the error `Response` to send back, or `None` when the
+/// request may proceed.
+///
+/// The scope decision is [`crate::authz::allows_tool`]'s and is asked about
+/// `read_graph` by name, never spelled here. `src/authz.rs` is the one place
+/// that decision is made, and asking it about the tool the viewer stands for
+/// is what keeps the two provably in step: a tool moved to another scope
+/// moves the viewer with it.
+///
+/// The 401 is [`unauthorized`] and the scope refusal is [`insufficient_scope`],
+/// the same two challenges `/mcp` sends: one server answers with one shape, so
+/// a scripted viewer client can discover the authorization server from the 401
+/// and learn the scope to ask for from the 403.
 fn ui_data_gate(
     state: &HttpState,
     headers: &HeaderMap,
     params: &HashMap<String, String>,
 ) -> Option<Response> {
-    if !authorized_ui(state, headers, params.get("token").map(String::as_str)) {
-        return Some((StatusCode::UNAUTHORIZED, "Unauthorized").into_response());
-    }
+    let Some(principal) = principal_of_ui(state, headers, params.get("token").map(String::as_str))
+    else {
+        return Some(unauthorized(state));
+    };
     if !server::graph_read_enabled() {
         return Some(
             (
@@ -280,6 +563,15 @@ fn ui_data_gate(
             )
                 .into_response(),
         );
+    }
+    if !crate::authz::allows_tool(&principal, "read_graph") {
+        // The scope the challenge names is the one `authz` reports missing, so
+        // the header cannot drift from the decision that produced it. The
+        // fallback is unreachable while `read_graph` is a tool this server
+        // knows, and names the category the viewer stands for.
+        let missing = crate::authz::missing_scope(&principal, "read_graph")
+            .unwrap_or(ToolCategory::GraphRead.slug());
+        return Some(insufficient_scope(state, &[missing]));
     }
     None
 }
@@ -583,5 +875,57 @@ async fn ui_expand_handler(
             error!("/ui/expand task panicked: {join_err}");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::server::MCPServer;
+    use crate::tools::ToolCategory;
+
+    /// A viewer state with no bearer token and the given scopes on the
+    /// credential. The category flags are process-wide atomics, so this goes
+    /// through the same entry point `src/main.rs` uses — and it enables both
+    /// graph categories, because clearing `graph-write` here would race the
+    /// dispatch-gate test in `src/server.rs`, which runs in this same binary.
+    fn ui_state(dir: &tempfile::TempDir, scopes: &[ToolCategory]) -> HttpState {
+        let config = Config {
+            memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
+            enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
+            ..Config::default()
+        };
+        let kg = MCPServer::new_kg(config)
+            .expect("test server builds")
+            .graph();
+        HttpState {
+            kg,
+            vs: None,
+            auth_token: None,
+            bearer_scopes: Arc::from(scopes),
+            enabled_categories: Arc::from(&[ToolCategory::GraphRead, ToolCategory::GraphWrite][..]),
+            oauth: None,
+        }
+    }
+
+    /// The viewer reads the whole graph, so it needs the same `graph-read`
+    /// scope as `read_graph`. Without it the endpoint must refuse, even though
+    /// the category is enabled and the token is accepted.
+    #[tokio::test]
+    async fn ui_graph_refuses_a_credential_without_the_graph_read_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ui_state(&dir, &[ToolCategory::Vectors]);
+        let resp = ui_graph_handler(State(state), HeaderMap::new(), Query(HashMap::new())).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Control: the same request with the scope is served.
+    #[tokio::test]
+    async fn ui_graph_serves_a_credential_holding_the_graph_read_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ui_state(&dir, &[ToolCategory::GraphRead]);
+        let resp = ui_graph_handler(State(state), HeaderMap::new(), Query(HashMap::new())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -6,44 +6,147 @@
 //! A raw `TcpStream` is the client (no HTTP-client dependency), matching
 //! `tests/vector_http.rs`.
 
+use std::fmt;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 struct HttpServer {
     child: Child,
     port: u16,
     db_path: String,
+    /// File both of the child's output streams were redirected to.
+    log_path: String,
 }
 
 impl Drop for HttpServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        for ext in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{}{}", self.db_path, ext));
-        }
+        remove_server_files(&self.db_path, &self.log_path);
     }
 }
 
+/// Remove everything one server put on disk: the database and its sidecars,
+/// the code-index directory, and the captured output.
+fn remove_server_files(db_path: &str, log_path: &str) {
+    for ext in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
+    }
+    // The `code` category opens `<db>.code/<project>.code.db`, and creates that
+    // directory at startup whether or not a project is ever indexed.
+    let _ = std::fs::remove_dir_all(format!("{db_path}.code"));
+    let _ = std::fs::remove_file(log_path);
+}
+
 /// Grab a currently-free localhost port by binding to :0 and releasing it.
+///
+/// The port is only *probably* still free by the time the child binds it: the
+/// listener is gone before the child starts, so another thread in this binary
+/// — or any other process — can take it in between. [`spawn_http_server`]
+/// therefore treats a child that died on the address as retryable.
 fn free_port() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     l.local_addr().unwrap().port()
 }
 
+/// Why one spawn attempt never reached a serving state.
+///
+/// `exit` and `output` are what make the failure legible: without them a child
+/// that died on a failed bind is indistinguishable from a child that is merely
+/// slow, because both surface only as the deadline expiring.
+struct StartupFailure {
+    port: u16,
+    elapsed: Duration,
+    polls: usize,
+    /// What the last health-check poll saw.
+    last: String,
+    /// `None` while the child was still running when the attempt was abandoned.
+    exit: Option<ExitStatus>,
+    /// Everything the child printed on either stream.
+    output: String,
+}
+
+impl StartupFailure {
+    /// A child that exited complaining about the address lost the race in
+    /// [`free_port`]: the port was free when the test read it and taken by the
+    /// time the child bound it. That is the only retryable failure — every
+    /// other exit means the server itself is broken.
+    fn lost_port_race(&self) -> bool {
+        self.exit.is_some() && self.output.contains("Address already in use")
+    }
+}
+
+impl fmt::Display for StartupFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let child = match self.exit {
+            Some(status) => format!("child exited: {status}"),
+            None => "child still running".to_string(),
+        };
+        let output = self.output.trim();
+        let output = if output.is_empty() {
+            "<no output>"
+        } else {
+            output
+        };
+        write!(
+            f,
+            "server did not start serving on 127.0.0.1:{} after {:?} \
+             ({} polls, last response: {}); {child}; child output:\n{output}",
+            self.port, self.elapsed, self.polls, self.last
+        )
+    }
+}
+
+/// How many ports a spawn will try before giving up; see
+/// [`StartupFailure::lost_port_race`].
+const SPAWN_ATTEMPTS: usize = 5;
+
 /// Spawn a server with the given `--enable-*` category flags and optional token.
+///
+/// Retries on a fresh port when the child lost the port race, and panics with
+/// the child's own output on any other failure.
 fn spawn_http_server(enable_args: &[&str], auth_token: Option<&str>) -> HttpServer {
+    let mut races = Vec::new();
+    for attempt in 1..=SPAWN_ATTEMPTS {
+        match try_spawn_http_server(enable_args, auth_token) {
+            Ok(server) => return server,
+            Err(failure) if failure.lost_port_race() => {
+                races.push(format!("attempt {attempt}: {failure}"));
+            }
+            Err(failure) => {
+                panic!("attempt {attempt} of {SPAWN_ATTEMPTS}: {failure}")
+            }
+        }
+    }
+    panic!(
+        "no usable port after {SPAWN_ATTEMPTS} attempts:\n{}",
+        races.join("\n\n")
+    );
+}
+
+/// One spawn attempt on one port: either a server that is serving, or the
+/// reason it never got there.
+fn try_spawn_http_server(
+    enable_args: &[&str],
+    auth_token: Option<&str>,
+) -> Result<HttpServer, StartupFailure> {
     let port = free_port();
     let pid = std::process::id();
     let db_path = format!("/tmp/ui_http_{pid}_{port}.db");
-    for ext in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
-    }
+    let log_path = format!("/tmp/ui_http_{pid}_{port}.log");
+    remove_server_files(&db_path, &log_path);
 
     let bin =
         std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
+
+    // Both streams share one file rather than a pipe: a failure can then quote
+    // them in order, and neither can fill a pipe buffer while the test is
+    // polling instead of reading. The file is removed with the database.
+    let log = File::create(&log_path).expect("create server log");
+    let log_err = log.try_clone().expect("clone server log handle");
 
     let mut cmd = Command::new(&bin);
     cmd.arg("-f")
@@ -53,33 +156,69 @@ fn spawn_http_server(enable_args: &[&str], auth_token: Option<&str>) -> HttpServ
         .arg("--bind")
         .arg(format!("127.0.0.1:{port}"))
         .arg("--log-level")
-        .arg("error")
+        // `info` so the child reports the address it bound; that report is the
+        // only proof that the server answering on this port is ours.
+        .arg("info")
         .args(enable_args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
     if let Some(tok) = auth_token {
         cmd.arg("--auth-token").arg(tok);
     }
 
-    let child = cmd.spawn().expect("failed to spawn mcpmem");
+    let mut child = cmd.spawn().expect("failed to spawn mcpmem");
 
-    // Wait until the HTTP stack is actually serving, not merely until the port
-    // is bound: `GET /ui` needs no auth or permission, so a 200 from it means
-    // `axum::serve` is accepting and dispatching (avoids a first-request race).
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Two conditions, in order. First the child must print the address it
+    // bound: a 200 alone proves only that *something* owns this port, and
+    // whatever won the race in `free_port` would answer just as happily —
+    // adopting it would run the test against a process it neither owns nor can
+    // kill. Then `GET /ui`, which needs no auth or permission, must return 200:
+    // bound is not yet serving, and a 200 means `axum::serve` is accepting and
+    // dispatching (avoids a first-request race).
+    let bound = format!("http://127.0.0.1:{port}/mcp");
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(10);
+    let mut polls = 0usize;
+    // Assigned by the poll below, which always runs before any read of it.
+    let mut last;
     loop {
-        if try_request(port, "GET", "/ui", None, None).is_some_and(|r| r.0 == 200) {
-            break;
+        polls += 1;
+        if std::fs::read_to_string(&log_path).is_ok_and(|out| out.contains(&bound)) {
+            match try_request(port, "GET", "/ui", None, None) {
+                Some((200, _, _)) => {
+                    return Ok(HttpServer {
+                        child,
+                        port,
+                        db_path,
+                        log_path,
+                    });
+                }
+                Some((code, _, body)) => last = format!("HTTP {code} ({} body bytes)", body.len()),
+                None => last = "connection refused".to_string(),
+            }
+        } else {
+            last = "child has not reported a bound listener".to_string();
         }
-        assert!(Instant::now() < deadline, "server did not start serving");
+        // A child that has exited will never start serving, so give up on the
+        // spot rather than spending the rest of the deadline on a corpse.
+        let exit = child.try_wait().expect("poll server child");
+        if exit.is_some() || Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let output = std::fs::read_to_string(&log_path)
+                .unwrap_or_else(|e| format!("<log unreadable: {e}>"));
+            remove_server_files(&db_path, &log_path);
+            return Err(StartupFailure {
+                port,
+                elapsed: started.elapsed(),
+                polls,
+                last,
+                exit,
+                output,
+            });
+        }
         std::thread::sleep(Duration::from_millis(50));
-    }
-
-    HttpServer {
-        child,
-        port,
-        db_path,
     }
 }
 
@@ -339,6 +478,29 @@ fn test_ui_graph_requires_graph_read() {
     assert!(
         body.contains("graph-read"),
         "403 body should explain the missing permission: {body}"
+    );
+}
+
+/// The static bearer's scopes and the server's enabled categories are two
+/// lists of the same type, wired side by side in `HttpRunConfig`. Here every
+/// category is enabled, so the viewer's category gate passes, but the
+/// credential holds only `vectors`, so the scope gate must refuse. Swap the two
+/// fields and the credential silently holds every category, and this case
+/// answers 200.
+#[test]
+fn test_ui_graph_honours_static_bearer_scopes_not_enabled_categories() {
+    let srv = spawn_http_server(&["--enable-all", "--static-bearer-scopes", "vectors"], None);
+    let (status, headers, body) = get(srv.port, "/ui/graph", None);
+    assert_eq!(
+        status, 403,
+        "a credential without graph-read must be refused: {body}"
+    );
+    assert!(
+        headers.to_lowercase().contains(
+            "www-authenticate: bearer error=\"insufficient_scope\", scope=\"graph-read\""
+        ),
+        "the refusal must come from the scope gate with its challenge, not from \
+         the category gate: {headers}"
     );
 }
 

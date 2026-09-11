@@ -34,6 +34,11 @@ fn count(conn: &rusqlite::Connection, table: &str) -> i64 {
     conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
         .unwrap()
 }
+/// The ledger is append-only: every migration adds one row. Tests derive the
+/// expected count from the registry, so a new migration needs no edit here.
+const fn migration_count() -> i64 {
+    mcpmem_core::events::MIGRATIONS.len() as i64
+}
 
 #[test]
 fn webhook_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
@@ -474,7 +479,7 @@ fn filters_and_migration_reopen_are_compatible() {
     assert_eq!(count(&conn, "event_outbox"), 0);
     drop(graph);
     mcpmem_core::schema::initialize_database(&conn).unwrap();
-    assert_eq!(count(&conn, "schema_migration"), 3);
+    assert_eq!(count(&conn, "schema_migration"), migration_count());
     assert!(
         conn.query_row::<String, _, _>(
             "SELECT checksum FROM schema_migration WHERE version=1",
@@ -503,7 +508,7 @@ fn migration_from_a_real_0001_database_applies_remaining_migrations() {
     )
     .unwrap();
     mcpmem_core::schema::initialize_database(&conn).unwrap();
-    assert_eq!(count(&conn, "schema_migration"), 3);
+    assert_eq!(count(&conn, "schema_migration"), migration_count());
     assert_eq!(count(&conn, "entity"), 0);
     assert_eq!(count(&conn, "graph_stat"), 5);
     let historical: (String, i64) = conn

@@ -15,3 +15,6 @@ OPTIMIZATION_PLAN.md
 REVIEW_MEMORY_IO_CONCURRENCY.md
 new arch plan.md
 examples
+
+# Subagent-driven development scratch (ledger, briefs, review packages)
+.superpowers/

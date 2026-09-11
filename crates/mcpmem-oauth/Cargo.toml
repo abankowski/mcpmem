@@ -1,0 +1,54 @@
+[package]
+name = "mcpmem-oauth"
+version = "1.0.1"
+edition = "2024"
+license = "Apache-2.0"
+description = "OAuth 2.1 authorization server for the mcpmem MCP server."
+repository = "https://github.com/abankowski/mcpmem"
+readme = "README.md"
+
+[dependencies]
+mcpmem-core = { path = "../mcpmem-core", version = "1.0.1" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.4"
+subtle = "2.6"
+thiserror = "2"
+tracing = "0.1"
+
+# ── The upstream OpenID Connect leg (feature = "upstream") ───────────────────
+# All three are optional, and only this feature turns them on. `mcpmem` depends
+# on this crate with no feature gate, so a plain dependency here would enter the
+# graph-only tree that `.github/workflows/ci.yml` requires to carry no HTTP
+# client. The `mcpmem` feature `oauth` forwards to `upstream`, and a
+# `--no-default-features` build of `mcpmem` therefore drops `reqwest` with it.
+#
+# `rustls-tls-native-roots` keeps rustls on the process default `ring` crypto
+# provider (installed in `src/tls.rs`) — the `-no-provider` suffix is absent
+# because this spelling selects `ring` explicitly, and no `aws-lc-rs` toolchain
+# is pulled in. Native roots rather than the bundled webpki set: a self-hosted
+# provider behind a private certificate authority is a normal deployment, and
+# the bundled set cannot ever admit one.
+#
+# `jsonwebtoken` carries `default-features = false` to drop `use_pem`. Nothing
+# here reads a PEM key: a JWKS gives the EC coordinates directly.
+#
+# `blocking` is the client `registration::Fetch` needs. That trait is
+# synchronous — it is declared in this crate's non-optional half, where no
+# async runtime exists — so the implementation cannot be the async client the
+# provider uses. The blocking client owns its own runtime on its own thread and
+# is built on first use, so a deployment that never meets a client identifier
+# metadata document never creates it. Its caller runs it inside
+# `tokio::task::spawn_blocking`; see `MetadataFetch`.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "blocking"], optional = true }
+jsonwebtoken = { version = "9", default-features = false, optional = true }
+url = { version = "2", optional = true }
+
+[features]
+upstream = ["dep:reqwest", "dep:jsonwebtoken", "dep:url"]
+
+[lints]
+workspace = true

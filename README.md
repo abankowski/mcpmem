@@ -33,6 +33,11 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
 - 🔌 **MCP-native and safe by default.** Speaks MCP `2025-11-25` over **stdio** and
   **Streamable HTTP** (with bearer-token auth and TLS). Tools are **opt-in by category**, so the
   server only ever exposes what you turn on.
+- 🔐 **Its own OAuth 2.1 authorization server.** `--oidc-issuer` turns it on. A remote
+  connector — Claude's custom connectors, ChatGPT's — discovers this server, registers itself,
+  and sends its human to your OpenID Connect provider. The human approves a subset of scopes on
+  a consent page, and the connector then calls tools under a token this server issued. The
+  provider authenticates the human and nothing more.
 
 ---
 
@@ -66,8 +71,10 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
 cargo install mcpmem
 ```
 
-This installs the `mcpmem` binary. (The `code` feature is on by default; build with
-`--no-default-features` for a lean pure-memory binary without tree-sitter grammars.)
+This installs the `mcpmem` binary. The `code` and `oauth` features are both on by default.
+A `--no-default-features` build gives a lean pure-memory binary with no tree-sitter grammars
+and no HTTP client, and it **refuses `--oidc-issuer` at startup** rather than serve half an
+authorization server. Add `--features oauth` back to keep the OAuth endpoints on a lean build.
 
 ## Quick start
 
@@ -156,6 +163,196 @@ mcpmem --enable-all --transport http --bind 0.0.0.0:8080 --auth-token "s3cr3t"
 
 On HTTP the token is sent as `Authorization: Bearer <token>`; comparison is constant-time.
 Binding a non-loopback address **without** a token exposes the entire graph to the network.
+
+By default the token grants every enabled tool category. Narrow it with
+`--static-bearer-scopes`, a comma-separated list of category slugs
+(`graph-read`, `graph-write`, `vectors`, `code`); a call to a tool outside the
+list is refused. The list also gates the built-in graph viewer, with or without
+a token: omit `graph-read` and `/ui/graph`, `/ui/search`, `/ui/node` and
+`/ui/expand` answer 403, so the viewer loads and stays empty.
+
+```sh
+mcpmem --enable-all --transport http --auth-token "s3cr3t" \
+  --static-bearer-scopes graph-read,vectors
+```
+
+### OAuth 2.1 (remote connectors)
+
+`--oidc-issuer` makes `mcpmem` its own **OAuth 2.1 authorization server**, so a
+remote MCP connector — Claude's custom connectors, ChatGPT's — can discover it,
+register itself, send its human to your OpenID Connect provider, take consent
+for a subset of scopes, and call tools under an issued token. `mcpmem` mints
+its own opaque tokens and stores only their digests; the provider authenticates
+the human and nothing more.
+
+A build without the `oauth` feature **refuses `--oidc-issuer` at startup**: it
+serves no authorization, consent or token endpoint, and half an authorization
+server is worse than none. The feature is on by default.
+
+For one worked setup from nothing, see
+[Setting it up with Google](#setting-it-up-with-google) below.
+
+The shortest configuration that works:
+
+```sh
+mcpmem --enable-all --transport http --bind 0.0.0.0:8443 \
+  --public-url https://mem.example.com \
+  --oidc-issuer https://accounts.example.com \
+  --oidc-client-id mcpmem-prod \
+  --principals-file ./principals.json \
+  --tls-cert ./cert.pem --tls-key ./key.pem
+```
+
+Register the redirect URI `https://mem.example.com/oauth/callback` at the
+provider, and list the humans who may authorize — identity is `iss` plus `sub`,
+and their `scopes` is the ceiling a connector may be granted:
+
+```json
+[{ "name": "adam", "iss": "https://accounts.example.com",
+   "sub": "109876543210987654321", "scopes": ["graph-read", "graph-write"] }]
+```
+
+Behind a proxy that ends TLS, pass `--oauth-trust-forwarded-proto` instead of
+`--tls-cert`/`--tls-key`. That flag also decides which address the per-peer
+request limits count, so the proxy must **set** `X-Forwarded-For` rather than
+append to a client-supplied one, **and the process must be bound where only the
+proxy can reach it** (`--bind 127.0.0.1:8080`). Anyone who can open a socket to
+it directly chooses their own bucket, and every limit is then bypassable.
+
+**The static bearer token above still works, unchanged.** A server may run both:
+a request carrying an issued OAuth token is resolved as that token, and anything
+else falls back to the static token.
+
+The graph viewer takes **either** credential in the `Authorization` header, so
+OAuth alone is enough for a human at `/ui`: open
+`https://mem.example.com/ui#token=<access token>`, and the viewer keeps the
+token client-side and sends it as a header. The fragment never reaches the
+server, so the token stays out of the proxy log. The `?token=` query fallback on
+the data endpoints takes the static token alone — an OAuth token in a URL is
+refused.
+
+#### Setting it up with Google
+
+Six steps, from nothing to a working connector. `https://mem.example.com` stands
+for your own `--public-url` throughout.
+
+**1. Create the OAuth client at Google.** In the Google Cloud console, open
+**APIs and Services → Credentials → Create credentials → OAuth client ID**, and
+choose the application type **Web application**. *Starting point, not checked
+against the console:* Google moved this area into the Google Auth Platform. The
+labels may differ from the ones above. The result is the same pair of values:
+one client ID that ends `.apps.googleusercontent.com`, and one client secret.
+
+A Google web application client is confidential. Google's own documentation
+states that a web server application needs a secret, and that PKCE does not
+stand in for one. So `--oidc-client-secret-file` is not optional here, although
+`mcpmem` leaves it optional for a public client elsewhere. The file is trimmed,
+so a trailing newline is harmless.
+
+```sh
+# Identical in Bash and fish.
+printf '%s' 'GOCSPX-your-secret' > ./google-client-secret
+chmod 600 ./google-client-secret
+```
+
+**2. Register the exact redirect URI.** Add one authorized redirect URI to the
+same client:
+
+```
+https://mem.example.com/oauth/callback
+```
+
+That is `{public_url}/oauth/callback`, byte for byte. Google needs `https` and
+compares the value exactly. A trailing slash is a different URI, and the login
+then fails with `redirect_uri_mismatch`.
+
+**3. Find a subject identifier.** Google's issuer is
+`https://accounts.google.com`. `mcpmem` reads the authorization endpoint, the
+token endpoint and the key set from its discovery document on the first login.
+Check that document first:
+
+```sh
+# Identical in Bash and fish.
+curl -fsS https://accounts.google.com/.well-known/openid-configuration \
+  | jq '{issuer, code_challenge_methods_supported, scopes_supported}'
+```
+
+It prints `https://accounts.google.com`, a list that holds `S256`, and a scope
+list that holds `openid` and `email`. `S256` is the only challenge method this
+server offers, and `openid email` is the scope pair it asks Google for.
+
+Identity is `iss` plus `sub`, never the email address: Google lets a human
+change the address, so `mcpmem` keeps it as display text only. Google's `sub` is
+a numeric string.
+
+The way that always works is one refused login. Put a placeholder entry in the
+principals file, start the server with the command line of step 5, and add the
+connector as step 6 describes. Sign in at Google once. `mcpmem` writes its log
+to standard error, so read that:
+
+```
+2026-09-11T09:12:44.512744Z  WARN mcpmem::oauth_routes: an upstream login was refused reason=no principal is registered for https://accounts.google.com 109876543210987654321
+```
+
+The number in that line is the `sub`. *Starting point, not checked against the
+console:* a Google Workspace administrator can also read a numeric unique ID for
+each user in the admin console, and that ID is reported to be the same value.
+This document does not confirm it.
+
+**4. Write the principals file.** One entry per human. `scopes` is the ceiling:
+the consent page offers the intersection of what the connector asked for and
+what the entry holds.
+
+```json
+[
+  {
+    "name": "adam",
+    "iss": "https://accounts.google.com",
+    "sub": "109876543210987654321",
+    "label": "Adam Bankowski",
+    "scopes": ["graph-read", "graph-write"]
+  }
+]
+```
+
+`iss` must equal `https://accounts.google.com`. `mcpmem` trims each field and
+then compares the pair as plain strings. An empty file, an unknown scope, or a
+duplicate `iss` and `sub` pair stops the server at startup.
+
+**5. The command line.**
+
+```sh
+# Identical in Bash and fish.
+mcpmem --enable-graph-read --enable-graph-write \
+  --transport http --bind 0.0.0.0:8443 \
+  --public-url https://mem.example.com \
+  --oidc-issuer https://accounts.google.com \
+  --oidc-client-id 1234567890-abc123.apps.googleusercontent.com \
+  --oidc-client-secret-file ./google-client-secret \
+  --principals-file ./principals.json \
+  --tls-cert ./cert.pem --tls-key ./key.pem
+```
+
+`--oidc-issuer` needs `--transport http`, `--public-url`, `--oidc-client-id`,
+`--principals-file`, and TLS. It also needs the `mcp` runtime role, which is the
+default. Each missing one is its own startup refusal. An OAuth flag without
+`--oidc-issuer` is refused too, rather than ignored. Only the categories you
+enable are advertised, so the `--enable-*` flags decide which scopes exist at
+all.
+
+**6. Add the connector in Claude.** Settings → Connectors → **Add custom
+connector**, with the URL `https://mem.example.com/mcp`. Claude reads the two
+discovery documents, registers itself at `POST /oauth/register`, and opens the
+Google login. After Google answers, `mcpmem` serves its own consent page, which
+names the client, the human, and one checkbox per offered scope. Approving sends
+Claude back to `https://claude.ai/api/mcp/auth_callback` with a code, which it
+exchanges for a token.
+
+`claude.ai` and `chatgpt.com` are the default hosts allowed to serve a client
+identifier metadata document, so neither needs a `--cimd-allowed-domain` flag.
+
+Deployment, connector setup, revocation, and what each refusal means:
+[`docs/runbooks/oauth-deployment.md`](docs/runbooks/oauth-deployment.md).
 
 ### TLS (HTTPS)
 
@@ -360,7 +557,7 @@ Entity(name, entityType, observations[])   ──relationType──▶   Entity(
 Search uses FTS5 with `unicode61 remove_diacritics 2` tokenization. Names and observation bodies
 live in separate external-content FTS5 tables (`name_fts`, `obs_fts`).
 
-## Storage & performance
+## Storage and speed
 
 ### SQLite (WAL mode)
 
@@ -493,6 +690,15 @@ main.rs → MCPServer { kg, vs: Option<VectorStore> }
         ├── GET /ui/graph  — a paged view of the graph for the viewer (gated by graph-read)
         ├── GET /ui/search — paged FTS5 search for the viewer (gated)
         ├── GET /ui/expand — a node's neighbourhood for double-click traversal (gated)
+        ├── oauth_routes::attach() — the authorization server (--oidc-issuer)
+        │     ├── GET  /.well-known/oauth-protected-resource   — RFC 9728 (always)
+        │     ├── GET  /.well-known/oauth-authorization-server — RFC 8414 (always)
+        │     ├── POST /oauth/register  — RFC 7591 registration (always)
+        │     ├── GET  /oauth/authorize — start a login         (feature = "oauth")
+        │     ├── GET  /oauth/callback  — the provider answers  (feature = "oauth")
+        │     ├── POST /oauth/consent   — the human decides     (feature = "oauth")
+        │     ├── POST /oauth/token     — code + refresh grants (feature = "oauth")
+        │     └── POST /oauth/revoke    — RFC 7009 revocation   (feature = "oauth")
         └── process_request()
               ├── "initialize"      → protocol version + capabilities
               ├── "tools/list"      → tool list (filtered by enabled categories)
@@ -509,6 +715,19 @@ All transports share one transport-agnostic dispatch core (`dispatch_line()` /
   `RwLock` over the petgraph cache; HNSW/IVF indexes are internally synchronized. Heavy dispatch
   (graph lock + optional fsync) is offloaded to `tokio::task::spawn_blocking` to keep the reactor
   responsive.
+- **Authorization.** `--oidc-issuer` makes this process its own OAuth 2.1 authorization server.
+  `src/oauth_routes.rs` attaches the routes above and owns the store lock;
+  [`mcpmem-oauth`](crates/mcpmem-oauth/README.md) owns every decision behind them — client
+  registration, the consent page, token issue, refresh, revocation, validation, the two
+  discovery documents, and the per-peer limits. The MCP transport is the **resource server**:
+  `src/http.rs` reads the `Authorization` header and resolves an issued OAuth token first, the
+  static bearer token second. A refusal there carries a `WWW-Authenticate` challenge that names
+  the protected-resource document, so a connector can find the authorization server from a 401
+  or a 403. The upstream OpenID Connect provider **only authenticates the human**:
+  `mcpmem_oauth::upstream` checks its identity token against the provider's key set, audience,
+  expiry and nonce, and nothing else crosses that boundary. Registration, consent and token
+  issue all belong to this server. Its tokens are opaque, and the four `oauth_*` tables from
+  migration `0004_oauth.sql` hold their digests alone.
 
 ### Workspace crates
 
@@ -521,6 +740,7 @@ Each library crate has its own README with the detail for that layer.
 | [`mcpmem-runtime`](crates/mcpmem-runtime/README.md) | The role enumeration, the role parser and the supervisor |
 | [`mcpmem-indexer`](crates/mcpmem-indexer/README.md) | The durable embedding worker and its providers |
 | [`mcpmem-webhook`](crates/mcpmem-webhook/README.md) | The durable webhook delivery worker |
+| [`mcpmem-oauth`](crates/mcpmem-oauth/README.md) | The OAuth 2.1 authorization server: client registration, consent, the token lifecycle, the discovery documents and the upstream OpenID Connect leg |
 
 ### Limits
 
@@ -536,6 +756,9 @@ Each library crate has its own README with the detail for that layer.
 | Max embedding dimensions *(vectors)* | 4,096 |
 | Max `topK` *(vectors)* | 100 |
 | Max items per `vector_batch_upsert` | 1,024 |
+| Max `POST /oauth/register` per minute per peer *(oauth)* | 20 |
+| Max requests per minute per peer on the other five OAuth endpoints *(oauth)* | 60 |
+| Client name / redirect URIs / URL bytes *(oauth)* | 256 / 8 / 2,048 |
 
 ## Development
 
@@ -549,7 +772,8 @@ cargo run --release --bin bench  # standalone benchmark
 The suite covers protocol handling, every tool handler, CRUD/search/path persistence,
 concurrency, fuzzy invariant checks, both ANN backends end-to-end, the retrieval tools (batch
 upsert, more-like-this, recommend, MMR), category gating, code indexing across all 10 languages,
-and HTTP bearer-token authentication.
+HTTP bearer-token authentication, and the OAuth 2.1 server end to end — discovery, registration,
+the upstream login, consent, the token grants, revocation and the startup refusals.
 
 ### Releases
 
