@@ -179,16 +179,32 @@ export MCP_MEMORY_OLLAMA_URL=http://127.0.0.1:11434
 mcpmem --role mcp,indexer --enable-all
 ```
 
-> ### Known limitation in 1.0.1: the worker has nothing to drain
->
-> The worker claims a job only for a serving or candidate index profile, and **no shipped command
-> creates a profile**. Every graph mutation enqueues its job in the `held` state, which no worker
-> claims. An `indexer` build therefore starts, polls every 250 ms and stays idle; it never calls
-> the embedding provider.
->
-> Until a profile bootstrap command exists, compute embeddings on the client and write them with
-> `vector_upsert_embedding` or `vector_batch_upsert`. Build with `--features indexer` today only
-> to pin the deployment shape, not to get automatic embeddings.
+### Turning automatic embedding on
+
+Name a provider, a model and a dimension, and the server embeds entity text by itself:
+
+```toml
+[indexer]
+ollama-url = "http://127.0.0.1:11434"
+provider = "ollama"
+model = "nomic-embed-text"
+dimensions = 768
+# normalization = "l2"     # the default
+# metric = "cosine"        # the default
+```
+
+Those three keys are the **vector-space contract**: the profile the store serves. On startup the
+server compares them against the profile already in the database, by fingerprint, so an unchanged
+file is a no-op. A change to any of the five starts a rebuild, which re-embeds every live entity.
+
+> **A profile ends legacy compatibility.** Once the store serves one, `vector_upsert_embedding`
+> and `vector_batch_upsert` are refused with `direct_vector_writes_disabled`. That is the point —
+> the server now owns the vectors — but a client that pushes its own embeddings breaks at that
+> moment. Adopt a profile deliberately, not by accident.
+
+Without those three keys the store stays in legacy compatibility: the worker starts, polls every
+250 ms and finds nothing, and you keep supplying vectors yourself. That is the correct setup for
+a deployment whose client already computes embeddings.
 
 > ### Known limitation in 1.0.1: the `webhooks` role has no worker
 >

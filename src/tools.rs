@@ -193,6 +193,11 @@ pub const ALL_TOOLS: &[ToolMeta] = &[
     },
 ];
 
+/// The read-side embedding tool. `src/server.rs` gates it on the `indexer`
+/// feature and on a configured provider, so the name is declared once here and
+/// every other place derives it from this constant.
+pub const SEMANTIC_SEARCH: &str = "semantic_search";
+
 /// Names of the vector-search tools (manifest: `vector_tools.json`).
 pub const VECTOR_TOOL_NAMES: &[&str] = &[
     "vector_upsert_embedding",
@@ -207,6 +212,11 @@ pub const VECTOR_TOOL_NAMES: &[&str] = &[
     "vector_recommend",
     "vector_mmr_search",
     "vector_reindex",
+    // The name stays in this list on every build, feature or no feature.
+    // [`category_of`] is the scope gate, and a name it does not know is an
+    // unknown tool rather than a refused one. The feature gate belongs in
+    // `tools/list` and in dispatch, where it can give a reason.
+    SEMANTIC_SEARCH,
 ];
 
 /// Names of the tree-sitter code tools (manifest: `code_tools.json`).

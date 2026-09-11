@@ -282,10 +282,10 @@ fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_t
 fn indexer_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
     struct UnusedProvider;
     impl mcpmem_indexer::EmbeddingProvider for UnusedProvider {
-        fn embed(
+        fn embed_texts(
             &self,
             _: &mcpmem_core::jobs::IndexProfile,
-            _: &[mcpmem_indexer::CanonicalDocument],
+            _: &[String],
         ) -> Result<Vec<Vec<f32>>, mcpmem_indexer::ProviderError> {
             panic!("empty queue must not call provider")
         }

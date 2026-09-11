@@ -206,5 +206,21 @@
       "properties": {}
     },
     "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
+  },
+  {
+    "name": "semantic_search",
+    "description": "Search entities by meaning, with text only. Send 'queryText' and the server embeds it; the client needs no embedding service and sends no vector. The server embeds the query with the model named by the serving index profile — the same model that embedded the stored entities — so the query and the index agree. That model comes from the [indexer] section of the server configuration file, never from this call. Returns the topK entities whose stored embeddings are closest to the query. Set 'textWeight' or 'vecWeight' to fuse the vector result with the FTS5 text result, exactly as 'hybrid_search' does; leave both unset for a pure vector search. The server must be built with the 'indexer' feature and must have a configured embedding provider. Without either one the tool is absent from tools/list and a call to it is refused.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "queryText": { "type": "string", "description": "The text to search for. The server embeds this text itself." },
+        "topK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results to return (default 10)" },
+        "entityType": { "type": "string", "description": "Optional: only return entities of this type" },
+        "textWeight": { "type": "number", "description": "Optional weight for the FTS5 text rank (default 0.5). Setting this or 'vecWeight' turns on fusion." },
+        "vecWeight": { "type": "number", "description": "Optional weight for the vector rank (default 0.5). Setting this or 'textWeight' turns on fusion." }
+      },
+      "required": ["queryText"]
+    },
+    "annotations": { "readOnlyHint": true }
   }
 ]

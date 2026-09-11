@@ -4,7 +4,7 @@ use std::time::Duration;
 use aws_sdk_bedrockruntime::primitives::Blob;
 use mcpmem_core::jobs::IndexProfile;
 
-use crate::{CanonicalDocument, EmbeddingProvider, ProviderError};
+use crate::{EmbeddingProvider, ProviderError};
 
 const TITAN_TEXT_EMBEDDINGS_V2: &str = "amazon.titan-embed-text-v2:";
 
@@ -39,17 +39,17 @@ impl BedrockEmbeddingProvider<AwsBedrockTransport> {
 }
 
 impl<T: BedrockTransport> EmbeddingProvider for BedrockEmbeddingProvider<T> {
-    fn embed(
+    fn embed_texts(
         &self,
         profile: &IndexProfile,
-        documents: &[CanonicalDocument],
+        texts: &[String],
     ) -> Result<Vec<Vec<f32>>, ProviderError> {
         validate_titan_v2(profile)?;
-        documents
+        texts
             .iter()
-            .map(|document| {
+            .map(|text| {
                 let payload = serde_json::json!({
-                    "inputText": document.text(),
+                    "inputText": text,
                     "dimensions": profile.dimensions,
                     "normalize": false,
                 });

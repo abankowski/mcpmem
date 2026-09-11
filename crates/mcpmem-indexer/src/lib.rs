@@ -179,30 +179,34 @@ impl ProviderSettings {
 }
 
 impl EmbeddingProvider for ProviderRegistry {
-    fn embed(
+    /// Strict dispatch on the profile's provider kind. An unknown kind fails
+    /// the call; it is never sent to another provider. Implementing the text
+    /// primitive is enough: the trait's `embed` reduces documents to text and
+    /// arrives here.
+    fn embed_texts(
         &self,
         profile: &mcpmem_core::jobs::IndexProfile,
-        documents: &[CanonicalDocument],
+        texts: &[String],
     ) -> Result<Vec<Vec<f32>>, ProviderError> {
         match profile.provider_kind.as_str() {
             "ollama" => self
                 .ollama
                 .as_ref()
                 .ok_or_else(|| ProviderError::Request("Ollama provider is not configured".into()))?
-                .embed(profile, documents),
+                .embed_texts(profile, texts),
             "openai" | "openai-compatible" => self
                 .openai
                 .as_ref()
                 .ok_or_else(|| {
                     ProviderError::Request("OpenAI-compatible provider is not configured".into())
                 })?
-                .embed(profile, documents),
+                .embed_texts(profile, texts),
             #[cfg(feature = "bedrock")]
             "bedrock" => self
                 .bedrock
                 .as_ref()
                 .ok_or_else(|| ProviderError::Request("Bedrock provider is not configured".into()))?
-                .embed(profile, documents),
+                .embed_texts(profile, texts),
             kind => Err(ProviderError::Request(format!(
                 "unsupported embedding provider '{kind}'"
             ))),

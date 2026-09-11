@@ -1,8 +1,9 @@
 #![cfg(feature = "indexer")]
 
+use parking_lot::Mutex;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mcpmem::config::{Durability, SqliteTuning};
@@ -10,35 +11,37 @@ use mcpmem::kg::GraphHandle;
 use mcpmem::types::EntityInput as Entity;
 use mcpmem::vector_store::VectorStore;
 use mcpmem_core::jobs::{DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization};
-use mcpmem_indexer::{CanonicalDocument, EmbeddingProvider, IndexerWorker, ProviderError};
+use mcpmem_indexer::{EmbeddingProvider, IndexerWorker, ProviderError};
 use uuid::Uuid;
 
 struct FixedProvider;
 
 impl EmbeddingProvider for FixedProvider {
-    fn embed(
+    fn embed_texts(
         &self,
         profile: &IndexProfile,
-        documents: &[CanonicalDocument],
+        texts: &[String],
     ) -> Result<Vec<Vec<f32>>, ProviderError> {
-        Ok(documents
+        Ok(texts
             .iter()
             .map(|_| vec![1.0; profile.dimensions as usize])
             .collect())
     }
 }
 
+/// Records the text the worker sends. Text is what the provider receives, so
+/// recording it proves what reaches the model, not how the worker assembled it.
 #[derive(Clone)]
-struct RecordingProvider(Arc<Mutex<Vec<CanonicalDocument>>>);
+struct RecordingProvider(Arc<Mutex<Vec<String>>>);
 
 impl EmbeddingProvider for RecordingProvider {
-    fn embed(
+    fn embed_texts(
         &self,
         profile: &IndexProfile,
-        documents: &[CanonicalDocument],
+        texts: &[String],
     ) -> Result<Vec<Vec<f32>>, ProviderError> {
-        self.0.lock().unwrap().extend_from_slice(documents);
-        Ok(documents
+        self.0.lock().extend_from_slice(texts);
+        Ok(texts
             .iter()
             .map(|_| vec![1.0; profile.dimensions as usize])
             .collect())
@@ -137,10 +140,9 @@ fn worker_indexes_observation_bodies_without_metadata() {
         Duration::from_secs(5),
     );
     assert_eq!(worker.run_once(now_us()).unwrap().committed, 1);
-    let documents = captured.lock().unwrap();
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0].observations, ["first programmer"]);
-    assert_eq!(documents[0].text(), "Ada\nPerson\nfirst programmer");
+    let texts = captured.lock();
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0], "Ada\nPerson\nfirst programmer");
 }
 
 #[test]
@@ -182,24 +184,24 @@ fn stale_claim_cannot_commit_after_a_newer_claimant() {
 
 struct WrongDimensions;
 impl EmbeddingProvider for WrongDimensions {
-    fn embed(
+    fn embed_texts(
         &self,
         _profile: &IndexProfile,
-        documents: &[CanonicalDocument],
+        texts: &[String],
     ) -> Result<Vec<Vec<f32>>, ProviderError> {
-        Ok(documents.iter().map(|_| vec![1.0]).collect())
+        Ok(texts.iter().map(|_| vec![1.0]).collect())
     }
 }
 
 struct SlowProvider;
 impl EmbeddingProvider for SlowProvider {
-    fn embed(
+    fn embed_texts(
         &self,
         profile: &IndexProfile,
-        documents: &[CanonicalDocument],
+        texts: &[String],
     ) -> Result<Vec<Vec<f32>>, ProviderError> {
         std::thread::sleep(Duration::from_millis(2));
-        Ok(documents
+        Ok(texts
             .iter()
             .map(|_| vec![1.0; profile.dimensions as usize])
             .collect())

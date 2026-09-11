@@ -69,19 +69,60 @@ async fn inner_main() -> Result<()> {
     } else {
         services
     };
+    // The registry is published for the whole process, not only for the
+    // worker. `semantic_search` embeds the query text on read, and an operator
+    // may split the roles across two hosts: one `--role mcp`, one
+    // `--role indexer`. The MCP host still has to embed every query. Tying the
+    // registry to the worker role would hide the tool in that shape, and in the
+    // default single-role shape too.
+    #[cfg(feature = "indexer")]
+    let loaded = file.as_ref().map(|(_, loaded)| loaded);
+    #[cfg(feature = "indexer")]
+    let provider = {
+        let settings = config_file::indexer_settings(loaded)?;
+        // A named endpoint is what names a provider. A key on its own names
+        // none, and `from_settings` rejects a key that arrives without its URL.
+        // So a stray `MCP_MEMORY_OPENAI_API_KEY` must never reach it: it would
+        // stop a startup that needs no provider at all.
+        if settings.ollama_url.is_some() || settings.openai_url.is_some() {
+            let provider = runtime::IndexerService::provider_registry(settings).await?;
+            mcpmem::indexer_provider::init(Arc::clone(&provider));
+            info!("Embedding provider published: this process can embed a query text");
+            provider
+        } else {
+            // Nothing is named, so nothing is published, and a query tool that
+            // cannot work stays hidden. The worker still needs an instance. An
+            // empty registry fails every job it claims, with its own error text.
+            Arc::new(mcpmem_indexer::ProviderRegistry::new(None, None))
+        }
+    };
     #[cfg(feature = "indexer")]
     let services = if config
         .roles
         .roles()
         .contains(&runtime::RuntimeRole::Indexer)
     {
-        let settings = config_file::indexer_settings(file.as_ref().map(|(_, f)| f))?;
-        services.with_indexer(Arc::new(runtime::IndexerService::with_settings(
+        let vectors = mcp_server.vector_store();
+        adopt_index_profile(loaded, vectors.as_deref())?;
+        services.with_indexer(Arc::new(runtime::IndexerService::with_provider(
             config.memory_file_path.clone(),
-            mcp_server.vector_store(),
-            &settings,
-        )?))
+            vectors,
+            provider,
+        )))
     } else {
+        // A rebuild fills a queue that only the worker drains, so a process
+        // without the `indexer` role adopts nothing. A query text can still be
+        // embedded here, because publication above is not tied to the role.
+        if file
+            .as_ref()
+            .is_some_and(|(_, loaded)| !loaded.indexer.is_empty())
+        {
+            tracing::warn!(
+                "config file section [indexer] is set, but this process runs no `indexer` role: \
+                 it adopts no index profile and embeds no entity on write. Add \
+                 --role mcp,indexer, or run the `indexer` role in another process."
+            );
+        }
         services
     };
     let services = Arc::new(services);
@@ -90,6 +131,65 @@ async fn inner_main() -> Result<()> {
     running_roles.wait_for_shutdown().await?;
 
     info!("Server shutdown complete");
+    Ok(())
+}
+
+/// Moves the vector store onto the index profile that the configuration file
+/// names.
+///
+/// Startup calls this on every boot. An unchanged configuration costs nothing,
+/// because [`mcpmem::vector_store::VectorStore::adopt_profile`] compares the
+/// profile fingerprint and reports `Unchanged`.
+///
+/// An error stops startup on purpose. A half-configured vector space would
+/// answer a search over one embedding space with vectors from another.
+#[cfg(feature = "indexer")]
+fn adopt_index_profile(
+    file: Option<&config_file::FileConfig>,
+    vectors: Option<&mcpmem::vector_store::VectorStore>,
+) -> Result<()> {
+    use mcpmem::vector_store::AdoptOutcome;
+
+    let Some(spec) = config_file::profile_spec(file)? else {
+        return Ok(());
+    };
+    let Some(vectors) = vectors else {
+        tracing::warn!(
+            "config file section [indexer] names an index profile, but the vector subsystem is \
+             off, so no profile is adopted. Enable it with --enable-vectors or --enable-all."
+        );
+        return Ok(());
+    };
+    let profile = spec.to_profile();
+    match vectors.adopt_profile(&profile)? {
+        AdoptOutcome::Unchanged => tracing::debug!(
+            provider = %profile.provider_kind,
+            model = %profile.model,
+            dimensions = profile.dimensions,
+            "the store already serves this index profile"
+        ),
+        AdoptOutcome::RebuildInProgress => info!(
+            provider = %profile.provider_kind,
+            model = %profile.model,
+            dimensions = profile.dimensions,
+            "a rebuild into this index profile is already running; the worker continues it"
+        ),
+        AdoptOutcome::RebuildStarted => tracing::warn!(
+            provider = %profile.provider_kind,
+            model = %profile.model,
+            dimensions = profile.dimensions,
+            "index profile adopted: every live entity is queued for embedding, and a direct \
+             vector write is refused from now on"
+        ),
+        AdoptOutcome::PreviousRebuildFailed(reason) => tracing::error!(
+            provider = %profile.provider_kind,
+            model = %profile.model,
+            dimensions = profile.dimensions,
+            reason = %reason,
+            "the last rebuild into this index profile failed and stays failed; the store keeps \
+             serving the profile it served before"
+        ),
+    }
     Ok(())
 }
 

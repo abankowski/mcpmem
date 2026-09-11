@@ -10,6 +10,8 @@ pub mod config;
 pub mod config_file;
 pub use mcpmem_core::errors;
 pub mod http;
+#[cfg(feature = "indexer")]
+pub mod indexer_provider;
 pub mod ivf;
 pub mod kg;
 pub mod oauth_routes;

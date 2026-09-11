@@ -12,6 +12,27 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Added
 
+- **The server computes embeddings.** Name `provider`, `model` and
+  `dimensions` in the `[indexer]` section, and the server adopts an index
+  profile at startup and embeds entity text by itself. Adoption compares the
+  profile fingerprint, so an unchanged file is a no-op and only a real change
+  to the provider, the model, the dimension, the normalization or the metric
+  starts a rebuild. A rebuild re-embeds every live entity, and it ends legacy
+  compatibility: `vector_upsert_embedding` and `vector_batch_upsert` are then
+  refused with `direct_vector_writes_disabled`. `normalization` defaults to
+  `l2` and `metric` to `cosine`. A half-written profile is a startup error
+  that names the missing key.
+- **`semantic_search`.** The read-side counterpart: it takes `queryText` and
+  embeds it on the server, through the provider the serving profile names.
+  `textWeight` and `vecWeight` fuse the result with FTS5, as `hybrid_search`
+  does; without them the tool runs a pure vector search. The tool is hidden
+  from `tools/list` on a build without the `indexer` feature, and on any
+  process that configured no provider, so a client never sees a tool that
+  cannot answer.
+- **`EmbeddingProvider::embed_texts`.** Text is now the trait primitive, and
+  `embed` is a default body over it. A query has no entity and no revision,
+  and `CanonicalDocument` carries both for revision fencing, so a read path
+  must not fabricate one.
 - **A TOML configuration file.** `--config <PATH>`, or the `MCP_MEMORY_CONFIG`
   environment variable, names a file that carries every setting that is not a
   secret. `--auth-token` has no file key, by design, and `--config` has none
@@ -31,6 +52,16 @@ This entry lists every change since that snapshot. The version line restarts at
   `mcpmem-indexer`. The embedding worker can now be built from settings the
   caller resolved, so a configuration file reaches the provider without writing
   back into the process environment. `from_environment` delegates to it.
+
+### Fixed
+
+- **The `indexer` role could never start with a provider configured.** Every
+  provider holds a `reqwest::blocking::Client`, whose builder creates and
+  drops a temporary Tokio runtime. Dropping a runtime inside an async context
+  panics, and the registry was built inside `inner_main`, which runs under
+  `block_on`. Startup aborted with `Cannot drop a runtime in a context where
+  blocking is not allowed`. The registry is now built inside
+  `spawn_blocking`, which is not an async context.
 
 ### Documentation
 

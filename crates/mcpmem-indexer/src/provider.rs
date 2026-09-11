@@ -28,15 +28,38 @@ pub enum ProviderError {
     Response(String),
 }
 
+/// Every provider reduces a document to one string before the request, so
+/// **text is the primitive** and `embed` is the convenience over it.
+///
+/// A query has no entity and no revision. Building a `CanonicalDocument` for
+/// one would put an invented `entity_id` and `revision` into the struct whose
+/// whole purpose is revision fencing, so a read path calls `embed_texts`.
 pub trait EmbeddingProvider: Send + Sync {
+    fn embed_texts(
+        &self,
+        profile: &IndexProfile,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, ProviderError>;
+
     fn embed(
         &self,
         profile: &IndexProfile,
         documents: &[CanonicalDocument],
-    ) -> Result<Vec<Vec<f32>>, ProviderError>;
+    ) -> Result<Vec<Vec<f32>>, ProviderError> {
+        let texts: Vec<String> = documents.iter().map(CanonicalDocument::text).collect();
+        self.embed_texts(profile, &texts)
+    }
 }
 
 impl<T: EmbeddingProvider + ?Sized> EmbeddingProvider for std::sync::Arc<T> {
+    fn embed_texts(
+        &self,
+        profile: &IndexProfile,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, ProviderError> {
+        (**self).embed_texts(profile, texts)
+    }
+
     fn embed(
         &self,
         profile: &IndexProfile,

@@ -1,4 +1,4 @@
-use crate::{CanonicalDocument, EmbeddingProvider, ProviderError};
+use crate::{EmbeddingProvider, ProviderError};
 use mcpmem_core::jobs::IndexProfile;
 use std::time::Duration;
 
@@ -34,12 +34,22 @@ impl OpenAiCompatibleProvider {
     }
 }
 impl EmbeddingProvider for OpenAiCompatibleProvider {
-    fn embed(
+    fn embed_texts(
         &self,
         profile: &IndexProfile,
-        documents: &[CanonicalDocument],
+        texts: &[String],
     ) -> Result<Vec<Vec<f32>>, ProviderError> {
-        let response: serde_json::Value = self.client.post(&self.endpoint).bearer_auth(&self.api_key).json(&serde_json::json!({"model": profile.model, "input": documents.iter().map(CanonicalDocument::text).collect::<Vec<_>>() })).send().map_err(|e| ProviderError::Request(e.to_string()))?.error_for_status().map_err(|e| ProviderError::Request(e.to_string()))?.json().map_err(|e| ProviderError::Response(e.to_string()))?;
+        let response: serde_json::Value = self
+            .client
+            .post(&self.endpoint)
+            .bearer_auth(&self.api_key)
+            .json(&serde_json::json!({"model": profile.model, "input": texts }))
+            .send()
+            .map_err(|e| ProviderError::Request(e.to_string()))?
+            .error_for_status()
+            .map_err(|e| ProviderError::Request(e.to_string()))?
+            .json()
+            .map_err(|e| ProviderError::Response(e.to_string()))?;
         response
             .get("data")
             .and_then(serde_json::Value::as_array)

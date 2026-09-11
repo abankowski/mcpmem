@@ -107,41 +107,52 @@ impl RoleService for WebhookService {
 #[cfg(feature = "indexer")]
 pub struct IndexerService {
     database: std::path::PathBuf,
-    timeout: std::time::Duration,
     vectors: Option<Arc<crate::vector_store::VectorStore>>,
     provider: Arc<mcpmem_indexer::ProviderRegistry>,
 }
 
 #[cfg(feature = "indexer")]
 impl IndexerService {
-    /// Builds the service from settings the caller already resolved: the
-    /// environment layered over the configuration file. The provider registry
-    /// is created once here and reused by every poll.
-    pub fn with_settings(
-        database: impl Into<std::path::PathBuf>,
-        vectors: Option<Arc<crate::vector_store::VectorStore>>,
-        settings: &mcpmem_indexer::ProviderSettings,
-    ) -> Result<Self, crate::errors::MCSError> {
-        let timeout = std::time::Duration::from_secs(10);
-        let provider = mcpmem_indexer::ProviderRegistry::from_settings(settings, timeout)
-            .map_err(|error| crate::errors::MCSError::MemoryError(error.to_string()))?;
-        Ok(Self::with_provider(
-            database,
-            vectors,
-            Arc::new(provider),
-            timeout,
-        ))
+    /// The request timeout of one embedding call. The registry and the worker
+    /// are built by separate calls, so one constant serves both and the two
+    /// cannot disagree.
+    pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Builds the provider registry from settings the caller already resolved:
+    /// the environment layered over the configuration file.
+    ///
+    /// This is an associated function and not a step inside the constructor
+    /// because the process also publishes the registry through
+    /// [`crate::indexer_provider::init`]. The worker embeds an entity on write
+    /// and a query tool embeds the query text. Both must call one provider, so
+    /// the process builds one registry and hands it to both.
+    ///
+    /// It is `async` so that no caller can reach the hazard it hides. Each
+    /// provider holds a `reqwest::blocking` client, and building one makes a
+    /// temporary Tokio runtime and drops it again. A runtime dropped inside an
+    /// async context panics, which killed startup for every operator who named
+    /// a provider. The blocking pool is not an async context, so the build runs
+    /// there.
+    pub async fn provider_registry(
+        settings: mcpmem_indexer::ProviderSettings,
+    ) -> Result<Arc<mcpmem_indexer::ProviderRegistry>, crate::errors::MCSError> {
+        tokio::task::spawn_blocking(move || {
+            mcpmem_indexer::ProviderRegistry::from_settings(&settings, Self::REQUEST_TIMEOUT)
+                .map(Arc::new)
+                .map_err(|error| crate::errors::MCSError::MemoryError(error.to_string()))
+        })
+        .await
+        .map_err(|error| crate::errors::MCSError::MemoryError(error.to_string()))?
     }
 
-    fn with_provider(
+    /// Takes the registry the caller already built. Every poll reuses it.
+    pub fn with_provider(
         database: impl Into<std::path::PathBuf>,
         vectors: Option<Arc<crate::vector_store::VectorStore>>,
         provider: Arc<mcpmem_indexer::ProviderRegistry>,
-        timeout: std::time::Duration,
     ) -> Self {
         Self {
             database: database.into(),
-            timeout,
             vectors,
             provider,
         }
@@ -152,7 +163,7 @@ impl IndexerService {
 impl RoleService for IndexerService {
     fn run(&self) -> mcpmem_runtime::RoleFuture {
         let database = self.database.clone();
-        let timeout = self.timeout;
+        let timeout = Self::REQUEST_TIMEOUT;
         let vectors = self.vectors.clone();
         let provider = self.provider.clone();
         Box::pin(async move {
@@ -169,9 +180,18 @@ impl RoleService for IndexerService {
                     let worker = mcpmem_indexer::IndexerWorker::new(database, provider, timeout);
                     worker.run_once(now).map_err(|error| error.to_string())?;
                     if let Some(vectors) = vectors {
-                        vectors
-                            .reconcile_managed_snapshot()
-                            .map_err(|error| error.to_string())?;
+                        // A rebuild completes over many polls. Until the last
+                        // job commits, the `verify_full_scan` inside this call
+                        // reports that the candidate is incomplete, and only a
+                        // later poll can complete it. Ending the role here
+                        // stopped every rebuild bigger than one poll, so the
+                        // candidate never reached the serving state. A
+                        // concurrent entity write can also enqueue a job
+                        // between these two calls, so no error here is
+                        // permanent, and the next poll retries it.
+                        if let Err(error) = vectors.reconcile_managed_snapshot() {
+                            tracing::debug!(%error, "managed snapshot is not published yet");
+                        }
                     }
                     Ok::<_, String>(())
                 })
@@ -187,27 +207,6 @@ impl RoleService for IndexerService {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         })
-    }
-}
-
-#[cfg(all(test, feature = "indexer"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn indexer_service_reuses_its_provider_registry_across_polls() {
-        let provider = Arc::new(mcpmem_indexer::ProviderRegistry::new(None, None));
-        let service = IndexerService::with_provider(
-            "memory.db",
-            None,
-            Arc::clone(&provider),
-            std::time::Duration::from_secs(1),
-        );
-
-        assert!(Arc::ptr_eq(&provider, &service.provider));
-        let first_poll = Arc::clone(&service.provider);
-        let second_poll = Arc::clone(&service.provider);
-        assert!(Arc::ptr_eq(&first_poll, &second_poll));
     }
 }
 

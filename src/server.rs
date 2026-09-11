@@ -834,7 +834,7 @@ fn handle_tools_list(vectors_enabled: bool, principal: &Principal) -> Value {
         all.extend(
             vector_tools()
                 .iter()
-                .filter(|t| in_scope(t, principal))
+                .filter(|t| in_scope(t, principal) && vector_tool_listed(t))
                 .cloned(),
         );
     }
@@ -856,6 +856,30 @@ fn in_scope(tool: &Value, principal: &Principal) -> bool {
     tool.get("name")
         .and_then(Value::as_str)
         .is_some_and(|n| authz::allows_tool(principal, n))
+}
+
+/// `false` for a vector tool this process cannot run. Only `semantic_search`
+/// carries such a condition: it embeds the query itself, so it needs an
+/// embedding provider. Listing it without one would advertise a call that
+/// always fails.
+#[inline]
+fn vector_tool_listed(tool: &Value) -> bool {
+    match tool.get("name").and_then(Value::as_str) {
+        Some(tools::SEMANTIC_SEARCH) => semantic_search_available(),
+        _ => true,
+    }
+}
+
+/// Whether `semantic_search` can work here. The tool needs the `indexer`
+/// feature at build time and a provider at run time. A build without the
+/// feature has no handler at all, so it never lists the tool.
+#[cfg(feature = "indexer")]
+fn semantic_search_available() -> bool {
+    crate::indexer_provider::is_configured()
+}
+#[cfg(not(feature = "indexer"))]
+const fn semantic_search_available() -> bool {
+    false
 }
 
 /// Process-wide flag for the code-indexing subsystem, set once at server
@@ -947,6 +971,17 @@ fn handle_tools_call(
             "vector_reindex" => {
                 vector_actions::handle_vector_reindex(vs, kg, tool_args).map(HandlerResult::Value)
             }
+            #[cfg(feature = "indexer")]
+            tools::SEMANTIC_SEARCH => vector_actions::handle_semantic_search(vs, kg, tool_args)
+                .map(HandlerResult::RawResult),
+            // The name is a vector tool on every build, so dispatch must answer
+            // for it here. Without the feature there is no handler, and a bare
+            // "method not found" would not say why.
+            #[cfg(not(feature = "indexer"))]
+            tools::SEMANTIC_SEARCH => Err(MCSError::MethodNotFound(format!(
+                "{tool_name} (this build has no embedding worker; rebuild with \
+                 --features indexer)"
+            ))),
             other => Err(MCSError::MethodNotFound(other.to_string())),
         };
         return Ok(result.unwrap_or_else(|e| {

@@ -12,9 +12,9 @@
 #
 # Every key below is commented out, so this file changes nothing until you
 # uncomment a line. A key in [server], [storage], [tools] or [vectors] shows its
-# default. A key in [security], [oauth] or [indexer] has no default, so it shows
-# an example value instead. An unknown key or section is a startup error, not a
-# warning.
+# default. A key in [security] or [oauth] has no default, so it shows an example
+# value instead. The [indexer] section holds both kinds, and each comment says
+# which one it is. An unknown key or section is a startup error, not a warning.
 #
 # This file never holds a secret. It names the file that holds one.
 
@@ -133,12 +133,9 @@
 
 
 [indexer]
-# The embedding worker's provider. Needs the `indexer` Cargo feature and the
+# Settings for the embedding worker. Needs the `indexer` Cargo feature and the
 # `indexer` role. On a build without that feature the section is ignored with a
 # warning, so one file can serve several deployments.
-#
-# Read the "Known limitation" note in the README before you rely on this: the
-# worker has no index profile to drain in 1.0.1.
 #
 # Env: MCP_MEMORY_OLLAMA_URL
 # ollama-url = "http://127.0.0.1:11434"
@@ -146,3 +143,36 @@
 # Env: MCP_MEMORY_OPENAI_URL and MCP_MEMORY_OPENAI_API_KEY
 # openai-url = "https://api.openai.com/v1/embeddings"
 # openai-api-key-file = "/etc/mcpmem/openai-api-key"
+
+# The index profile, and the point of the whole section. Name a provider, a
+# model and a dimension, and the server embeds entity text by itself: it adopts
+# an index profile, enqueues every live entity, and the worker drains the queue.
+#
+# The same act ends legacy compatibility for the vector store. The server then
+# owns every entity vector, and it refuses a direct `vector_upsert_embedding` or
+# `vector_batch_upsert` call. Leave the three keys out to keep writing your own
+# vectors from the client.
+#
+# The three keys travel together. A section that names two of them is a startup
+# error, because a half-written profile would still rebuild the whole store.
+#
+# A profile is immutable. A change to any key below adopts a new profile and
+# rebuilds every entity vector. The old vectors keep serving a query until the
+# new profile is complete.
+#
+# "ollama", "openai", "openai-compatible" or "bedrock". No default.
+# provider = "ollama"
+
+# The model name the provider knows. No default.
+# model = "nomic-embed-text"
+
+# The vector length the model returns, 1 to 65536. The "bedrock" provider
+# accepts 256, 512 or 1024 only. No default.
+# dimensions = 768
+
+# "none" or "l2". Shows its default. The worker checks that every vector it
+# stores is L2 normalized.
+# normalization = "l2"
+
+# "cosine", "inner-product" or "l2-squared". Shows its default.
+# metric = "cosine"

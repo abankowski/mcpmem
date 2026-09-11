@@ -20,11 +20,15 @@ profile, inside the same transaction as the graph write. A crash therefore
 loses no work. A second change to the same entity replaces the queued row and
 raises the lease epoch, so an in-flight worker cannot commit a stale revision.
 
-> ### Known limitation in 1.0.1: the worker has nothing to drain
+> ### The worker needs an index profile
 >
-> No shipped command creates an index profile. Every index job therefore stays
-> in the `held` state, which no worker claims. The worker starts, polls every
-> 250 ms and stays idle. It never calls a provider.
+> The worker claims a job only for a serving or a candidate index profile.
+> Name a provider, a model and a dimension in the `[indexer]` section of the
+> server configuration file. The server then adopts a profile at startup, and
+> the queue drains.
+>
+> Without those three keys every index job stays in the `held` state. The
+> worker polls and stays idle, and the caller keeps supplying vectors.
 
 ## How the worker runs
 

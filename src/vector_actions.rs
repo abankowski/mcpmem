@@ -202,6 +202,14 @@ pub fn handle_hybrid_search(
         perform_hybrid_search(vs, kg, query_text, buf, text_weight, vec_weight, top_k)
     })?;
 
+    Ok(build_content_response(&build_fused_results(&results)))
+}
+
+/// Render fused `(name, entityType, score, textScore, vecScore)` rows as the
+/// standard results JSON. `hybrid_search` and `semantic_search` fuse the same
+/// two rankings, so a client parses one shape for both.
+fn build_fused_results(results: &HybridResult) -> String {
+    use std::fmt::Write;
     let mut out = String::with_capacity(128 + results.len() * 80);
     out.push_str(r#"{"results":["#);
     for (i, (name, etype, score, txt_score, vec_score)) in results.iter().enumerate() {
@@ -212,19 +220,16 @@ pub fn handle_hybrid_search(
         push_json_str(&mut out, name);
         out.push_str(r#","entityType":"#);
         push_json_str(&mut out, etype);
-        use std::fmt::Write;
         write!(
             out,
-            r#","score":{:.6},"textScore":{:.6},"vecScore":{:.6}}}"#,
-            score, txt_score, vec_score
+            r#","score":{score:.6},"textScore":{txt_score:.6},"vecScore":{vec_score:.6}}}"#
         )
         .unwrap();
     }
     out.push_str(r#"],"count":"#);
     out.push_str(&results.len().to_string());
     out.push('}');
-
-    Ok(build_content_response(&out))
+    out
 }
 
 fn perform_hybrid_search(
@@ -746,4 +751,147 @@ fn collect_names(params: &Value, key: &str) -> Result<Vec<String>> {
             "'{key}' must be an array of strings"
         ))),
     }
+}
+
+/// Scale a vector to unit length in place.
+///
+/// A zero vector keeps its value. Dividing by a zero norm would fill the
+/// vector with NaN, and every later comparison against NaN is false, so the
+/// search would silently return nothing.
+#[cfg(feature = "indexer")]
+fn l2_normalize(vector: &mut [f32]) {
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    if norm > 0.0 && norm.is_finite() {
+        let scale = 1.0 / norm;
+        for value in vector.iter_mut() {
+            *value = (f64::from(*value) * scale) as f32;
+        }
+    }
+}
+
+/// Search by text: `{ queryText, topK?, entityType?, textWeight?, vecWeight? }`.
+///
+/// The server embeds the query with the model the serving index profile names,
+/// so the query vector and the stored vectors come from one model. A chat
+/// client needs no embedding service of its own.
+///
+/// `textWeight` or `vecWeight` turns on fusion with the FTS5 ranking, through
+/// the same [`perform_hybrid_search`] that `hybrid_search` uses. Without
+/// either, the search is pure vector.
+#[cfg(feature = "indexer")]
+pub fn handle_semantic_search(
+    vs: &VectorStore,
+    kg: &GraphHandle,
+    args: Option<&Value>,
+) -> Result<String> {
+    use mcpmem_core::jobs::Normalization;
+    use mcpmem_indexer::EmbeddingProvider;
+
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+
+    let query_text = params
+        .get("queryText")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| MCSError::InvalidParams("Missing 'queryText' parameter".into()))?;
+    // Blank text embeds to a vector that means nothing, and the provider bills
+    // for the call. Refuse it before any network request.
+    if query_text.trim().is_empty() {
+        return Err(MCSError::InvalidParams(
+            "'queryText' must not be empty or whitespace".into(),
+        ));
+    }
+
+    let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?.clamp(1, MAX_TOP_K);
+    let entity_type = params
+        .get("entityType")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    // Either weight turns on fusion. The other one then takes its default, the
+    // rule `hybrid_search` already follows. A null counts as absent, because
+    // `opt_f64` reads it that way.
+    let given = |key: &str| matches!(params.get(key), Some(value) if !value.is_null());
+    let fuse = given("textWeight") || given("vecWeight");
+
+    let profile = vs.serving_profile()?.ok_or_else(|| {
+        MCSError::InvalidParams(
+            "This store serves no index profile, so the server does not know which model to \
+             embed with. Name a provider, a model and a dimension in the [indexer] section of \
+             the configuration file, then restart the server."
+                .into(),
+        )
+    })?;
+
+    let provider = crate::indexer_provider::get().ok_or_else(|| {
+        MCSError::InvalidParams(format!(
+            "No embedding provider is configured, so the server cannot embed the query text. \
+             The serving profile names the provider kind '{}'. Configure that provider in the \
+             [indexer] section of the configuration file, then restart the server.",
+            profile.provider_kind
+        ))
+    })?;
+
+    let texts = [query_text.to_owned()];
+    let vectors = provider
+        .embed_texts(&profile, &texts)
+        .map_err(|e| MCSError::MemoryError(format!("Embedding the query text failed: {e}")))?;
+
+    // One text goes in, so one vector must come back. Any other count is a
+    // provider fault. `into_iter().next()` takes the vector without an index,
+    // so that fault cannot panic the server.
+    let returned = vectors.len();
+    let mut query = vectors
+        .into_iter()
+        .next()
+        .filter(|_| returned == 1)
+        .ok_or_else(|| {
+            MCSError::MemoryError(format!(
+                "The embedding provider returned {returned} vectors for one query text; it must \
+                 return exactly one"
+            ))
+        })?;
+
+    if query.len() != profile.dimensions as usize {
+        return Err(MCSError::MemoryError(format!(
+            "The embedding provider returned {} dimensions and the serving profile names model \
+             '{}' at {} dimensions. The provider and the profile disagree.",
+            query.len(),
+            profile.model,
+            profile.dimensions
+        )));
+    }
+
+    // The worker validates a stored vector as L2 normalized before it commits
+    // the job. Nothing validates a query vector, and cosine distance against an
+    // unnormalized query ranks the results wrongly, so normalize it here.
+    if profile.normalization == Normalization::L2 {
+        l2_normalize(&mut query);
+    }
+
+    if fuse {
+        let text_weight = opt_f64(params, "textWeight", 0.5)?;
+        let vec_weight = opt_f64(params, "vecWeight", 0.5)?;
+        // Fusion ranks over both stores and knows no entity type, so a filtered
+        // call asks for a wider pool and drops the other types afterwards.
+        // Filtering a pool of exactly `top_k` would return too few rows while
+        // matching entities still wait below the cut.
+        let wanted = if entity_type.is_some() {
+            top_k.saturating_mul(4)
+        } else {
+            top_k
+        };
+        let mut results =
+            perform_hybrid_search(vs, kg, query_text, &query, text_weight, vec_weight, wanted)?;
+        if let Some(filter) = entity_type {
+            results.retain(|(_, etype, ..)| etype == filter);
+            results.truncate(top_k);
+        }
+        return Ok(build_content_response(&build_fused_results(&results)));
+    }
+
+    let json = vs.search_entities_json(&query, top_k, entity_type)?;
+    Ok(build_content_response(&json))
 }

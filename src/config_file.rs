@@ -18,6 +18,7 @@ use std::path::Path;
 
 use clap::parser::ValueSource;
 use clap::{ArgMatches, ValueEnum};
+use mcpmem_core::jobs::{DistanceMetric, Normalization};
 use serde::Deserialize;
 
 use crate::errors::{MCSError, Result};
@@ -236,12 +237,25 @@ pub struct OAuthSection {
 /// Settings for the embedding worker. They apply only to a build carrying the
 /// `indexer` Cargo feature; on any other build the server warns and ignores
 /// them, so one file can serve several deployments.
+///
+/// `provider`, `model` and `dimensions` define the index profile, and they
+/// travel together. [`profile_spec`] refuses a section that names some of the
+/// three and not all of them. A half-written profile would still start a
+/// rebuild of every entity.
+///
+/// `normalization` and `metric` describe the vector the provider returns.
+/// Each one has a default, so an operator may leave it out.
 #[derive(Debug, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct IndexerSection {
     pub ollama_url: Option<String>,
     pub openai_url: Option<String>,
     pub openai_api_key_file: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub dimensions: Option<u32>,
+    pub normalization: Option<String>,
+    pub metric: Option<String>,
 }
 
 impl IndexerSection {
@@ -561,6 +575,183 @@ pub fn indexer_settings(file: Option<&FileConfig>) -> Result<mcpmem_indexer::Pro
     }))
 }
 
+/// The index profile the `[indexer]` section names, already checked. Only
+/// [`profile_spec`] builds one, so every value in it is valid.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileSpec {
+    pub provider_kind: String,
+    pub model: String,
+    pub dimensions: u32,
+    pub normalization: Normalization,
+    pub distance_metric: DistanceMetric,
+}
+
+impl ProfileSpec {
+    /// Mints the profile. The identifier is fresh on every call, because a
+    /// profile is immutable and a new one re-enqueues every entity. The caller
+    /// compares fingerprints instead, and a fingerprint excludes the
+    /// identifier, so a restart with an unchanged file starts no rebuild.
+    #[must_use]
+    pub fn to_profile(&self) -> mcpmem_core::jobs::IndexProfile {
+        mcpmem_core::jobs::IndexProfile {
+            id: uuid::Uuid::new_v4(),
+            store_key: "default".to_string(),
+            provider_kind: self.provider_kind.clone(),
+            model: self.model.clone(),
+            dimensions: self.dimensions,
+            representation_version: "name+type+observations-v1".to_string(),
+            normalization: self.normalization,
+            distance_metric: self.distance_metric,
+            vector_encoding_version: "f32le-v1".to_string(),
+        }
+    }
+}
+
+/// The spellings an operator writes, and the kind the profile carries. The
+/// second column is what `ProviderRegistry::embed` dispatches on, so this table
+/// is the whole mapping.
+const PROVIDERS: &[(&str, &str)] = &[
+    ("ollama", "ollama"),
+    ("openai", "openai"),
+    ("openai-compatible", "openai-compatible"),
+    ("bedrock", "bedrock"),
+];
+
+const NORMALIZATIONS: &[(&str, Normalization)] =
+    &[("none", Normalization::None), ("l2", Normalization::L2)];
+
+const METRICS: &[(&str, DistanceMetric)] = &[
+    ("cosine", DistanceMetric::Cosine),
+    ("inner-product", DistanceMetric::InnerProduct),
+    ("l2-squared", DistanceMetric::L2Squared),
+];
+
+/// The bound `mcpmem_core::jobs::IndexProfile::validate` applies. It is
+/// repeated here to name the offending key; the core validator reports only
+/// that the whole profile is invalid.
+const MAX_DIMENSIONS: u32 = 65_536;
+
+/// The longest name the core validator accepts. Only the model needs the check
+/// here, because every other string in a profile comes from a table above.
+const MAX_NAME_LEN: usize = 256;
+
+/// A blank value counts as an unset key. An operator who empties a string
+/// means the same as an operator who deletes the line.
+fn named(raw: Option<&String>) -> Option<&str> {
+    raw.map(|raw| raw.trim()).filter(|raw| !raw.is_empty())
+}
+
+/// Resolves one string key against its allowed-value table. The message names
+/// the field and every allowed value, so the operator needs no second lookup.
+fn parse_choice<T: Copy>(
+    field: &str,
+    value: Option<&str>,
+    table: &[(&str, T)],
+) -> Result<Option<T>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    table
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(value))
+        .map(|(_, parsed)| Some(*parsed))
+        .ok_or_else(|| {
+            let allowed = table
+                .iter()
+                .map(|(name, _)| format!("'{name}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            MCSError::InvalidParams(format!(
+                "config '{field}': unknown value '{value}'. Allowed values: {allowed}."
+            ))
+        })
+}
+
+/// The index profile the file names, or `None` when it names none. `None`
+/// leaves the store in legacy compatibility, so a client keeps writing its own
+/// vectors and the embedding worker stays idle.
+///
+/// Every rejection here is cheap, and every mistake that reaches the store is
+/// not: adopting a profile re-enqueues every live entity and refuses a direct
+/// `vector_upsert_embedding` write from that moment on.
+pub fn profile_spec(file: Option<&FileConfig>) -> Result<Option<ProfileSpec>> {
+    let Some(section) = file.map(|file| &file.indexer) else {
+        return Ok(None);
+    };
+
+    // Both tables are checked before the early return below, because a
+    // misspelled value has no other guard. `deny_unknown_fields` catches a
+    // wrong key name and never a wrong value.
+    let normalization = parse_choice(
+        "indexer.normalization",
+        named(section.normalization.as_ref()),
+        NORMALIZATIONS,
+    )?
+    .unwrap_or(Normalization::L2);
+    let distance_metric = parse_choice("indexer.metric", named(section.metric.as_ref()), METRICS)?
+        .unwrap_or(DistanceMetric::Cosine);
+    let provider_kind = parse_choice(
+        "indexer.provider",
+        named(section.provider.as_ref()),
+        PROVIDERS,
+    )?;
+
+    let (provider_kind, model, dimensions) = match (
+        provider_kind,
+        named(section.model.as_ref()),
+        section.dimensions,
+    ) {
+        (Some(provider_kind), Some(model), Some(dimensions)) => (provider_kind, model, dimensions),
+        (None, None, None) => return Ok(None),
+        (provider, model, dimensions) => {
+            let missing = [
+                ("indexer.provider", provider.is_none()),
+                ("indexer.model", model.is_none()),
+                ("indexer.dimensions", dimensions.is_none()),
+            ]
+            .into_iter()
+            .filter(|(_, absent)| *absent)
+            .map(|(field, _)| format!("'{field}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+            return Err(MCSError::InvalidParams(format!(
+                "config 'indexer': a profile needs 'provider', 'model' and \
+                     'dimensions' together. Add {missing}."
+            )));
+        }
+    };
+
+    if dimensions == 0 || dimensions > MAX_DIMENSIONS {
+        return Err(MCSError::InvalidParams(format!(
+            "config 'indexer.dimensions': {dimensions} is out of range. \
+             Use a value from 1 to {MAX_DIMENSIONS}."
+        )));
+    }
+    // Titan Text Embeddings V2 returns one of three lengths. The provider
+    // rejects any other length per request, so a wrong value here would fail
+    // every job of a rebuild that already started.
+    if provider_kind == "bedrock" && !matches!(dimensions, 256 | 512 | 1024) {
+        return Err(MCSError::InvalidParams(format!(
+            "config 'indexer.dimensions': the 'bedrock' provider accepts 256, 512 \
+             or 1024 only, and not {dimensions}."
+        )));
+    }
+    if model.len() > MAX_NAME_LEN || model.chars().any(char::is_control) {
+        return Err(MCSError::InvalidParams(format!(
+            "config 'indexer.model': the name must hold no control character, \
+             and {MAX_NAME_LEN} bytes at most."
+        )));
+    }
+
+    Ok(Some(ProfileSpec {
+        provider_kind: provider_kind.to_string(),
+        model: model.to_string(),
+        dimensions,
+        normalization,
+        distance_metric,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,5 +791,135 @@ mod tests {
         let error = read_secret_file("indexer.openai-api-key-file", path.to_str().expect("utf8"))
             .expect_err("an empty secret file must be rejected");
         assert!(error.to_string().contains("is empty"), "{error}");
+    }
+
+    fn indexer_file(body: &str) -> FileConfig {
+        toml::from_str(&format!("[indexer]\n{body}")).expect("the section must parse")
+    }
+
+    #[test]
+    fn a_complete_indexer_section_names_a_profile() {
+        let file = indexer_file(
+            r#"provider = "ollama"
+model = "nomic-embed-text"
+dimensions = 768
+"#,
+        );
+        let spec = profile_spec(Some(&file))
+            .expect("a complete section must be accepted")
+            .expect("a complete section must name a profile");
+        assert_eq!(spec.provider_kind, "ollama");
+        assert_eq!(spec.model, "nomic-embed-text");
+        assert_eq!(spec.dimensions, 768);
+        assert_eq!(spec.normalization, Normalization::L2);
+        assert_eq!(spec.distance_metric, DistanceMetric::Cosine);
+        // The core validator is what `adopt_profile` reaches, and it names no
+        // field. Anything it refuses must be refused above instead.
+        spec.to_profile()
+            .validate()
+            .expect("the minted profile must satisfy the core validator");
+    }
+
+    #[test]
+    fn nothing_named_is_no_profile() {
+        assert!(
+            profile_spec(None)
+                .expect("no file names no profile")
+                .is_none(),
+            "a deployment with no configuration file must keep legacy compatibility"
+        );
+        let file = indexer_file("provider = \"\"\nmodel = \"  \"\n");
+        assert!(
+            profile_spec(Some(&file))
+                .expect("a blank value names no profile")
+                .is_none(),
+            "an empty string is not a name"
+        );
+    }
+
+    #[test]
+    fn a_missing_model_names_the_missing_key() {
+        let file = indexer_file("provider = \"ollama\"\ndimensions = 768\n");
+        let error = profile_spec(Some(&file)).expect_err("a half-written profile must be rejected");
+        assert!(error.to_string().contains("indexer.model"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_provider_lists_the_allowed_values() {
+        let file = indexer_file("provider = \"llama\"\nmodel = \"m\"\ndimensions = 768\n");
+        let error = profile_spec(Some(&file)).expect_err("an unknown provider must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("indexer.provider"), "{message}");
+        assert!(message.contains("'ollama'"), "{message}");
+    }
+
+    #[test]
+    fn a_dimension_outside_the_range_is_rejected() {
+        for body in [
+            "provider = \"ollama\"\nmodel = \"m\"\ndimensions = 0\n",
+            "provider = \"ollama\"\nmodel = \"m\"\ndimensions = 65537\n",
+        ] {
+            let file = indexer_file(body);
+            let error =
+                profile_spec(Some(&file)).expect_err("a length outside the range is refused");
+            assert!(error.to_string().contains("indexer.dimensions"), "{error}");
+            // The message must carry the whole bound, so the operator needs no
+            // second lookup.
+            assert!(error.to_string().contains("1 to 65536"), "{error}");
+        }
+    }
+
+    /// The shape keys have a default, so a test that names none of them cannot
+    /// tell a parsed value from a default one.
+    #[test]
+    fn the_shape_keys_are_read() {
+        let file = indexer_file(
+            r#"provider = "ollama"
+model = "m"
+dimensions = 8
+normalization = "none"
+metric = "inner-product"
+"#,
+        );
+        let spec = profile_spec(Some(&file))
+            .expect("both values are allowed")
+            .expect("the section names a profile");
+        assert_eq!(spec.normalization, Normalization::None);
+        assert_eq!(spec.distance_metric, DistanceMetric::InnerProduct);
+
+        // The two spellings the shipped example documents.
+        let example = indexer_file(
+            r#"provider = "ollama"
+model = "m"
+dimensions = 8
+normalization = "l2"
+metric = "cosine"
+"#,
+        );
+        profile_spec(Some(&example)).expect("every documented spelling must be accepted");
+    }
+
+    #[test]
+    fn bedrock_refuses_a_length_it_never_returns() {
+        let file = indexer_file(
+            r#"provider = "bedrock"
+model = "amazon.titan-embed-text-v2:0"
+dimensions = 768
+"#,
+        );
+        let error = profile_spec(Some(&file)).expect_err("768 is not a Bedrock length");
+        let message = error.to_string();
+        assert!(message.contains("indexer.dimensions"), "{message}");
+        assert!(message.contains("bedrock"), "{message}");
+        assert!(message.contains("256, 512 or 1024"), "{message}");
+        // The discriminating case: the guard refuses the length, and never the
+        // provider.
+        let allowed = indexer_file(
+            r#"provider = "bedrock"
+model = "amazon.titan-embed-text-v2:0"
+dimensions = 1024
+"#,
+        );
+        profile_spec(Some(&allowed)).expect("1024 is a Bedrock length");
     }
 }

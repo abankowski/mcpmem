@@ -19,6 +19,21 @@ use mcpmem_core::jobs::{
     AnnGenerationRepository, DistanceMetric, IndexProfileRegistry, StoreState,
 };
 
+/// What [`VectorStore::adopt_profile`] did. Reported rather than logged inside,
+/// so the caller decides how loud each outcome is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdoptOutcome {
+    /// The store already serves an equivalent profile.
+    Unchanged,
+    /// A rebuild into this profile was already running.
+    RebuildInProgress,
+    /// A rebuild started. Every live entity is queued for embedding, and a
+    /// direct `vector_*` write is refused from now on.
+    RebuildStarted,
+    /// The last rebuild into this profile failed and stays failed. The store
+    /// keeps serving whatever it served before.
+    PreviousRebuildFailed(String),
+}
 pub type EntityId = i64;
 
 /// Number of concurrent searcher threads reserved inside the usearch HNSW
@@ -1097,6 +1112,57 @@ impl VectorStore {
 
     pub const fn dims(&self) -> u32 {
         self.dims
+    }
+
+    /// The profile this store serves, or `None` while it stays in legacy
+    /// compatibility. A caller that must know the model or the dimension of the
+    /// managed index reads it here; the registry itself is private.
+    pub fn serving_profile(&self) -> Result<Option<mcpmem_core::jobs::IndexProfile>> {
+        let conn = self.db.lock();
+        let registry = IndexProfileRegistry::new(&conn);
+        registry
+            .serving_profile("default")?
+            .map(|id| registry.get(id))
+            .transpose()
+    }
+
+    /// Moves the store onto `desired`, and does nothing when it already serves
+    /// an equivalent profile.
+    ///
+    /// Equivalence is the profile fingerprint, which covers every field except
+    /// the identifier. That is what makes this safe to call on every startup:
+    /// an unchanged configuration file is a no-op, and only a real change to
+    /// the provider, the model, the dimension, the normalization or the metric
+    /// starts a rebuild.
+    ///
+    /// A rebuild re-enqueues every live entity, and it takes the store out of
+    /// legacy compatibility, after which a direct `vector_*` write is refused.
+    /// The caller decides whether that is wanted; this method only reports what
+    /// it did.
+    pub fn adopt_profile(&self, desired: &mcpmem_core::jobs::IndexProfile) -> Result<AdoptOutcome> {
+        let wanted = desired.fingerprint()?;
+        let conn = self.db.lock();
+        let registry = IndexProfileRegistry::new(&conn);
+        let same = |id| -> Result<bool> { Ok(registry.get(id)?.fingerprint()? == wanted) };
+        match registry.state("default")? {
+            StoreState::Active(active) if same(active)? => Ok(AdoptOutcome::Unchanged),
+            StoreState::Rebuilding { candidate, .. } => {
+                if same(candidate)? {
+                    Ok(AdoptOutcome::RebuildInProgress)
+                } else {
+                    Err(MCSError::InvalidParams(
+                        "a rebuild into a different profile is already in progress; let it finish or clear it before changing the configuration".into(),
+                    ))
+                }
+            }
+            StoreState::Failed {
+                candidate, reason, ..
+            } if same(candidate)? => Ok(AdoptOutcome::PreviousRebuildFailed(reason)),
+            StoreState::Active(_) | StoreState::Failed { .. } | StoreState::LegacyCompat => {
+                registry.begin_rebuild(desired)?;
+                Ok(AdoptOutcome::RebuildStarted)
+            }
+        }
     }
 
     /// Approximate resident RAM used by the ANN index, in bytes.
