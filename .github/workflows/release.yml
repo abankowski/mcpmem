@@ -137,24 +137,30 @@ jobs:
   # After a release, `main` names the version that is coming next, never the one
   # already published. Owner decision, 2026-09-10, after two releases failed
   # because a tag moved and the manifests did not.
+  #
+  # The bump lands as a pull request, not a direct push. `main` accepts nothing
+  # but pull requests (owner decision, 2026-09-11, after the oauth publish fix
+  # was rejected by the repository rules), and a workflow pushing past its own
+  # rule would fail loudly anyway.
   bump:
-    needs: publish
+    needs: [publish, binaries]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
-      # Only this job writes. `publish` stays read-only, so the escalation is
-      # confined to the one commit it exists for.
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Advance the version on main
+      - name: Open the version bump as a pull request
         env:
           RELEASED: ${{ github.event.release.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           released="${RELEASED#v}"
           current="$(awk '/^\[package\]/ {p=1; next} /^\[/ {p=0} p && /^version = / {gsub(/[",]/, "", $3); print $3; exit}' Cargo.toml)"
@@ -166,6 +172,13 @@ jobs:
           scripts/set-version.sh "${next}"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          branch="chore/open-${next}"
+          git checkout -b "${branch}"
           git add Cargo.toml Cargo.lock crates/*/Cargo.toml
           git commit -m "chore: open ${next} after releasing ${released}"
-          git push origin main
+          git push -u origin "${branch}"
+          gh pr create \
+            --base main \
+            --head "${branch}" \
+            --title "Open ${next} after releasing ${released}" \
+            --body "The release tagged \`${released}\` is complete. This moves \`main\` to \`${next}\` so the next release starts from a fresh version. Merge this whenever convenient; nothing blocks on it."
