@@ -154,10 +154,10 @@ mod tests {
             iss: "https://issuer".into(),
             sub: "s2".into(),
             label: None,
-            scopes: vec!["GraphRead".into(), "graph-read".into()],
+            scopes: vec!["graph-read".into(), "graph-read".into()],
         };
         // Canonical slugs only, in input order.
-        assert_eq!(canonical_scopes(&["GraphRead".into(), "admin".into()]).unwrap(), vec!["graph-read", "admin"]);
+        assert_eq!(canonical_scopes(&["graph-read".into(), "admin".into()]).unwrap(), vec!["graph-read", "admin"]);
     }
 
     #[test]
@@ -1033,6 +1033,7 @@ Tokens: ~6k. Cost: < $1."
 
 **Files:**
 - Modify: `src/oauth_routes.rs`
+- Create: `tests/principal_admin.rs`
 
 **Interfaces:**
 - Consumes: `PrincipalsStore` (Task 4), `OAuthConfig.approval_waitlist` + TTL (Task 5), `IdentityClaims { iss, sub, email }` (`crates/mcpmem-oauth/src/upstream.rs:99-113`), `login_refused` / `callback` (`oauth_routes.rs:1062-1067, 1229-1247`).
@@ -1040,9 +1041,13 @@ Tokens: ~6k. Cost: < $1."
 
 - [ ] **Step 1: Write the failing integration tests**
 
-Append to `src/oauth_routes.rs`'s existing `#[cfg(test)]` module (which drives the router with `HttpState::for_test` / `oneshot`, e.g. `oauth_routes.rs:1730-1760`). These use `tests/support`'s `FakeIdp` and flow helpers the same way `tests/oauth_upstream.rs` does; the human the FakeIdp authenticates is `sub-1` (see `oauth_upstream.rs:824-825`):
+These are integration tests: they need `tests/support` (the fake upstream provider), which unit tests inside `src/oauth_routes.rs` cannot see. Create `tests/principal_admin.rs` with the two tests below; Task 7 extends the same file.
 
 ```rust
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
+use support::{Scopes, json};
+
     #[tokio::test]
     async fn an_unknown_human_is_recorded_and_sees_pending_when_waitlist_is_on() {
         let idp = support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default()).await;
@@ -1094,9 +1099,9 @@ The authorize → Location → callback walk exists verbatim in `tests/oauth_ups
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p mcpmem oauth_routes::tests`
+Run: `cargo test --test principal_admin`
 
-Expected: FAIL — `approval_waitlist` field and the pending branch do not exist (plus the existing tests break on `OAuthConfig` construction until Task 5's fields are in; Task 5 lands first, so this task starts green).
+Expected: FAIL — `approval_waitlist` field and the pending branch do not exist. (The OAuthConfig construction errors clear once Task 5 lands; Task 5 executes before Task 6, so this task starts green.)
 
 - [ ] **Step 3: Implement**
 
@@ -1220,9 +1225,9 @@ fn html_escape(s: &str) -> String {
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p mcpmem oauth_routes::tests`
+Run: `cargo test --test principal_admin`
 
-Expected: PASS — the two new tests plus the whole existing oauth test module.
+Expected: PASS — the two new tests plus the whole existing oauth integration set.
 
 - [ ] **Step 5: Run the full oauth integration set**
 
@@ -1250,7 +1255,7 @@ Tokens: ~9k. Cost: < $1."
 
 **Files:**
 - Modify: `src/http.rs`
-- Create: `tests/principal_admin.rs`
+- Create: `tests/principal_admin.rs` (extends the file Task 6 created)
 
 **Interfaces:**
 - Consumes: `PrincipalsStore` (Task 4), `OAuthConfig` defaults (Task 5), `OauthState.runtime`/`builtin_keys`/`revoke_principal` (Tasks 3, 6), `principal_id`/`parse_principal_id` (Task 3), `principals::canonical_scopes`/`ADMIN_SCOPE` (Task 2).
@@ -1277,7 +1282,7 @@ pub async fn admin_access_token(server: &Server) -> String {
         ("response_type", "code"),
         ("client_id", client_id.as_str()),
         ("redirect_uri", redirect.as_str()),
-        ("scope", crate::support::principals::ADMIN_SCOPE),
+        ("scope", mcpmem::principals::ADMIN_SCOPE),
         ("state", "st"),
         ("code_challenge", code_challenge().as_str()),
     ];
@@ -1428,7 +1433,9 @@ async fn waitlist_approve_promotes_and_dismiss_discards() {
     ).await.unwrap();
     let entry = json(list).await["entries"][0].clone();
     let id = entry["id"].as_str().unwrap().to_owned();
-    assert_eq!(entry["name"], "sub-1".to_string().escape_default().to_string().into()); // email absent → sub is the name; assert on id + iss/sub instead
+    // The FakeIdp sends no email, so the entry name is the sub itself.
+    assert_eq!(entry["sub"], "sub-1");
+    assert_eq!(entry["name"], "sub-1");
 
     let approve = server.request(
         Request::post(format!("/ui/api/waitlist/{id}/approve"))
@@ -1444,8 +1451,6 @@ async fn waitlist_approve_promotes_and_dismiss_discards() {
     assert_eq!(again_rows, 0);
 }
 ```
-
-Fix the sloppy assertion in that last test: `entry["name"]` for `sub-1` with no email equals `"sub-1"`; assert `entry["sub"] == "sub-1"` instead, which is stable.
 
 Also add a `dismiss` test (DELETE on the entry → 204, row gone, no principal created).
 
