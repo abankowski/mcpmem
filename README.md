@@ -403,6 +403,13 @@ and rejected from `tools/call` as if they never existed — least privilege by d
 | `--enable-code` | **code** | `code_index`, `code_outline`, `code_search`, `code_get_symbol`, `code_watch`, `code_embed`, `code_semantic_search` |
 | `--enable-all` | *(all)* | Every category. Overrides the individual flags. |
 
+On a server that carries credentials the list is filtered a second time, **per
+caller**: the static bearer token holds `--static-bearer-scopes` (every enabled
+category by default), and an issued OAuth token holds exactly the scopes the
+human approved. A category the server enables can still be invisible to one
+caller — see [Authentication](#authentication) and
+[`docs/runbooks/oauth-deployment.md`](docs/runbooks/oauth-deployment.md).
+
 The database path is resolved in order:
 
 1. `--memory-file` / `-f` flag
@@ -746,11 +753,15 @@ Layer a vector store on top of the knowledge graph. Each embedding attaches to a
 by name, is indexed in an in-memory ANN index, and persists as a blob in SQLite — rebuilt on
 startup.
 
-- **Bring your own embeddings.** These tools never call an embedding model. Compute the vector on
-  the client and pass it in, at `--embedding-dims` length. No tool turns query text into a vector,
-  so `vector_search_entities`, `vector_mmr_search` and the vector half of `hybrid_search` all need
-  a ready vector. The optional `indexer` role does call a provider, but only for stored entity
-  text on write, and it is idle in 1.0.1 — see [Runtime roles](#runtime-roles).
+- **Bring your own embeddings.** `vector_search_entities`, `vector_mmr_search` and the vector half
+  of `hybrid_search` never call an embedding model. Compute the vector on the client and pass it
+  in, at `--embedding-dims` length. No tool turns query text into a vector.
+- **One tool embeds on the server.** `semantic_search` takes query text alone and embeds it with
+  the model named by the serving index profile — the same model that embedded the stored
+  entities — then returns the nearest entities. It exists only when the process was built with
+  the `indexer` feature **and** the store serves an index profile (`[indexer]` with `provider`,
+  `model`, `dimensions`) **and** a provider of that kind is configured. Missing any of those,
+  the tool is hidden from `tools/list` while the other vector tools remain visible.
 - **Two tools need no vector from you.** `vector_search_by_entity` and `vector_recommend` build
   the query from vectors already in the store, so a chat client can call them directly.
 - **Semantic search** — `vector_search_entities` returns nearest entities by cosine similarity
@@ -763,6 +774,21 @@ startup.
   per-item error reporting.
 - **Hybrid search** — `hybrid_search` runs vector and FTS5 search in parallel, fuses them with
   Reciprocal Rank Fusion, and optionally boosts by graph centrality.
+
+### The vector tools are missing from `tools/list`
+
+The Indexer **role** is not what exposes these tools. `--role indexer` starts
+the embedding worker; the tools appear only when the **category** is enabled
+(`--enable-vectors` or `--enable-all`), in the startup log line `Tool
+categories enabled: …`. And on a server that carries credentials, the list is
+filtered **per caller** — a static bearer token holds
+`--static-bearer-scopes`, and an issued OAuth token holds exactly the scopes
+the human approved, never more. A principal whose `scopes` entry lacks
+`vectors` sees none of them, whatever the server enables, and a token never
+gains a scope after issue: refresh keeps the original grant's set, so the
+connector must authorize again. `semantic_search` needs a serving profile on
+top of the other gates (above). The deployed-connector case, with the checks:
+[`docs/runbooks/oauth-deployment.md`](docs/runbooks/oauth-deployment.md#8-the-connector-sees-fewer-tools-than-the-server-enables).
 
 ### HNSW vs IVF-Flat vs TurboQuant
 

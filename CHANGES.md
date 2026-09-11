@@ -94,6 +94,16 @@ This entry lists every change since that snapshot. The version line restarts at
   not call an embedding model" now says which build and which path that covers.
   The evidence is in
   [`docs/analysis/2026-09-11-query-side-embedding.md`](docs/analysis/2026-09-11-query-side-embedding.md).
+- **The vector tools' three gates are written down.** `tools/list` shows a
+  vector tool only when the category is enabled on the serving process, the
+  caller's credential holds the `vectors` scope, and (for `semantic_search`
+  alone) the store serves an index profile with a provider. The Indexer role
+  exposes no tool of its own, and a token never gains a scope after issue —
+  refresh keeps the original grant's set, so a connector must re-authorize.
+  The deployed-connector case is a new section in
+  [`docs/runbooks/oauth-deployment.md`](docs/runbooks/oauth-deployment.md#8-the-connector-sees-fewer-tools-than-the-server-enables),
+  and the README no longer calls the `indexer` role "idle in 1.0.1" — since
+  1.0.2 the server embeds on write and in `semantic_search`.
 
 ## 1.0.0 — 2026-09-10
 

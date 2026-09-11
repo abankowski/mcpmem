@@ -11,8 +11,9 @@ given for **Bash** and for **fish**. Where the two are identical, it says so.
 - [5. Add the connector](#5-add-the-connector)
 - [6. Revoking access](#6-revoking-access)
 - [7. What each refusal means](#7-what-each-refusal-means)
-- [8. The limits](#8-the-limits)
-- [9. What maintenance deletes](#9-what-maintenance-deletes)
+- [8. The connector sees fewer tools than the server enables](#8-the-connector-sees-fewer-tools-than-the-server-enables)
+- [9. The limits](#9-the-limits)
+- [10. What maintenance deletes](#10-what-maintenance-deletes)
 
 ## What this turns on
 
@@ -285,7 +286,7 @@ An easier deployment carries no path prefix at all. Prefer that.
 
 ### The peer address, and what a rate limit counts
 
-`mcpmem` bounds the anonymous endpoints per peer address (section 8). Which
+`mcpmem` bounds the anonymous endpoints per peer address (section 9). Which
 address it uses is decided by **`--oauth-trust-forwarded-proto`**, the same
 flag that says a trusted proxy ended TLS:
 
@@ -302,7 +303,7 @@ catches for you:
 - The flag set, and the process reachable **without** going through the proxy:
   the same bypass, and overwriting the header at the proxy does not close it.
   Binding where only the proxy can reach you is a requirement of using this
-  flag, not a hardening step — [section 8](#8-the-limits) gives the addresses.
+  flag, not a hardening step — [section 9](#9-the-limits) gives the addresses.
 - The flag unset behind a proxy: every caller counts as the proxy, so one
   misbehaving client locks the whole internet out of the endpoint.
 
@@ -601,7 +602,88 @@ connector can send its human back through consent for it.
 If a request produces no log line, it did not reach the process. Check the
 proxy — the well-known paths in section 4 are the usual cause.
 
-## 8. The limits
+## 8. The connector sees fewer tools than the server enables
+
+The connector's `tools/list` shows the knowledge-graph tools but none of the
+`vector_*` tools, or none of the `code_*` tools, while the server log says
+the category is enabled and the indexer role is running. Nothing answers an
+error — the tools are simply absent. Two gates decide what a caller sees,
+and both must pass. A third gate applies to one tool alone.
+
+### Gate 1: the serving process must enable the category
+
+Each tool is listed only when a category enables it at startup
+(`--enable-vectors`, `--enable-code`, or `--enable-all`). The Indexer
+**role** is a different switch: it is the embedding worker, and it exposes
+no tool of its own. A process can run `--role indexer` and still list no
+vector tool, if `--enable-vectors` is absent.
+
+The startup log names the truth:
+
+```
+Tool categories enabled: graph-read, graph-write, vectors, code
+```
+
+`vectors` in that line means the server can serve vector tools. Its absence
+is the whole story — add `--enable-vectors` (or `--enable-all`) and restart.
+
+### Gate 2: the caller's credential must hold the scope
+
+A credential with every applicable scope, but only those: since 1.0.2,
+`tools/list` is filtered **per caller**. The static bearer token holds
+`--static-bearer-scopes`; an issued token holds exactly what the human
+approved at consent, which is already the intersection of what the connector
+asked for and the principal's `scopes` in the principals file.
+
+So a principal whose entry says `"scopes": ["graph-read", "graph-write"]`
+never sees the vector tools, however the server was started. The fix is a
+wider entry in the principals file
+
+```json
+{ "scopes": ["graph-read", "graph-write", "vectors"] }
+```
+
+**and a new authorization.** A token never gains a scope after it is issued:
+a refresh carries the original grant's scope set forward, so a connector
+that already holds a token keeps its old scopes until the human consents
+again — a refresh succeeds, scopes unchanged. Remove the connector and
+re-add it, or [revoke](#6-revoking-access) its token family first, then
+re-authorize. If the scope is missing at consent time, the entry or the
+connector's requested set is wrong.
+
+### Gate 3: `semantic_search` needs a serving profile
+
+This one tool embeds the query text on the server, so it is listed only when
+the process was built with the `indexer` feature *and* the store serves an
+index profile — `[indexer]` with `provider`, `model` and `dimensions` — *and*
+a provider of that kind is configured. Missing any of those, `semantic_search`
+is hidden while every other vector tool is visible. The other vector tools
+never embed, so they ignore this gate.
+
+### Check before you change anything
+
+The discovery document says what the server advertises, in one request:
+
+```sh
+# Identical in Bash and fish.
+curl -fsS https://mem.example.com/.well-known/oauth-protected-resource | jq .scopes_supported
+```
+
+The list must hold `vectors`. Then the granted scopes are visible in the
+database, per principal:
+
+```sh
+# Identical in Bash and fish.
+sqlite3 /var/lib/mcpmem/memory.mcpmem \
+  'SELECT principal, scopes FROM oauth_token WHERE revoked = 0;'
+```
+
+`vector_upsert_embedding` wants the `vectors` scope and appears under it in
+`tools/list`. The 403 path in section 7 names scope failures; the missing-tool
+case above never produces one, because `tools/list` hides before `tools/call`
+can refuse.
+
+## 9. The limits
 
 Six endpoints answer an anonymous caller, because the specifications require
 it. Each is bounded per peer address, in a fixed one-minute window:
@@ -699,7 +781,7 @@ If that answers, the limits are decoration. Either fix the bind, or drop
 `--oauth-trust-forwarded-proto` and give the process its own TLS certificate —
 then the peer is the connection and the header is ignored.
 
-## 9. What maintenance deletes
+## 10. What maintenance deletes
 
 A background task runs every five minutes, on the same tick as the graph's own
 maintenance. It logs `OAuth maintenance` with two counts whenever it removed
