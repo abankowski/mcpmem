@@ -200,8 +200,8 @@ pub struct Args {
     /// Record a rejected would-be human and answer with a pending page,
     /// instead of refusing outright. Entries expire after
     /// `--approval-waitlist-ttl-seconds` and the list holds at most 25.
-    #[arg(long = "approval-waitlist", action = clap::ArgAction::SetTrue)]
-    pub approval_waitlist: Option<bool>,
+    #[arg(long = "approval-waitlist")]
+    pub approval_waitlist: bool,
 
     /// How long a waitlist entry lives, measured from first sighting.
     /// 0 disables the TTL sweep; the 25-entry cap always applies.

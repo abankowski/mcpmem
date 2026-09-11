@@ -355,7 +355,7 @@ impl Config {
                 principals,
                 cimd_allowed_domains,
                 trust_forwarded_proto: args.oauth_trust_forwarded_proto,
-                approval_waitlist: args.approval_waitlist.unwrap_or(false),
+                approval_waitlist: args.approval_waitlist,
                 approval_waitlist_ttl_seconds: args
                     .approval_waitlist_ttl_seconds
                     .unwrap_or(24 * 60 * 60),
@@ -375,6 +375,9 @@ impl Config {
                 || args.principals_file.is_some()
                 || !args.cimd_allowed_domains.is_empty()
                 || args.oauth_trust_forwarded_proto
+                || args.approval_waitlist
+                || args.approval_waitlist_ttl_seconds.is_some()
+                || args.default_new_principal_scopes.is_some()
             {
                 return Err(MCSError::InvalidParams(
                     "the OAuth flags need --oidc-issuer, which turns OAuth on".into(),

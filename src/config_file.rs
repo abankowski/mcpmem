@@ -543,7 +543,7 @@ impl FileConfig {
         );
         assign(
             &mut args.approval_waitlist,
-            oauth.approval_waitlist.map(Some),
+            oauth.approval_waitlist,
             cli.absent("approval_waitlist"),
         );
         assign(

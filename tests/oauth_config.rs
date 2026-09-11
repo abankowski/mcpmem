@@ -392,6 +392,9 @@ fn an_oauth_flag_without_the_issuer_is_refused() {
         vec!["--principals-file", p.as_str()],
         vec!["--cimd-allowed-domain", "claude.ai"],
         vec!["--oauth-trust-forwarded-proto"],
+        vec!["--approval-waitlist"],
+        vec!["--approval-waitlist-ttl-seconds", "60"],
+        vec!["--default-new-principal-scope", "graph-read"],
     ] {
         let mut argv = vec!["--transport", "http"];
         argv.extend_from_slice(&orphan);

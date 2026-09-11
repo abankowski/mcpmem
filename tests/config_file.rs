@@ -149,7 +149,7 @@ fn the_oauth_waitlist_keys_reach_the_args() {
         &[],
         "[oauth]\napproval-waitlist = true\napproval-waitlist-ttl-seconds = 3600\ndefault-new-principal-scopes = [\"graph-read\", \"graph-write\"]\n",
     );
-    assert_eq!(args.approval_waitlist, Some(true));
+    assert!(args.approval_waitlist);
     assert_eq!(args.approval_waitlist_ttl_seconds, Some(3600));
     assert_eq!(
         args.default_new_principal_scopes,
@@ -169,11 +169,25 @@ fn an_oauth_waitlist_flag_beats_the_file() {
         ],
         "[oauth]\napproval-waitlist = false\napproval-waitlist-ttl-seconds = 3600\ndefault-new-principal-scopes = [\"graph-read\"]\n",
     );
-    assert_eq!(args.approval_waitlist, Some(true));
+    assert!(args.approval_waitlist);
     assert_eq!(args.approval_waitlist_ttl_seconds, Some(60));
     assert_eq!(
         args.default_new_principal_scopes,
         Some(vec!["graph-write".to_string()])
+    );
+}
+
+#[test]
+fn an_empty_scopes_list_in_the_file_clears_the_default() {
+    let args = merge(
+        &[],
+        "[oauth]\ndefault-new-principal-scopes = []\n",
+    );
+    assert_eq!(
+        args.default_new_principal_scopes,
+        Some(vec![]),
+        "an explicitly empty list is a value, not an absence: it must reach \
+         Config::from_args and clear the graph-read default"
     );
 }
 
