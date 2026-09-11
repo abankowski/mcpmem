@@ -7,7 +7,7 @@ The commands below are identical in Bash and fish.
 
 ## The version rules
 
-- The workspace holds five crates. All five carry the same version.
+- The workspace holds six crates. All six carry the same version.
 - A tag is `v` plus the version, for example `v1.0.0`.
 - The version is strict semver 2.0.0. Build metadata is rejected: crates.io
   stores it, but no dependency can request it, so the release is unreachable.
@@ -22,7 +22,7 @@ requires the version to be unpublished.
 ## The first release binds the names on crates.io
 
 A crate name belongs to nobody until a version of it exists. The first release
-is therefore `1.0.0-rc.1`, a prerelease: it takes all five names, and it lets
+is therefore `1.0.0-rc.1`, a prerelease: it takes all six names, and it lets
 crates.io accept the Trusted Publisher entries, which it refuses for a crate
 that does not exist.
 
@@ -70,7 +70,7 @@ which keeps a re-run and a manual bump from fighting each other.
 
 1. Choose the version. When the number `main` already carries is the one you
    want, skip to the tests. Otherwise set it with one command, which edits all
-   five `[package]` blocks and every path dependency requirement, refreshes
+   six `[package]` blocks and every path dependency requirement, refreshes
    `Cargo.lock`, and runs the gate:
 
    ```sh
@@ -155,7 +155,7 @@ No credential is stored in the repository.
 crates.io accepts a Trusted Publisher entry only for a crate that exists, so
 the first release must use the API token. After that release:
 
-1. Open each of the five crates on crates.io. Add a Trusted Publisher: owner
+1. Open each of the six crates on crates.io. Add a Trusted Publisher: owner
    `abankowski`, repository `mcpmem`, workflow `release.yml`, environment
    `crates-io`.
 2. Delete the `CARGO_REGISTRY_TOKEN` secret in the GitHub repository.
@@ -178,7 +178,7 @@ and it fails with a clear message when neither credential is available.
 ## Requirements in the repository settings
 
 - Either the secret `CARGO_REGISTRY_TOKEN`, or a Trusted Publisher entry for
-  all five crates.
+  all six crates.
 - An environment named `crates-io`. Add required reviewers there when a manual
   approval before publishing is wanted.
 - The job holds `id-token: write`, which the OIDC exchange needs.

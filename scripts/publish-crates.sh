@@ -13,9 +13,12 @@
 # The command is identical in Bash and fish.
 set -euo pipefail
 
-# Dependency order. `mcpmem-core` first, the three crates that depend on it
-# next, the binary crate last.
-ORDER=(mcpmem-core mcpmem-runtime mcpmem-indexer mcpmem-webhook mcpmem)
+# Dependency order. `mcpmem-core` first, the crates that depend on it next,
+# the binary crate last. `mcpmem-oauth` must precede `mcpmem`: the binary
+# depends on it with a version requirement, and the release on 2026-09-11
+# failed exactly there, because the order skipped it while the manifest had
+# required it since the oauth work landed.
+ORDER=(mcpmem-core mcpmem-runtime mcpmem-indexer mcpmem-webhook mcpmem-oauth mcpmem)
 UA='mcpmem-release (https://github.com/abankowski/mcpmem)'
 
 dry_run=0

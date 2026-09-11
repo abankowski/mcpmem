@@ -12,7 +12,7 @@
 # The command is identical in Bash and fish.
 set -uo pipefail
 
-CRATES=(mcpmem-core mcpmem-runtime mcpmem-indexer mcpmem-webhook mcpmem)
+CRATES=(mcpmem-core mcpmem-runtime mcpmem-indexer mcpmem-webhook mcpmem-oauth mcpmem)
 UA='mcpmem-release-check (https://github.com/abankowski/mcpmem)'
 failures=0
 check_registry=0
