@@ -114,12 +114,16 @@ pub struct IndexerService {
 
 #[cfg(feature = "indexer")]
 impl IndexerService {
-    pub fn from_environment(
+    /// Builds the service from settings the caller already resolved: the
+    /// environment layered over the configuration file. The provider registry
+    /// is created once here and reused by every poll.
+    pub fn with_settings(
         database: impl Into<std::path::PathBuf>,
         vectors: Option<Arc<crate::vector_store::VectorStore>>,
+        settings: &mcpmem_indexer::ProviderSettings,
     ) -> Result<Self, crate::errors::MCSError> {
         let timeout = std::time::Duration::from_secs(10);
-        let provider = mcpmem_indexer::ProviderRegistry::from_environment(timeout)
+        let provider = mcpmem_indexer::ProviderRegistry::from_settings(settings, timeout)
             .map_err(|error| crate::errors::MCSError::MemoryError(error.to_string()))?;
         Ok(Self::with_provider(
             database,

@@ -20,6 +20,12 @@ profile, inside the same transaction as the graph write. A crash therefore
 loses no work. A second change to the same entity replaces the queued row and
 raises the lease epoch, so an in-flight worker cannot commit a stale revision.
 
+> ### Known limitation in 1.0.1: the worker has nothing to drain
+>
+> No shipped command creates an index profile. Every index job therefore stays
+> in the `held` state, which no worker claims. The worker starts, polls every
+> 250 ms and stays idle. It never calls a provider.
+
 ## How the worker runs
 
 1. Claim one due job and take a 30-second lease.
@@ -47,6 +53,11 @@ password is rejected at construction.
 | `ollama` | `MCP_MEMORY_OLLAMA_URL` | Posts to `<url>/api/embed` |
 | `openai`, `openai-compatible` | `MCP_MEMORY_OPENAI_URL` and `MCP_MEMORY_OPENAI_API_KEY` | Both keys must be set together |
 | `bedrock` | the standard AWS region and credential chain | Needs the `bedrock` Cargo feature. Amazon Titan Text Embeddings V2 only, with 256, 512 or 1024 dimensions |
+
+The server configuration file carries the same three settings.
+`[indexer] ollama-url`, `[indexer] openai-url` and `[indexer] openai-api-key-file`
+configure the Ollama and OpenAI-compatible providers. An environment variable
+wins over the matching file key.
 
 Add a provider by implementing the `EmbeddingProvider` trait.
 

@@ -66,7 +66,7 @@
   },
   {
     "name": "hybrid_search",
-    "description": "Combined vector + full-text search with Reciprocal Rank Fusion. Runs vector search on the query embedding and FTS5 text search on the query text simultaneously, then fuses results by rank. Optionally boosts results by graph centrality.",
+    "description": "Combined vector + full-text search with Reciprocal Rank Fusion. Runs vector search on the query embedding, then FTS5 text search on the query text, and fuses the two result lists by rank. queryText is never embedded: the vector half needs queryEmbedding. Results are boosted by graph centrality whenever the graph mirror holds nodes; there is no flag to disable the boost.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -109,7 +109,7 @@
   },
   {
     "name": "vector_store_stats",
-    "description": "Return statistics about the vector store: embeddingCount, dims, indexKind ('hnsw' or 'ivf'), petgraphNodes/petgraphEdges, the index capacity (indexCapacity), and its resident memory in bytes (indexMemoryBytes) broken down into the graph component (indexGraphBytes; 0 for IVF) and the stored vectors (indexVectorsBytes).",
+    "description": "Return statistics about the vector store: embeddingCount, dims, indexKind ('hnsw', 'ivf' or 'turboquant'), petgraphNodes/petgraphEdges, the index capacity (indexCapacity), and its resident memory in bytes (indexMemoryBytes) broken down into the graph component (indexGraphBytes; 0 for IVF) and the stored vectors (indexVectorsBytes).",
     "inputSchema": {
       "type": "object",
       "properties": {}
@@ -200,7 +200,7 @@
   },
   {
     "name": "vector_reindex",
-    "description": "Rebuild/retrain the ANN index over the current vectors. For the IVF-Flat backend this re-runs k-means to refresh the Voronoi cells and improve recall after large batch ingestion; for HNSW it is a no-op. Returns {reindexed, indexKind, embeddingCount}.",
+    "description": "Rebuild/retrain the ANN index over the current vectors. Only the IVF-Flat backend rebuilds anything: it re-runs k-means to refresh the Voronoi cells and improve recall after large batch ingestion. For HNSW and TurboQuant the call does no work, and 'reindexed' is true in every case. Returns {reindexed, indexKind, embeddingCount}.",
     "inputSchema": {
       "type": "object",
       "properties": {}

@@ -1,6 +1,5 @@
 use anyhow::Result;
-use clap::Parser;
-use mcpmem::{config, runtime, server};
+use mcpmem::{config, config_file, runtime, server};
 use std::sync::Arc;
 use tracing::info;
 
@@ -10,7 +9,11 @@ fn main() -> Result<()> {
 }
 
 async fn inner_main() -> Result<()> {
-    let args = mcpmem::Args::parse();
+    // One entry point, shared with `tests/config_file.rs`: parse the command
+    // line, then layer the configuration file under it. A flag stays ahead of
+    // a file value because the merge records what the command line actually
+    // carried, rather than comparing a parsed value against its default.
+    let (args, file) = config_file::resolve(std::env::args_os())?;
 
     // Install the rustls `ring` crypto provider as the process default up front
     // (idempotent) so the HTTPS transport can build its TLS config. See src/tls.rs.
@@ -21,6 +24,14 @@ async fn inner_main() -> Result<()> {
     info!("Starting MCP Memory Server");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
 
+    if let Some((path, loaded)) = file.as_ref() {
+        info!("Configuration file: {}", path.display());
+        if cfg!(not(feature = "indexer")) && !loaded.indexer.is_empty() {
+            tracing::warn!(
+                "config file section [indexer] ignored: this build carries no `indexer` Cargo feature"
+            );
+        }
+    }
     let config = Arc::new(config::Config::from_args(&args)?);
     info!("Memory file: {}", config.memory_file_path);
 
@@ -64,9 +75,11 @@ async fn inner_main() -> Result<()> {
         .roles()
         .contains(&runtime::RuntimeRole::Indexer)
     {
-        services.with_indexer(Arc::new(runtime::IndexerService::from_environment(
+        let settings = config_file::indexer_settings(file.as_ref().map(|(_, f)| f))?;
+        services.with_indexer(Arc::new(runtime::IndexerService::with_settings(
             config.memory_file_path.clone(),
             mcp_server.vector_store(),
+            &settings,
         )?))
     } else {
         services

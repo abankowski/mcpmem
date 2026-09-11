@@ -1,0 +1,148 @@
+# mcpmem configuration file
+#
+# Pass it with `--config /path/to/mcpmem.toml`, or name it in the
+# MCP_MEMORY_CONFIG environment variable. There is no implicit search path: a
+# file is read only when you name it.
+#
+# Precedence, highest first:
+#   1. a command-line flag
+#   2. an environment variable, where the setting reads one
+#   3. this file
+#   4. the built-in default
+#
+# Every key below is commented out, so this file changes nothing until you
+# uncomment a line. A key in [server], [storage], [tools] or [vectors] shows its
+# default. A key in [security], [oauth] or [indexer] has no default, so it shows
+# an example value instead. An unknown key or section is a startup error, not a
+# warning.
+#
+# This file never holds a secret. It names the file that holds one.
+
+
+[server]
+# Path to the SQLite database. Env: MEMORY_FILE_PATH
+# memory-file = "memory.mcpmem"
+
+# "stdio" or "http".
+# transport = "stdio"
+
+# Listen address for the http transport.
+# bind = "127.0.0.1:8080"
+
+# log-level = "info"
+
+# Roles this process starts. "indexer" needs the `indexer` Cargo feature and
+# "webhooks" needs the `webhooks` feature; a role whose feature is absent is a
+# startup error.
+# roles = ["mcp"]
+
+# The deprecated string-observation adapter. Removed in 2.0.0.
+# legacy-observations = false
+
+# Requests dispatched at once on stdio. Set 1 for strict request ordering.
+# stdio-concurrency = 8
+
+# Read-only SQLite connections. 0 auto-scales to the CPU count.
+# read-pool-size = 4
+
+
+[storage]
+# "async" or "sync". Env: MCP_MEMORY_DURABILITY
+# durability = "async"
+
+# mmap-size = 67108864
+# page-size = 4096
+# cache-size-mb = 32
+# busy-timeout-ms = 5000
+
+# Interval of the background passive WAL checkpoint. 0 disables it.
+# wal-flush-ms = 500
+
+# lru-cache-size = 10000
+
+
+[tools]
+# Nothing is exposed until its category is on. `all` overrides the other four.
+# all = false
+# graph-read = false
+# graph-write = false
+# vectors = false
+# code = false
+
+
+[vectors]
+# Entity vector length. The "turbo" backend accepts 384 to 1536 only.
+# embedding-dims = 384
+
+# Code vector length, for code_embed and code_semantic_search.
+# code-embedding-dims = 768
+
+# "hnsw", "ivf" or "turbo".
+# index = "hnsw"
+
+# "cos", "ip" or "l2sq".
+# metric = "cos"
+
+# "f32", "f16", "bf16" or "i8".
+# quantization = "f32"
+
+# HNSW graph degree M, efConstruction and efSearch.
+# connectivity = 16
+# expansion-add = 200
+# expansion-search = 50
+
+# IVF centroids and cells probed per query. Used with index = "ivf".
+# ivf-nlist = 256
+# ivf-nprobe = 8
+
+# TurboQuant bits per coordinate, 1 to 8. Used with index = "turbo".
+# tq-bits = 4
+
+
+[security]
+# File holding the static bearer token for the http transport. An empty file is
+# rejected. Env: MCP_MEMORY_AUTH_TOKEN holds the token itself and wins over this.
+# auth-token-file = "/etc/mcpmem/bearer-token"
+
+# Scopes granted to that token. Omit for every category.
+# static-bearer-scopes = ["graph-read", "vectors"]
+
+# HTTPS. Both must be set together. Env: MCP_TLS_CERT and MCP_TLS_KEY
+# tls-cert = "/etc/mcpmem/fullchain.pem"
+# tls-key = "/etc/mcpmem/privkey.pem"
+
+
+[oauth]
+# Setting `issuer` turns the OAuth 2.1 authorization server on. `public-url` is
+# then needed too. Both need the `oauth` Cargo feature, which is on by default.
+# public-url = "https://mem.example.com"
+# issuer = "https://accounts.google.com"
+# client-id = "1234567890-abc.apps.googleusercontent.com"
+# client-secret-file = "/etc/mcpmem/oidc-client-secret"
+
+# JSON file listing the humans allowed to authorize, and their scopes.
+# principals-file = "/etc/mcpmem/principals.json"
+
+# Hosts allowed to serve a client metadata document. One entry per whole host.
+# The built-in default holds both hosts, "claude.ai" and "chatgpt.com". This key
+# replaces both hosts when an operator sets it.
+# cimd-allowed-domains = ["claude.ai"]
+
+# A reverse proxy terminates TLS in front of this server.
+# trust-forwarded-proto = false
+
+
+[indexer]
+# The embedding worker's provider. Needs the `indexer` Cargo feature and the
+# `indexer` role. On a build without that feature the section is ignored with a
+# warning, so one file can serve several deployments.
+#
+# Read the "Known limitation" note in the README before you rely on this: the
+# worker has no index profile to drain in 1.0.1.
+#
+# Env: MCP_MEMORY_OLLAMA_URL
+# ollama-url = "http://127.0.0.1:11434"
+
+# Env: MCP_MEMORY_OPENAI_URL and MCP_MEMORY_OPENAI_API_KEY
+# openai-url = "https://api.openai.com/v1/embeddings"
+# openai-api-key-file = "/etc/mcpmem/openai-api-key"

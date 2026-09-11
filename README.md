@@ -71,10 +71,126 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
 cargo install mcpmem
 ```
 
-This installs the `mcpmem` binary. The `code` and `oauth` features are both on by default.
-A `--no-default-features` build gives a lean pure-memory binary with no tree-sitter grammars
-and no HTTP client, and it **refuses `--oidc-issuer` at startup** rather than serve half an
-authorization server. Add `--features oauth` back to keep the OAuth endpoints on a lean build.
+That installs the `mcpmem` binary with the default features, `code` and `oauth`.
+
+### Build features
+
+The binary is modular. A feature that you do not compile is absent: its code is not linked, and
+the runtime role that needs it refuses to start.
+
+| Feature | Default | What it adds | Extra dependencies |
+|---|---|---|---|
+| `code` | **on** | tree-sitter parsing for 10 languages and the `code_*` tools | 11 tree-sitter grammars, `ignore`, `blake3`, `notify` |
+| `oauth` | **on** | the OAuth 2.1 authorization server and the upstream OpenID Connect leg | `reqwest`, `url` |
+| `indexer` | off | the `indexer` role — a durable embedding worker with Ollama and OpenAI-compatible providers | `mcpmem-indexer`, `reqwest` |
+| `bedrock` | off | Amazon Titan Text Embeddings V2 as a third provider. Implies `indexer` | `aws-config`, `aws-sdk-bedrockruntime` |
+| `webhooks` | off | the `webhooks` role and the delivery outbox. Read the limitation below first | `mcpmem-webhook` |
+
+Recipes — identical in Bash and fish:
+
+```sh
+cargo install mcpmem                                     # default: code + oauth
+cargo install mcpmem --features indexer                  # adds the embedding worker
+cargo install mcpmem --features indexer,webhooks
+cargo install mcpmem --features bedrock                  # implies indexer
+cargo install mcpmem --no-default-features               # lean graph-only binary
+cargo install mcpmem --no-default-features --features oauth
+```
+
+A `--no-default-features` build carries no tree-sitter grammars and no HTTP client, and it
+**refuses `--oidc-issuer` at startup** rather than serve half an authorization server. Add
+`--features oauth` back when a lean build still needs the OAuth endpoints. CI asserts that the
+graph-only build links neither an HTTP client nor an AWS client.
+
+To build from a clone instead of crates.io:
+
+```sh
+git clone https://github.com/abankowski/mcpmem && cd mcpmem
+cargo build --release --features indexer
+# the binary lands in target/release/mcpmem
+```
+
+## Runtime roles
+
+One process runs the MCP server, a background worker, or any compiled combination. `--role`
+takes a comma-separated list and may be repeated. Without the flag the process runs `mcp`
+alone, which is what every earlier version did.
+
+| Role | Cargo feature | What it runs |
+|---|---|---|
+| `mcp` | always compiled | the stdio or HTTP MCP transport |
+| `indexer` | `indexer` | the embedding worker: polls the index-job queue every 250 ms, then republishes the vector snapshot |
+| `webhooks` | `webhooks` | the delivery outbox poller |
+
+```sh
+mcpmem                                   # the mcp role alone
+mcpmem --role mcp,indexer                # server and worker in one process
+mcpmem --role indexer                    # a worker-only process beside a separate server
+```
+
+Both deployment shapes use the same binary. There is no separate worker executable, and a
+worker-only process still opens the graph and the vector store.
+
+A wrong selection fails at startup. None of these is a silent no-op:
+
+| Mistake | Message |
+|---|---|
+| the role's feature is not compiled | `Invalid params: runtime role 'indexer' was selected but its Cargo feature is not compiled` |
+| a repeated role | `Invalid params: runtime role 'mcp' was selected more than once` |
+| an empty list | `Invalid params: at least one runtime role is required` |
+| an empty element, as in `--role mcp,,indexer` | `Invalid params: runtime role names cannot be empty` |
+| an unknown name | `Invalid params: unknown runtime role 'foo'` |
+
+**The first role to settle ends the process.** The supervisor stops every other role as soon as
+one returns or fails, so a dead worker never leaves a half-running server. A failed indexer poll
+therefore takes a co-hosted MCP transport down with it. Run the process under something that
+restarts it: systemd `Restart=on-failure`, or a container restart policy.
+
+### Configuring the embedding worker
+
+The provider comes from the environment, or from the `[indexer]` section of the configuration
+file. The server reads both once at startup. An environment variable wins field by field, so a
+variable overrides only the key it names. `--role` selects the worker; these settings tell it
+which model service to call.
+
+| Setting | Provider kind | Notes |
+|---|---|---|
+| `MCP_MEMORY_OLLAMA_URL`, or `[indexer] ollama-url` | `ollama` | posts to `<url>/api/embed`. A URL carrying credentials is rejected |
+| `MCP_MEMORY_OPENAI_URL` and `MCP_MEMORY_OPENAI_API_KEY`, or `[indexer] openai-url` and `[indexer] openai-api-key-file` | `openai`, `openai-compatible` | both must be set together, or startup fails |
+| the standard AWS region and credential chain | `bedrock` | needs the `bedrock` feature. Titan Text Embeddings V2 only, with 256, 512 or 1024 dimensions |
+
+Every provider request carries a 10-second deadline.
+
+```fish
+# fish
+set -x MCP_MEMORY_OLLAMA_URL http://127.0.0.1:11434
+mcpmem --role mcp,indexer --enable-all
+```
+
+```bash
+# Bash
+export MCP_MEMORY_OLLAMA_URL=http://127.0.0.1:11434
+mcpmem --role mcp,indexer --enable-all
+```
+
+> ### Known limitation in 1.0.1: the worker has nothing to drain
+>
+> The worker claims a job only for a serving or candidate index profile, and **no shipped command
+> creates a profile**. Every graph mutation enqueues its job in the `held` state, which no worker
+> claims. An `indexer` build therefore starts, polls every 250 ms and stays idle; it never calls
+> the embedding provider.
+>
+> Until a profile bootstrap command exists, compute embeddings on the client and write them with
+> `vector_upsert_embedding` or `vector_batch_upsert`. Build with `--features indexer` today only
+> to pin the deployment shape, not to get automatic embeddings.
+
+> ### Known limitation in 1.0.1: the `webhooks` role has no worker
+>
+> The shipped binary starts the role with no configured worker ports, and the role then fails with
+> `webhook role selected without configured worker ports`, which stops the process. The failure is
+> deliberate and visible instead of a silent no-op. Delivery works for a program that embeds
+> `mcpmem-webhook` and constructs `WebhookWorker::new` with a connector, a secret provider, a
+> hostname allowlist and a resolver.
 
 ## Quick start
 
@@ -462,9 +578,13 @@ Layer a vector store on top of the knowledge graph. Each embedding attaches to a
 by name, is indexed in an in-memory ANN index, and persists as a blob in SQLite — rebuilt on
 startup.
 
-- **Bring your own embeddings.** The server stores and searches vectors; it does not call an
-  embedding model. Compute embeddings client-side and pass them in (all must match
-  `--embedding-dims`).
+- **Bring your own embeddings.** These tools never call an embedding model. Compute the vector on
+  the client and pass it in, at `--embedding-dims` length. No tool turns query text into a vector,
+  so `vector_search_entities`, `vector_mmr_search` and the vector half of `hybrid_search` all need
+  a ready vector. The optional `indexer` role does call a provider, but only for stored entity
+  text on write, and it is idle in 1.0.1 — see [Runtime roles](#runtime-roles).
+- **Two tools need no vector from you.** `vector_search_by_entity` and `vector_recommend` build
+  the query from vectors already in the store, so a chat client can call them directly.
 - **Semantic search** — `vector_search_entities` returns nearest entities by cosine similarity
   (configurable), optionally filtered by type.
 - **More-like-this & recommendations** — `vector_search_by_entity` finds entities similar to a
@@ -519,6 +639,138 @@ mcpmem --enable-vectors --embedding-dims 768 \
 mcpmem --enable-vectors --embedding-dims 768 \
   --vec-index turbo --tq-bits 4
 ```
+
+## Configuration reference
+
+With this many switches a long command line stops being readable, so every setting that is not a
+secret is also a key in a TOML file.
+
+```sh
+mcpmem --config /etc/mcpmem/mcpmem.toml
+```
+
+[`mcpmem.example.toml`](mcpmem.example.toml) in the repository root lists every key, all commented
+out. A key in `[server]`, `[storage]`, `[tools]` or `[vectors]` shows its default. A key in
+`[security]`, `[oauth]` or `[indexer]` has no default, so it shows an example value instead. Copy
+the file and uncomment what you need.
+
+- **Precedence, highest first:** a command-line flag, then an environment variable where the
+  setting reads one, then the file, then the built-in default. A flag wins even when you pass it
+  the same value as the default.
+- **A boolean in the file is one-way.** Every `--enable-*` flag and
+  `--oauth-trust-forwarded-proto` is a presence flag with no `--no-` counterpart, so the command
+  line can turn one on but cannot turn one off. A file that sets `[tools] all = true` is
+  therefore authoritative. Treat a file reachable through `MCP_MEMORY_CONFIG` as trusted input.
+- **`MCP_MEMORY_CONFIG`** names the file when `--config` does not. There is no implicit search
+  path, so a stray `mcpmem.toml` in the working directory can never change a deployment.
+- **A named file that does not exist is a startup error**, and so is an unknown key or section.
+  A typo fails loudly instead of being ignored.
+- **The file never holds a secret.** It names the file that holds one — `auth-token-file`,
+  `client-secret-file`, `openai-api-key-file` — so the config stays safe to commit.
+- **Sections map to the tables below:** `[server]`, `[storage]`, `[tools]`, `[vectors]`,
+  `[security]`, `[oauth]`, `[indexer]`. A key drops the prefix that its section already implies.
+  The four prefixes are `--enable-`, `--vec-`, `--oidc-` and `--oauth-`. A repeatable flag becomes
+  a plural key. So `--enable-graph-read` is `[tools] graph-read`, `--vec-index` is
+  `[vectors] index`, `--role` is `[server] roles`, and `--cimd-allowed-domain` is
+  `[oauth] cimd-allowed-domains`.
+
+```toml
+[server]
+memory-file = "/var/lib/mcpmem/memory.mcpmem"
+transport = "http"
+bind = "0.0.0.0:8080"
+roles = ["mcp", "indexer"]
+
+[tools]
+graph-read = true
+graph-write = true
+vectors = true
+
+[vectors]
+embedding-dims = 768
+index = "hnsw"
+
+[indexer]
+ollama-url = "http://127.0.0.1:11434"
+```
+
+A `[indexer]` section on a build without the `indexer` Cargo feature is ignored with a warning
+rather than an error, so one file can serve several deployments.
+
+### Process and storage
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-f`, `--memory-file` | `MEMORY_FILE_PATH`, else a local file | Path to the SQLite database |
+| `-t`, `--transport` | `stdio` | `stdio` or `http` |
+| `-b`, `--bind` | `127.0.0.1:8080` | Listen address for the `http` transport |
+| `-l`, `--log-level` | `info` | Tracing filter |
+| `--role` | `mcp` | Roles to start in this process. See [Runtime roles](#runtime-roles) |
+| `--legacy-observations` | off | The deprecated string-observation adapter. Removed in 2.0.0 |
+| `--mmap-size` | `67108864` | SQLite mmap size in bytes |
+| `--page-size` | `4096` | SQLite page size. Applies to a fresh database only |
+| `--cache-size-mb` | `32` | SQLite page cache, in MiB |
+| `--busy-timeout-ms` | `5000` | SQLite busy timeout |
+| `--wal-flush-ms` | `500` | Interval of the background passive WAL checkpoint. `0` disables it |
+| `--lru-cache-size` | `10000` | Entity-metadata cache capacity |
+| `--stdio-concurrency` | `8` | Requests dispatched at once on stdio. Set `1` for strict ordering |
+| `--read-pool-size` | `4` | Read-only SQLite connections. `0` auto-scales to the CPU count |
+| `--durability` | `MCP_MEMORY_DURABILITY`, else `async` | SQLite synchronous mode: `async` or `sync`. See [Durability](#durability) |
+| `--config` | `MCP_MEMORY_CONFIG` | TOML configuration file |
+
+### Tool categories
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--enable-all` | off | Every category. Overrides the four flags below |
+| `--enable-graph-read` | off | Read-only graph tools |
+| `--enable-graph-write` | off | Graph mutation tools |
+| `--enable-vectors` | off | `vector_*` and `hybrid_search`. The `--vec-*` flags need this |
+| `--enable-code` | off | The `code_*` tools. Needs the `code` build feature |
+
+### Vector index
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--embedding-dims` | `384` | Entity vector length. `turbo` accepts 384 to 1536 only |
+| `--code-embedding-dims` | `768` | Code vector length, for `code_embed` and `code_semantic_search` |
+| `--vec-index` | `hnsw` | `hnsw`, `ivf` or `turbo` |
+| `--vec-metric` | `cos` | `cos`, `ip` or `l2sq` |
+| `--vec-quantization` | `f32` | Scalar quantization of the stored vectors |
+| `--vec-connectivity` | `16` | HNSW graph degree `M` |
+| `--vec-expansion-add` | `200` | HNSW `efConstruction` |
+| `--vec-expansion-search` | `50` | HNSW `efSearch` |
+| `--ivf-nlist` | `256` | IVF centroids. Needs `--vec-index ivf` |
+| `--ivf-nprobe` | `8` | IVF cells probed per query. Needs `--vec-index ivf` |
+| `--tq-bits` | `4` | TurboQuant bits per coordinate, 1 to 8. Needs `--vec-index turbo` |
+
+### Transport security and OAuth
+
+| Flag | Environment fallback | Meaning |
+|---|---|---|
+| `--auth-token` | `MCP_MEMORY_AUTH_TOKEN` | Static bearer token for the `http` transport |
+| `--auth-token-file` | — | File holding that token. An empty file is rejected |
+| `--static-bearer-scopes` | — | Scopes granted to the static token. Defaults to every category |
+| `--tls-cert` | `MCP_TLS_CERT` | PEM certificate chain for HTTPS |
+| `--tls-key` | `MCP_TLS_KEY` | PEM private key matching the certificate |
+| `--public-url` | — | Canonical HTTPS URL of this server. Needed with `--oidc-issuer` |
+| `--oidc-issuer` | — | Upstream OpenID Connect issuer. Turns the authorization server on |
+| `--oidc-client-id` | — | Client identifier at the upstream provider |
+| `--oidc-client-secret-file` | — | File holding the upstream client secret. Omit for a public client |
+| `--principals-file` | — | JSON file listing the humans allowed to authorize, and their scopes |
+| `--cimd-allowed-domain` | — | A host allowed to serve a client metadata document. Repeatable |
+| `--oauth-trust-forwarded-proto` | — | A reverse proxy terminates TLS in front of this server |
+
+### Embedding worker
+
+| Variable | Meaning |
+|---|---|
+| `MCP_MEMORY_OLLAMA_URL` | Ollama base URL. The worker posts to `<url>/api/embed` |
+| `MCP_MEMORY_OPENAI_URL` | OpenAI-compatible embeddings endpoint |
+| `MCP_MEMORY_OPENAI_API_KEY` | Its API key. Must be set together with the URL |
+
+These need the `indexer` build feature and the `indexer` role. See
+[Configuring the embedding worker](#configuring-the-embedding-worker).
 
 ## MCP compliance
 
@@ -599,8 +851,13 @@ updates → cache invalidation.
 | `async` (default) | Flush to kernel page cache, background sync | Up to ~1 s on power failure |
 | `sync` | fsync before every write | Zero |
 
-Set via `MCP_MEMORY_DURABILITY=sync`. A background task also runs every 5 minutes: WAL checkpoint
-(TRUNCATE), planner analysis (`PRAGMA optimize`), and FTS optimization.
+Three ways set the mode: the flag `--durability sync`, the file key
+`[storage] durability = "sync"`, and the environment variable `MCP_MEMORY_DURABILITY=sync`. The
+flag and the file key reject an unknown value at startup. The environment variable only warns and
+keeps `async`, because a typo there must not stop a restart.
+
+A background task also runs every 5 minutes: WAL checkpoint (TRUNCATE), planner analysis
+(`PRAGMA optimize`), and FTS optimization.
 
 ## Maintenance: relation integrity
 

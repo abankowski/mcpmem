@@ -1,4 +1,5 @@
 use crate::Transport;
+use crate::config_file::env_keys;
 use crate::errors::{MCSError, Result};
 use crate::runtime::RoleSet;
 use crate::tools::ToolCategory;
@@ -177,7 +178,7 @@ impl Config {
         let memory_file_path = args
             .memory_file
             .clone()
-            .or_else(|| std::env::var("MEMORY_FILE_PATH").ok())
+            .or_else(|| std::env::var(env_keys::MEMORY_FILE).ok())
             .unwrap_or_else(|| "memory.mcpmem".to_string());
 
         // Resolve the auth token from --auth-token, then --auth-token-file, then
@@ -197,15 +198,24 @@ impl Config {
             }
             Some(Arc::from(token))
         } else {
-            std::env::var("MCP_MEMORY_AUTH_TOKEN")
+            std::env::var(env_keys::AUTH_TOKEN)
                 .ok()
                 .filter(|t| !t.is_empty())
                 .map(|t| Arc::from(t.as_str()))
         };
 
-        let durability = if let Ok(env) = std::env::var("MCP_MEMORY_DURABILITY") {
+        // `--durability` (or the same key in the config file) is exact: a bad
+        // value stops the server. The environment variable keeps its older,
+        // forgiving behaviour, because a typo there must not take a running
+        // deployment down on restart.
+        let durability = if let Some(raw) = args.durability.as_deref() {
+            raw.parse().map_err(MCSError::InvalidParams)?
+        } else if let Ok(env) = std::env::var(env_keys::DURABILITY) {
             env.parse().unwrap_or_else(|e| {
-                tracing::warn!("MCP_MEMORY_DURABILITY parse failed: {e}; falling back to Async");
+                tracing::warn!(
+                    "{} parse failed: {e}; falling back to Async",
+                    env_keys::DURABILITY
+                );
                 Durability::Async
             })
         } else {
@@ -217,13 +227,13 @@ impl Config {
         let tls_cert = args
             .tls_cert
             .clone()
-            .or_else(|| std::env::var("MCP_TLS_CERT").ok())
+            .or_else(|| std::env::var(env_keys::TLS_CERT).ok())
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
         let tls_key = args
             .tls_key
             .clone()
-            .or_else(|| std::env::var("MCP_TLS_KEY").ok())
+            .or_else(|| std::env::var(env_keys::TLS_KEY).ok())
             .filter(|s| !s.is_empty())
             .map(std::path::PathBuf::from);
         if tls_cert.is_some() != tls_key.is_some() {

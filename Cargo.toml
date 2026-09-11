@@ -56,6 +56,11 @@ uuid = { version = "1" }
 # authorization endpoint to encode for. `url` carries no HTTP client, so the
 # `.github/workflows/ci.yml` guard on that build is unaffected.
 url = { version = "2", optional = true }
+# The `--config` file parser. Parsing and `serde` only: the server reads a
+# configuration file and never writes one, so the serializer stays out of the
+# build. `toml` carries no HTTP client, so the graph-only dependency guard in
+# `.github/workflows/ci.yml` is unaffected.
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 
 # --- Code-symbol indexing (feature = "code") ---------------------------------
 # Tree-sitter parsing + the `tags` extractor drive the code knowledge graph.

@@ -5,9 +5,14 @@
 *~
 *.bin
 
-# TidesDB data directories (the default store path and any *.mcpmem dir)
+# The default SQLite store and its sidecars. The trailing-slash forms below
+# are the older TidesDB directory layout; SQLite writes a plain file, which
+# those patterns do not match.
 /memory.mcpmem/
 *.mcpmem/
+*.mcpmem
+*.mcpmem-wal
+*.mcpmem-shm
 
 # Local design notes, plans, and reviews (not for the published crate)
 PERF_OPTIMIZATION_PLAN.md

@@ -8,11 +8,21 @@ pub struct OpenAiCompatibleProvider {
     client: reqwest::blocking::Client,
 }
 impl OpenAiCompatibleProvider {
+    /// Refuses credentials in the URL, as the Ollama provider already does.
+    /// A `reqwest` error renders its URL, so userinfo in the endpoint would
+    /// put the password into a log line on the first failure.
     pub fn new(
         endpoint: String,
         api_key: String,
         timeout: Duration,
     ) -> Result<Self, ProviderError> {
+        let parsed = url::Url::parse(&endpoint)
+            .map_err(|error| ProviderError::Request(format!("OpenAI URL is invalid: {error}")))?;
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(ProviderError::Request(
+                "OpenAI URL must not contain credentials; use the API key setting".into(),
+            ));
+        }
         Ok(Self {
             endpoint,
             api_key,

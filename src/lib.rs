@@ -7,6 +7,7 @@ pub mod code_registry;
 #[cfg(feature = "code")]
 pub mod code_vec_registry;
 pub mod config;
+pub mod config_file;
 pub use mcpmem_core::errors;
 pub mod http;
 pub mod ivf;
@@ -117,6 +118,17 @@ pub struct Args {
     /// Path to the memory file
     #[arg(short = 'f', long = "memory-file")]
     pub memory_file: Option<String>,
+
+    /// TOML configuration file. Falls back to the `MCP_MEMORY_CONFIG` env var.
+    /// A command-line flag always wins over the file, and so does any
+    /// environment variable the same setting reads.
+    #[arg(long = "config", value_name = "PATH")]
+    pub config: Option<String>,
+
+    /// SQLite synchronous mode: `async` (default) or `sync`. Falls back to the
+    /// `MCP_MEMORY_DURABILITY` env var.
+    #[arg(long = "durability")]
+    pub durability: Option<String>,
 
     /// Transport to listen on: stdio or http
     #[arg(short = 't', long = "transport", value_enum, default_value_t = Transport::Stdio)]

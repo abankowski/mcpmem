@@ -8,6 +8,50 @@ version 5.2.1, commit `d6fe34b`. The license stays Apache-2.0, and
 This entry lists every change since that snapshot. The version line restarts at
 1.0.0, because the upstream crate name belongs to another author.
 
+## Unreleased
+
+### Added
+
+- **A TOML configuration file.** `--config <PATH>`, or the `MCP_MEMORY_CONFIG`
+  environment variable, names a file that carries every setting that is not a
+  secret. `--auth-token` has no file key, by design, and `--config` has none
+  either. Precedence is a flag, then an environment variable where the
+  setting reads one, then the file, then the default; a flag wins even when it
+  repeats the default value, because the merge reads clap's value source rather
+  than comparing against defaults. A named file that is absent, an unknown key
+  and an unknown section are all startup errors. There is no implicit search
+  path, so a stray file in the working directory cannot change a deployment.
+  The file names secret files and never holds a secret.
+  [`mcpmem.example.toml`](mcpmem.example.toml) ships every key, commented out.
+- **`--durability`.** The SQLite synchronous mode was reachable only through
+  `MCP_MEMORY_DURABILITY`. The flag and the `[storage] durability` key reject a
+  bad value; the environment variable keeps its older warn-and-continue
+  behaviour, so a typo there cannot stop a restart.
+- **`ProviderRegistry::from_settings` and `ProviderSettings`** in
+  `mcpmem-indexer`. The embedding worker can now be built from settings the
+  caller resolved, so a configuration file reaches the provider without writing
+  back into the process environment. `from_environment` delegates to it.
+
+### Documentation
+
+- **The README describes the build features, the runtime roles and every
+  setting.** New sections: the Cargo feature matrix with install recipes, the
+  `--role` table with both deployment shapes and the exact startup errors, the
+  embedding-worker environment, and a full configuration reference.
+- **Two limitations are written down rather than implied.** The `indexer` role
+  polls and stays idle, because no shipped command creates an index profile and
+  every job therefore stays `held`. The `webhooks` role fails at startup in the
+  shipped binary, because it has no configured worker ports.
+- **Three stale tool descriptions are corrected.** `hybrid_search` said it runs
+  the two searches "simultaneously" and boosts by centrality "optionally"; it
+  runs them in sequence and always boosts. `vector_store_stats` listed only
+  `hnsw` and `ivf` for `indexKind`, omitting `turboquant`. `vector_reindex`
+  called itself a no-op for HNSW alone, while TurboQuant is equally a no-op and
+  `reindexed` is `true` in every case. The README claim that the server "does
+  not call an embedding model" now says which build and which path that covers.
+  The evidence is in
+  [`docs/analysis/2026-09-11-query-side-embedding.md`](docs/analysis/2026-09-11-query-side-embedding.md).
+
 ## 1.0.0 — 2026-09-10
 
 ### Breaking changes

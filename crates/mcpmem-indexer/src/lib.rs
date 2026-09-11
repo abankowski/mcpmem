@@ -72,19 +72,33 @@ impl ProviderRegistry {
         self
     }
 
+    /// Reads the three provider variables from the process environment.
     pub fn from_environment(timeout: Duration) -> Result<Self, ProviderError> {
-        let ollama = std::env::var("MCP_MEMORY_OLLAMA_URL")
-            .ok()
-            .map(|url| OllamaProvider::new(&url, timeout))
+        Self::from_settings(&ProviderSettings::from_environment(), timeout)
+    }
+
+    /// Builds the registry from settings the caller resolved. A server that
+    /// merges a configuration file with the environment uses this entry point,
+    /// so no code has to write back into the process environment.
+    pub fn from_settings(
+        settings: &ProviderSettings,
+        timeout: Duration,
+    ) -> Result<Self, ProviderError> {
+        let ollama = settings
+            .ollama_url
+            .as_deref()
+            .map(|url| OllamaProvider::new(url, timeout))
             .transpose()?
             .map(Arc::new);
         let openai = match (
-            std::env::var("MCP_MEMORY_OPENAI_URL").ok(),
-            std::env::var("MCP_MEMORY_OPENAI_API_KEY").ok(),
+            settings.openai_url.as_deref(),
+            settings.openai_api_key.as_deref(),
         ) {
-            (Some(url), Some(key)) => {
-                Some(Arc::new(OpenAiCompatibleProvider::new(url, key, timeout)?))
-            }
+            (Some(url), Some(key)) => Some(Arc::new(OpenAiCompatibleProvider::new(
+                url.to_string(),
+                key.to_string(),
+                timeout,
+            )?)),
             (None, None) => None,
             _ => {
                 return Err(ProviderError::Request(
@@ -98,6 +112,69 @@ impl ProviderRegistry {
             BedrockEmbeddingProvider::from_standard_chain(timeout)?,
         ));
         Ok(registry)
+    }
+}
+
+/// Environment variable holding the Ollama base URL.
+pub const OLLAMA_URL_ENV: &str = "MCP_MEMORY_OLLAMA_URL";
+/// Environment variable holding the OpenAI-compatible embeddings endpoint.
+pub const OPENAI_URL_ENV: &str = "MCP_MEMORY_OPENAI_URL";
+/// Environment variable holding the key for that endpoint.
+pub const OPENAI_API_KEY_ENV: &str = "MCP_MEMORY_OPENAI_API_KEY";
+
+/// Which embedding services the worker may call. Every field is optional: an
+/// absent field means the matching provider kind is not configured, and a job
+/// that names it fails rather than reaching another provider.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ProviderSettings {
+    pub ollama_url: Option<String>,
+    pub openai_url: Option<String>,
+    pub openai_api_key: Option<String>,
+}
+
+/// Hand-written so the key can never reach a log line through `{:?}`.
+impl std::fmt::Debug for ProviderSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderSettings")
+            .field("ollama_url", &self.ollama_url)
+            .field("openai_url", &self.openai_url)
+            .field(
+                "openai_api_key",
+                &self.openai_api_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl ProviderSettings {
+    /// An empty variable counts as unset. A deployment that expands an unset
+    /// shell variable writes an empty string, and treating that as a
+    /// configured provider would hide the real setting behind it.
+    pub fn from_environment() -> Self {
+        let read = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+        Self {
+            ollama_url: read(OLLAMA_URL_ENV),
+            openai_url: read(OPENAI_URL_ENV),
+            openai_api_key: read(OPENAI_API_KEY_ENV),
+        }
+    }
+
+    /// True when the environment already answered every field, so no
+    /// lower-priority source has to be read at all.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.ollama_url.is_some() && self.openai_url.is_some() && self.openai_api_key.is_some()
+    }
+
+    /// Fills only the fields this value leaves empty. The receiver is the
+    /// higher-priority source, so the environment keeps precedence over a
+    /// configuration file.
+    #[must_use]
+    pub fn or(mut self, lower: Self) -> Self {
+        self.ollama_url = self.ollama_url.or(lower.ollama_url);
+        self.openai_url = self.openai_url.or(lower.openai_url);
+        self.openai_api_key = self.openai_api_key.or(lower.openai_api_key);
+        self
     }
 }
 
