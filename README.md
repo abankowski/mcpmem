@@ -93,6 +93,7 @@ cargo install mcpmem                                     # default: code + oauth
 cargo install mcpmem --features indexer                  # adds the embedding worker
 cargo install mcpmem --features indexer,webhooks
 cargo install mcpmem --features bedrock                  # implies indexer
+cargo install mcpmem --features indexer,webhooks,bedrock # everything on
 cargo install mcpmem --no-default-features               # lean graph-only binary
 cargo install mcpmem --no-default-features --features oauth
 ```
@@ -102,11 +103,16 @@ A `--no-default-features` build carries no tree-sitter grammars and no HTTP clie
 `--features oauth` back when a lean build still needs the OAuth endpoints. CI asserts that the
 graph-only build links neither an HTTP client nor an AWS client.
 
+`--features indexer,webhooks,bedrock` is every feature this crate has: `code` and `oauth` are
+already on by default, and `bedrock` pulls `indexer` with it. CI compiles and lints that whole
+set on every push.
+
 To build from a clone instead of crates.io:
 
 ```sh
 git clone https://github.com/abankowski/mcpmem && cd mcpmem
-cargo build --release --features indexer
+cargo build --release --features indexer   # one extra feature
+cargo build --release --all-features       # everything on
 # the binary lands in target/release/mcpmem
 ```
 
