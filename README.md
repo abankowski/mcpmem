@@ -410,11 +410,13 @@ errors) so the model can read the message and self-correct.
 Entity(name, entityType, observations[])   ──relationType──▶   Entity(...)
 ```
 
-- **Entity** — a named node with a type (e.g. `person`, `company`, `project`) and free-form
-  observation strings. Names are unique and case-sensitive.
+- **Entity** — a named node with a type (e.g. `person`, `company`, `project`) and its
+  observations. Names are unique and case-sensitive.
 - **Relation** — a directed edge `(from, to, relationType)`. Traversal is undirected (BFS/DFS
   follow both directions).
-- **Observation** — an unstructured fact attached to an entity.
+- **Observation** — a fact attached to an entity: a `body`, the server-owned `createdAtUs`,
+  an optional caller-supplied `occurredAtUs`, and `originEntityName` when a merge copied it.
+  See [Observation format (1.0)](#observation-format-10).
 - **Embedding** *(`--enable-vectors`)* — a fixed-dimension `f32` vector attached to an entity, plus
   an optional model identifier.
 
@@ -570,6 +572,18 @@ All transports share one transport-agnostic dispatch core (`dispatch_line()` /
   `RwLock` over the petgraph cache; HNSW/IVF indexes are internally synchronized. Heavy dispatch
   (graph lock + optional fsync) is offloaded to `tokio::task::spawn_blocking` to keep the reactor
   responsive.
+
+### Workspace crates
+
+Each library crate has its own README with the detail for that layer.
+
+| Crate | What it owns |
+|---|---|
+| [`mcpmem`](Cargo.toml) | The MCP server, the transports, the vector store, the code indexing, and the `mcpmem` and `mcpmem-maintenance` binaries |
+| [`mcpmem-core`](crates/mcpmem-core/README.md) | The transactional SQLite graph, the schema bootstrap, the migrations, the change log and the relation repair |
+| [`mcpmem-runtime`](crates/mcpmem-runtime/README.md) | The role enumeration, the role parser and the supervisor |
+| [`mcpmem-indexer`](crates/mcpmem-indexer/README.md) | The durable embedding worker and its providers |
+| [`mcpmem-webhook`](crates/mcpmem-webhook/README.md) | The durable webhook delivery worker |
 
 ### Limits
 
