@@ -74,6 +74,25 @@ This entry lists every change since that snapshot. The version line restarts at
   `block_on`. Startup aborted with `Cannot drop a runtime in a context where
   blocking is not allowed`. The registry is now built inside
   `spawn_blocking`, which is not an async context.
+- **The OpenAI provider silently ignored the profile's dimension.** The
+  request body carried `model` and `input` but never `dimensions`, so
+  `text-embedding-3-small` returned its 1536-dimension default regardless of
+  what the `[indexer]` profile declared. Every embedding then failed
+  `validate_vector`, the job retried forever with only a `last_error` row in
+  the database, the queue never drained, and the full-scan gate blocked the
+  snapshot from ever publishing — the store served no vectors. The body now
+  sends the profile's `dimensions`. The live API was probed to confirm both
+  ends: the field is honored by `text-embedding-3-small` and reduces the
+  return to the declared length.
+- **A permanently failing job blocked the whole store, silently.** The worker
+  retried a failed job every second with no console output and no bound, and
+  the full-scan gate requires *every* job to be `done`. One poisoned entity
+  therefore kept the snapshot unpublished forever. Failures are now logged at
+  `warn` with the entity id and the error, and after `MAX_ATTEMPTS` failures
+  the job is dead-lettered (`state='dead'`) and logged at `error`. The gate
+  ignores dead jobs, and dead-lettering drops the entity's stale vector row so
+  a published snapshot cannot serve an outdated embedding. The next write to
+  the entity re-enqueues it with a fresh attempt budget.
 
 ### Documentation
 

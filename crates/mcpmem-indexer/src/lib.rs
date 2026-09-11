@@ -21,12 +21,16 @@ use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
 const LEASE_US: i64 = 30_000_000;
+/// Failures allowed before a job is dead-lettered. Mirrors the webhook
+/// worker's bound; a poisoned entity must not occupy the queue forever.
+const MAX_ATTEMPTS: i64 = 8;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct RunReport {
     pub claimed: usize,
     pub committed: usize,
     pub retried: usize,
+    pub dead: usize,
 }
 
 #[derive(Debug, Error)]
@@ -314,7 +318,14 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                             )
                             .map_err(|error| error.to_string())
                         }),
-                    None => Ok(false),
+                    // The entity vanished or was superseded before this claim
+                    // ran. Retrying the same text can never succeed, so it must
+                    // not loop as a leased job forever: route it through the
+                    // retry path, which bounds it and dead-letters.
+                    None => Err(
+                        "entity vanished or was superseded before embedding; nothing to index"
+                            .into(),
+                    ),
                 }
             }
         };
@@ -324,8 +335,27 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
             Err(error) => {
                 let retry_now = current_us();
                 let retry_at = retry_now.saturating_add(1_000_000);
-                if jobs.retry(&job, retry_now, retry_at, &error, false)? {
-                    report.retried = 1;
+                let dead = job.attempts >= MAX_ATTEMPTS;
+                if jobs.retry(&job, retry_now, retry_at, &error, dead)? {
+                    if dead {
+                        report.dead = 1;
+                        tracing::error!(
+                            entity_id = job.entity_id,
+                            profile_id = %job.profile_id,
+                            attempts = job.attempts,
+                            %error,
+                            "index job dead-lettered after max attempts; it will not block the store"
+                        );
+                    } else {
+                        report.retried = 1;
+                        tracing::warn!(
+                            entity_id = job.entity_id,
+                            profile_id = %job.profile_id,
+                            attempts = job.attempts,
+                            %error,
+                            "index job embedding failed; scheduled for retry"
+                        );
+                    }
                 }
             }
         }

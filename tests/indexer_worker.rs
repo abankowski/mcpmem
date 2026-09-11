@@ -268,6 +268,90 @@ fn profile_dimension_mismatch_is_retried_without_a_vector_write() {
 }
 
 #[test]
+fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
+    use mcpmem_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    graph
+        .create_entities(&[Entity {
+            name: "poisoned".into(),
+            entity_type: "Person".into(),
+            observations: vec![],
+        }])
+        .unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let profile = profile();
+    IndexProfileRegistry::new(&conn)
+        .begin_rebuild(&profile)
+        .unwrap();
+    let worker = IndexerWorker::new(&database, WrongDimensions, Duration::from_secs(1));
+    // Each poll claims the same job and fails it. Every failure is a retry
+    // until the attempt budget is spent, then the job is dead-lettered. The
+    // worker schedules each retry 1s ahead, so the synthetic clock must
+    // advance past it or no later poll will ever claim the job again.
+    let start = now_us();
+    let mut dead_seen = false;
+    for i in 0..24 {
+        let report = worker.run_once(start + i * 2_000_000).unwrap();
+        dead_seen |= report.dead == 1;
+        if dead_seen {
+            break;
+        }
+    }
+    assert!(dead_seen, "the job must be dead-lettered after max attempts");
+    let (state, attempts): (String, i64) = conn
+        .query_row(
+            "SELECT state, attempts FROM index_job WHERE entity_id=1 AND profile_id=?1",
+            [profile.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "dead");
+    assert!(attempts >= 8);
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM profile_vector", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    // The dead-lettered entity must not block the candidate any more: the
+    // full scan verifies, and no vector was written for it.
+    let generation = AnnGenerationRepository::new(&conn)
+        .get(profile.id)
+        .unwrap()
+        .durable_generation;
+    AnnGenerationRepository::new(&conn)
+        .verify_full_scan(profile.id)
+        .unwrap();
+    AnnGenerationRepository::new(&conn)
+        .mark_published(profile.id, generation)
+        .unwrap();
+    IndexProfileRegistry::new(&conn)
+        .activate(profile.id)
+        .unwrap();
+    let vectors = VectorStore::new(&database, 2).unwrap();
+    vectors.reconcile_managed_snapshot().unwrap();
+    assert_eq!(vectors.search_embeddings(&[1.0, 1.0], 10).unwrap().len(), 0);
+    // A later write to the same entity re-enqueues it with a fresh budget.
+    graph
+        .add_observations("poisoned", &[mcpmem::types::ObservationInput {
+            body: "changed".into(),
+            occurred_at_us: None,
+        }])
+        .unwrap();
+    let (state, attempts): (String, i64) = conn
+        .query_row(
+            "SELECT state, attempts FROM index_job WHERE entity_id=1 AND profile_id=?1",
+            [profile.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "pending");
+    assert_eq!(attempts, 0);
+}
+
+#[test]
 fn ollama_rejects_url_credentials() {
     assert!(
         mcpmem_indexer::OllamaProvider::new("http://token@127.0.0.1:11434", Duration::from_secs(1))

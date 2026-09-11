@@ -337,6 +337,13 @@ impl<'a> IndexJobRepository<'a> {
     ) -> Result<bool> {
         let tx = TxGuard::begin(self.conn)?;
         let changed = self.conn.execute("UPDATE index_job SET state=?6,next_attempt_us=?7,last_error=?8 WHERE entity_id=?1 AND profile_id=?2 AND lease_token=?3 AND lease_epoch=?4 AND state='leased' AND lease_until_us>?5", params![job.entity_id,job.profile_id.to_string(),job.lease.token.to_string(),job.lease.epoch,now,if dead {"dead"} else {"pending"},next_attempt_us,error.chars().take(2048).collect::<String>()]).map_err(sql_error)?;
+        // A dead-lettered entity must not keep a stale vector in the
+        // candidate: the verified full-scan gate would otherwise publish a
+        // snapshot serving an outdated embedding. Its next write re-enqueues
+        // the entity from scratch.
+        if changed == 1 && dead {
+            self.conn.execute("DELETE FROM profile_vector WHERE profile_id=?1 AND entity_id=?2", params![job.profile_id.to_string(), job.entity_id]).map_err(sql_error)?;
+        }
         tx.commit()?;
         Ok(changed == 1)
     }
@@ -413,7 +420,10 @@ fn profile_writable(conn: &Connection, profile: Uuid) -> Result<bool> {
 }
 
 fn verify_vectors_current(conn: &Connection, profile: Uuid) -> Result<()> {
-    let invalid: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM entity e LEFT JOIN entity_revision r ON r.entity_id=e.id LEFT JOIN profile_vector v ON v.entity_id=e.id AND v.profile_id=?1 WHERE e.flags=0 AND (v.entity_id IS NULL OR r.revision IS NULL OR v.entity_revision!=r.revision)) OR EXISTS(SELECT 1 FROM profile_vector v LEFT JOIN entity e ON e.id=v.entity_id WHERE v.profile_id=?1 AND (e.id IS NULL OR e.flags!=0)) OR EXISTS(SELECT 1 FROM index_job WHERE profile_id=?1 AND state!='done')", [profile.to_string()], |r| r.get(0)).map_err(sql_error)?;
+    // A dead-lettered job declares its entity unindexable: the gate must not
+    // block the whole store on it. The worker deletes the entity's vector row
+    // when it dead-letters, so no stale vector sneaks into the snapshot.
+    let invalid: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM entity e LEFT JOIN entity_revision r ON r.entity_id=e.id LEFT JOIN profile_vector v ON v.entity_id=e.id AND v.profile_id=?1 WHERE e.flags=0 AND NOT EXISTS(SELECT 1 FROM index_job d WHERE d.entity_id=e.id AND d.profile_id=?1 AND d.state='dead') AND (v.entity_id IS NULL OR r.revision IS NULL OR v.entity_revision!=r.revision)) OR EXISTS(SELECT 1 FROM profile_vector v LEFT JOIN entity e ON e.id=v.entity_id WHERE v.profile_id=?1 AND (e.id IS NULL OR e.flags!=0)) OR EXISTS(SELECT 1 FROM index_job WHERE profile_id=?1 AND state NOT IN ('done','dead'))", [profile.to_string()], |r| r.get(0)).map_err(sql_error)?;
     if invalid {
         return Err(MCSError::InvalidParams(
             "candidate Full scan has missing or stale vectors/jobs".into(),

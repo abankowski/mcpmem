@@ -43,7 +43,11 @@ impl EmbeddingProvider for OpenAiCompatibleProvider {
             .client
             .post(&self.endpoint)
             .bearer_auth(&self.api_key)
-            .json(&serde_json::json!({"model": profile.model, "input": texts }))
+            .json(&serde_json::json!({
+                "model": profile.model,
+                "input": texts,
+                "dimensions": profile.dimensions,
+            }))
             .send()
             .map_err(|e| ProviderError::Request(e.to_string()))?
             .error_for_status()
