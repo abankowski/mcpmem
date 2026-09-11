@@ -12,6 +12,8 @@ use tracing::error;
 #[cfg(feature = "code")]
 use crate::actions::code as code_actions;
 use crate::actions::memory;
+#[cfg(feature = "webhooks")]
+use crate::actions::webhooks as webhooks_actions;
 use crate::authz::{self, Principal};
 use crate::config::Config;
 use crate::errors::{MCSError, Result};
@@ -437,6 +439,17 @@ impl MCPServer {
             }
         }
 
+        // The subscription tools open their own connection to the same
+        // memory file, the way `OauthState` opens its own connection for
+        // the OAuth tables. The delivery worker is a separate runtime role
+        // and reads the memory path itself; this only serves the MCP tool
+        // handlers below.
+        #[cfg(feature = "webhooks")]
+        crate::actions::webhooks::init(
+            std::path::PathBuf::from(&config.memory_file_path),
+            config.busy_timeout_ms,
+        );
+
         Ok(Self {
             config: Arc::new(config),
             kg,
@@ -792,10 +805,23 @@ fn code_tools() -> &'static Vec<Value> {
     })
 }
 
+/// The webhook subscription-management tools, parsed from
+/// `webhooks_tools.json` at build time.
+#[cfg(feature = "webhooks")]
+fn webhook_tools() -> &'static Vec<Value> {
+    static HOOKS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("../webhooks_tools.json"))
+            .expect("webhooks_tools.json is valid JSON compiled at build time")
+    });
+    &HOOKS
+}
+
 /// `tools/list` response. Each tool is advertised only when its category is
-/// enabled *and* the caller's scopes cover it, so the server never lists a tool
-/// it would reject. Knowledge-graph tools are gated by the graph-read /
-/// graph-write flags; vector and code tools by their subsystems being enabled.
+/// enabled *and* the caller's scopes cover it, so the server never lists a
+/// tool it would reject. Knowledge-graph tools are gated by the graph-read /
+/// graph-write flags; vector and code tools by their subsystems being
+/// enabled; webhook tools by graph-write too, since they share its scope
+/// rather than adding one of their own.
 fn handle_tools_list(vs: Option<&VectorStore>, principal: &Principal) -> Value {
     let (read, write) = (graph_read_enabled(), graph_write_enabled());
     let mut all: Vec<Value> = base_tools()
@@ -839,6 +865,15 @@ fn handle_tools_list(vs: Option<&VectorStore>, principal: &Principal) -> Value {
     if code_enabled() {
         all.extend(
             code_tools()
+                .iter()
+                .filter(|t| in_scope(t, principal))
+                .cloned(),
+        );
+    }
+    #[cfg(feature = "webhooks")]
+    if graph_write_enabled() {
+        all.extend(
+            webhook_tools()
                 .iter()
                 .filter(|t| in_scope(t, principal))
                 .cloned(),
@@ -1034,6 +1069,39 @@ fn handle_tools_call(
         return Err(MCSError::MethodNotFound(format!(
             "{tool_name} (built without the 'code' feature)"
         )));
+    }
+
+    if tools::is_webhook_tool_name(tool_name) {
+        // Unlike `code_enabled()`, `graph_write_enabled()` does not already
+        // encode "this build has no webhook feature": it is the ordinary
+        // graph-write flag, and it can be on in a build that never compiled
+        // this feature at all. Check the feature first, so a caller gets a
+        // build-related reason instead of a bare "not found".
+        #[cfg(not(feature = "webhooks"))]
+        return Err(MCSError::MethodNotFound(format!(
+            "{tool_name} (built without the 'webhooks' feature)"
+        )));
+        #[cfg(feature = "webhooks")]
+        {
+            if !graph_write_enabled() {
+                return Err(MCSError::MethodNotFound(tool_name.to_string()));
+            }
+            let result = match tool_name {
+                "webhook_add_subscription" => {
+                    webhooks_actions::handle_webhook_add_subscription(tool_args)
+                        .map(HandlerResult::Value)
+                }
+                "webhook_delete_subscription" => {
+                    webhooks_actions::handle_webhook_delete_subscription(tool_args)
+                        .map(HandlerResult::Value)
+                }
+                other => Err(MCSError::MethodNotFound(other.to_string())),
+            };
+            return Ok(result.unwrap_or_else(|e| {
+                error!("Tool '{tool_name}' error: {e}");
+                HandlerResult::Value(tool_error(&e.to_string()))
+            }));
+        }
     }
 
     // Knowledge-graph category gate: a KG tool is reachable only if it exists

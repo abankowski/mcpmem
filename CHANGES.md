@@ -12,6 +12,18 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Added
 
+- **Webhook delivery ships in the binary.** The `webhooks` role no longer
+  aborts with `webhook role selected without configured worker ports`; it runs
+  the real worker. Configure an optional `[webhooks]` section in the TOML
+  file: `allowlist` lists the HTTPS hostnames the worker may deliver to, and
+  `secrets` maps each `secret_ref` to the file holding its signing key. The
+  section is fail-closed by default — empty means nothing is delivered.
+- **`webhook_add_subscription` and `webhook_delete_subscription`.** Two MCP
+  tools, behind the `webhooks` Cargo feature, manage the
+  `webhook_subscription` table. The add tool validates the endpoint with the
+  worker's own `validate_endpoint` rule (https, port 443, hostname, no
+  fragment), and `secretRef` is a name, never key material.
+
 - **The server computes embeddings.** Name `provider`, `model` and
   `dimensions` in the `[indexer]` section, and the server adopts an index
   profile at startup and embeds entity text by itself. Adoption compares the

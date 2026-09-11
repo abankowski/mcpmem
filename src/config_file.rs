@@ -13,7 +13,7 @@
 //! The file never carries a secret. It names the file that holds one, exactly
 //! as `--auth-token-file` and `--oidc-client-secret-file` already do.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 use clap::parser::ValueSource;
@@ -160,6 +160,18 @@ pub struct FileConfig {
     pub oauth: OAuthSection,
     #[serde(default)]
     pub indexer: IndexerSection,
+    #[serde(default)]
+    pub webhooks: WebhooksSection,
+}
+
+/// HTTP delivery configuration for the `webhooks` role. An empty section is
+/// the fail-closed default: no hostname may be subscribed and no signing key
+/// exists, so the worker refuses every delivery.
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct WebhooksSection {
+    pub allowlist: Option<Vec<String>>,
+    pub secrets: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -587,6 +599,67 @@ pub fn indexer_settings(file: Option<&FileConfig>) -> Result<mcpmem_indexer::Pro
         openai_api_key,
         bedrock,
     }))
+}
+
+/// The [`StaticSecretProvider`] the [`WebhookConfigFile`] implies. The worker
+/// needs one concrete provider, and the config file layer owns the map, so
+/// constructing it here keeps the crate's provider construction honest.
+#[cfg(any(feature = "webhooks", test))]
+pub fn static_secret_provider(
+    cfg: &mcpmem_webhook::WebhookConfigFile,
+) -> mcpmem_webhook::StaticSecretProvider {
+    mcpmem_webhook::StaticSecretProvider(cfg.secrets.clone())
+}
+
+/// The delivery policy the `[webhooks]` section names. The controller makes
+/// this exact call, so the worker constructor and this function never drift
+/// apart.
+///
+/// `allowlist` is the set of HTTPS hostnames the worker may deliver to.
+/// `secrets` maps a `secret_ref` to the file that holds its signing key. The
+/// keys are read here, once at startup, and an empty file or a missing file
+/// stops the process: a webhook signed with an empty key would be forgeable,
+/// and a missing key would dead-letter every delivery later, invisibly.
+#[cfg(any(feature = "webhooks", test))]
+pub fn webhook_worker_config(
+    file: Option<&FileConfig>,
+) -> Result<mcpmem_webhook::WebhookConfigFile> {
+    let Some(section) = file.map(|file| &file.webhooks) else {
+        return Ok(mcpmem_webhook::WebhookConfigFile::default());
+    };
+    let allowlist: BTreeSet<String> = section
+        .allowlist
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let secrets = match section.secrets.as_ref() {
+        None => BTreeMap::default(),
+        Some(secrets) => secrets
+            .iter()
+            .map(|(reference, path)| {
+                let contents = std::fs::read_to_string(path).map_err(|error| {
+                    MCSError::InvalidParams(format!(
+                        "config 'webhooks.secrets.{reference}': cannot read \
+                             '{path}': {error}"
+                    ))
+                })?;
+                let bytes = contents.trim().to_owned().into_bytes();
+                if bytes.is_empty() {
+                    return Err(MCSError::InvalidParams(format!(
+                        "config 'webhooks.secrets.{reference}': '{path}' is empty; \
+                         refusing a forgeable signing key"
+                    )));
+                }
+                let key = mcpmem_webhook::SigningKey::new(bytes)
+                    .map_err(|error| MCSError::InvalidParams(error.to_string()))?;
+                Ok((reference.clone(), key))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+    };
+    Ok(mcpmem_webhook::WebhookConfigFile { allowlist, secrets })
 }
 
 /// The index profile the `[indexer]` section names, already checked. Only

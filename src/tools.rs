@@ -7,9 +7,12 @@
 //!
 //! The knowledge-graph tools below carry a `write` flag that also selects their
 //! category: read-only queries are [`ToolCategory::GraphRead`], mutations are
-//! [`ToolCategory::GraphWrite`]. The vector and code tools live in separate
-//! JSON manifests (`vector_tools.json`, `code_tools.json`); their names are
-//! enumerated here so [`category_of`] can classify them uniformly.
+//! [`ToolCategory::GraphWrite`]. The vector, code and webhook tools live in
+//! separate JSON manifests (`vector_tools.json`, `code_tools.json`,
+//! `webhooks_tools.json`); their names are enumerated here so
+//! [`category_of`] can classify them uniformly. The webhook tools mutate a
+//! stored subscription row, so they share [`ToolCategory::GraphWrite`]
+//! rather than adding a category of their own.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -230,6 +233,13 @@ pub const CODE_TOOL_NAMES: &[&str] = &[
     "code_semantic_search",
 ];
 
+/// Names of the webhook subscription-management tools (manifest:
+/// `webhooks_tools.json`). Both mutate a stored subscription row, so
+/// `category_of` gives them `ToolCategory::GraphWrite` rather than a scope
+/// of their own.
+pub const WEBHOOK_TOOL_NAMES: &[&str] =
+    &["webhook_add_subscription", "webhook_delete_subscription"];
+
 #[inline]
 pub fn tool_exists(name: &str) -> bool {
     ALL_TOOLS.iter().any(|t| t.name == name)
@@ -256,6 +266,12 @@ pub fn is_code_tool_name(name: &str) -> bool {
     CODE_TOOL_NAMES.contains(&name)
 }
 
+/// `true` for the webhook subscription-management tool names.
+#[inline]
+pub fn is_webhook_tool_name(name: &str) -> bool {
+    WEBHOOK_TOOL_NAMES.contains(&name)
+}
+
 /// The category a tool belongs to, or `None` if the name is unknown.
 #[inline]
 pub fn category_of(name: &str) -> Option<ToolCategory> {
@@ -267,6 +283,9 @@ pub fn category_of(name: &str) -> Option<ToolCategory> {
     }
     if is_code_tool_name(name) {
         return Some(ToolCategory::Code);
+    }
+    if is_webhook_tool_name(name) {
+        return Some(ToolCategory::GraphWrite);
     }
     None
 }
@@ -313,6 +332,10 @@ mod tests {
         );
         assert_eq!(category_of("hybrid_search"), Some(ToolCategory::Vectors));
         assert_eq!(category_of("code_index"), Some(ToolCategory::Code));
+        assert_eq!(
+            category_of("webhook_add_subscription"),
+            Some(ToolCategory::GraphWrite)
+        );
         assert_eq!(category_of("nope"), None);
     }
 

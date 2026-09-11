@@ -221,13 +221,32 @@ Without those three keys the store stays in legacy compatibility: the worker sta
 250 ms and finds nothing, and you keep supplying vectors yourself. That is the correct setup for
 a deployment whose client already computes embeddings.
 
-> ### Known limitation in 1.0.1: the `webhooks` role has no worker
->
-> The shipped binary starts the role with no configured worker ports, and the role then fails with
-> `webhook role selected without configured worker ports`, which stops the process. The failure is
-> deliberate and visible instead of a silent no-op. Delivery works for a program that embeds
-> `mcpmem-webhook` and constructs `WebhookWorker::new` with a connector, a secret provider, a
-> hostname allowlist and a resolver.
+### Webhook delivery
+
+The `webhooks` role delivers graph change events over HTTPS. Configure it in `[webhooks]`:
+
+```toml
+[server]
+roles = ["mcp", "indexer", "webhooks"]
+
+[webhooks]
+# The only hostnames the worker will deliver to. Empty (the default) refuses
+# every endpoint.
+allowlist = ["hooks.example.com"]
+
+# One signing key file per secret_ref. Read once at startup.
+[webhooks.secrets]
+"my-consumer" = "/etc/mcpmem/webhook-key"
+```
+
+Then register a subscription through the MCP tool `webhook_add_subscription` (an `endpoint`,
+an allowlisted `https` hostname, and a `secretRef` from the section above). Delivery is signed
+with `X-Memory-Signature` over `<timestamp>.<body>`, retried with backoff, and dead-lettered
+after eight attempts. The full contract is in [`crates/mcpmem-webhook/README.md`](crates/mcpmem-webhook/README.md).
+
+> **Fail closed by default.** With no `[webhooks]` section, the role runs as an empty worker:
+> nothing is delivered, no error is raised. An allowlisted host and a signing key are what make
+> it act.
 
 ## Quick start
 

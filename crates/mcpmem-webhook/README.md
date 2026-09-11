@@ -11,14 +11,12 @@ at least once, from a SQLite outbox.
 cargo install mcpmem --features webhooks
 ```
 
-**Read this before you plan a deployment.** The shipped `mcpmem` binary starts
-the `webhooks` role with no worker, and the role then fails with
-`webhook role selected without configured worker ports`. The failure is
-deliberate and visible, instead of a silent no-op. Delivery works for a program
-that embeds this crate and constructs `WebhookWorker::new` with a connector, a
-secret provider, a hostname allowlist and a resolver. No MCP tool manages a
-subscription in 1.0.0; a user writes the `webhook_subscription` table, or calls
-`SubscriptionRepository`.
+**Read this before you plan a deployment.** The shipped `mcpmem` binary keeps
+this crate's distribution honest: it embeds the large bodies of the delivery
+engine and the poll loop, and it enforces the contract of this README. It
+ships `webhook_add_subscription` and `webhook_delete_subscription` as MCP
+tools, and it reads the delivery policy from the `[webhooks]` section of its
+TOML configuration file, not from environment variables.
 
 ## Subscriptions
 

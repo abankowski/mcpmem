@@ -63,6 +63,16 @@ impl SecretProvider for StaticSecretProvider {
             .ok_or_else(|| WorkerError::Secret("secret reference is not configured".into()))
     }
 }
+
+/// The delivery policy the binary reads from its configuration file. The
+/// allowlist names the HTTPS hostnames the worker may deliver to; a `secret`
+/// reference maps to an already-loaded signing key. Empty is the fail-closed
+/// default: no allowed host and no key means the worker refuses everything.
+#[derive(Clone, Debug, Default)]
+pub struct WebhookConfigFile {
+    pub allowlist: BTreeSet<String>,
+    pub secrets: BTreeMap<String, SigningKey>,
+}
 #[derive(Clone, Debug)]
 pub struct ValidatedEndpoint {
     pub url: Url,

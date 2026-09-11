@@ -1,0 +1,59 @@
+[
+  {
+    "name": "webhook_add_subscription",
+    "description": "Register a webhook subscription that delivers knowledge-graph change events to an HTTPS endpoint. The delivery worker signs and retries each delivery in the background; this tool only stores the subscription row.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "HTTPS URL that receives delivery POST requests. Must use port 443 (default or explicit), carry no credentials or fragment, and name a host rather than a literal IP address."
+        },
+        "eventOperations": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["create", "update", "delete", "rename"] },
+          "description": "Change operations to deliver. An empty array (the default) delivers every operation."
+        },
+        "entityTypes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Entity types to deliver. An empty array (the default) delivers every type."
+        },
+        "consumerOrigin": {
+          "type": "string",
+          "description": "Identifies this consumer's own writes, so they are never delivered back to it. Max 231 bytes."
+        },
+        "ignoredOrigins": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "More origins whose changes are never delivered. An empty array (the default) ignores none."
+        },
+        "secretRef": {
+          "type": "string",
+          "description": "Name of a secret configured on the server, used to sign each delivery. Never the secret value itself."
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the subscription is active. Default true."
+        }
+      },
+      "required": ["endpoint", "consumerOrigin", "secretRef"]
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false }
+  },
+  {
+    "name": "webhook_delete_subscription",
+    "description": "Delete a webhook subscription by id. Deleting an id that no longer exists is not an error.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "type": "string",
+          "description": "The subscription id returned by webhook_add_subscription."
+        }
+      },
+      "required": ["subscriptionId"]
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true }
+  }
+]

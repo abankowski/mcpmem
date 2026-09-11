@@ -75,6 +75,42 @@ impl WebhookService {
             worker: Some(worker),
         }
     }
+    /// Builds the delivery worker from the resolved webhook configuration.
+    ///
+    /// An empty configuration produces a worker that refuses every endpoint.
+    /// The allowlist is empty and no signing key exists, so every delivery
+    /// fails the policy check.
+    pub fn with_config(
+        database: impl Into<std::path::PathBuf>,
+        config: mcpmem_webhook::WebhookConfigFile,
+    ) -> Result<Self, crate::errors::MCSError> {
+        let worker = mcpmem_webhook::WebhookWorker::new(
+            database.into(),
+            mcpmem_webhook::HttpsConnector::production(),
+            mcpmem_webhook::StaticSecretProvider(config.secrets),
+            config.allowlist,
+            mcpmem_webhook::SystemResolver,
+        );
+        Ok(Self {
+            worker: Some(Arc::new(worker)),
+        })
+    }
+    /// Runs one poll against the database. This is a test seam.
+    ///
+    /// The concrete worker's `run_once` is not reachable through the
+    /// `WorkerPoll` trait object. The worker implements `poll` as `run_once`,
+    /// so this method exposes the same run-once path.
+    pub fn run_once(
+        &self,
+        now_us: i64,
+    ) -> Result<mcpmem_webhook::DeliveryReport, crate::errors::MCSError> {
+        let worker = self.worker.clone().ok_or_else(|| {
+            crate::errors::MCSError::MemoryError("webhook worker is not configured".into())
+        })?;
+        worker
+            .poll(now_us)
+            .map_err(|error| crate::errors::MCSError::MemoryError(error.to_string()))
+    }
 }
 
 #[cfg(feature = "webhooks")]
@@ -84,7 +120,7 @@ impl RoleService for WebhookService {
         Box::pin(async move {
             let worker = worker.ok_or_else(|| RuntimeError::RoleFailed {
                 role: RuntimeRole::Webhooks,
-                message: "webhook role selected without configured worker ports".into(),
+                message: "webhook worker is not configured".into(),
             })?;
             loop {
                 let worker = worker.clone();
@@ -214,7 +250,7 @@ impl RoleService for IndexerService {
 mod webhook_tests {
     use super::*;
     #[tokio::test]
-    async fn selected_service_fails_observably_without_worker_ports() {
+    async fn disabled_service_fails_observably() {
         let result = WebhookService::disabled().run().await;
         assert!(matches!(
             result,

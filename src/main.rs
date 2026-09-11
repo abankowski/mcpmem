@@ -59,13 +59,21 @@ async fn inner_main() -> Result<()> {
         config.bind_addr.clone(),
     );
     let services = runtime::AppServices::new(Arc::new(transport));
+    // The webhook worker polls the memory database directly, in its own
+    // connection. An empty `[webhooks]` section is a valid fail-closed
+    // worker: it refuses every delivery until the operator names an
+    // allowlisted host and a signing key.
     #[cfg(feature = "webhooks")]
     let services = if config
         .roles
         .roles()
         .contains(&runtime::RuntimeRole::Webhooks)
     {
-        services.with_webhooks(Arc::new(runtime::WebhookService::disabled()))
+        let worker = runtime::WebhookService::with_config(
+            config.memory_file_path.clone(),
+            crate::config_file::webhook_worker_config(file.as_ref().map(|(_, f)| f))?,
+        )?;
+        services.with_webhooks(Arc::new(worker))
     } else {
         services
     };

@@ -176,3 +176,20 @@
 
 # "cosine", "inner-product" or "l2-squared". Shows its default.
 # metric = "cosine"
+
+
+[webhooks]
+# HTTP delivery for the `webhooks` role. Needs the `webhooks` Cargo feature and
+# the `webhooks` role. On a build without that feature the section is ignored
+# with a warning, so one file can serve several deployments.
+#
+# The allowlist names the HTTPS hostnames the worker may deliver to. An empty
+# allowlist is the fail-closed default: the worker refuses every endpoint that
+# is not on the list, so a subscription cannot point anywhere by accident.
+# allowlist = ["hooks.example.com"]
+
+# The signing keys, one file per `secret_ref`. The key is read at startup, so
+# changing a key still needs a restart. The file must not be empty: a webhook
+# signed with an empty key would be forgeable.
+# [webhooks.secrets]
+# "my-consumer" = "/etc/mcpmem/webhook-key"
