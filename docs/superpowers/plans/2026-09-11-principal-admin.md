@@ -587,6 +587,12 @@ Expected: FAIL — module and methods do not exist.
 //! SQLite database. Built-in entries from the principals file win on a
 //! key collision; `oauth_routes` applies that rule. This store holds
 //! everything else.
+//!
+//! The store is not `Sync`: the caller owns exclusive access, and
+//! `OauthState` holds it in a `Mutex` (the `with_store` convention).
+//! Methods take `&self` and use `unchecked_transaction` like the graph
+//! store (`graph.rs:523`); sharing the connection across threads would be
+//! unsound.
 
 use std::sync::Arc;
 
@@ -789,7 +795,7 @@ impl PrincipalsStore {
     /// non-empty.
     pub fn approve(&self, iss: &str, sub: &str, scopes: &[String]) -> Result<Option<RuntimePrincipal>> {
         let now = (self.now_us)();
-        let tx = self.conn.transaction().map_err(sql_error)?;
+        let tx = self.conn.unchecked_transaction().map_err(sql_error)?;
         let name: Option<String> = tx
             .query_row(
                 "SELECT name FROM principal_waitlist WHERE iss = ?1 AND sub = ?2",
@@ -828,7 +834,7 @@ impl PrincipalsStore {
     /// to [`WAITLIST_CAP`], evicting least-recently-seen first.
     fn evict(&self, ttl_us: i64) -> Result<()> {
         let now = (self.now_us)();
-        let mut tx = self.conn.transaction().map_err(sql_error)?;
+        let tx = self.conn.unchecked_transaction().map_err(sql_error)?;
         tx.execute(
             "DELETE FROM principal_waitlist WHERE first_seen_us < ?1",
             params![now.saturating_sub(ttl_us)],
@@ -1120,7 +1126,9 @@ Add fields to `OauthState` (`oauth_routes.rs:31-60`):
 
 ```rust
     /// The runtime principals store (same SQLite file, own connection).
-    pub(crate) runtime: Arc<crate::runtime_principals::PrincipalsStore>,
+    /// In a `Mutex`: the connection is not `Sync` and the store uses
+    /// `unchecked_transaction`, which needs exclusive access.
+    pub(crate) runtime: std::sync::Mutex<crate::runtime_principals::PrincipalsStore>,
     /// The keys the principals file owns. A runtime row whose key is here
     /// is masked: unreachable for login, still listed in the admin API.
     pub(crate) builtin_keys: Arc<std::collections::BTreeSet<(String, String)>>,
@@ -1129,7 +1137,7 @@ Add fields to `OauthState` (`oauth_routes.rs:31-60`):
 Construct both in `open_with_clock` (where the connection and store are built, `oauth_routes.rs:172-210`), after the `Store` is ready:
 
 ```rust
-    let runtime = Arc::new(
+    let runtime = std::sync::Mutex::new(
         crate::runtime_principals::PrincipalsStore::open(db_path, busy_timeout_ms)
             .map_err(open_failed)?,
     );
@@ -1142,6 +1150,19 @@ Construct both in `open_with_clock` (where the connection and store are built, `
 ```
 
 (`open_failed` already exists at `oauth_routes.rs:272-274`; adjust its message or add a sibling if the type differs.)
+
+Add the access helper beside `with_store` (every store access in Tasks 6 and 7 goes through it):
+
+```rust
+/// Run `f` with exclusive access to the runtime principals store.
+pub fn with_principals<R>(
+    &self,
+    f: impl FnOnce(&crate::runtime_principals::PrincipalsStore) -> R,
+) -> R {
+    let guard = self.runtime.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(&guard)
+}
+```
 
 Change `principal_of` (`oauth_routes.rs:1185-1199`) to return an owned entry and consult both sources:
 
@@ -1161,8 +1182,7 @@ fn principal_of(
         return Ok(p.clone());
     }
     let row = oauth
-        .runtime
-        .get(&claims.iss, &claims.sub)
+        .with_principals(|s| s.get(&claims.iss, &claims.sub))
         .map_err(|e| format!("the principals store refused a read: {e}"))?;
     match row {
         Some(row) => Ok(crate::principals::PrincipalEntry {
@@ -1194,13 +1214,14 @@ Change the call site in `finish_login` (`oauth_routes.rs:1112`):
             // minted on this path.
             let name = claims.email.clone().unwrap_or_else(|| claims.sub.clone());
             oauth
-                .runtime
-                .record_waitlist(
-                    &claims.iss,
-                    &claims.sub,
-                    &name,
-                    oauth.config.approval_waitlist_ttl_seconds.saturating_mul(1_000_000),
-                )
+                .with_principals(|s| {
+                    s.record_waitlist(
+                        &claims.iss,
+                        &claims.sub,
+                        &name,
+                        oauth.config.approval_waitlist_ttl_seconds.saturating_mul(1_000_000),
+                    )
+                })
                 .map_err(|err| format!("the principals store refused a write: {err}"))?;
             return Ok(waiting_page(&name));
         }
@@ -1593,7 +1614,7 @@ fn store_failure(e: impl std::fmt::Display) -> Response {
 }
 ```
 
-The `oauth` accessor, then the handlers. List:
+The `oauth` accessor, then the handlers. **Every store access in the handlers below goes through the Task 6 helper: rewrite each `oauth.runtime.X(...)` call as `oauth.with_principals(|s| s.X(...))`** — the store sits behind a `Mutex` because the connection is not `Sync` and the store uses `unchecked_transaction`. List:
 
 ```rust
 async fn admin_list_principals(State(state): State<HttpState>, headers: HeaderMap) -> Response {
