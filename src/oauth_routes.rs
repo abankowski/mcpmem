@@ -773,21 +773,11 @@ fn consent_page(
             (header::CACHE_CONTROL, "no-store"),
         ],
         mcpmem_oauth::consent::page(
-            // RFC 7591 section 2 makes `client_name` optional, so
-            // `mcpmem_oauth::registration` records a client that sent none
-            // with an empty name. Name it by its identifier instead: a page
-            // that names nobody is the more dangerous prompt of the two,
-            // because an attacker would reach it by leaving one field out.
-            //
-            // Blank, not merely empty. `register` applies no trim and bounds
-            // only the length, so `"client_name": "   "` is stored as it
-            // stands — and HTML collapses whitespace, so it draws the same
-            // unnamed page as no name at all.
-            if client.client_name.trim().is_empty() {
-                &client.client_id
-            } else {
-                &client.client_name
-            },
+            // Whether a name names anything is the page's question, and
+            // `mcpmem_oauth::consent::client_label` states the property once.
+            // This check has been wrong three times against ever narrower
+            // input; it is not a condition to reproduce here.
+            mcpmem_oauth::consent::client_label(&client.client_name, &client.client_id),
             principal.label.as_deref().unwrap_or(&principal.name),
             offered,
             &login.csrf,

@@ -42,46 +42,80 @@ async fn the_served_page_escapes_a_hostile_client_name() {
     assert!(a.body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
 }
 
-/// RFC 7591 section 2 makes `client_name` optional, so a client can register
-/// without one — and then the page must name it by its identifier. A page that
-/// names nobody is the more dangerous prompt of the two: an attacker would get
-/// a blank "asks to use your memory graph" by omitting one field.
+/// Every name that does not name anything, and one that is simply absent.
+///
+/// One list, because this is one class of input and it has now reopened three
+/// times: an empty name, then a blank one, then an invisible one that `trim`
+/// does not see. Each entry is labelled, so a failure says which input did it.
+const NAMES_NOBODY: &[(&str, &str)] = &[
+    ("no client_name member at all", ""),
+    ("an empty name", ""),
+    ("three spaces", "   "),
+    ("a tab", "\t"),
+    ("U+00A0 no-break space", "\u{00a0}"),
+    ("U+200B zero width space", "\u{200b}"),
+    ("U+202E right-to-left override", "\u{202e}"),
+    ("U+FEFF zero width no-break space", "\u{feff}"),
+];
+
+/// RFC 7591 section 2 makes `client_name` optional, and nothing trims or
+/// inspects what a client does send, so the page must decide for itself whether
+/// a name names anything. A page that names nobody is the more dangerous prompt
+/// of the two: an attacker reaches it by sending a name a browser draws as
+/// nothing, and the human is asked to grant `graph-write` to a blank.
+///
+/// One server at a time: each flow is dropped before the next is built.
 #[tokio::test]
-async fn a_client_that_registered_no_name_is_named_by_its_identifier() {
-    let a = Flow::new("graph-read")
-        .without_client_name()
-        .into_consent()
-        .await;
-    assert_named_by_identifier(&a);
+async fn a_client_whose_name_draws_nothing_is_named_by_its_identifier() {
+    for (label, name) in NAMES_NOBODY {
+        let flow = Flow::new("graph-read");
+        let flow = if *label == "no client_name member at all" {
+            flow.without_client_name()
+        } else {
+            flow.client_name(name)
+        };
+        let a = flow.into_consent().await;
+        assert_named_by_identifier(&a, label);
+    }
 }
 
-/// A name of only whitespace is the same page as no name at all: HTML collapses
-/// it, so the human reads `Authorize` and is asked to grant access to nobody.
-/// `register` applies no trim and bounds only the length, so this body
-/// registers as it stands.
-#[tokio::test]
-async fn a_client_whose_name_is_only_whitespace_is_named_by_its_identifier() {
-    let a = Flow::new("graph-read")
-        .client_name(" \t \n ")
-        .into_consent()
-        .await;
-    assert_named_by_identifier(&a);
+/// The page names the client by its identifier, in both places it names it.
+///
+/// Positive assertions, not a negative one about one spelling of emptiness:
+/// `!body.contains("<strong></strong>")` passed for three spaces, which is how
+/// this defect reopened.
+fn assert_named_by_identifier(a: &Authorized, label: &str) {
+    for element in [
+        format!("<strong>{}</strong>", a.client_id),
+        format!("<h1>Authorize {}</h1>", a.client_id),
+    ] {
+        assert!(
+            a.body.contains(&element),
+            "with {label}, the page must name the client by its identifier; \
+             it carries no {element} in: {}",
+            a.body
+        );
+    }
 }
 
-/// The page names the client by its identifier, and the element that names it
-/// is not blank. Testing for `<strong></strong>` alone would pass for a name of
-/// three spaces, which is the input that reopened this defect.
-fn assert_named_by_identifier(a: &Authorized) {
-    let named = format!("<strong>{}</strong>", a.client_id);
+/// U+202E reverses the run that follows it, so a name that does render can make
+/// the sentence beside it read backwards — on the one page whose job is to tell
+/// a human what they are about to grant. The name is not blank, so the page
+/// uses it; the control must not survive into the markup.
+#[tokio::test]
+async fn a_client_name_carrying_a_bidi_override_cannot_reverse_the_page() {
+    let a = Flow::new("graph-read")
+        .client_name("Sync\u{202e}gpj.eliforp")
+        .into_consent()
+        .await;
     assert!(
-        a.body.contains(&named),
-        "the page must name the client it cannot name by name: {}",
+        !a.body.contains('\u{202e}'),
+        "a bidirectional control must not reach the page: {}",
         a.body
     );
     assert!(
-        a.body
-            .contains(&format!("<h1>Authorize {}</h1>", a.client_id)),
-        "the heading must name it too: {}",
+        a.body.contains("Syncgpj.eliforp"),
+        "the rendering characters of the name must survive: {}",
         a.body
     );
 }
@@ -436,4 +470,15 @@ fn the_rendered_page_leaves_no_placeholder_behind() {
 #[test]
 fn escape_html_covers_every_dangerous_character() {
     assert_eq!(escape_html(r#"<>&"'"#), "&lt;&gt;&amp;&quot;&#39;");
+}
+
+/// The complete Unicode `Bidi_Control` set: twelve characters, and a closed
+/// property rather than a list somebody guessed. Each one changes the order a
+/// browser draws the text around it, so none of them may reach the page.
+#[test]
+fn escape_html_drops_every_bidirectional_control() {
+    let controls = "\u{61c}\u{200e}\u{200f}\u{202a}\u{202b}\u{202c}\u{202d}\u{202e}\
+                    \u{2066}\u{2067}\u{2068}\u{2069}";
+    assert_eq!(controls.chars().count(), 12);
+    assert_eq!(escape_html(&format!("a{controls}b")), "ab");
 }

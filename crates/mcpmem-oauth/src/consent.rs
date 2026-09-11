@@ -117,6 +117,52 @@ pub fn offered(requested: &[String], held: &BTreeSet<String>) -> Vec<String> {
     out
 }
 
+/// The text the page uses to name a client: its registered name when that name
+/// names anything, and its identifier when it does not.
+///
+/// # The property
+///
+/// *A client name is used only when it proves that it renders, by carrying at
+/// least one character a browser draws as a mark.* Everything else — absent,
+/// empty, whitespace, invisible, or a character nobody here has heard of —
+/// falls back to the identifier, which always names the client.
+///
+/// # Why this shape, and not a third condition
+///
+/// This check has been wrong three times, and each time the fix was a narrower
+/// deny-list: first `is_empty`, which a name of three spaces defeated; then
+/// `trim().is_empty()`, which follows Unicode `White_Space` and so does not see
+/// `U+200B ZERO WIDTH SPACE` or `U+202E RIGHT-TO-LEFT OVERRIDE`. A deny-list of
+/// things that draw nothing cannot be finished: Unicode keeps adding
+/// characters, and every one of them is allowed by a list written before it
+/// existed.
+///
+/// So the test is inverted. A character must prove it renders to count, and
+/// `is_alphanumeric` (every script's letters and digits) or `is_ascii_graphic`
+/// (the printable ASCII punctuation) is that proof. An unknown character does
+/// not count towards naming the client — it neither passes nor needs to be
+/// listed — which is how this covers an input nobody has thought of yet.
+///
+/// The failure direction is the safe one. A name that renders only as symbols
+/// outside ASCII, `"→"` say, is judged to name nothing and the page shows the
+/// identifier instead. That is a worse label and a correct page. The opposite
+/// mistake — showing a human a prompt that names nobody — is the one this
+/// function exists to prevent.
+pub fn client_label<'a>(client_name: &'a str, client_id: &'a str) -> &'a str {
+    if client_name.chars().any(renders) {
+        client_name
+    } else {
+        client_id
+    }
+}
+
+/// Whether a browser draws this character as a mark a human can see.
+///
+/// An allow-list, on purpose: see [`client_label`].
+fn renders(c: char) -> bool {
+    c.is_alphanumeric() || c.is_ascii_graphic()
+}
+
 /// The consent page for one login.
 ///
 /// `offered` is the set from [`offered`]; every other argument is text. All
@@ -262,11 +308,24 @@ fn csrf_matches(presented: &str, expected: &str) -> bool {
     crate::digest_eq(&crate::digest(presented), &crate::digest(expected))
 }
 
-/// The five characters that would otherwise let a value chosen by a client
-/// leave the text of the page and become markup in it.
+/// The page-safe form of a value chosen by a client.
 ///
-/// A `client_name` comes from an unauthenticated registration request, and a
-/// scope slug from an authorization request, so both are hostile until escaped.
+/// Two jobs, and both are about the page being read by a human rather than
+/// parsed by a machine.
+///
+/// It escapes the five characters that would otherwise let the value leave the
+/// text of the page and become markup in it. A `client_name` comes from an
+/// unauthenticated registration request, and a scope slug from an
+/// authorization request, so both are hostile until escaped.
+///
+/// It also **drops every Unicode bidirectional control**. Those twelve
+/// characters reorder the text a browser draws around them: `U+202E` alone
+/// makes the run after it render backwards, so a client name can rewrite the
+/// sentence beside it on the one page whose job is to tell a human what they
+/// are about to grant. Escaping them would not help — they are invisible and
+/// act on rendering, not on parsing — so they are removed. This is a deny-list
+/// and it is still complete: `Bidi_Control` is a closed Unicode property with
+/// exactly these members, and no future character joins it.
 pub fn escape_html(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -276,6 +335,14 @@ pub fn escape_html(text: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
+            // The `Bidi_Control` set: ALM, LRM, RLM, the four embedding and
+            // override codes with their terminator, and the three isolates
+            // with theirs.
+            '\u{61c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => {}
             _ => out.push(c),
         }
     }
@@ -348,5 +415,42 @@ mod tests {
     fn nothing_in_common_is_an_empty_offer() {
         let held: BTreeSet<String> = ["graph-read".to_string()].into_iter().collect();
         assert!(offered(&["code".to_string()], &held).is_empty());
+    }
+
+    /// A name in any script names its client. The check must not be a Latin
+    /// filter: `is_alphanumeric` is every script's letters and digits, and a
+    /// page that fell back for a Japanese name would be a worse page.
+    #[test]
+    fn a_name_that_renders_is_used_whatever_script_it_is_in() {
+        for name in ["Claude Desktop", "日本語クライアント", "Клиент", "7", "***"] {
+            assert_eq!(client_label(name, "the-id"), name, "for {name:?}");
+        }
+    }
+
+    /// Every input that has defeated this check, and one that has not been
+    /// tried. `trim` sees the first four and misses the rest.
+    #[test]
+    fn a_name_that_draws_nothing_falls_back_to_the_identifier() {
+        for name in [
+            "",
+            "   ",
+            "\t",
+            "\u{00a0}",
+            "\u{200b}",
+            "\u{202e}",
+            "\u{feff}",
+            "\u{2060}\u{034f}",
+        ] {
+            assert_eq!(client_label(name, "the-id"), "the-id", "for {name:?}");
+        }
+    }
+
+    /// The direction this property fails in, stated as a test so that it is a
+    /// decision rather than a surprise: a name that renders only as non-ASCII
+    /// symbols is judged to name nothing. A worse label is the safe side; a
+    /// page that names nobody is not.
+    #[test]
+    fn a_name_of_symbols_alone_falls_back_which_is_the_safe_direction() {
+        assert_eq!(client_label("→", "the-id"), "the-id");
     }
 }
