@@ -913,7 +913,9 @@ impl Store {
 
     pub fn put_code(&self, code: &str, g: &CodeGrant,
                     created_us: i64, expires_us: i64) -> Result<()>;
-    pub fn take_code(&self, code: &str, now_us: i64) -> Result<Option<CodeGrant>>;
+    // Task 8 changed this signature. A code is marked spent, not deleted, so a
+    // replay can find the family and revoke it, as RFC 6749 section 4.1.2 asks.
+    pub fn take_code(&self, code: &str, now_us: i64) -> Result<CodeOutcome>;
 
     pub fn put_token(&self, token: &str, kind: TokenKind, g: &Grant,
                      created_us: i64, expires_us: i64) -> Result<()>;
@@ -1275,7 +1277,10 @@ pub fn digest_eq(a: &str, b: &str) -> bool {
 Write the record types and the methods named in the Interfaces block. Rules the implementation must follow:
 
 1. Every read filters on `expires_us > now_us`, `revoked = 0` and, for a refresh token, `spent = 0`.
-2. `take_code` deletes the row in the same statement that reads it, with `DELETE ... RETURNING`, so a replay finds nothing.
+2. `take_code` runs inside one immediate transaction, in the same shape as
+   `take_refresh`. Task 3 shipped a `DELETE ... RETURNING`, and Task 8 replaced
+   it, because a deleted row leaves a replay with no family to revoke and
+   RFC 6749 section 4.1.2 asks for that revocation.
 3. `take_refresh` runs inside one immediate transaction. It reads the row by digest. When the row exists and `spent = 1`, it sets `revoked = 1` for every row with the same `family` and returns `Replayed`. When the row is live, it sets `spent = 1` and returns `Valid`.
 4. `sweep` deletes expired rows from all four tables and returns the total count.
 5. `Store::connection()` exposes the connection for tests only. Mark it `#[doc(hidden)]`.
