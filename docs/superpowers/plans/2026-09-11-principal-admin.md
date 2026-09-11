@@ -1492,9 +1492,9 @@ async fn waitlist_approve_promotes_and_dismiss_discards() {
     ).await.unwrap();
     let entry = json(list).await["entries"][0].clone();
     let id = entry["id"].as_str().unwrap().to_owned();
-    // The FakeIdp sends no email, so the entry name is the sub itself.
+    // The FakeIdp always stamps an email, so the entry name is the email.
     assert_eq!(entry["sub"], "sub-1");
-    assert_eq!(entry["name"], "sub-1");
+    assert_eq!(entry["name"], support::fake_idp::EMAIL);
 
     let approve = server.request(
         Request::post(format!("/ui/api/waitlist/{id}/approve"))
