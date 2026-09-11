@@ -49,8 +49,52 @@ pub fn s256_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(h.finalize())
 }
 
+/// The reserved client id of this server's own admin UI, seeded at OAuth
+/// startup. The UI is a public PKCE client of this server's AS.
+pub const ADMIN_CLIENT_ID: &str = "mcpmem-admin-ui";
+
+/// The id of a principal in the admin API: base64url of `iss\0sub`.
+///
+/// One path segment, so a route never needs to split an issuer URL.
+pub fn principal_id(iss: &str, sub: &str) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{iss}\0{sub}"))
+}
+
+/// Split a [`principal_id`] back into `(iss, sub)`, or `None` for
+/// anything this server did not issue.
+pub fn parse_principal_id(id: &str) -> Option<(String, String)> {
+    let raw = URL_SAFE_NO_PAD.decode(id.as_bytes()).ok()?;
+    let sep = raw.iter().position(|&b| b == 0)?;
+    let iss = std::str::from_utf8(&raw[..sep]).ok()?;
+    let sub = std::str::from_utf8(&raw[sep + 1..]).ok()?;
+    if sub.is_empty() {
+        return None;
+    }
+    Some((iss.to_owned(), sub.to_owned()))
+}
+
 /// Constant-time comparison for a digest.
 pub fn digest_eq(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
     a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn principal_ids_round_trip() {
+        let id = principal_id("https://accounts.google.com", "u-1");
+        assert_eq!(
+            parse_principal_id(&id),
+            Some((
+                "https://accounts.google.com".to_owned(),
+                "u-1".to_owned()
+            ))
+        );
+        assert_eq!(parse_principal_id("not-base64!"), None);
+        // A sub of zero length is refused.
+        assert_eq!(parse_principal_id(&principal_id("iss", "")), None);
+    }
 }

@@ -863,17 +863,19 @@ async fn authorizing_records_the_use_the_eviction_measures() {
     let flow = Flow::fresh().await;
     let used = flow.register().await;
     let forgotten = flow.register().await;
-    assert_eq!(flow::count_rows(flow.server(), "oauth_client"), 2);
+    assert_eq!(flow::count_registered_clients(flow.server()), 2);
 
     // Twenty-nine days later, one of them comes back.
     flow.server().clock().advance_seconds(29 * DAY);
     assert_eq!(flow.authorize(&used).await.status(), StatusCode::FOUND);
 
     // Two days after that: thirty-one days since both registered, two days
-    // since the one was used.
+    // since the one was used. The startup-seeded admin-UI client is
+    // `source = 'reserved'` and is exempt from the eviction, so only the
+    // forgotten registration goes.
     flow.server().clock().advance_seconds(2 * DAY);
     assert_eq!(flow.server().oauth().maintain().evicted, 1);
-    assert_eq!(flow::count_rows(flow.server(), "oauth_client"), 1);
+    assert_eq!(flow::count_registered_clients(flow.server()), 1);
     assert_eq!(
         flow.authorize(&used).await.status(),
         StatusCode::FOUND,

@@ -114,6 +114,8 @@ impl ClientRecord {
     /// The `source` of a client whose metadata this server fetched from the
     /// https URL the client presents as its identifier.
     pub const CIMD: &'static str = "cimd";
+    /// The `source` of the admin UI client this server seeds at startup.
+    pub const RESERVED: &'static str = "reserved";
 }
 
 /// One authorization request in flight, keyed by the state this server sent
@@ -641,6 +643,24 @@ impl Store {
             .optional()?)
     }
 
+    /// Revoke every live token family that names `principal`, and return how
+    /// many families were revoked. A renamed, then deleted, principal keeps
+    /// old-name families alive until they expire; that gap is documented.
+    pub fn revoke_principal(&self, principal: &str) -> Result<usize> {
+        let families: Vec<String> = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT family FROM oauth_token
+                 WHERE principal = ?1 AND revoked = 0",
+            )?
+            .query_map([principal], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        for family in &families {
+            self.revoke_family(family)?;
+        }
+        Ok(families.len())
+    }
+
     /// Delete expired logins, codes and tokens, and return how many rows went.
     ///
     /// `oauth_client` has no `expires_us` and so is untouched here: a
@@ -678,11 +698,17 @@ impl Store {
     /// `src/oauth_routes.rs` is that pass, and it evicts **before** it sweeps:
     /// a client is then judged against the tokens it held when the pass
     /// started, rather than against whatever that same pass has just deleted.
+    ///
+    /// A client with `source = 'reserved'` is exempt: the seeded admin-UI
+    /// client is server-owned infrastructure, not a registration. Only a
+    /// restart re-seeds it, so eviction would break `/ui/admin` for a server
+    /// that ran an idle month.
     pub fn evict_clients(&self, now_us: i64, max_idle_us: i64) -> Result<u64> {
         let removed = self.conn.execute(
             "DELETE FROM oauth_client
              WHERE last_used_us <= ?1
-               AND client_id NOT IN (SELECT client_id FROM oauth_token)",
+               AND client_id NOT IN (SELECT client_id FROM oauth_token)
+               AND source <> 'reserved'",
             params![now_us.saturating_sub(max_idle_us)],
         )?;
         Ok(removed as u64)

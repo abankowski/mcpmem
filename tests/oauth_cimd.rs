@@ -148,7 +148,7 @@ async fn a_resolved_document_is_not_fetched_again() {
         1,
         "the document must be read once, not once per authorization request"
     );
-    assert_eq!(flow::count_rows(&server, "oauth_client"), 1);
+    assert_eq!(flow::count_registered_clients(&server), 1);
 }
 
 /// A document on a host the operator did not allow is refused, and nothing
@@ -166,7 +166,7 @@ async fn a_document_on_a_domain_outside_the_list_is_refused_without_a_request() 
         "a refusal at the authorization endpoint never redirects"
     );
     assert_eq!(
-        flow::count_rows(&server, "oauth_client"),
+        flow::count_registered_clients(&server),
         0,
         "a refused document stores nothing"
     );
@@ -202,7 +202,7 @@ async fn a_document_claiming_another_identifier_is_refused_by_the_endpoint() {
     let res = server.request(authorize_request(DOCUMENT_URL)).await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        flow::count_rows(&server, "oauth_client"),
+        flow::count_registered_clients(&server),
         0,
         "a refused document stores nothing"
     );

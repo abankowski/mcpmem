@@ -4,6 +4,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
+use std::sync::Arc;
 
 mod support;
 
@@ -81,7 +82,7 @@ async fn the_protected_resource_document_names_this_server() {
         json!({
             "resource": format!("{PUBLIC_URL}/mcp"),
             "authorization_servers": [PUBLIC_URL],
-            "scopes_supported": ["graph-read", "graph-write", "vectors", "code"],
+            "scopes_supported": ["graph-read", "graph-write", "vectors", "code", "admin"],
             "bearer_methods_supported": ["header"]
         })
     );
@@ -144,7 +145,7 @@ async fn the_authorization_server_document_advertises_pkce_and_cimd() {
             "token_endpoint_auth_methods_supported": ["none"],
             "client_id_metadata_document_supported": true,
             "authorization_response_iss_parameter_supported": true,
-            "scopes_supported": ["graph-read", "graph-write", "vectors", "code"]
+            "scopes_supported": ["graph-read", "graph-write", "vectors", "code", "admin"]
         })
     );
 }
@@ -272,6 +273,124 @@ async fn the_store_is_reachable_and_opens_on_a_migrated_schema() {
     assert!(timeout > 0, "busy_timeout was {timeout}");
 }
 
+/// OAuth startup seeds the reserved admin-UI client: one row, source
+/// `reserved`, its redirect named after the public URL, and both timestamps
+/// stamped with the server's own clock reading.
+#[tokio::test]
+async fn startup_seeds_the_reserved_admin_ui_client() {
+    const FIXED: i64 = 1_700_000_000_000_000;
+    let server = support::oauth_server_with_clock(support::Clock::at(FIXED)).await;
+    let record = server
+        .oauth()
+        .with_store(|store| {
+            store
+                .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
+                .expect("the store answers")
+                .expect("startup seeded the admin UI client")
+        });
+    assert_eq!(record.client_name, "mcpmem admin UI");
+    assert_eq!(record.source, "reserved");
+    assert_eq!(
+        record.redirect_uris,
+        vec![format!("{PUBLIC_URL}/ui/admin/callback")]
+    );
+    assert_eq!(record.created_us, FIXED);
+    assert_eq!(record.last_used_us, FIXED);
+}
+
+/// A repeat start refreshes the seeded row instead of duplicating it:
+/// `put_client` upserts, and the second open rewrites `last_used_us` but
+/// never `created_us`.
+#[tokio::test]
+async fn reopening_the_store_upserts_the_reserved_client() {
+    const FIXED: i64 = 1_700_000_000_000_000;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.mcpmem");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        mcpmem_core::schema::initialize_database(&conn).unwrap();
+    }
+    let clock: std::sync::Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || FIXED);
+    let open = || {
+        mcpmem::oauth_routes::OauthState::open_with_clock(
+            support::oauth_config("https://idp.invalid"),
+            &path,
+            5000,
+            Arc::clone(&clock),
+        )
+        .expect("the store opens on the migrated schema")
+    };
+    let created_us = open()
+        .with_store(|store| {
+            store
+                .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
+                .expect("the store answers")
+                .expect("the first open seeded the admin client")
+                .created_us
+        });
+    let second = open();
+    let count: i64 = second.with_store(|store| {
+        store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM oauth_client", [], |r| r.get(0))
+            .expect("the store counts its clients")
+    });
+    assert_eq!(count, 1, "a repeat start must upsert, not duplicate");
+    let after = second
+        .with_store(|store| {
+            store
+                .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
+                .expect("the store answers")
+                .expect("the admin client survives the second open")
+        });
+    assert_eq!(after.created_us, created_us);
+    assert_eq!(after.last_used_us, FIXED);
+}
+
+/// `OauthState::revoke_principal` reaches the store through the same lock a
+/// handler uses, so the admin API can revoke by principal without holding the
+/// guard itself.
+#[tokio::test]
+async fn oauth_state_revokes_by_principal_through_the_store() {
+    use mcpmem_oauth::new_token;
+    use mcpmem_oauth::store::{Grant, TokenKind};
+    let server = support::oauth_server().await;
+    let token = new_token();
+    server
+        .oauth()
+        .with_store(|store| {
+            store.put_token(
+                &token,
+                TokenKind::Refresh,
+                &Grant {
+                    client_id: "c1".into(),
+                    principal: "adam".into(),
+                    scopes: vec!["graph-read".into()],
+                    resource: format!("{PUBLIC_URL}/mcp"),
+                    family: "f1".into(),
+                },
+                1,
+                10_000,
+            )
+        })
+        .expect("the store writes the token");
+
+    let count = server
+        .oauth()
+        .revoke_principal("adam")
+        .expect("the store answers");
+    assert_eq!(count, 1, "one live family names adam");
+
+    let outcome = server
+        .oauth()
+        .with_store(|store| store.take_refresh(&token, 2))
+        .expect("the store answers");
+    assert!(
+        matches!(outcome, mcpmem_oauth::store::RefreshOutcome::Unknown),
+        "the wrapper revoked the family the bearer path reads"
+    );
+}
+
 /// The clock a test injects is the clock the state reads, and moving it moves
 /// what the state sees. Tasks 7 and 8 observe an expiry this way; no test can
 /// wait out a token lifetime.
@@ -305,7 +424,7 @@ async fn bearer_holds_narrows_the_credential_and_not_the_advertised_scopes() {
     let body: serde_json::Value = support::json(res).await;
     assert_eq!(
         body["scopes_supported"],
-        json!(["graph-read", "graph-write", "vectors", "code"]),
+        json!(["graph-read", "graph-write", "vectors", "code", "admin"]),
         "the document advertises the enabled categories, not the credential"
     );
 }

@@ -7,18 +7,18 @@ use mcpmem_oauth::{digest, digest_eq, new_token, s256_challenge};
 fn the_oauth_migration_applies_to_a_database_that_predates_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.mcpmem");
-    // First open applies 1..=3 as it did before this change.
+    // First open applies the full migration set, exactly as it always has.
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
         mcpmem_core::schema::initialize_database(&conn).unwrap();
     }
-    // Second open must add only migration 4 and must not change earlier rows.
+    // A second open must add no migration and must not change earlier rows.
     let conn = rusqlite::Connection::open(&path).unwrap();
     mcpmem_core::schema::initialize_database(&conn).unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM schema_migration", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count, 4);
+    assert_eq!(count, 5, "the count tracks MIGRATIONS, currently 0005_principals");
     conn.query_row("SELECT COUNT(*) FROM oauth_token", [], |r| {
         r.get::<_, i64>(0)
     })
@@ -404,6 +404,10 @@ fn the_sweep_covers_logins_and_codes_too() {
 /// answers `invalid_client`. Without the idle check, a client is evicted in
 /// the seconds between its registration and its first exchange, when it has
 /// by definition reached no token yet.
+///
+/// A client with `source = 'reserved'` is exempt: the sweep exists to bound
+/// anonymous DCR/CIMD rows, and only a restart re-seeds the reserved admin-UI
+/// client.
 #[test]
 fn the_eviction_removes_only_idle_clients_that_hold_no_token() {
     let (_d, s) = store();
@@ -421,6 +425,15 @@ fn the_eviction_removes_only_idle_clients_that_hold_no_token() {
         })
         .unwrap();
     }
+    s.put_client(&ClientRecord {
+        client_id: "reserved".into(),
+        client_name: "mcpmem admin UI".into(),
+        redirect_uris: vec!["https://mem.example.com/ui/admin/callback".into()],
+        source: ClientRecord::RESERVED.into(),
+        created_us: now - 31 * day_us,
+        last_used_us: now - 31 * day_us,
+    })
+    .unwrap();
     s.touch_client("recent", now - max_idle_us + 1).unwrap();
     let mut holder = grant("fam", &["graph-read"]);
     holder.client_id = "holder".into();
@@ -439,6 +452,10 @@ fn the_eviction_removes_only_idle_clients_that_hold_no_token() {
     assert!(
         s.get_client("holder").unwrap().is_some(),
         "a client holding a token must survive however long it has been quiet"
+    );
+    assert!(
+        s.get_client("reserved").unwrap().is_some(),
+        "a reserved client must survive the sweep however long it has been idle"
     );
 }
 

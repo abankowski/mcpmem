@@ -815,6 +815,23 @@ pub fn count_rows(server: &Server, table: &str) -> i64 {
     })
 }
 
+/// How many client rows a *dynamic* registration produced. Startup seeds its
+/// own reserved admin-UI client (`source = 'reserved'`), so a test that
+/// counts the registrations it made filters that row out; [`count_rows`]
+/// counts it with the rest.
+pub fn count_registered_clients(server: &Server) -> i64 {
+    with_store(server, |store| {
+        store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM oauth_client WHERE source != 'reserved'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("the store counts its clients")
+    })
+}
+
 /// The `code` query parameter of a `Location` header.
 pub fn code_from(location: &str) -> String {
     query_param(location, "code").expect("the redirect carries a code")

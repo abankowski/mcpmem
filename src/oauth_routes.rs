@@ -159,6 +159,12 @@ impl OauthState {
         f(&self.store.lock())
     }
 
+    /// Revoke every live token family that names `principal`, and return how
+    /// many families were revoked.
+    pub fn revoke_principal(&self, principal: &str) -> std::result::Result<usize, String> {
+        self.with_store(|store| store.revoke_principal(principal).map_err(|e| e.to_string()))
+    }
+
     /// Open the OAuth store on `db_path` and build the shared state.
     ///
     /// # Precondition
@@ -194,9 +200,28 @@ impl OauthState {
         let conn = rusqlite::Connection::open(db_path).map_err(|e| open_failed(&e))?;
         conn.busy_timeout(Duration::from_millis(busy_timeout_ms))
             .map_err(|e| open_failed(&e))?;
+        let now = now_us();
+        let store = mcpmem_oauth::store::Store::new(conn);
+        // The admin UI is a public PKCE client of this server's own AS. Seed
+        // it once; put_client upserts, so a repeat start only refreshes the
+        // row, and the same clock reading stamps `created_us` and `last_used_us`.
+        store
+            .put_client(&mcpmem_oauth::store::ClientRecord {
+                client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
+                client_name: "mcpmem admin UI".to_owned(),
+                redirect_uris: vec![format!("{}/ui/admin/callback", config.public_url)],
+                source: mcpmem_oauth::store::ClientRecord::RESERVED.to_owned(),
+                created_us: now,
+                last_used_us: now,
+            })
+            .map_err(|e| {
+                crate::errors::MCSError::MemoryError(format!(
+                    "failed to seed the admin UI client: {e}"
+                ))
+            })?;
         Ok(OauthState {
             config,
-            store: Mutex::new(mcpmem_oauth::store::Store::new(conn)),
+            store: Mutex::new(store),
             now_us,
             limits: mcpmem_oauth::limits::Limits::new(),
             #[cfg(feature = "oauth")]
@@ -589,9 +614,18 @@ fn registration_refused(e: &RegistrationError) -> Response {
         .into_response()
 }
 
-/// The scopes this server advertises: one slug per enabled tool category.
+/// The scopes this server advertises: one slug per enabled tool category,
+/// plus the admin scope whenever an OAuth state exists.
 fn scopes(state: &HttpState) -> Vec<&'static str> {
-    state.enabled_categories.iter().map(|c| c.slug()).collect()
+    let mut out: Vec<&'static str> = state
+        .enabled_categories
+        .iter()
+        .map(|c| c.slug())
+        .collect();
+    if state.oauth.is_some() {
+        out.push(crate::principals::ADMIN_SCOPE);
+    }
+    out
 }
 
 /// The scheme and host of `public_url`, without any path prefix. Both
