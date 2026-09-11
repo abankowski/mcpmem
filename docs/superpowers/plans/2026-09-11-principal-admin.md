@@ -556,6 +556,28 @@ mod tests {
     }
 
     #[test]
+    fn the_production_clock_is_live() {
+        // open() must use a live wall clock: a frozen clock would keep the
+        // TTL sweep from ever expiring and degenerate the LRU eviction.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("w.mcpmem");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let (_, sql) = mcpmem_core::events::MIGRATIONS
+            .iter()
+            .find(|(v, _)| *v == 5)
+            .expect("migration 5 exists");
+        conn.execute_batch(sql).unwrap();
+        drop(conn);
+        let store = PrincipalsStore::open(path.to_str().unwrap(), 5000).unwrap();
+        store.create("iss", "a", "a", None, &scopes()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.create("iss", "b", "b", None, &scopes()).unwrap();
+        let a = store.get("iss", "a").unwrap().unwrap();
+        let b = store.get("iss", "b").unwrap().unwrap();
+        assert!(b.created_us > a.created_us, "the wall clock must advance between writes");
+    }
+
+    #[test]
     fn approve_creates_a_principal_and_removes_the_entry() {
         let (clock, _t) = moved_clock();
         let (store, _dir) = store_at(clock);
@@ -634,11 +656,11 @@ impl PrincipalsStore {
     /// already be migrated (build the graph first, which runs
     /// `initialize_database`), exactly as the OAuth store requires.
     pub fn open(db_path: &str, busy_timeout_ms: u64) -> Result<Self> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros() as i64)
-            .unwrap_or(0);
-        Self::open_with_clock(db_path, busy_timeout_ms, Arc::new(move || now))
+        // A live clock, never a fixed value: a frozen now_us would stop the
+        // TTL sweep forever (boot < boot - ttl is false) and collapse the
+        // LRU order to insertion order. The OAuth store uses the same
+        // live clock (oauth_routes.rs:187).
+        Self::open_with_clock(db_path, busy_timeout_ms, Arc::new(mcpmem_core::events::now_us))
     }
 
     /// Test seam: the clock is injected, so TTL and eviction are
