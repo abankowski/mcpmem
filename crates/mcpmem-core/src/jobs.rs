@@ -520,6 +520,7 @@ pub struct TaxonomyJob {
     pub profile_id: Uuid,
     pub operation: IndexOperation,
     pub lease: Lease,
+    pub attempts: i64,
 }
 
 pub struct TaxonomyJobRepository<'a> {
@@ -534,11 +535,11 @@ impl<'a> TaxonomyJobRepository<'a> {
     pub fn claim_due(&self, now: i64, duration_us: i64) -> Result<Option<TaxonomyJob>> {
         let until = lease_until(now, duration_us)?;
         let tx = TxGuard::begin(self.conn)?;
-        let row: Option<(i64,i64,String,i64,String,i64)> = self.conn.query_row("SELECT subject_kind,subject_id,profile_id,subject_revision,operation,lease_epoch FROM taxonomy_job j WHERE ((state='pending' AND next_attempt_us<=?1) OR (state='leased' AND lease_until_us<=?1)) AND EXISTS(SELECT 1 FROM index_profile_registry r WHERE r.serving_profile=j.profile_id OR (r.state='Rebuilding' AND r.candidate_profile=j.profile_id)) ORDER BY next_attempt_us,subject_kind,subject_id,profile_id LIMIT 1", [now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(sql_error)?;
-        let job = row.map(|(kind,id,profile,revision,operation,epoch)| -> Result<TaxonomyJob> {
+        let row: Option<(i64,i64,String,i64,String,i64,i64)> = self.conn.query_row("SELECT subject_kind,subject_id,profile_id,subject_revision,operation,lease_epoch,attempts FROM taxonomy_job j WHERE ((state='pending' AND next_attempt_us<=?1) OR (state='leased' AND lease_until_us<=?1)) AND EXISTS(SELECT 1 FROM index_profile_registry r WHERE r.serving_profile=j.profile_id OR (r.state='Rebuilding' AND r.candidate_profile=j.profile_id)) ORDER BY next_attempt_us,subject_kind,subject_id,profile_id LIMIT 1", [now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
+        let job = row.map(|(kind,id,profile,revision,operation,epoch,attempts)| -> Result<TaxonomyJob> {
             let token = Uuid::new_v4();
             self.conn.execute("UPDATE taxonomy_job SET state='leased',lease_token=?4,lease_epoch=lease_epoch+1,lease_until_us=?5,attempts=attempts+1 WHERE subject_kind=?1 AND subject_id=?2 AND profile_id=?3", params![kind,id,profile,token.to_string(),until]).map_err(sql_error)?;
-            Ok(TaxonomyJob { subject_kind:kind,subject_id:id,subject_revision:revision,profile_id:parse_uuid(&profile)?,operation:match operation.as_str() { "upsert"=>IndexOperation::Upsert,"delete"=>IndexOperation::Delete,_=>return Err(MCSError::MemoryError("invalid taxonomy operation".into())) },lease:Lease {token,epoch:epoch+1,until_us:until} })
+            Ok(TaxonomyJob { subject_kind:kind,subject_id:id,subject_revision:revision,profile_id:parse_uuid(&profile)?,operation:match operation.as_str() { "upsert"=>IndexOperation::Upsert,"delete"=>IndexOperation::Delete,_=>return Err(MCSError::MemoryError("invalid taxonomy operation".into())) },lease:Lease {token,epoch:epoch+1,until_us:until},attempts:attempts+1 })
         }).transpose()?;
         tx.commit()?;
         Ok(job)
@@ -548,6 +549,32 @@ impl<'a> TaxonomyJobRepository<'a> {
         let until = lease_until(now, duration_us)?;
         let tx = TxGuard::begin(self.conn)?;
         let changed = self.conn.execute("UPDATE taxonomy_job SET lease_until_us=?7 WHERE subject_kind=?1 AND subject_id=?2 AND profile_id=?3 AND lease_token=?4 AND lease_epoch=?5 AND state='leased' AND lease_until_us>?6", params![job.subject_kind,job.subject_id,job.profile_id.to_string(),job.lease.token.to_string(),job.lease.epoch,now,until]).map_err(sql_error)?;
+        tx.commit()?;
+        Ok(changed == 1)
+    }
+
+    pub fn retry(
+        &self,
+        job: &TaxonomyJob,
+        now: i64,
+        next_attempt_us: i64,
+        error: &str,
+        dead: bool,
+    ) -> Result<bool> {
+        let tx = TxGuard::begin(self.conn)?;
+        let changed = self.conn.execute("UPDATE taxonomy_job SET state=?7,next_attempt_us=?8,last_error=?9 WHERE subject_kind=?1 AND subject_id=?2 AND profile_id=?3 AND lease_token=?4 AND lease_epoch=?5 AND state='leased' AND lease_until_us>?6", params![job.subject_kind,job.subject_id,job.profile_id.to_string(),job.lease.token.to_string(),job.lease.epoch,now,if dead {"dead"} else {"pending"},next_attempt_us,error.chars().take(2048).collect::<String>()]).map_err(sql_error)?;
+        // A dead-lettered subject must not keep a stale vector row: the
+        // full-scan gate would otherwise publish an outdated embedding. Its
+        // next write re-enqueues the subject from scratch, mirroring the
+        // entity dead-letter cleanup.
+        if changed == 1 && dead {
+            self.conn
+                .execute(
+                    "DELETE FROM taxonomy_vector WHERE profile_id=?1 AND subject_kind=?2 AND subject_id=?3",
+                    params![job.profile_id.to_string(), job.subject_kind, job.subject_id],
+                )
+                .map_err(sql_error)?;
+        }
         tx.commit()?;
         Ok(changed == 1)
     }
