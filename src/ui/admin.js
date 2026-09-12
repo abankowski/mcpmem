@@ -21,7 +21,13 @@
 const CLIENT_ID = "mcpmem-admin-ui";
 const TOKEN_KEY = "mcpmem_admin_access";
 const VERIFIER_KEY = "mcpmem_admin_verifier";
-const REDIRECT = location.origin + "/ui/admin/callback";
+// The client is seeded with "{public_url}/ui/admin/callback" and
+// /oauth/authorize compares redirect_uri byte-for-byte, so this derives the
+// callback from the page's own path: a path-prefixed --public-url must not
+// lose its prefix. The derivation is stable on both pages the shell serves
+// (/ui/admin and /ui/admin/callback).
+const REDIRECT =
+    location.origin + location.pathname.replace(/\/callback$/, "").replace(/\/?$/, "/callback");
 
 let accessToken = sessionStorage.getItem(TOKEN_KEY);
 let defaultScopes = ["graph-read"];

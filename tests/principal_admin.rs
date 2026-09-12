@@ -334,6 +334,49 @@ async fn create_update_delete_round_trip_and_delete_revokes() {
     );
 }
 
+/// The create endpoint trims like the file loader does: an untrimmed `iss`
+/// or `sub` can never equal a provider claim, so a stray space would create
+/// a principal that can never authenticate. The response must carry the
+/// trimmed values, and a later duplicate submission with the trimmed key
+/// must be the same principal — a 409, not a second row.
+#[tokio::test]
+async fn create_trims_name_iss_and_sub_like_the_file_loader() {
+    let (server, token) = admin_server().await;
+
+    let create = server
+        .request(
+            Request::post("/ui/api/principals")
+                .header(header::AUTHORIZATION, bearer(&token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"  ada  ","iss":" https://idp.example ","sub":"  u-9","scopes":["graph-read"]}"#
+                        .to_owned(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(create.status(), 201);
+    let view = support::json(create).await;
+    assert_eq!(view["name"], "ada", "name is trimmed");
+    assert_eq!(view["iss"], "https://idp.example", "iss is trimmed");
+    assert_eq!(view["sub"], "u-9", "sub is trimmed");
+
+    // The same identity, spelled with the trimmed key, is a duplicate.
+    let dup = server
+        .request(
+            Request::post("/ui/api/principals")
+                .header(header::AUTHORIZATION, bearer(&token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"ada","iss":"https://idp.example","sub":"u-9","scopes":["graph-read"]}"#
+                        .to_owned(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(dup.status(), 409, "the trimmed key is the same principal");
+}
+
 #[tokio::test]
 async fn a_non_admin_grant_is_refused() {
     let idp = support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default()).await;
@@ -380,6 +423,69 @@ async fn the_admin_page_and_assets_are_served() {
             .unwrap();
         assert!(ct.starts_with(kind), "{path} content type is {ct}");
     }
+}
+
+/// The admin SPA derives its redirect from the page's own path, and the
+/// seeded `mcpmem-admin-ui` client registers `{public_url}/ui/admin/callback`.
+/// `/oauth/authorize` compares the two byte-for-byte, so a `--public-url`
+/// with a path prefix keeps working only when the SPA's derivation carries
+/// the prefix. The origin-only value is what the old SPA sent, and it must
+/// be refused — that is the regression this test guards.
+#[tokio::test]
+async fn the_admin_redirect_keeps_a_public_url_path_prefix() {
+    let idp = support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default()).await;
+    let config = support::oauth_config_at(&format!("{}/mem", support::PUBLIC_URL), &idp.issuer);
+    let server = support::server(Some(config), support::Scopes::all(), None).await;
+
+    // What the fixed SPA sends on the page {prefix}/ui/admin:
+    // location.origin + page path, a trailing "/callback" dropped if
+    // present, then "/callback" appended.
+    let prefixed = format!("{}/mem/ui/admin/callback", support::PUBLIC_URL);
+    let origin_only = format!("{}/ui/admin/callback", support::PUBLIC_URL);
+    let params = |redirect: String| {
+        vec![
+            ("response_type", "code".into()),
+            ("client_id", "mcpmem-admin-ui".into()),
+            ("redirect_uri", redirect),
+            (
+                "scope",
+                format!("graph-read {}", mcpmem::principals::ADMIN_SCOPE),
+            ),
+            ("state", "st".into()),
+            ("code_challenge", support::flow::code_challenge()),
+            ("code_challenge_method", "S256".into()),
+        ]
+    };
+    let started = server
+        .request(
+            Request::get(format!(
+                "/oauth/authorize?{}",
+                support::flow::query_string(&as_pairs(&params(prefixed)))
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        started.status(),
+        StatusCode::FOUND,
+        "the page-derived redirect matches the seeded client, so authorize accepts it"
+    );
+    let refused = server
+        .request(
+            Request::get(format!(
+                "/oauth/authorize?{}",
+                support::flow::query_string(&as_pairs(&params(origin_only)))
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        refused.status(),
+        StatusCode::BAD_REQUEST,
+        "the origin-only redirect drops the prefix and is refused byte-for-byte"
+    );
 }
 
 /// Register a waitlist-test client and walk one login that lands on the

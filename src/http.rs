@@ -637,6 +637,16 @@ fn store_failure(e: impl std::fmt::Display) -> Response {
     )
 }
 
+/// A 500 whose message names the OAuth store, not the principals store: the
+/// token-revocation path in the delete handler can fail in either, and a
+/// mislabeled body sends the operator to the wrong logs.
+fn oauth_store_failure(e: impl std::fmt::Display) -> Response {
+    json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("oauth store: {e}"),
+    )
+}
+
 /// `GET /ui/api/principals` — every principal the server knows: the built-ins
 /// from the principals file, then the runtime rows, with a row whose identity
 /// a built-in owns marked `masked_by_builtin`. The sidebar reads the mask
@@ -709,33 +719,33 @@ async fn admin_create_principal(
         Ok(v) => v,
         Err(_) => return bad_request("the body must be a JSON principal"),
     };
+    // Trim into the stored values, like the file loader does: an untrimmed
+    // `sub` can never equal a provider claim, so a stray space would create
+    // a principal that can never authenticate — and whitespace-only
+    // variants of a built-in key would slip past the collision check.
     let name = input.name.trim();
-    if name.is_empty() || input.iss.is_empty() || input.sub.is_empty() {
+    let iss = input.iss.trim();
+    let sub = input.sub.trim();
+    if name.is_empty() || iss.is_empty() || sub.is_empty() {
         return bad_request("name, iss and sub are required");
     }
     let scopes = match crate::principals::canonical_scopes(&input.scopes) {
         Ok(s) if !s.is_empty() => s,
         _ => return bad_request("at least one known scope is required"),
     };
-    if is_builtin(oauth, &input.iss, &input.sub) {
+    if is_builtin(oauth, iss, sub) {
         return conflict("a built-in principal owns this identity; it is immutable");
     }
     // A duplicate runtime key is refused before the store is touched, so the
     // answer is 409 and not the store's UNIQUE-constraint error.
-    match oauth.with_principals(|s| s.get(&input.iss, &input.sub)) {
+    match oauth.with_principals(|s| s.get(iss, sub)) {
         Ok(Some(_)) => return conflict("a runtime principal already owns this identity"),
         Ok(None) => {}
         Err(e) => return store_failure(e),
     }
-    if let Err(e) = oauth.with_principals(|s| {
-        s.create(
-            &input.iss,
-            &input.sub,
-            name,
-            input.label.as_deref(),
-            &scopes,
-        )
-    }) {
+    if let Err(e) =
+        oauth.with_principals(|s| s.create(iss, sub, name, input.label.as_deref(), &scopes))
+    {
         // The pre-check above is not a lock: two concurrent identical POSTs
         // can both pass it, and the second then hits the UNIQUE constraint.
         // That race is classified by the store and answered as a conflict
@@ -746,10 +756,10 @@ async fn admin_create_principal(
         return store_failure(e);
     }
     let view = PrincipalView {
-        id: mcpmem_oauth::principal_id(&input.iss, &input.sub),
+        id: mcpmem_oauth::principal_id(iss, sub),
         name: name.to_owned(),
-        iss: input.iss,
-        sub: input.sub,
+        iss: iss.to_owned(),
+        sub: sub.to_owned(),
         label: input.label,
         scopes,
         builtin: false,
@@ -858,7 +868,7 @@ async fn admin_delete_principal(
     // intact, so the delete is retryable.
     let revoked = match oauth.revoke_principal(&row.name) {
         Ok(n) => n,
-        Err(e) => return store_failure(e),
+        Err(e) => return oauth_store_failure(e),
     };
     if let Err(e) = oauth.with_principals(|s| s.delete(&iss, &sub)) {
         return store_failure(e);
