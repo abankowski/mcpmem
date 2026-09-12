@@ -1302,76 +1302,66 @@ mod tests {
 
         // The compiled manifest advertises the tool with read annotations.
         let entry = base_tools()
-                .iter()
-                .find(|t| t["name"].as_str() == Some("suggest_taxonomy"))
-                .expect("tools.json lists suggest_taxonomy");
-            assert_eq!(
-                entry["annotations"]["readOnlyHint"].as_bool(),
-                Some(true)
-            );
-            assert_eq!(
-                entry["inputSchema"]["properties"]["kind"]["enum"]
-                    .as_array()
-                    .map(|a| a.len()),
-                Some(4)
-            );
-
-            // tools/list exposes it under the graph-read gate.
-            let listed = handle_tools_list(None, &principal);
-            let names: Vec<String> = listed["tools"]
+            .iter()
+            .find(|t| t["name"].as_str() == Some("suggest_taxonomy"))
+            .expect("tools.json lists suggest_taxonomy");
+        assert_eq!(entry["annotations"]["readOnlyHint"].as_bool(), Some(true));
+        assert_eq!(
+            entry["inputSchema"]["properties"]["kind"]["enum"]
                 .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|t| t["name"].as_str().map(String::from))
-                .collect();
-            assert!(
-names.iter().any(|n| n == "suggest_taxonomy"),
+                .map(|a| a.len()),
+            Some(4)
+        );
+
+        // tools/list exposes it under the graph-read gate.
+        let listed = handle_tools_list(None, &principal);
+        let names: Vec<String> = listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "suggest_taxonomy"),
             "tools/list must announce suggest_taxonomy"
-            );
+        );
 
-            // The dispatch arm answers with suggestions for a seeded graph.
-            let req: JsonRpcRequest = serde_json::from_value(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {
-                    "name": "suggest_taxonomy",
-                    "arguments": { "query": "persn" }
-                }
-            }))
-            .unwrap();
-            let Ok(HandlerResult::Value(result)) =
-                process_request(&req, &kg, None, &principal)
-            else {
-                panic!("expected a suggestion value");
-            };
-let suggestions = &result["suggestions"];
+        // The dispatch arm answers with suggestions for a seeded graph.
+        let req: JsonRpcRequest = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "suggest_taxonomy",
+                "arguments": { "query": "persn" }
+            }
+        }))
+        .unwrap();
+        let Ok(HandlerResult::Value(result)) = process_request(&req, &kg, None, &principal) else {
+            panic!("expected a suggestion value");
+        };
+        let suggestions = &result["suggestions"];
         assert!(suggestions.is_array());
-            assert_eq!(suggestions[0]["name"], "person");
+        assert_eq!(suggestions[0]["name"], "person");
 
-            // A blank query fails through the same dispatch arm, as an
-            // isError tool result rather than a protocol error.
-            let req: JsonRpcRequest = serde_json::from_value(json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "name": "suggest_taxonomy",
-                    "arguments": { "query": "  " }
-                }
-            }))
-            .unwrap();
-            let Ok(HandlerResult::Value(result)) =
-                process_request(&req, &kg, None, &principal)
-            else {
-                panic!("expected a tool error value");
-            };
-            assert_eq!(result["isError"].as_bool(), Some(true));
-            let text = result["content"][0]["text"].as_str().unwrap();
-            assert!(
-                text.contains("must not be empty or whitespace"),
-                "{text}"
-            );
+        // A blank query fails through the same dispatch arm, as an
+        // isError tool result rather than a protocol error.
+        let req: JsonRpcRequest = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "suggest_taxonomy",
+                "arguments": { "query": "  " }
+            }
+        }))
+        .unwrap();
+        let Ok(HandlerResult::Value(result)) = process_request(&req, &kg, None, &principal) else {
+            panic!("expected a tool error value");
+        };
+        assert_eq!(result["isError"].as_bool(), Some(true));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("must not be empty or whitespace"), "{text}");
         GRAPH_READ_ENABLED.store(was_on, std::sync::atomic::Ordering::Relaxed);
     }
 }

@@ -696,8 +696,9 @@ mod semantic {
         // endpoint answers 500, so its presence proves the failure path ran.
         let calls = fake_embeddings().recorded();
         assert!(
-            calls.iter().any(|call| call.texts
-                == vec!["FAIL_ME".to_string(), "persn".to_string()]),
+            calls
+                .iter()
+                .any(|call| call.texts == vec!["FAIL_ME".to_string(), "persn".to_string()]),
             "the FAIL_ME batch must have reached the provider: {calls:?}"
         );
     }

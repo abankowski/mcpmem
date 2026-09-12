@@ -103,10 +103,7 @@ fn similarity(a: &str, b: &str) -> f64 {
 /// Returns the overlapping trigrams of `s` as a vector.
 fn trigrams(s: &str) -> Vec<String> {
     let chars: Vec<char> = s.chars().collect();
-    chars
-        .windows(3)
-        .map(|w| w.iter().collect())
-        .collect()
+    chars.windows(3).map(|w| w.iter().collect()).collect()
 }
 
 /// Returns the Levenshtein distance of `a` and `b`.
@@ -180,24 +177,23 @@ pub fn handle_suggest_taxonomy(
 
     let kind: &str = match params.get("kind") {
         None | Some(Value::Null) => "entityType",
-        Some(v) => v.as_str().ok_or_else(|| {
-            MCSError::InvalidParams("'kind' must be a string".into())
-        })?,
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| MCSError::InvalidParams("'kind' must be a string".into()))?,
     };
     match kind {
         "entityType" | "relationType" | "entity" | "relation" => (),
-        _ => return Err(MCSError::InvalidParams(format!(
-            "'kind' must be one of entityType, relationType, entity, relation"
-        ))),
+        _ => {
+            return Err(MCSError::InvalidParams(format!(
+                "'kind' must be one of entityType, relationType, entity, relation"
+            )));
+        }
     }
-    let top_k = opt_usize(params, "topK", DEFAULT_SUGGESTION_K)?
-        .clamp(MIN_SUGGESTION_K, MAX_SUGGESTION_K);
+    let top_k =
+        opt_usize(params, "topK", DEFAULT_SUGGESTION_K)?.clamp(MIN_SUGGESTION_K, MAX_SUGGESTION_K);
 
     let offline = |counts: Vec<(String, usize)>| -> Vec<Suggestion> {
-        let existing: Vec<(&str, usize)> = counts
-            .iter()
-            .map(|(n, c)| (n.as_str(), *c))
-            .collect();
+        let existing: Vec<(&str, usize)> = counts.iter().map(|(n, c)| (n.as_str(), *c)).collect();
         suggest_strings(query, &existing)
     };
     let suggestions: Vec<Suggestion> = match kind {
@@ -347,7 +343,10 @@ pub fn suggest_semantic(
             let Some((name, _)) = vs.resolve_taxonomy(taxonomy_kind, id) else {
                 continue;
             };
-            group.push(Suggestion { name, score: 1.0 - distance });
+            group.push(Suggestion {
+                name,
+                score: 1.0 - distance,
+            });
         }
         groups.push(group);
     }
@@ -511,8 +510,8 @@ fn suggest_entities(vs: &VectorStore, query: &str, top_k: usize) -> Result<Vec<S
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn fallback_suggests_typo_and_underscore_variants() {
@@ -532,24 +531,16 @@ mod tests {
     fn fallback_orders_by_score_then_name() {
         // "related_to" is closer to "relatedTo" than "relates_to" is, so it
         // must sort first.
-        let existing = vec![
-            ("relates_to".into(), 1usize),
-            ("related_to".into(), 2usize),
-        ];
+        let existing = vec![("relates_to".into(), 1usize), ("related_to".into(), 2usize)];
         let got = suggest_strings("relatedTo", &existing);
         assert_eq!(got[0].name, "related_to");
         assert!(
-            got.iter()
-                .position(|s| s.name == "related_to")
-                .unwrap()
+            got.iter().position(|s| s.name == "related_to").unwrap()
                 < got.iter().position(|s| s.name == "relates_to").unwrap()
         );
 
         // Two candidates with an equal score must sort by name ascending.
-        let tied = vec![
-            ("abcdx".into(), 1usize),
-            ("abcde".into(), 1usize),
-        ];
+        let tied = vec![("abcdx".into(), 1usize), ("abcde".into(), 1usize)];
         let got = suggest_strings("abc", &tied);
         assert_eq!(got[0].name, "abcde");
     }
@@ -568,10 +559,7 @@ mod tests {
 
     #[test]
     fn fallback_returns_empty_for_garbage() {
-        let existing = vec![
-            ("person".into(), 3usize),
-            ("project".into(), 2usize),
-        ];
+        let existing = vec![("person".into(), 3usize), ("project".into(), 2usize)];
         let got = suggest_strings("zzzz", &existing);
         assert!(got.is_empty());
     }
@@ -615,12 +603,7 @@ mod tests {
 
         // A misspelled query gets the established entity type. The kind
         // defaults to entityType when the argument is omitted.
-        let value = handle_suggest_taxonomy(
-            None,
-            &kg,
-            Some(&json!({ "query": "persn" })),
-        )
-        .unwrap();
+        let value = handle_suggest_taxonomy(None, &kg, Some(&json!({ "query": "persn" }))).unwrap();
         let suggestions = &value["suggestions"];
         assert!(suggestions.is_array());
         assert_eq!(suggestions[0]["name"], "person");
@@ -634,24 +617,28 @@ mod tests {
         )
         .unwrap();
         let suggestions = &value["suggestions"];
-        assert!(suggestions.as_array().unwrap().iter().any(|s| s["name"] == "knows"));
+        assert!(
+            suggestions
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["name"] == "knows")
+        );
     }
 
     #[test]
     fn suggest_taxonomy_rejects_blank_query_and_unknown_kind() {
         let (_dir, kg) = seeded_graph();
 
-        let Err(err) = handle_suggest_taxonomy(None, &kg, Some(&json!({ "query": "   " })))
-            else {
-                panic!("expected a blank-query error");
-            };
+        let Err(err) = handle_suggest_taxonomy(None, &kg, Some(&json!({ "query": "   " }))) else {
+            panic!("expected a blank-query error");
+        };
         let err = err.to_string();
         assert!(err.contains("must not be empty or whitespace"), "{err}");
 
-        let Err(err) = handle_suggest_taxonomy(None, &kg, Some(&json!({})))
-            else {
-                panic!("expected a missing-query error");
-            };
+        let Err(err) = handle_suggest_taxonomy(None, &kg, Some(&json!({}))) else {
+            panic!("expected a missing-query error");
+        };
         let err = err.to_string();
         assert!(err.contains("Missing 'query'"), "{err}");
 
@@ -659,19 +646,15 @@ mod tests {
             None,
             &kg,
             Some(&json!({ "query": "persn", "kind": "taxonomy" })),
-        )
-        else {
+        ) else {
             panic!("expected an unknown-kind error");
         };
         let err = err.to_string();
         assert!(err.contains("'kind'"), "{err}");
 
         // A non-string kind must be rejected, not silently defaulted.
-        let Err(err) = handle_suggest_taxonomy(
-            None,
-            &kg,
-            Some(&json!({ "query": "persn", "kind": 7 })),
-        )
+        let Err(err) =
+            handle_suggest_taxonomy(None, &kg, Some(&json!({ "query": "persn", "kind": 7 })))
         else {
             panic!("expected a non-string kind error");
         };
@@ -692,10 +675,7 @@ mod tests {
             Some(&json!({ "query": "persn", "kind": "entity" })),
         )
         .unwrap();
-        assert_eq!(
-            value["suggestions"].as_array().map(|a| a.len()),
-            Some(0)
-        );
+        assert_eq!(value["suggestions"].as_array().map(|a| a.len()), Some(0));
 
         let value = handle_suggest_taxonomy(
             None,
@@ -703,10 +683,7 @@ mod tests {
             Some(&json!({ "query": "know_", "kind": "relation" })),
         )
         .unwrap();
-        assert_eq!(
-            value["suggestions"].as_array().map(|a| a.len()),
-            Some(0)
-        );
+        assert_eq!(value["suggestions"].as_array().map(|a| a.len()), Some(0));
     }
 
     #[test]
@@ -721,10 +698,7 @@ mod tests {
             Some(&json!({ "query": "pers", "kind": "entityType", "topK": 1 })),
         )
         .unwrap();
-        assert_eq!(
-            value["suggestions"].as_array().map(|a| a.len()),
-            Some(1)
-        );
+        assert_eq!(value["suggestions"].as_array().map(|a| a.len()), Some(1));
 
         let value = handle_suggest_taxonomy(
             None,
@@ -732,10 +706,7 @@ mod tests {
             Some(&json!({ "query": "pers", "kind": "entityType", "topK": 0 })),
         )
         .unwrap();
-        assert_eq!(
-            value["suggestions"].as_array().map(|a| a.len()),
-            Some(1)
-        );
+        assert_eq!(value["suggestions"].as_array().map(|a| a.len()), Some(1));
     }
 
     #[cfg(feature = "indexer")]
@@ -745,7 +716,9 @@ mod tests {
         use crate::kg::GraphHandle;
         use crate::types::EntityInput as Entity;
         use crate::vector_store::VectorStore;
-        use mcpmem_core::jobs::{DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization};
+        use mcpmem_core::jobs::{
+            DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization,
+        };
         use mcpmem_indexer::OpenAiCompatibleProvider;
         use parking_lot::Mutex;
         use rusqlite::params;
@@ -785,9 +758,8 @@ mod tests {
         }
 
         /// One loopback embeddings server for the whole test binary.
-        static FAKE: std::sync::LazyLock<Arc<FakeEmbeddings>> = std::sync::LazyLock::new(|| {
-            Arc::new(FakeEmbeddings::start())
-        });
+        static FAKE: std::sync::LazyLock<Arc<FakeEmbeddings>> =
+            std::sync::LazyLock::new(|| Arc::new(FakeEmbeddings::start()));
 
         fn fake_embeddings() -> &'static FakeEmbeddings {
             FAKE.as_ref()
@@ -795,12 +767,14 @@ mod tests {
 
         impl FakeEmbeddings {
             fn start() -> Self {
-                let listener = TcpListener::bind("127.0.0.1:0")
-                    .expect("bind the fake embeddings listener");
+                let listener =
+                    TcpListener::bind("127.0.0.1:0").expect("bind the fake embeddings listener");
                 let addr = listener
                     .local_addr()
                     .expect("read back the fake embeddings port");
-                let state = Arc::new(FakeState { calls: Mutex::new(Vec::new()) });
+                let state = Arc::new(FakeState {
+                    calls: Mutex::new(Vec::new()),
+                });
                 let thread_state = Arc::clone(&state);
                 let _ = std::thread::Builder::new()
                     .name("taxonomy-semantic-fake".into())
@@ -864,7 +838,11 @@ mod tests {
                     // The body follows the blank-line separator.
                     let body_start = headers_end + 4;
                     if buf.len() >= body_start + body_len {
-                        respond(&mut conn, &buf[body_start..body_start + body_len], Arc::clone(&state));
+                        respond(
+                            &mut conn,
+                            &buf[body_start..body_start + body_len],
+                            Arc::clone(&state),
+                        );
                         return;
                     }
                 }
@@ -899,8 +877,7 @@ mod tests {
         /// engine must detect. Each request produces the same fault.
         fn respond(conn: &mut TcpStream, body: &[u8], state: Arc<FakeState>) {
             let text = String::from_utf8_lossy(body).to_string();
-            let Some(value) = serde_json::from_str::<serde_json::Value>(text.as_str()).ok()
-            else {
+            let Some(value) = serde_json::from_str::<serde_json::Value>(text.as_str()).ok() else {
                 return;
             };
             let input: Vec<String> = value["input"]
@@ -911,10 +888,17 @@ mod tests {
                         .collect()
                 })
                 .unwrap_or(Vec::new());
-            let dimensions: usize = value["dimensions"].as_u64().map(|n| n as usize).unwrap_or(0);
-            state.calls.lock().extend_from_slice(&[RecordedCall { texts: input.clone() }]);
+            let dimensions: usize = value["dimensions"]
+                .as_u64()
+                .map(|n| n as usize)
+                .unwrap_or(0);
+            state.calls.lock().extend_from_slice(&[RecordedCall {
+                texts: input.clone(),
+            }]);
 
-            let wrong_dimensions = input.first().is_some_and(|text| *text == "WRONG_DIMENSIONS");
+            let wrong_dimensions = input
+                .first()
+                .is_some_and(|text| *text == "WRONG_DIMENSIONS");
             let wrong_count = input.first().is_some_and(|text| *text == "WRONG_COUNT");
             let count = if wrong_count {
                 input.len() + 1
@@ -1074,7 +1058,10 @@ mod tests {
             // One search per text: the single seeded subject comes back for
             // each of the three texts, grouped by input text.
             assert_eq!(got.len(), 3);
-            assert!(got.iter().all(|group| group.len() == 1 && group[0].name == "person"));
+            assert!(
+                got.iter()
+                    .all(|group| group.len() == 1 && group[0].name == "person")
+            );
 
             // And the three texts rode one embed_texts call.
             let calls = fake_embeddings().recorded();
@@ -1136,33 +1123,19 @@ mod tests {
             }
             adopt(&mut env).unwrap();
 
-            let entity_types = suggest_semantic(
-                &env.vs,
-                &["query".into()],
-                SubjectKind::EntityType,
-                10,
-            )
-            .unwrap();
+            let entity_types =
+                suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 10).unwrap();
             assert_eq!(entity_types.len(), 1);
             assert_eq!(entity_types[0][0].name, "person");
 
-            let relation_types = suggest_semantic(
-                &env.vs,
-                &["query".into()],
-                SubjectKind::RelationType,
-                10,
-            )
-            .unwrap();
+            let relation_types =
+                suggest_semantic(&env.vs, &["query".into()], SubjectKind::RelationType, 10)
+                    .unwrap();
             assert_eq!(relation_types.len(), 1);
             assert_eq!(relation_types[0][0].name, "works_at");
 
-            let relations = suggest_semantic(
-                &env.vs,
-                &["query".into()],
-                SubjectKind::Relation,
-                10,
-            )
-            .unwrap();
+            let relations =
+                suggest_semantic(&env.vs, &["query".into()], SubjectKind::Relation, 10).unwrap();
             assert_eq!(relations.len(), 1);
             assert_eq!(relations[0][0].name, "alice -[works_at]-> acme");
         }
@@ -1181,22 +1154,15 @@ mod tests {
             seed_vector(&env, profile, 2, 999, &[1.0; 4]);
             adopt(&mut env).unwrap();
 
-            let relations = suggest_semantic(
-                &env.vs,
-                &["query".into()],
-                SubjectKind::Relation,
-                10,
-            )
-            .unwrap();
-            assert!(relations[0].is_empty(), "a dangling vector must be skipped: {relations:?}");
+            let relations =
+                suggest_semantic(&env.vs, &["query".into()], SubjectKind::Relation, 10).unwrap();
+            assert!(
+                relations[0].is_empty(),
+                "a dangling vector must be skipped: {relations:?}"
+            );
 
-            let entity_types = suggest_semantic(
-                &env.vs,
-                &["query".into()],
-                SubjectKind::EntityType,
-                10,
-            )
-            .unwrap();
+            let entity_types =
+                suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 10).unwrap();
             assert_eq!(entity_types[0][0].name, "person");
         }
 
@@ -1206,8 +1172,8 @@ mod tests {
             let _ = seed_profile(&env, 4, Normalization::None);
             // A serving profile with no adopted snapshot for the kind: the
             // engine must fall back to the offline tier, not fail.
-            let got = suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 10)
-                .unwrap();
+            let got =
+                suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 10).unwrap();
             assert!(got[0].is_empty());
         }
 
@@ -1220,12 +1186,14 @@ mod tests {
                 &["WRONG_DIMENSIONS".into()],
                 SubjectKind::EntityType,
                 10,
-            )
-            else {
+            ) else {
                 panic!("expected a dimension-mismatch error");
             };
             let text = err.to_string();
-            assert!(text.contains("dimensions") && text.contains("disagree"), "{text}");
+            assert!(
+                text.contains("dimensions") && text.contains("disagree"),
+                "{text}"
+            );
         }
 
         #[test]
@@ -1237,8 +1205,7 @@ mod tests {
                 &["WRONG_COUNT".into()],
                 SubjectKind::EntityType,
                 10,
-            )
-            else {
+            ) else {
                 panic!("expected a count-mismatch error");
             };
             let text = err.to_string();
@@ -1254,8 +1221,8 @@ mod tests {
             seed_vector(&env, profile, 0, 7, &[0.5; 4]);
             adopt(&mut env).unwrap();
 
-            let got = suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 10)
-                .unwrap();
+            let got =
+                suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 10).unwrap();
             // The provider returns all-ones. L2 normalization scales it to
             // 0.5 per component, which exactly matches the seeded unit
             // vector; without normalization the distance would be 1.0 and the
@@ -1272,7 +1239,10 @@ mod tests {
                 panic!("expected a missing-profile error");
             };
             let text = err.to_string();
-            assert!(text.contains("[indexer]") && text.contains("no index profile"), "{text}");
+            assert!(
+                text.contains("[indexer]") && text.contains("no index profile"),
+                "{text}"
+            );
         }
 
         #[test]
@@ -1364,7 +1334,10 @@ mod tests {
             assert_eq!(suggestions[0]["name"], "alice");
             assert_eq!(suggestions[0]["score"], 1.0);
             assert_eq!(
-                suggestions.iter().map(|s| s["name"].as_str().unwrap()).collect::<Vec<_>>(),
+                suggestions
+                    .iter()
+                    .map(|s| s["name"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
                 vec!["alice", "acme"]
             );
             assert!(
