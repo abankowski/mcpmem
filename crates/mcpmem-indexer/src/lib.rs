@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mcpmem_core::jobs::{IndexJobRepository, IndexOperation, IndexProfileRegistry, Normalization};
+use mcpmem_core::jobs::{
+    IndexJobRepository, IndexOperation, IndexProfile, IndexProfileRegistry, Normalization,
+    TaxonomyJobRepository,
+};
 use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
 
@@ -274,7 +277,9 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
         mcpmem_core::schema::initialize_database(&conn)?;
         let jobs = IndexJobRepository::new(&conn);
         let Some(job) = jobs.claim_due(now_us, self.lease_us)? else {
-            return Ok(RunReport::default());
+            // No entity job is due. Serve a taxonomy job next, mirroring the
+            // entity flow.
+            return self.run_taxonomy_job(&conn, now_us);
         };
         let mut report = RunReport {
             claimed: 1,
@@ -295,45 +300,18 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
             IndexOperation::Upsert => {
                 let document = canonical_document(&conn, job.entity_id, job.entity_revision)?;
                 match document {
-                    Some(document) => self
-                        .provider
-                        .embed(&profile, &[document])
-                        .map_err(|error| error.to_string())
-                        .and_then(|mut vectors| {
-                            if vectors.len() != 1 {
-                                return Err("provider returned wrong embedding count".into());
-                            }
-                            let mut vector = vectors.pop().expect("len checked above");
-                            // The profile's L2 contract is a promise the worker
-                            // makes before storing: OpenAI returns vectors that
-                            // are only *roughly* unit-norm (measured off by up
-                            // to 5e-4), and the stored-vector validation demands
-                            // |norm-1| < 1e-4. Normalize here so a provider's
-                            // approximation cannot fail the gate. A zero vector
-                            // cannot be normalized and will be rejected by the
-                            // stored-vector validation.
-                            if profile.normalization == Normalization::L2 {
-                                let norm: f64 = vector
-                                    .iter()
-                                    .map(|value| f64::from(*value).powi(2))
-                                    .sum::<f64>()
-                                    .sqrt();
-                                if norm > 0.0 {
-                                    for value in &mut vector {
-                                        *value = (f64::from(*value) / norm) as f32;
-                                    }
-                                }
-                            }
-                            let before_commit = current_us();
-                            if !jobs
-                                .renew(&job, before_commit, self.lease_us)
-                                .map_err(|error| error.to_string())?
-                            {
-                                return Ok(false);
-                            }
+                    Some(document) => self.embed_and_commit(
+                        &profile,
+                        document,
+                        || {
+                            jobs.renew(&job, current_us(), self.lease_us)
+                                .map_err(|error| error.to_string())
+                        },
+                        |vector| {
                             jobs.commit_vector(&job, current_us(), Some(&vector), "indexer")
                                 .map_err(|error| error.to_string())
-                        }),
+                        },
+                    ),
                     // The entity vanished or was superseded before this claim
                     // ran. Retrying the same text can never succeed, so it must
                     // not loop as a leased job forever: route it through the
@@ -370,6 +348,146 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                             attempts = job.attempts,
                             %error,
                             "index job embedding failed; scheduled for retry"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Embed one document, then commit its vector under one lease renewal,
+    /// mirroring the pre-embed and pre-commit renewals of the entity flow.
+    /// Both job paths share this code so the lease and normalization gates
+    /// cannot diverge.
+    fn embed_and_commit<Renew, Commit>(
+        &self,
+        profile: &IndexProfile,
+        document: CanonicalDocument,
+        mut renew: Renew,
+        commit: Commit,
+    ) -> Result<bool, String>
+    where
+        Renew: FnMut() -> Result<bool, String>,
+        Commit: FnOnce(Vec<f32>) -> Result<bool, String>,
+    {
+        self.provider
+            .embed(profile, &[document])
+            .map_err(|error| error.to_string())
+            .and_then(|mut vectors| {
+                if vectors.len() != 1 {
+                    return Err("provider returned wrong embedding count".into());
+                }
+                let mut vector = vectors.pop().expect("len checked above");
+                // The profile's L2 contract is a promise the worker
+                // makes before storing: OpenAI returns vectors that
+                // are only *roughly* unit-norm (measured off by up
+                // to 5e-4), and the stored-vector validation demands
+                // |norm-1| < 1e-4. Normalize here so a provider's
+                // approximation cannot fail the gate. A zero vector
+                // cannot be normalized and will be rejected by the
+                // stored-vector validation.
+                if profile.normalization == Normalization::L2 {
+                    let norm: f64 = vector
+                        .iter()
+                        .map(|value| f64::from(*value).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    if norm > 0.0 {
+                        for value in &mut vector {
+                            *value = (f64::from(*value) / norm) as f32;
+                        }
+                    }
+                }
+                if !renew()? {
+                    return Ok(false);
+                }
+                commit(vector)
+            })
+    }
+
+    /// Serve the next due taxonomy job, mirroring the entity flow. Runs only
+    /// when no entity job is due, so one poll serves exactly one job.
+    fn run_taxonomy_job(&self, conn: &Connection, now_us: i64) -> Result<RunReport, WorkerError> {
+        let tax_jobs = TaxonomyJobRepository::new(conn);
+        let Some(tax_job) = tax_jobs.claim_due(now_us, self.lease_us)? else {
+            return Ok(RunReport::default());
+        };
+        let mut report = RunReport {
+            claimed: 1,
+            ..RunReport::default()
+        };
+        let profile = IndexProfileRegistry::new(conn).get(tax_job.profile_id)?;
+        // Renew immediately before work and again immediately before the
+        // fenced write using a fresh wall clock. An over-lease provider call
+        // cannot commit merely because its claim timestamp was old.
+        let fresh_before_provider = current_us();
+        if !tax_jobs.renew(&tax_job, fresh_before_provider, self.lease_us)? {
+            return Ok(report);
+        }
+        let outcome: Result<bool, String> = match tax_job.operation {
+            IndexOperation::Delete => tax_jobs
+                .commit_vector(&tax_job, current_us(), None, "indexer")
+                .map_err(|error| error.to_string()),
+            IndexOperation::Upsert => {
+                let document = taxonomy_document(
+                    conn,
+                    tax_job.subject_kind,
+                    tax_job.subject_id,
+                    tax_job.subject_revision,
+                )?;
+                match document {
+                    Some(document) => self.embed_and_commit(
+                        &profile,
+                        document,
+                        || {
+                            tax_jobs
+                                .renew(&tax_job, current_us(), self.lease_us)
+                                .map_err(|error| error.to_string())
+                        },
+                        |vector| {
+                            tax_jobs
+                                .commit_vector(&tax_job, current_us(), Some(&vector), "indexer")
+                                .map_err(|error| error.to_string())
+                        },
+                    ),
+                    // The subject vanished or was superseded before this claim
+                    // ran. Route it through the retry path, which bounds it
+                    // and dead-letters, as for a vanished entity.
+                    None => Err(
+                        "taxonomy subject vanished or was superseded before embedding; nothing to index"
+                            .into(),
+                    ),
+                }
+            }
+        };
+        match outcome {
+            Ok(true) => report.committed = 1,
+            Ok(false) => {}
+            Err(error) => {
+                let retry_now = current_us();
+                let retry_at = retry_now.saturating_add(1_000_000);
+                let dead = tax_job.attempts >= MAX_ATTEMPTS;
+                if tax_jobs.retry(&tax_job, retry_now, retry_at, &error, dead)? {
+                    if dead {
+                        report.dead = 1;
+                        tracing::error!(
+                            subject_kind = tax_job.subject_kind,
+                            subject_id = tax_job.subject_id,
+                            profile_id = %tax_job.profile_id,
+                            attempts = tax_job.attempts,
+                            %error,
+                            "taxonomy job dead-lettered after max attempts; it will not block the store"
+                        );
+                    } else {
+                        report.retried = 1;
+                        tracing::warn!(
+                            subject_kind = tax_job.subject_kind,
+                            subject_id = tax_job.subject_id,
+                            profile_id = %tax_job.profile_id,
+                            attempts = tax_job.attempts,
+                            %error,
+                            "taxonomy job embedding failed; scheduled for retry"
                         );
                     }
                 }
