@@ -927,16 +927,21 @@ impl VectorStore {
     /// generation. This is worker-only; MCP searches never invoke it.
     ///
     /// Also drives taxonomy adoption for every kind, with the entity path's
-    /// candidate decision. Adoption runs first: a candidate refusal must not
-    /// let the entity path activate the registry on an unverified taxonomy
-    /// scan, and the error propagates to the caller, which tolerates it and
-    /// retries on the next poll exactly like an entity-side failure.
+    /// candidate decision. A refused adoption is logged, never propagated:
+    /// the entity path must still publish and activate when a taxonomy job
+    /// keeps a kind scan-invalid forever.
     pub fn reconcile_managed_snapshot(&self) -> Result<()> {
         let conn = self.db.lock();
         let registry = IndexProfileRegistry::new(&conn);
         let state = registry.state("default")?;
         let candidate = matches!(&state, StoreState::Rebuilding { .. });
-        self.adopt_taxonomy(&registry, candidate)?;
+        // A taxonomy refusal must not break the entity path: a dead job can
+        // keep a kind scan-invalid forever, so deferring the entity
+        // activation on that refusal would block entity search for good.
+        // Log and continue; the next poll retries the adoption.
+        if let Err(error) = self.adopt_taxonomy(&registry, candidate) {
+            tracing::debug!(%error, "taxonomy adoption deferred; the entity path continues");
+        }
         let active = match state {
             StoreState::Active(profile) => Some((
                 profile,
@@ -1943,11 +1948,11 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_defers_activation_when_taxonomy_scan_is_invalid() {
-        // D10 wiring: reconcile drives taxonomy adoption with the entity
-        // candidate decision. A refused taxonomy adoption must also defer the
-        // entity activation, or the candidate would activate on a stale
-        // taxonomy scan.
+    fn reconcile_activates_the_entity_when_taxonomy_scan_is_invalid() {
+        // D10 wiring: adoption must not break the entity path. A dead
+        // taxonomy job keeps a kind scan-invalid forever, so a refused
+        // adoption must not defer the entity activation; it logs and the
+        // entity side proceeds.
         let env = setup(4);
         let profile = seed_taxonomy_profile(&env, 4);
         {
@@ -1966,29 +1971,13 @@ mod tests {
             .unwrap();
         }
         seed_taxonomy_generation(&env, profile, 0, 1);
-        // A counted type without any queued job makes the taxonomy scan
-        // invalid; the entity side alone is empty and would verify.
         seed_type_dict(&env, 7, 0, "person");
-        let error = env.vs.reconcile_managed_snapshot().unwrap_err();
-        assert!(error.to_string().contains("taxonomy"), "got: {error}");
-        // Nothing was adopted or activated: the refusal is the gate.
-        let state = IndexProfileRegistry::new(&env.vs.db.lock())
-            .state("default")
-            .unwrap();
-        assert!(matches!(state, StoreState::Rebuilding { .. }));
-        assert!(env.vs.search_embeddings(&[1.0; 4], 10).unwrap().is_empty());
-        assert!(
-            env.vs
-                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
-                .unwrap()
-                .is_empty()
-        );
-        // A queued job clears the refusal, and the next poll completes the
-        // activation.
+        // The subject's only job is dead, so the kind scan is invalid on
+        // every poll: the adoption refuses forever.
         {
             let conn = env.vs.db.lock();
             conn.execute(
-                "INSERT INTO taxonomy_job(subject_kind,subject_id,profile_id,subject_revision,operation,state) VALUES(0,7,?1,1,'upsert','pending')",
+                "INSERT INTO taxonomy_job(subject_kind,subject_id,profile_id,subject_revision,operation,state) VALUES(0,7,?1,1,'upsert','dead')",
                 [profile.to_string()],
             )
             .unwrap();
@@ -1998,6 +1987,21 @@ mod tests {
             IndexProfileRegistry::new(&env.vs.db.lock()).state("default").unwrap(),
             StoreState::Active(active) if active == profile
         ));
+        // The taxonomy side stays deferred: the dead subject is not served.
+        assert!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap()
+                .is_empty()
+        );
+        // A repeated reconcile stays green and keeps the taxonomy deferred.
+        env.vs.reconcile_managed_snapshot().unwrap();
+        assert!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn renamed_vector_fixture() -> (TestEnv, EntityId) {

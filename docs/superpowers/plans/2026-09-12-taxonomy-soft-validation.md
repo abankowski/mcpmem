@@ -36,7 +36,7 @@ These apply to every task. Copy them verbatim into each task brief.
 |D7|The semantic tier reuses `vs.serving_profile()` and `crate::indexer_provider::get()`; no new provider wiring|`handle_semantic_search` shows the exact seam (`vector_actions.rs:803-824`)|
 |D8|Query embedding batches one provider call per write hook|The semantic engine takes `&[String]` and calls `provider.embed_texts` once (Task 11)|
 |D9|Taxonomy snapshot freshness mirrors the entity loop: `commit_vector` bumps the kind's durable generation (mirror of `jobs.rs:434`); the reconcile rebuilds when `published < durable`|`builds one flat per-kind snapshot` in Task 10; the bump lives in Task 7's `commit_vector` success path|
-|D10|The runtime drives taxonomy adoption: `reconcile_managed_snapshot` (the runtime poll loop's entity path, `runtime.rs:44-48,227-231`) must also call `adopt_taxonomy` for each kind with the same candidate decision|wired in Task 14; verified by a full-cycle integration test (write -> embed -> reconcile -> semantic suggestion)|
+|D10|The runtime drives taxonomy adoption: `reconcile_managed_snapshot` (the runtime poll loop's entity path, `runtime.rs:44-48,227-231`) must also call `adopt_taxonomy` for each kind with the same candidate decision|wired in Task 14; verified by a full-cycle integration test (write -> embed -> reconcile -> semantic suggestion). Decisions: adoption runs BEFORE the entity early-return (a taxonomy-only commit advances no entity generation, so the early return would starve it); a refused adoption is logged, never propagated (a dead job keeps a kind scan-invalid forever, so deferring the entity activation on the refusal would block entity search for good)|
 
 ## File map
 
