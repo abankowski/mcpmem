@@ -42,7 +42,7 @@ pub fn request_fingerprint(method: &str, normalized_path: &str, raw_body: &[u8])
 /// to this crate, and `cargo package` copies only the files under one crate
 /// root, so an `include_str!` from another crate ships a crate that cannot
 /// compile. That is how the `v1.0.0-rc.1` release failed.
-pub const MIGRATIONS: [(i64, &str); 6] = [
+pub const MIGRATIONS: [(i64, &str); 7] = [
     (1, include_str!("../migrations/0001_change_events.sql")),
     (
         2,
@@ -55,6 +55,7 @@ pub const MIGRATIONS: [(i64, &str); 6] = [
     (4, include_str!("../migrations/0004_oauth.sql")),
     (5, include_str!("../migrations/0005_principals.sql")),
     (6, include_str!("../migrations/0006_code_repos.sql")),
+    (7, include_str!("../migrations/0007_taxonomy_index.sql")),
 ];
 
 #[cfg(test)]
@@ -96,6 +97,10 @@ mod migration_inventory {
                 (
                     6,
                     "f57f6103c82269627ada7de2cea989a2494aabdb066eb6f9775e3ea6d32ed564".to_owned()
+                ),
+                (
+                    7,
+                    "4949f6c6f73c22bce5de31219d2d5d52739cde05967363c2fc89e88b35c044e8".to_string()
                 ),
             ],
             "a migration was added, removed, renumbered or edited"
