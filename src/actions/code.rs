@@ -824,3 +824,52 @@ pub fn handle_code_watch(args: Option<&Value>) -> Result<Value> {
         "path": watch_path,
     }))
 }
+
+// ---------------------------------------------------------------------------
+// code_repo_* — managed remote repositories
+// ---------------------------------------------------------------------------
+
+fn repo_input(args: Option<&Value>) -> Result<crate::repos::RepoInput> {
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+    serde_json::from_value(params.clone()).map_err(|e| {
+        MCSError::InvalidParams(format!("invalid repository input: {e}"))
+    })
+}
+
+pub fn handle_code_repo_add(args: Option<&Value>) -> Result<Value> {
+    let input = repo_input(args)?;
+    let counters = crate::repos::add(&input)?;
+    to_json(&counters)
+}
+
+pub fn handle_code_repo_list(_args: Option<&Value>) -> Result<Value> {
+    let repos = crate::repos::list()?;
+    to_json(&serde_json::json!({ "repos": repos }))
+}
+
+pub fn handle_code_repo_reindex(args: Option<&Value>) -> Result<Value> {
+    let key = repo_key(args)?;
+    let counters = crate::repos::reindex(&key)?;
+    to_json(&counters)
+}
+
+pub fn handle_code_repo_remove(args: Option<&Value>) -> Result<Value> {
+    let key = repo_key(args)?;
+    crate::repos::remove(&key)?;
+    to_json(&serde_json::json!({ "status": "removed", "key": key }))
+}
+
+/// Read the `key` argument alone. The reindex/remove tools take only a key,
+/// so parsing a full `RepoInput` (which requires `url` and `authKind`) would
+/// reject their documented payloads.
+fn repo_key(args: Option<&Value>) -> Result<String> {
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+    params
+        .get("key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            MCSError::InvalidParams("invalid repository input: missing field `key`".into())
+        })
+}

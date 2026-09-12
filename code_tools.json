@@ -229,5 +229,89 @@
       "destructiveHint": false,
       "idempotentHint": true
     }
+  },
+  {
+    "name": "code_repo_add",
+    "description": "Register a remote git repository for code-symbol indexing, clone it, and index it. The key becomes the project identifier for every later code tool call on this repository. Credentials are stored in the memory database and never returned. Use code_repo_reindex later to pick up new commits. Synchronous; a large repository takes minutes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Repository key (== project identifier). 1-64 chars of [A-Za-z0-9_-]; selects the dedicated, isolated code database."
+        },
+        "url": {
+          "type": "string",
+          "description": "Remote git URL (https, http, or ssh form). Must not embed credentials; pass authSecret instead."
+        },
+        "authKind": {
+          "type": "string",
+          "enum": ["none", "token", "ssh"],
+          "description": "How the server authenticates: 'none' for public repos, 'token' for an HTTPS bearer/PAT, 'ssh' for a private key. Default 'none'."
+        },
+        "authSecret": {
+          "type": "string",
+          "description": "The token or the full SSH private key text. Required when authKind is token or ssh. Never returned by code_repo_list."
+        },
+        "snippets": {
+          "type": "boolean",
+          "description": "Also store each symbol's bounded body text, as code_index does with snippets=true. Default false."
+        }
+      },
+      "required": ["key", "url"]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "code_repo_list",
+    "description": "List registered code repositories with their state (pending, cloning, indexing, indexed, error), auth kind, and last indexed time. Responses never contain credentials. A state of 'error' carries the last failure message in lastError.",
+    "inputSchema": { "type": "object", "properties": {} },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "code_repo_reindex",
+    "description": "Fetch the latest commits of a registered repository and re-index changed files incrementally. Run this after the remote moves. Synchronous; returns the counters of the index run (filesIndexed, symbols, relations).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Repository key as given to code_repo_add."
+        }
+      },
+      "required": ["key"]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "code_repo_remove",
+    "description": "Remove a registered repository completely: stop its watcher, delete its indexed code database, delete its local clone, and forget the registration. The key can be re-added afterwards. Irreversible.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Repository key as given to code_repo_add."
+        }
+      },
+      "required": ["key"]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    }
   }
 ]

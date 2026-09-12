@@ -231,6 +231,10 @@ pub const CODE_TOOL_NAMES: &[&str] = &[
     "code_watch",
     "code_embed",
     "code_semantic_search",
+    "code_repo_add",
+    "code_repo_list",
+    "code_repo_reindex",
+    "code_repo_remove",
 ];
 
 /// Names of the webhook subscription-management tools (manifest:

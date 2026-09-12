@@ -1064,6 +1064,18 @@ fn handle_tools_call(
                 "code_semantic_search" => {
                     code_actions::handle_code_semantic_search(tool_args).map(HandlerResult::Value)
                 }
+                "code_repo_add" => {
+                    code_actions::handle_code_repo_add(tool_args).map(HandlerResult::Value)
+                }
+                "code_repo_list" => {
+                    code_actions::handle_code_repo_list(tool_args).map(HandlerResult::Value)
+                }
+                "code_repo_reindex" => {
+                    code_actions::handle_code_repo_reindex(tool_args).map(HandlerResult::Value)
+                }
+                "code_repo_remove" => {
+                    code_actions::handle_code_repo_remove(tool_args).map(HandlerResult::Value)
+                }
                 other => Err(MCSError::MethodNotFound(other.to_string())),
             };
             return Ok(result.unwrap_or_else(|e| {

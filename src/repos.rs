@@ -45,10 +45,20 @@ const STATE_REMOVING: &str = "removing";
 pub struct RepoInput {
     pub key: String,
     pub url: String,
-    /// `none`, `token`, or `ssh`.
+    /// `none`, `token`, or `ssh`. Defaults to "none" when omitted; the MCP
+    /// descriptor documents "Default 'none'".
+    #[serde(default = "none_kind")]
     pub auth_kind: String,
     pub auth_secret: Option<String>,
+    /// Defaults to false; the MCP descriptor documents "Default false".
+    #[serde(default)]
     pub snippets: bool,
+}
+
+/// Serde default for a missing `authKind` field; "none" matches the MCP
+/// descriptor's documented default and the store's validation.
+fn none_kind() -> String {
+    "none".into()
 }
 
 /// A repository row for API responses. Secrets never leave the store.
