@@ -654,6 +654,18 @@ active MCP session. **The first admin is a built-in**: put `admin` in the
 principal an admin then adds, edits or removes lives in SQLite, never in the
 JSON file.
 
+**How a sign-in looks.** Opening `/ui/admin` with no saved token asks this
+server's authorization server to log you in, and that redirects you to the
+upstream provider named by `[oauth]` — the same Google (or other IdP) login
+the connector flow above uses. After the provider signs you in, `mcpmem`
+serves its own consent page naming the client (`mcpmem admin UI`), the human,
+and the `admin` scope; approving it stores the access token in the browser's
+`sessionStorage` and renders the page. The sign-in drops to a refusal before
+that when your principals-file entry holds no `admin` (the consent page
+reports you hold none of the requested scopes), and outright when you are not
+on the principals list at all — which is where the approval waitlist below can
+record you as pending instead.
+
 The page lists all principals together — built-ins and runtime rows — and
 offers edit, add and remove for the runtime ones. Removing a runtime principal
 revokes its live token families immediately — an already-minted access token
