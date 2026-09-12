@@ -1,13 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mcpmem_core::mutation::{
     MutationContext, MutationRequest, MutationResult, MutationService, ObservationUpdate,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::errors::{MCSError, Result};
 use crate::kg::{GraphHandle, push_json_str};
 use crate::taxonomy::{SubjectKind, Suggestion, suggest_strings};
+use crate::vector_store::VectorStore;
 
 const MAX_NAME_BYTES: usize = 1024;
 const MAX_OBSERVATION_BYTES: usize = 65536;
@@ -26,6 +28,47 @@ const MAX_FIND_ALL_PATHS_RESULTS: usize = 100;
 const MAX_EXPORT_ROWS: i64 = 1_000_000;
 /// Default page size for `search_nodes` when the caller omits `limit`.
 const DEFAULT_SEARCH_LIMIT: usize = 20;
+/// Upper bound on the example entities or relations attached to one
+/// suggestion payload.
+const MAX_TAXONOMY_EXAMPLES: usize = 3;
+/// `topK` for the semantic tier of the write hook, matching the
+/// `suggest_taxonomy` default.
+#[cfg(feature = "indexer")]
+const SEMANTIC_SUGGESTION_K: usize = 10;
+
+/// The `taxonomySuggestions` payload for one result object.
+///
+/// `similarTypes` lists the similar existing type names. The semantic tier's
+/// results sort first; the offline string engine fills the remaining slots.
+/// An unknown entity type also gets up to [`MAX_TAXONOMY_EXAMPLES`]
+/// `exampleEntities` from the top similar types, and an unknown relation
+/// type gets the equivalent `exampleRelations` instead.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TypeSuggestions {
+    similar_types: Vec<Suggestion>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    example_entities: Vec<ExampleEntity>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    example_relations: Vec<ExampleRelation>,
+}
+
+/// One example entity of a similar type.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExampleEntity {
+    name: String,
+    entity_type: String,
+}
+
+/// One example relation of a similar relation type.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExampleRelation {
+    from: String,
+    relation_type: String,
+    to: String,
+}
 
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
@@ -74,9 +117,9 @@ fn apply_mutation(kg: &GraphHandle, request: MutationRequest) -> Result<Mutation
 }
 
 /// Adds "taxonomySuggestions" to `value`, whose authored type was unknown
-/// before the write, and returns it. The suggestion array is computed once
+/// before the write, and returns it. The suggestion payload is computed once
 /// per distinct authored type by [`suggestion_map`], never per result object.
-fn enrich_result_object(mut value: Value, candidates: &[Suggestion]) -> Value {
+fn enrich_result_object(mut value: Value, candidates: &TypeSuggestions) -> Value {
     value
         .as_object_mut()
         .expect("a result object is a JSON object")
@@ -90,11 +133,19 @@ fn enrich_result_object(mut value: Value, candidates: &[Suggestion]) -> Value {
 /// were unknown before the write; the write itself inserts the authored type
 /// row, so existence must be captured before the mutation and the engine must
 /// skip the exact self-match (it does).
+///
+/// The semantic tier runs first when `vs` is usable: one provider call
+/// embeds every unknown type text of the kind, and each text searches the
+/// kind's ANN snapshot. The offline string engine then fills the remaining
+/// slots, skipping names the semantic tier already returned. Every tier
+/// failure falls back to the offline tier, because the hook is advisory only
+/// and must never fail the write.
 fn suggestion_map<'a>(
     kg: &GraphHandle,
     types: impl Iterator<Item = &'a str>,
     kind: SubjectKind,
-) -> HashMap<String, Vec<Suggestion>> {
+    vs: Option<&VectorStore>,
+) -> HashMap<String, TypeSuggestions> {
     let mut types: Vec<&str> = types.collect();
     types.sort_unstable();
     types.dedup();
@@ -107,25 +158,154 @@ fn suggestion_map<'a>(
         SubjectKind::Relation => Vec::new(),
     };
     let existing: Vec<(&str, usize)> = counts.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+    let offline: HashMap<String, Vec<Suggestion>> = types
+        .iter()
+        .map(|authored_type| {
+            (
+                (*authored_type).to_string(),
+                suggest_strings(authored_type, &existing),
+            )
+        })
+        .collect();
+    let semantic = semantic_suggestions(vs, &types, kind);
     types
         .into_iter()
         .map(|authored_type| {
+            let mut similar = semantic.get(authored_type).cloned().unwrap_or_default();
+            // The offline tier fills the remaining slots: every name the
+            // semantic tier already returned is skipped, so a name appears
+            // once with its semantic score.
+            for suggestion in offline.get(authored_type).cloned().unwrap_or_default() {
+                if !similar.iter().any(|s| s.name == suggestion.name) {
+                    similar.push(suggestion);
+                }
+            }
+            let (example_entities, example_relations) = match kind {
+                SubjectKind::EntityType => (example_entities(kg, &similar), Vec::new()),
+                SubjectKind::RelationType => (Vec::new(), example_relations(kg, &similar)),
+                SubjectKind::Relation => (Vec::new(), Vec::new()),
+            };
             (
                 authored_type.to_string(),
-                suggest_strings(authored_type, &existing),
+                TypeSuggestions {
+                    similar_types: similar,
+                    example_entities,
+                    example_relations,
+                },
             )
         })
         .collect()
 }
 
+/// Runs the semantic tier for the unknown types, or returns an empty map.
+///
+/// The tier is active only when the `indexer` feature is compiled, a vector
+/// store exists, the store serves an index profile, and an embedding
+/// provider is configured. One provider call embeds the whole batch of
+/// unknown type texts of one kind. Every failure — a missing profile, a
+/// missing provider, an embed error, a wrong vector count — yields an empty
+/// map, so the write falls back to the offline tier and never fails.
+#[cfg(feature = "indexer")]
+fn semantic_suggestions(
+    vs: Option<&VectorStore>,
+    types: &[&str],
+    kind: SubjectKind,
+) -> HashMap<String, Vec<Suggestion>> {
+    let mut out: HashMap<String, Vec<Suggestion>> = HashMap::new();
+    let Some(store) = vs else {
+        return out;
+    };
+    if crate::indexer_provider::get().is_none() {
+        return out;
+    }
+    if store.serving_profile().ok().flatten().is_none() {
+        return out;
+    }
+    let texts: Vec<String> = types.iter().map(|s| (*s).to_string()).collect();
+    let Ok(groups) = crate::taxonomy::suggest_semantic(store, &texts, kind, SEMANTIC_SUGGESTION_K)
+    else {
+        return out;
+    };
+    for (authored_type, group) in types.iter().zip(groups) {
+        out.insert((*authored_type).to_string(), group);
+    }
+    out
+}
+
+/// Without the `indexer` feature there is no semantic tier; the hook runs
+/// the offline tier only.
+#[cfg(not(feature = "indexer"))]
+fn semantic_suggestions(
+    _vs: Option<&VectorStore>,
+    _types: &[&str],
+    _kind: SubjectKind,
+) -> HashMap<String, Vec<Suggestion>> {
+    HashMap::new()
+}
+
+/// Collects up to [`MAX_TAXONOMY_EXAMPLES`] example entities of the top
+/// similar types, in similar-type order.
+///
+/// Each similar type is searched by name with the `search_nodes` semantics;
+/// entities are deduplicated by name and type, and the first unique rows
+/// win.
+fn example_entities(kg: &GraphHandle, similar: &[Suggestion]) -> Vec<ExampleEntity> {
+    let mut out: Vec<ExampleEntity> = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    for suggestion in similar {
+        if out.len() >= MAX_TAXONOMY_EXAMPLES {
+            break;
+        }
+        for entity in kg.search_nodes_filtered(&suggestion.name, None, 0, MAX_TAXONOMY_EXAMPLES) {
+            if seen.insert((entity.name.clone(), entity.entity_type.clone())) {
+                out.push(ExampleEntity {
+                    name: entity.name,
+                    entity_type: entity.entity_type,
+                });
+            }
+            if out.len() >= MAX_TAXONOMY_EXAMPLES {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Collects up to [`MAX_TAXONOMY_EXAMPLES`] example relations of the top
+/// similar relation types, in similar-type order.
+fn example_relations(kg: &GraphHandle, similar: &[Suggestion]) -> Vec<ExampleRelation> {
+    let mut out: Vec<ExampleRelation> = Vec::new();
+    for suggestion in similar {
+        if out.len() >= MAX_TAXONOMY_EXAMPLES {
+            break;
+        }
+        for relation in kg.search_relations(
+            None,
+            None,
+            Some(&suggestion.name),
+            Some(MAX_TAXONOMY_EXAMPLES),
+        ) {
+            out.push(ExampleRelation {
+                from: relation.from,
+                relation_type: relation.relation_type,
+                to: relation.to,
+            });
+            if out.len() >= MAX_TAXONOMY_EXAMPLES {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Maps result entity objects through the suggestion hook. An object is
 /// matched by name to its authored type and pre-write existence, because the
-/// result may skip entities and reorder them. The suggestion array for each
-/// distinct authored type is read from `suggestions`.
+/// result may skip entities and reorder them. The suggestion payload for
+/// each distinct authored type is read from `suggestions`.
 fn enrich_entities(
     values: Vec<Value>,
     authored: &HashMap<String, (String, bool)>,
-    suggestions: &HashMap<String, Vec<Suggestion>>,
+    suggestions: &HashMap<String, TypeSuggestions>,
 ) -> Vec<Value> {
     values
         .into_iter()
@@ -155,7 +335,11 @@ pub fn handle_read_graph(kg: &GraphHandle, args: Option<&Value>) -> Result<Strin
     Ok(build_content_response(&text))
 }
 
-pub fn handle_create_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
+pub fn handle_create_entities(
+    kg: &GraphHandle,
+    vs: Option<&VectorStore>,
+    args: Option<&Value>,
+) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
     let entities_val = params
         .get("entities")
@@ -218,13 +402,18 @@ pub fn handle_create_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
             .filter(|(_, known)| !*known)
             .map(|(authored_type, _)| authored_type.as_str()),
         SubjectKind::EntityType,
+        vs,
     );
     let values = enrich_entities(values, &authored, &suggestions);
     let text = serde_json::to_string(&values).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }
 
-pub fn handle_create_relations(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
+pub fn handle_create_relations(
+    kg: &GraphHandle,
+    vs: Option<&VectorStore>,
+    args: Option<&Value>,
+) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
     let relations_val = params
         .get("relations")
@@ -278,6 +467,7 @@ pub fn handle_create_relations(kg: &GraphHandle, args: Option<&Value>) -> Result
             .filter(|(_, known)| !**known)
             .map(|(authored_type, _)| authored_type.as_str()),
         SubjectKind::RelationType,
+        vs,
     );
     let values: Vec<Value> = values
         .into_iter()
@@ -643,7 +833,11 @@ pub fn handle_list_relation_types(kg: &GraphHandle) -> Result<Value> {
     Ok(text_content!(text))
 }
 
-pub fn handle_upsert_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
+pub fn handle_upsert_entities(
+    kg: &GraphHandle,
+    vs: Option<&VectorStore>,
+    args: Option<&Value>,
+) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
     let entities_val = params
         .get("entities")
@@ -706,6 +900,7 @@ pub fn handle_upsert_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
             .filter(|(_, known)| !*known)
             .map(|(authored_type, _)| authored_type.as_str()),
         SubjectKind::EntityType,
+        vs,
     );
     let values = enrich_entities(values, &authored, &suggestions);
     let text = serde_json::to_string(&json!({ "results": values })).map_err(MCSError::JsonError)?;
