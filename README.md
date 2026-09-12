@@ -27,7 +27,7 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
   [usearch](https://github.com/unum-cloud/usearch) **HNSW** (or IVF-Flat) index and fuses vector
   similarity with full-text relevance and graph centrality — RAG retrieval, more-like-this,
   recommendations, and MMR diversification included.
-- 🗺️ **Code intelligence built in.** Point it at a repo and it parses **10 languages** with
+- 🗺️ **Code intelligence built in.** Point it at a repo and it parses **11 languages** with
   tree-sitter into a searchable symbol + call graph — then optionally embed symbols for
   meaning-based code search. A live, incremental, token-cheap map of your codebase.
 - 🔌 **MCP-native and safe by default.** Speaks MCP `2025-11-25` over **stdio** and
@@ -90,7 +90,7 @@ the runtime role that needs it refuses to start.
 
 | Feature | Default | What it adds | Extra dependencies |
 |---|---|---|---|
-| `code` | **on** | tree-sitter parsing for 10 languages and the `code_*` tools | 11 tree-sitter grammars, `ignore`, `blake3`, `notify` |
+| `code` | **on** | tree-sitter parsing for 11 languages and the `code_*` tools | 12 tree-sitter grammars, `ignore`, `blake3`, `notify` |
 | `oauth` | **on** | the OAuth 2.1 authorization server and the upstream OpenID Connect leg | `reqwest`, `url` |
 | `indexer` | off | the `indexer` role — a durable embedding worker with Ollama and OpenAI-compatible providers | `mcpmem-indexer`, `reqwest` |
 | `bedrock` | off | Amazon Titan Text Embeddings V2 as a third provider. Implies `indexer` | `aws-config`, `aws-sdk-bedrockruntime` |
@@ -815,7 +815,7 @@ symbols are ordinary graph entities, every graph tool (`search_nodes`, `extract_
   most complete after indexing the whole repo root in one pass.
 - **Project isolation.** Each project is a dedicated, independent database — index many repos
   without collisions.
-- **10 languages.** Rust, Python, JavaScript, TypeScript/TSX, Go, Java, C, C++, Ruby, PHP. Header
+- **11 languages.** Rust, Python, JavaScript, TypeScript/TSX, Go, Java, C, C++, Ruby, PHP, Scala. Header
   files are indexed alongside sources. The walk honors `.gitignore` and skips
   `target`/`node_modules`/`dist`/`build` and oversized files.
 
@@ -1312,7 +1312,7 @@ cargo run --release --bin bench  # standalone benchmark
 
 The suite covers protocol handling, every tool handler, CRUD/search/path persistence,
 concurrency, fuzzy invariant checks, both ANN backends end-to-end, the retrieval tools (batch
-upsert, more-like-this, recommend, MMR), category gating, code indexing across all 10 languages,
+upsert, more-like-this, recommend, MMR), category gating, code indexing across all 11 languages,
 HTTP bearer-token authentication, and the OAuth 2.1 server end to end — discovery, registration,
 the upstream login, consent, the token grants, revocation and the startup refusals.
 

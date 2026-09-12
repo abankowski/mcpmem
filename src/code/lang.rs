@@ -11,6 +11,79 @@ use std::sync::OnceLock;
 
 use tree_sitter_tags::TagsConfiguration;
 
+/// Scala's tags query, sourced verbatim from
+/// `https://raw.githubusercontent.com/tree-sitter/tree-sitter-scala/master/queries/tags.scm`
+/// (fetched 2026-09-12). The published `tree-sitter-scala` crate (0.26.2)
+/// exports LANGUAGE / NODE_TYPES / HIGHLIGHTS_QUERY / LOCALS_QUERY only —
+/// no TAGS_QUERY constant — so the query is kept in-repo. Mirror upstream
+/// edits to that file here.
+const SCALA_TAGS_QUERY: &str = r#"; Definitions
+
+(package_clause
+  name: (package_identifier) @name) @definition.module
+
+(trait_definition
+  name: (identifier) @name) @definition.interface
+
+(enum_definition
+  name: (identifier) @name) @definition.enum
+
+(simple_enum_case
+  name: (identifier) @name) @definition.class
+
+(full_enum_case
+  name: (identifier) @name) @definition.class
+
+(class_definition
+  name: (identifier) @name) @definition.class
+
+(object_definition
+  name: (identifier) @name) @definition.object
+
+(function_definition
+  name: (identifier) @name) @definition.function
+
+(val_definition
+  pattern: (identifier) @name) @definition.variable
+
+(given_definition
+  name: (identifier) @name) @definition.variable
+
+(var_definition
+  pattern: (identifier) @name) @definition.variable
+
+(val_declaration
+  name: (identifier) @name) @definition.variable
+
+(var_declaration
+  name: (identifier) @name) @definition.variable
+
+(type_definition
+  name: (type_identifier) @name) @definition.type
+
+(class_parameter
+  name: (identifier) @name) @definition.property
+
+; References 
+
+(call_expression
+  (identifier) @name) @reference.call
+
+(instance_expression
+  (type_identifier) @name) @reference.interface
+
+(instance_expression
+  (generic_type
+    (type_identifier) @name)) @reference.interface
+
+(extends_clause
+  (type_identifier) @name) @reference.class
+
+(extends_clause
+  (generic_type
+    (type_identifier) @name)) @reference.class
+"#;
+
 /// A source language we can extract symbols from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Lang {
@@ -25,6 +98,7 @@ pub enum Lang {
     Cpp,
     Ruby,
     Php,
+    Scala,
 }
 
 impl Lang {
@@ -42,6 +116,7 @@ impl Lang {
             Lang::Cpp => "cpp",
             Lang::Ruby => "ruby",
             Lang::Php => "php",
+            Lang::Scala => "scala",
         }
     }
 
@@ -58,6 +133,7 @@ impl Lang {
             Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
             Lang::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            Lang::Scala => tree_sitter_scala::LANGUAGE.into(),
         }
     }
 
@@ -73,10 +149,11 @@ impl Lang {
             Lang::Cpp => tree_sitter_cpp::TAGS_QUERY,
             Lang::Ruby => tree_sitter_ruby::TAGS_QUERY,
             Lang::Php => tree_sitter_php::TAGS_QUERY,
+            Lang::Scala => SCALA_TAGS_QUERY,
         }
     }
 
-    pub(crate) const fn all() -> [Lang; 11] {
+    pub(crate) const fn all() -> [Lang; 12] {
         [
             Lang::Rust,
             Lang::Python,
@@ -89,6 +166,7 @@ impl Lang {
             Lang::Cpp,
             Lang::Ruby,
             Lang::Php,
+            Lang::Scala,
         ]
     }
 }
@@ -108,6 +186,7 @@ pub fn detect(path: &Path) -> Option<Lang> {
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => Lang::Cpp,
         "rb" => Lang::Ruby,
         "php" | "phtml" | "php3" | "php4" | "php5" => Lang::Php,
+        "scala" | "sc" => Lang::Scala,
         _ => return None,
     })
 }

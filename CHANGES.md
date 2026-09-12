@@ -38,6 +38,14 @@ This entry lists every change since that snapshot. The version line restarts at
   the same payloads, and `secretRef` stays a name. A build without the
   `webhooks` Cargo feature answers 404 and the page hides the section.
 
+- **Scala support in the code indexer.** The tree-sitter grammar set grows
+  from 11 to 12; `code_index` now parses `.scala` and `.sc` files into the
+  symbol map (packages, classes, objects, traits, enums, functions, vals,
+  vars, type aliases and constructor parameters). The tags query is vendored
+  in `src/code/lang.rs` because the published `tree-sitter-scala` crate
+  exports no `TAGS_QUERY` constant; it is a verbatim copy of the upstream
+  `queries/tags.scm`, cited in-repo.
+
 - **The server computes embeddings.** Name `provider`, `model` and
   `dimensions` in the `[indexer]` section, and the server adopts an index
   profile at startup and embeds entity text by itself. Adoption compares the

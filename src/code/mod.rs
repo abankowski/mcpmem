@@ -1119,6 +1119,10 @@ fn fine() {}
             (Lang::Cpp, b"int foo() { return 1; }\nclass Bar {};\n"),
             (Lang::Ruby, b"def foo; end\nX = 1\n"),
             (Lang::Php, b"<?php function foo() {}\n"),
+            (
+                Lang::Scala,
+                b"package demo\nclass Foo {\n  def bar(): Int = 1\n}\n",
+            ),
         ];
         for (lang, src) in samples {
             let parsed = parse_source(lang, src);
@@ -1128,6 +1132,34 @@ fn fine() {}
                 lang
             );
         }
+    }
+
+    #[test]
+    fn test_parse_scala_class_and_functions() {
+        let src = b"package com.example.service
+
+object Config {
+  val defaultPort: Int = 8080
+}
+
+class Greeter {
+  def greet(name: String): String = \"hi \" + name
+  def farewell(): Unit = ()
+}
+
+trait Named {
+  def name(): String
+}
+";
+        let parsed = parse_source(Lang::Scala, src);
+        assert!(find_def(&parsed, "Config").is_some(), "Config object");
+        assert!(
+            find_def(&parsed, "defaultPort").is_some(),
+            "defaultPort val"
+        );
+        assert!(find_def(&parsed, "Greeter").is_some(), "Greeter class");
+        assert!(find_def(&parsed, "greet").is_some(), "greet function");
+        assert!(find_def(&parsed, "Named").is_some(), "Named trait");
     }
 
     #[test]

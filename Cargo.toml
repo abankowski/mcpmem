@@ -7,7 +7,7 @@ name = "mcpmem"
 version = "1.0.4"
 edition = "2024"
 authors = ["Artur Bańkowski", "Piyush <original mcp-memory author>"]
-description = "MCP server giving LLM agents persistent memory: a SQLite knowledge graph with FTS5 search, tree-sitter code indexing (10 languages) with semantic code search, and optional vector + hybrid search (usearch HNSW or IVF-Flat) with batch upsert, more-like-this, recommendations, and MMR diversification"
+description = "MCP server giving LLM agents persistent memory: a SQLite knowledge graph with FTS5 search, tree-sitter code indexing (11 languages) with semantic code search, and optional vector + hybrid search (usearch HNSW or IVF-Flat) with batch upsert, more-like-this, recommendations, and MMR diversification"
 license = "Apache-2.0"
 repository = "https://github.com/abankowski/mcpmem"
 readme = "README.md"
@@ -78,6 +78,7 @@ tree-sitter-c = { version = "0.24", optional = true }
 tree-sitter-cpp = { version = "0.23", optional = true }
 tree-sitter-ruby = { version = "0.23", optional = true }
 tree-sitter-php = { version = "0.24", optional = true }
+tree-sitter-scala = { version = "0.26", optional = true }
 
 ignore = { version = "0.4", optional = true }
 blake3 = { version = "1", optional = true }
@@ -109,6 +110,7 @@ code = [
     "dep:tree-sitter-cpp",
     "dep:tree-sitter-ruby",
     "dep:tree-sitter-php",
+    "dep:tree-sitter-scala",
     "dep:ignore",
     "dep:blake3",
     "dep:notify",
