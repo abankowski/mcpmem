@@ -1,6 +1,6 @@
 [package]
 name = "mcpmem-indexer"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Durable, provider-neutral embedding indexer worker for the mcpmem MCP server."
@@ -8,7 +8,7 @@ repository = "https://github.com/abankowski/mcpmem"
 readme = "README.md"
 
 [dependencies]
-mcpmem-core = { path = "../mcpmem-core", version = "1.0.4" }
+mcpmem-core = { path = "../mcpmem-core", version = "1.1.0" }
 aws-config = { version = "1.12", optional = true }
 aws-sdk-bedrockruntime = { version = "1.143", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

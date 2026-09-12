@@ -1,6 +1,6 @@
 [package]
 name = "mcpmem-core"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Transactional SQLite knowledge-graph core for the mcpmem MCP server: entities, relations, observations, FTS5 projections and a durable event outbox."
