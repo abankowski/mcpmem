@@ -50,10 +50,7 @@ fn revoking_a_principal_revokes_every_live_family_and_counts_it() {
 
     // Every adam token is dark, through the paths a bearer would use.
     assert!(
-        matches!(
-            s.take_refresh(&adam_r, 2).unwrap(),
-            RefreshOutcome::Unknown
-        ),
+        matches!(s.take_refresh(&adam_r, 2).unwrap(), RefreshOutcome::Unknown),
         "the revoked refresh token answers Unknown"
     );
     assert!(
@@ -61,19 +58,13 @@ fn revoking_a_principal_revokes_every_live_family_and_counts_it() {
         "the revoked access token is not found"
     );
     assert!(
-        matches!(
-            s.take_refresh(&adam_2, 2).unwrap(),
-            RefreshOutcome::Unknown
-        ),
+        matches!(s.take_refresh(&adam_2, 2).unwrap(), RefreshOutcome::Unknown),
         "the second family went dark too"
     );
 
     // Bob's families are untouched.
     assert!(
-        matches!(
-            s.take_refresh(&bob_r, 2).unwrap(),
-            RefreshOutcome::Valid(_)
-        ),
+        matches!(s.take_refresh(&bob_r, 2).unwrap(), RefreshOutcome::Valid(_)),
         "bob's refresh token still spends"
     );
     assert!(

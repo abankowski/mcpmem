@@ -49,7 +49,11 @@ impl PrincipalsStore {
     /// clock is the live wall clock, so TTL expiry and eviction track
     /// real time.
     pub fn open(db_path: &str, busy_timeout_ms: u64) -> Result<Self> {
-        Self::open_with_clock(db_path, busy_timeout_ms, Arc::new(mcpmem_core::events::now_us))
+        Self::open_with_clock(
+            db_path,
+            busy_timeout_ms,
+            Arc::new(mcpmem_core::events::now_us),
+        )
     }
 
     /// Test seam: the clock is injected, so TTL and eviction are
@@ -59,8 +63,9 @@ impl PrincipalsStore {
         busy_timeout_ms: u64,
         now_us: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<Self> {
-        let conn = Connection::open(db_path)
-            .map_err(|e| MCSError::MemoryError(format!("failed to open the principals store: {e}")))?;
+        let conn = Connection::open(db_path).map_err(|e| {
+            MCSError::MemoryError(format!("failed to open the principals store: {e}"))
+        })?;
         conn.busy_timeout(std::time::Duration::from_millis(busy_timeout_ms))
             .map_err(|e| MCSError::MemoryError(format!("principals store busy_timeout: {e}")))?;
         // Admin writes are access-control changes. Never lose one to a
@@ -72,27 +77,48 @@ impl PrincipalsStore {
 
     /// Insert a runtime principal. Fails on a key collision with an
     /// existing runtime principal.
-    pub fn create(&self, iss: &str, sub: &str, name: &str, label: Option<&str>, scopes: &[String]) -> Result<()> {
+    pub fn create(
+        &self,
+        iss: &str,
+        sub: &str,
+        name: &str,
+        label: Option<&str>,
+        scopes: &[String],
+    ) -> Result<()> {
         let now = (self.now_us)();
         self.conn
             .execute(
                 "INSERT INTO runtime_principal(iss, sub, name, label, scopes, created_us, updated_us)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                params![iss, sub, name, label, serde_json::to_string(scopes).map_err(|e| MCSError::JsonError(e))?, now],
+                params![iss, sub, name, label, serde_json::to_string(scopes).map_err(MCSError::JsonError)?, now],
             )
             .map_err(sql_error)?;
         Ok(())
     }
 
     /// Update name/label/scopes. Returns false when no row carries the key.
-    pub fn update(&self, iss: &str, sub: &str, name: &str, label: Option<&str>, scopes: &[String]) -> Result<bool> {
+    pub fn update(
+        &self,
+        iss: &str,
+        sub: &str,
+        name: &str,
+        label: Option<&str>,
+        scopes: &[String],
+    ) -> Result<bool> {
         let changed = self
             .conn
             .execute(
                 "UPDATE runtime_principal
                  SET name = ?3, label = ?4, scopes = ?5, updated_us = ?6
                  WHERE iss = ?1 AND sub = ?2",
-                params![iss, sub, name, label, serde_json::to_string(scopes).map_err(|e| MCSError::JsonError(e))?, (self.now_us)()],
+                params![
+                    iss,
+                    sub,
+                    name,
+                    label,
+                    serde_json::to_string(scopes).map_err(MCSError::JsonError)?,
+                    (self.now_us)()
+                ],
             )
             .map_err(sql_error)?;
         Ok(changed > 0)
@@ -129,10 +155,9 @@ impl PrincipalsStore {
             .conn
             .prepare("SELECT iss, sub, name, label, scopes, created_us, updated_us FROM runtime_principal")
             .map_err(sql_error)?;
-        let rows = stmt
-            .query_map([], row_to_principal)
-            .map_err(sql_error)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_error)
+        let rows = stmt.query_map([], row_to_principal).map_err(sql_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_error)
     }
 
     /// Record a rejected would-be user. A repeat sighting refreshes the
@@ -190,7 +215,8 @@ impl PrincipalsStore {
                 })
             })
             .map_err(sql_error)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_error)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_error)
     }
 
     /// Dismiss a waitlist entry without promoting it. Returns false when
@@ -210,7 +236,12 @@ impl PrincipalsStore {
     /// Returns None when the entry does not exist. The name comes from the
     /// entry; the admin-supplied scopes must already be canonical and
     /// non-empty.
-    pub fn approve(&self, iss: &str, sub: &str, scopes: &[String]) -> Result<Option<RuntimePrincipal>> {
+    pub fn approve(
+        &self,
+        iss: &str,
+        sub: &str,
+        scopes: &[String],
+    ) -> Result<Option<RuntimePrincipal>> {
         let now = (self.now_us)();
         let tx = self.conn.unchecked_transaction().map_err(sql_error)?;
         let name: Option<String> = tx
@@ -227,7 +258,13 @@ impl PrincipalsStore {
         tx.execute(
             "INSERT INTO runtime_principal(iss, sub, name, label, scopes, created_us, updated_us)
              VALUES(?1, ?2, ?3, NULL, ?4, ?5, ?5)",
-            params![iss, sub, name, serde_json::to_string(scopes).map_err(|e| MCSError::JsonError(e))?, now],
+            params![
+                iss,
+                sub,
+                name,
+                serde_json::to_string(scopes).map_err(MCSError::JsonError)?,
+                now
+            ],
         )
         .map_err(sql_error)?;
         tx.execute(
@@ -334,7 +371,10 @@ mod tests {
     fn store_at(now: Arc<dyn Fn() -> i64 + Send + Sync>) -> (PrincipalsStore, tempfile::TempDir) {
         let dir = migrated_db();
         let path = dir.path().join("p.mcpmem");
-        (PrincipalsStore::open_with_clock(path.to_str().unwrap(), 5000, now).unwrap(), dir)
+        (
+            PrincipalsStore::open_with_clock(path.to_str().unwrap(), 5000, now).unwrap(),
+            dir,
+        )
     }
 
     fn scopes() -> Vec<String> {
@@ -354,7 +394,9 @@ mod tests {
         store.create("iss", "sub", "ada", None, &scopes()).unwrap();
         // 5 ms is far past the wall clock's native resolution (us).
         std::thread::sleep(std::time::Duration::from_millis(5));
-        store.create("iss", "sub2", "ada2", None, &scopes()).unwrap();
+        store
+            .create("iss", "sub2", "ada2", None, &scopes())
+            .unwrap();
         let first = store.get("iss", "sub").unwrap().unwrap();
         let second = store.get("iss", "sub2").unwrap().unwrap();
         assert!(second.created_us > first.created_us);
@@ -369,7 +411,9 @@ mod tests {
         assert_eq!(got.name, "ada");
         assert_eq!(got.created_us, 1_000_000);
         *t.lock() = 2_000_000;
-        store.update("iss", "sub", "ada l", Some("label"), &scopes()).unwrap();
+        store
+            .update("iss", "sub", "ada l", Some("label"), &scopes())
+            .unwrap();
         let got = store.get("iss", "sub").unwrap().unwrap();
         assert_eq!(got.label.as_deref(), Some("label"));
         assert_eq!(got.updated_us, 2_000_000);
@@ -382,9 +426,13 @@ mod tests {
     fn waitlist_upsert_refreshes_last_seen_but_not_first_seen() {
         let (clock, t) = moved_clock();
         let (store, _dir) = store_at(clock);
-        store.record_waitlist("iss", "sub", "ada", 86_400_000_000).unwrap();
+        store
+            .record_waitlist("iss", "sub", "ada", 86_400_000_000)
+            .unwrap();
         *t.lock() = 2_000_000;
-        store.record_waitlist("iss", "sub", "ada2", 86_400_000_000).unwrap();
+        store
+            .record_waitlist("iss", "sub", "ada2", 86_400_000_000)
+            .unwrap();
         let e = store.waitlist_get("iss", "sub").unwrap().unwrap();
         assert_eq!(e.first_seen_us, 1_000_000);
         assert_eq!(e.last_seen_us, 2_000_000);
@@ -410,7 +458,9 @@ mod tests {
         let (store, _dir) = store_at(clock);
         for i in 0..26 {
             let name = format!("u{i}");
-            store.record_waitlist("iss", &name, &name, 86_400_000_000).unwrap();
+            store
+                .record_waitlist("iss", &name, &name, 86_400_000_000)
+                .unwrap();
         }
         let rows = store.waitlist().unwrap();
         assert_eq!(rows.len() as i64, WAITLIST_CAP);
@@ -423,7 +473,9 @@ mod tests {
     fn approve_creates_a_principal_and_removes_the_entry() {
         let (clock, _t) = moved_clock();
         let (store, _dir) = store_at(clock);
-        store.record_waitlist("iss", "sub", "ada", 86_400_000_000).unwrap();
+        store
+            .record_waitlist("iss", "sub", "ada", 86_400_000_000)
+            .unwrap();
         let scopes = scopes();
         let p = store.approve("iss", "sub", &scopes).unwrap().unwrap();
         assert_eq!(p.name, "ada");

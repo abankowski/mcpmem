@@ -12,6 +12,13 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Added
 
+- **Admin UI at `/ui/admin`:** principals management with OAuth (new `admin`
+  scope), runtime principals in SQLite, JSON entries immutable built-ins,
+  optional approval waitlist (`[oauth] approval-waitlist`).
+- **`MCSError::ConstraintViolation` in `mcpmem-core`.** A new error variant
+  (JSON-RPC code `-32005`) for a write refused by a server-side rule, such as
+  a runtime principal colliding with a built-in. A new public variant is
+  semver-visible for the crate; the release flow decides the bump.
 - **Webhook delivery ships in the binary.** The `webhooks` role no longer
   aborts with `webhook role selected without configured worker ports`; it runs
   the real worker. Configure an optional `[webhooks]` section in the TOML

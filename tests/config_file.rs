@@ -179,10 +179,7 @@ fn an_oauth_waitlist_flag_beats_the_file() {
 
 #[test]
 fn an_empty_scopes_list_in_the_file_clears_the_default() {
-    let args = merge(
-        &[],
-        "[oauth]\ndefault-new-principal-scopes = []\n",
-    );
+    let args = merge(&[], "[oauth]\ndefault-new-principal-scopes = []\n");
     assert_eq!(
         args.default_new_principal_scopes,
         Some(vec![]),

@@ -642,6 +642,56 @@ exchanges for a token.
 `claude.ai` and `chatgpt.com` are the default hosts allowed to serve a client
 identifier metadata document, so neither needs a `--cimd-allowed-domain` flag.
 
+#### The admin UI
+
+An operator can manage principals in a browser at
+[`https://mem.example.com/ui/admin`](https://mem.example.com/ui/admin). The page
+is its own OAuth client: it runs a PKCE login against this server's
+authorization server — the reserved `mcpmem-admin-ui` client, registered at
+startup — and asks for the **`admin` scope**, so it needs no connector and no
+active MCP session. **The first admin is a built-in**: put `admin` in the
+`scopes` of one principals-file entry, and that human is the way in. Every
+principal an admin then adds, edits or removes lives in SQLite, never in the
+JSON file.
+
+The page lists all principals together — built-ins and runtime rows — and
+offers edit, add and remove for the runtime ones. Removing a runtime principal
+revokes its live token families immediately; an access token already minted
+lives out its one-hour TTL, and every refresh and new login is refused from
+that moment.
+
+**Built-ins are immutable, server-side.** An entry from the principals file
+cannot be edited, removed, or shadowed: a runtime row whose `iss` and `sub`
+collide with a built-in key is refused with `409`. A stale runtime row under a
+built-in key stays listed, marked **masked by built-in**, with its edit and
+remove controls hidden — the JSON entry wins the collision, so the masked row
+can never affect logins.
+
+**The approval waitlist.** With `approval-waitlist` on, a refused login is
+recorded instead of only refused, and the admin page can promote the entry
+(**Approve**) or discard it (**Dismiss**). Approving creates a runtime
+principal in the same step, starting with the scopes the admin picks; the
+`default-new-principal-scopes` list arrives pre-checked. The list stays
+bounded: an entry expires 24 hours after its first attempt — a retry refreshes
+the name and last-seen time but not the clock — and it holds at most 25
+entries, evicting the least-recently-seen first.
+
+The three keys, all under `[oauth]`:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `approval-waitlist` | `false` | Record a refused login for later approval instead of refusing outright |
+| `approval-waitlist-ttl-seconds` | `86400` | How long an entry lives, from first attempt. `0` disables the TTL sweep; the 25-entry cap always applies |
+| `default-new-principal-scopes` | `["graph-read"]` | Scopes a promoted entry starts with; the Approve dialog offers these pre-checked |
+
+**Revocation matches by display name.** The token rows store the principal's
+`name`, so removing a principal revokes every family under that name. The v1
+limitation: a principal renamed, then deleted, leaves the families under the
+old name alive until they expire — an access token lives at most one hour, a
+rotating refresh family at most 30 days. Renaming or rescoping a principal
+changes only future grants; a granted scope is the grant's own value, by
+design.
+
 Deployment, connector setup, revocation, and what each refusal means:
 [`docs/runbooks/oauth-deployment.md`](docs/runbooks/oauth-deployment.md).
 
@@ -952,6 +1002,9 @@ rather than an error, so one file can serve several deployments.
 | `--oidc-client-id` | — | Client identifier at the upstream provider |
 | `--oidc-client-secret-file` | — | File holding the upstream client secret. Omit for a public client |
 | `--principals-file` | — | JSON file listing the humans allowed to authorize, and their scopes |
+| `--approval-waitlist` | — | Record a refused login for later approval instead of refusing outright |
+| `--approval-waitlist-ttl-seconds` | — | How long a waitlist entry lives, from first attempt. `0` disables the TTL sweep; the 25-entry cap always applies |
+| `--default-new-principal-scope` | — | A scope a promoted entry starts with. Repeatable; defaults to `graph-read` |
 | `--cimd-allowed-domain` | — | A host allowed to serve a client metadata document. Repeatable |
 | `--oauth-trust-forwarded-proto` | — | A reverse proxy terminates TLS in front of this server |
 

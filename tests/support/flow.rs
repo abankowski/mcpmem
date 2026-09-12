@@ -985,7 +985,8 @@ pub async fn admin_access_token(idp: &FakeIdp, server: &Server) -> String {
     let scopes = offered_scopes(&page);
     let csrf = hidden_field(&page, "csrf");
     let form_state = hidden_field(&page, "state");
-    let mut fields: Vec<(&str, &str)> = vec![("csrf", csrf.as_str()), ("state", form_state.as_str())];
+    let mut fields: Vec<(&str, &str)> =
+        vec![("csrf", csrf.as_str()), ("state", form_state.as_str())];
     fields.extend(scopes.iter().map(|s| ("scope", s.as_str())));
     let decided = server
         .request(

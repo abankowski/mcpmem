@@ -665,11 +665,7 @@ fn registration_refused(e: &RegistrationError) -> Response {
 /// The scopes this server advertises: one slug per enabled tool category,
 /// plus the admin scope whenever an OAuth state exists.
 fn scopes(state: &HttpState) -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = state
-        .enabled_categories
-        .iter()
-        .map(|c| c.slug())
-        .collect();
+    let mut out: Vec<&'static str> = state.enabled_categories.iter().map(|c| c.slug()).collect();
     if state.oauth.is_some() {
         out.push(crate::principals::ADMIN_SCOPE);
     }
@@ -1216,7 +1212,10 @@ async fn finish_login(
             // with a pending page instead of a refusal. No token is ever
             // minted on this path.
             let name = claims.email.clone().unwrap_or_else(|| claims.sub.clone());
-            let ttl_us = oauth.config.approval_waitlist_ttl_seconds.saturating_mul(1_000_000);
+            let ttl_us = oauth
+                .config
+                .approval_waitlist_ttl_seconds
+                .saturating_mul(1_000_000);
             oauth
                 .with_principals(|s| {
                     s.record_waitlist(

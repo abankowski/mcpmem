@@ -542,8 +542,10 @@ fn admin_principal(state: &HttpState, headers: &HeaderMap) -> Option<Principal> 
 }
 
 /// The gate every `/ui/api/*` handler runs first. `Ok(())` when the caller
-/// holds the admin scope; `Err(Response)` is the 401/403 answer.
-fn admin_gate(state: &HttpState, headers: &HeaderMap) -> std::result::Result<(), Response> {
+/// holds the admin scope; `Err(Box<Response>)` is the 401/403 answer. The
+/// box keeps the error variant small: the value is built once and returned
+/// once, never copied.
+fn admin_gate(state: &HttpState, headers: &HeaderMap) -> std::result::Result<(), Box<Response>> {
     if admin_principal(state, headers).is_some() {
         return Ok(());
     }
@@ -552,7 +554,7 @@ fn admin_gate(state: &HttpState, headers: &HeaderMap) -> std::result::Result<(),
     } else {
         unauthorized(state)
     };
-    Err(response)
+    Err(Box::new(response))
 }
 
 /// The id path segment → (iss, sub).
@@ -564,10 +566,7 @@ fn key_of_id(id: &str) -> Option<(String, String)> {
 /// pairs; `contains` cannot borrow a `(&str, &str)` from them, so the
 /// comparison is spelled out rather than cloned per row.
 fn is_builtin(oauth: &OauthState, iss: &str, sub: &str) -> bool {
-    oauth
-        .builtin_keys
-        .iter()
-        .any(|(i, s)| i == iss && s == sub)
+    oauth.builtin_keys.iter().any(|(i, s)| i == iss && s == sub)
 }
 
 /// One principal as the admin API answers it: built-ins from the principals
@@ -632,7 +631,10 @@ fn not_found() -> Response {
 }
 
 fn store_failure(e: impl std::fmt::Display) -> Response {
-    json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("principals store: {e}"))
+    json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("principals store: {e}"),
+    )
 }
 
 /// `GET /ui/api/principals` — every principal the server knows: the built-ins
@@ -641,7 +643,7 @@ fn store_failure(e: impl std::fmt::Display) -> Response {
 /// flag and the `defaultNewPrincipalScopes` list to render the create form.
 async fn admin_list_principals(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(response) = admin_gate(&state, &headers) {
-        return response;
+        return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -698,7 +700,7 @@ async fn admin_create_principal(
     body: String,
 ) -> Response {
     if let Err(response) = admin_gate(&state, &headers) {
-        return response;
+        return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -725,9 +727,15 @@ async fn admin_create_principal(
         Ok(None) => {}
         Err(e) => return store_failure(e),
     }
-    if let Err(e) = oauth
-        .with_principals(|s| s.create(&input.iss, &input.sub, name, input.label.as_deref(), &scopes))
-    {
+    if let Err(e) = oauth.with_principals(|s| {
+        s.create(
+            &input.iss,
+            &input.sub,
+            name,
+            input.label.as_deref(),
+            &scopes,
+        )
+    }) {
         // The pre-check above is not a lock: two concurrent identical POSTs
         // can both pass it, and the second then hits the UNIQUE constraint.
         // That race is classified by the store and answered as a conflict
@@ -760,7 +768,7 @@ async fn admin_update_principal(
     body: String,
 ) -> Response {
     if let Err(response) = admin_gate(&state, &headers) {
-        return response;
+        return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -793,10 +801,10 @@ async fn admin_update_principal(
             Ok(s) if !s.is_empty() => s,
             _ => return bad_request("at least one known scope is required"),
         },
-        None => row.scopes.clone(),
+        None => row.scopes,
     };
-    if let Err(e) = oauth
-        .with_principals(|s| s.update(&iss, &sub, &name, label.as_deref(), &scopes))
+    if let Err(e) =
+        oauth.with_principals(|s| s.update(&iss, &sub, &name, label.as_deref(), &scopes))
     {
         return store_failure(e);
     }
@@ -828,7 +836,7 @@ async fn admin_delete_principal(
     Path(id): Path<String>,
 ) -> Response {
     if let Err(response) = admin_gate(&state, &headers) {
-        return response;
+        return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -863,7 +871,7 @@ async fn admin_delete_principal(
 /// store keeps them.
 async fn admin_list_waitlist(State(state): State<HttpState>, headers: HeaderMap) -> Response {
     if let Err(response) = admin_gate(&state, &headers) {
-        return response;
+        return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -898,7 +906,7 @@ async fn admin_approve_waitlist(
     body: String,
 ) -> Response {
     if let Err(response) = admin_gate(&state, &headers) {
-        return response;
+        return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -943,7 +951,7 @@ async fn admin_dismiss_waitlist(
     Path(id): Path<String>,
 ) -> Response {
     if let Err(response) = admin_gate(&state, &headers) {
-        return response;
+        return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
@@ -1012,10 +1020,7 @@ async fn admin_css_handler() -> Response {
 /// `GET /ui/admin.js` — the admin application script (static asset, no auth).
 async fn admin_js_handler() -> Response {
     (
-        [(
-            header::CONTENT_TYPE,
-            "text/javascript; charset=utf-8",
-        )],
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         ADMIN_JS,
     )
         .into_response()

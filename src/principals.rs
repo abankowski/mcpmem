@@ -154,13 +154,6 @@ mod tests {
     fn tool_category_slugs_stay_canonical() {
         assert!(is_known_scope("graph-read"));
         assert!(!is_known_scope("graph-admin"));
-        let entry = PrincipalEntry {
-            name: "adam".into(),
-            iss: "https://issuer".into(),
-            sub: "s2".into(),
-            label: None,
-            scopes: vec!["graph-read".into(), "graph-read".into()],
-        };
         // Canonical slugs only, in input order.
         assert_eq!(
             canonical_scopes(&["graph-read".into(), "admin".into()]).unwrap(),

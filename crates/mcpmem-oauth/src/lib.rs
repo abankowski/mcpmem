@@ -88,10 +88,7 @@ mod tests {
         let id = principal_id("https://accounts.google.com", "u-1");
         assert_eq!(
             parse_principal_id(&id),
-            Some((
-                "https://accounts.google.com".to_owned(),
-                "u-1".to_owned()
-            ))
+            Some(("https://accounts.google.com".to_owned(), "u-1".to_owned()))
         );
         assert_eq!(parse_principal_id("not-base64!"), None);
         // A sub of zero length is refused.

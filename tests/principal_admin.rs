@@ -75,7 +75,10 @@ async fn an_unknown_human_is_recorded_and_sees_pending_when_waitlist_is_on() {
         .await;
     assert_eq!(hop.status(), StatusCode::OK, "pending page, not a refusal");
     let text = support::flow::body_text(hop).await;
-    assert!(text.contains("Sign-in pending"), "pending page names the state");
+    assert!(
+        text.contains("Sign-in pending"),
+        "pending page names the state"
+    );
     assert_eq!(
         support::flow::count_rows(&server, "principal_waitlist"),
         1,
@@ -136,7 +139,9 @@ async fn an_unknown_human_is_refused_when_waitlist_is_off() {
 async fn admin_server() -> (support::Server, String) {
     let idp = support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default()).await;
     let mut config = support::oauth_config(&idp.issuer);
-    config.principals[0].scopes.push(mcpmem::principals::ADMIN_SCOPE.into());
+    config.principals[0]
+        .scopes
+        .push(mcpmem::principals::ADMIN_SCOPE.into());
     let server = support::server(Some(config), support::Scopes::all(), None).await;
     let token = support::flow::admin_access_token(&idp, &server).await;
     (server, token)
@@ -157,7 +162,11 @@ fn bearer_get(token: &str, path: &str) -> Request<Body> {
 async fn an_anonymous_caller_is_challenged_not_refused() {
     let (server, _token) = admin_server().await;
     let res = server
-        .request(Request::get("/ui/api/principals").body(Body::empty()).unwrap())
+        .request(
+            Request::get("/ui/api/principals")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await;
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     let challenge = res
@@ -175,7 +184,9 @@ async fn an_anonymous_caller_is_challenged_not_refused() {
 #[tokio::test]
 async fn list_marks_builtins_immutable_and_lists_runtime_rows() {
     let (server, token) = admin_server().await;
-    let res = server.request(bearer_get(&token, "/ui/api/principals")).await;
+    let res = server
+        .request(bearer_get(&token, "/ui/api/principals"))
+        .await;
     assert_eq!(res.status(), 200);
     let body = support::json(res).await;
     let items = body["principals"].as_array().unwrap();
@@ -276,7 +287,9 @@ async fn create_update_delete_round_trip_and_delete_revokes() {
     assert_eq!(dup.status(), 409, "a duplicate runtime key is refused");
 
     // The runtime row lists under the same camelCase key, unmasked.
-    let listed = server.request(bearer_get(&token, "/ui/api/principals")).await;
+    let listed = server
+        .request(bearer_get(&token, "/ui/api/principals"))
+        .await;
     let listed = support::json(listed).await;
     let row = listed["principals"]
         .as_array()
@@ -292,7 +305,9 @@ async fn create_update_delete_round_trip_and_delete_revokes() {
             Request::patch(format!("/ui/api/principals/{id}"))
                 .header(header::AUTHORIZATION, bearer(&token))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"scopes":["graph-read","graph-write"]}"#.to_owned()))
+                .body(Body::from(
+                    r#"{"scopes":["graph-read","graph-write"]}"#.to_owned(),
+                ))
                 .unwrap(),
         )
         .await;
@@ -326,7 +341,9 @@ async fn a_non_admin_grant_is_refused() {
     // principals[0] holds only graph-read/graph-write — no admin.
     let server = support::server(Some(config), support::Scopes::all(), None).await;
     let token = support::flow::admin_access_token(&idp, &server).await;
-    let res = server.request(bearer_get(&token, "/ui/api/principals")).await;
+    let res = server
+        .request(bearer_get(&token, "/ui/api/principals"))
+        .await;
     assert_eq!(res.status(), 403);
     let challenge = res
         .headers()
@@ -403,7 +420,10 @@ async fn walk_unknown_human_into_pending(
         .await;
     assert_eq!(hop.status(), StatusCode::OK, "pending page, not a refusal");
     let text = support::flow::body_text(hop).await;
-    assert!(text.contains("Sign-in pending"), "pending page names the state");
+    assert!(
+        text.contains("Sign-in pending"),
+        "pending page names the state"
+    );
 }
 
 /// The one waitlist entry of `server`.
@@ -421,7 +441,9 @@ async fn waitlist_approve_promotes_and_dismiss_discards() {
     let idp = support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default()).await;
     let mut config = support::oauth_config(&idp.issuer);
     config.approval_waitlist = true;
-    config.principals[0].scopes.push(mcpmem::principals::ADMIN_SCOPE.into());
+    config.principals[0]
+        .scopes
+        .push(mcpmem::principals::ADMIN_SCOPE.into());
     // The provider authenticates sub-1; this server allows somebody else, so
     // sub-1's login lands on the waitlist. That also means no login on this
     // server can reach the consent page — the fake provider authenticates one
@@ -486,7 +508,11 @@ async fn waitlist_approve_promotes_and_dismiss_discards() {
             .unwrap(),
         )
         .await;
-    assert_eq!(hop.status(), StatusCode::OK, "the promoted human is not pending");
+    assert_eq!(
+        hop.status(),
+        StatusCode::OK,
+        "the promoted human is not pending"
+    );
     let text = support::flow::body_text(hop).await;
     assert!(
         text.contains("name=\"scope\" value=\"graph-read\""),
@@ -504,7 +530,9 @@ async fn waitlist_dismiss_discards_without_promoting() {
     let idp = support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default()).await;
     let mut config = support::oauth_config(&idp.issuer);
     config.approval_waitlist = true;
-    config.principals[0].scopes.push(mcpmem::principals::ADMIN_SCOPE.into());
+    config.principals[0]
+        .scopes
+        .push(mcpmem::principals::ADMIN_SCOPE.into());
     config.principals[0].sub = "another-human".into();
     let server = support::server(Some(config), support::Scopes::all(), None).await;
     let token = support::flow::plant_admin_token(&server);

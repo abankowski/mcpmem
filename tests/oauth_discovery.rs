@@ -280,14 +280,12 @@ async fn the_store_is_reachable_and_opens_on_a_migrated_schema() {
 async fn startup_seeds_the_reserved_admin_ui_client() {
     const FIXED: i64 = 1_700_000_000_000_000;
     let server = support::oauth_server_with_clock(support::Clock::at(FIXED)).await;
-    let record = server
-        .oauth()
-        .with_store(|store| {
-            store
-                .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
-                .expect("the store answers")
-                .expect("startup seeded the admin UI client")
-        });
+    let record = server.oauth().with_store(|store| {
+        store
+            .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
+            .expect("the store answers")
+            .expect("startup seeded the admin UI client")
+    });
     assert_eq!(record.client_name, "mcpmem admin UI");
     assert_eq!(record.source, "reserved");
     assert_eq!(
@@ -320,14 +318,13 @@ async fn reopening_the_store_upserts_the_reserved_client() {
         )
         .expect("the store opens on the migrated schema")
     };
-    let created_us = open()
-        .with_store(|store| {
-            store
-                .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
-                .expect("the store answers")
-                .expect("the first open seeded the admin client")
-                .created_us
-        });
+    let created_us = open().with_store(|store| {
+        store
+            .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
+            .expect("the store answers")
+            .expect("the first open seeded the admin client")
+            .created_us
+    });
     let second = open();
     let count: i64 = second.with_store(|store| {
         store
@@ -336,13 +333,12 @@ async fn reopening_the_store_upserts_the_reserved_client() {
             .expect("the store counts its clients")
     });
     assert_eq!(count, 1, "a repeat start must upsert, not duplicate");
-    let after = second
-        .with_store(|store| {
-            store
-                .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
-                .expect("the store answers")
-                .expect("the admin client survives the second open")
-        });
+    let after = second.with_store(|store| {
+        store
+            .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
+            .expect("the store answers")
+            .expect("the admin client survives the second open")
+    });
     assert_eq!(after.created_us, created_us);
     assert_eq!(after.last_used_us, FIXED);
 }

@@ -18,7 +18,10 @@ fn the_oauth_migration_applies_to_a_database_that_predates_it() {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM schema_migration", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(count, 5, "the count tracks MIGRATIONS, currently 0005_principals");
+    assert_eq!(
+        count, 5,
+        "the count tracks MIGRATIONS, currently 0005_principals"
+    );
     conn.query_row("SELECT COUNT(*) FROM oauth_token", [], |r| {
         r.get::<_, i64>(0)
     })

@@ -84,7 +84,11 @@ async function completeAuth() {
   accessToken = body.access_token;
   sessionStorage.setItem(TOKEN_KEY, accessToken);
   history.replaceState(null, "", "/ui/admin");
-  load();
+  try {
+    await load();
+  } catch (e) {
+    setStatus("Load failed: " + e.message);
+  }
 }
 
 async function api(path, options = {}) {
@@ -120,9 +124,15 @@ async function load() {
   defaultScopes = data.defaultNewPrincipalScopes || [];
   renderPrincipals(data.principals);
   document.getElementById("add").hidden = false;
-  const wait = await api("/ui/api/waitlist");
-  if (wait) renderWaitlist(wait.entries);
-  setStatus("");
+  let ok = true;
+  try {
+    const wait = await api("/ui/api/waitlist");
+    if (wait) renderWaitlist(wait.entries);
+  } catch (e) {
+    ok = false;
+    setStatus("Waitlist failed: " + e.message);
+  }
+  if (ok) setStatus("");
 }
 
 function renderPrincipals(principals) {
@@ -140,7 +150,7 @@ function renderPrincipals(principals) {
     const scopes = document.createElement("td");
     scopes.textContent = p.scopes.join(", ");
     const actions = document.createElement("td");
-    if (!p.builtin) {
+    if (!p.builtin && !p.maskedByBuiltin) {
       const edit = document.createElement("button");
       edit.textContent = "Edit";
       edit.onclick = () => openForm(p);
@@ -330,5 +340,9 @@ document.getElementById("add").onclick = () => openForm(null);
     await beginAuth();
     return;
   }
-  load();
+  try {
+    await load();
+  } catch (e) {
+    setStatus("Load failed: " + e.message);
+  }
 })();
