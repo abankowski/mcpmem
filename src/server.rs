@@ -1191,7 +1191,7 @@ fn handle_tools_call(
         "list_entity_types" => memory::handle_list_entity_types(kg).map(HandlerResult::Value),
         "list_relation_types" => memory::handle_list_relation_types(kg).map(HandlerResult::Value),
         "suggest_taxonomy" => {
-            taxonomy::handle_suggest_taxonomy(kg, tool_args).map(HandlerResult::Value)
+            taxonomy::handle_suggest_taxonomy(vs, kg, tool_args).map(HandlerResult::Value)
         }
         "upsert_entities" => {
             memory::handle_upsert_entities(kg, vs, tool_args).map(HandlerResult::Value)
