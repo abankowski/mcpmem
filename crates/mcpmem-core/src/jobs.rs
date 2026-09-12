@@ -789,8 +789,13 @@ mod tests {
         enqueue_taxonomy(&conn, 2, 11, 2, IndexOperation::Delete, profile).unwrap();
         let job = repo.claim_due(102, 10).unwrap().unwrap();
         assert!(!repo.commit_vector(&job, 103, None, "worker").unwrap());
+        // An upsert against a tombstoned relation: refuse.
+        seed_relation(&conn, 13, 5, 1);
+        enqueue_taxonomy(&conn, 2, 13, 5, IndexOperation::Upsert, profile).unwrap();
+        let job = repo.claim_due(104, 10).unwrap().unwrap();
+        assert!(!repo.commit_vector(&job, 105, Some(&[1.0]), "worker").unwrap());
         assert_eq!(count(&conn, "taxonomy_vector"), 0);
-        assert_eq!(count(&conn, "taxonomy_job"), 2);
+        assert_eq!(count(&conn, "taxonomy_job"), 3);
     }
 
     #[test]
