@@ -42,7 +42,7 @@ These apply to every task. Copy them verbatim into each task brief.
 
 |File|Change|Task|
 |---|---|---|
-|`crates/mcpmem-core/migrations/0006_taxonomy_index.sql`|Create|1|
+|`crates/mcpmem-core/migrations/0007_taxonomy_index.sql`|Create|1|
 |`crates/mcpmem-core/src/events.rs`|Modify: `MIGRATIONS` array + type|1|
 |`crates/mcpmem-core/src/graph.rs`|Modify: public `entity_type_exists`, `relation_type_exists`|2|
 |`src/taxonomy.rs`|Create: engine (fallback + semantic + assembly)|3, 11|
@@ -60,8 +60,14 @@ These apply to every task. Copy them verbatim into each task brief.
 
 ### Task 1: Migration 0006 and registry
 
+> SUPERSEDED registration (2026-09-12, rebase onto fresh main): main landed its
+> own migration 0006 in parallel (`0006_code_repos.sql`, managed code
+> repositories). The taxonomy migration renumbered to **0007**; the registry
+> entry became `(7, …/0007_taxonomy_index.sql)` and the inventory anchor grew
+> to seven pairs. All `0007_taxonomy_index` references below are that file.
+
 **Files:**
-- Create: `crates/mcpmem-core/migrations/0006_taxonomy_index.sql`
+- Create: `crates/mcpmem-core/migrations/0007_taxonomy_index.sql`
 - Modify: `crates/mcpmem-core/src/events.rs:45-57`
 - Test: `crates/mcpmem-core/src/events.rs` (inventory test, existing anchor)
 
@@ -132,7 +138,7 @@ SELECT rowid, from_id, to_id, type_id, 1, 0 FROM relation;
 
 - [ ] **Step 3: Register the migration**
 
-In `events.rs`, change `pub const MIGRATIONS: [(i64, &str); 5]` to `[(i64, &str); 6]` and append `(6, include_str!("../migrations/0006_taxonomy_index.sql")),`.
+In `events.rs`, change `pub const MIGRATIONS: [(i64, &str); 5]` to `[(i64, &str); 6]` and append `(6, include_str!("../migrations/0007_taxonomy_index.sql")),`.
 
 - [ ] **Step 4: Run the tests**
 
@@ -142,7 +148,7 @@ Expected: RED first (expectation holds 5 pairs, registry holds 6), PASS after th
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/mcpmem-core/migrations/0006_taxonomy_index.sql crates/mcpmem-core/src/events.rs
+git add crates/mcpmem-core/migrations/0007_taxonomy_index.sql crates/mcpmem-core/src/events.rs
 git commit -m "feat(core): add taxonomy index schema (migration 0006)"
 ```
 
@@ -339,7 +345,7 @@ Commit: `feat(indexer): add canonical documents for taxonomy subjects`.
 - Test: `crates/mcpmem-core/src/jobs.rs` tests
 
 **Interfaces:**
-- Consumes: migration 0006 tables; `IndexProfileRegistry` (existing).
+- Consumes: migration 0007 tables; `IndexProfileRegistry` (existing).
 - Produces, mirroring `IndexJobRepository`:
   - `pub struct TaxonomyJob { pub subject_kind: i64, pub subject_id: i64, pub subject_revision: i64, pub profile_id: Uuid, pub operation: IndexOperation, pub lease: Lease }`
   - `pub(crate) fn enqueue_taxonomy(conn, kind, id, revision, operation, profile)` — insert/update like `enqueue_change` (jobs.rs:32 shape, ON CONFLICT update + `lease_epoch+1`); also `UPDATE taxonomy_ann_generation SET full_scan_generation=NULL`.
