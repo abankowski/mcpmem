@@ -439,16 +439,18 @@ authored type is new. Suggestions are advisory only — nothing enforces them.
 ```json
 "taxonomySuggestions": {
   "similarTypes": [ { "name": "person", "score": 0.9 } ],
-  "exampleEntities": [ "alice" ],
-  "exampleRelations": [ "alice -[works_at]-> acme" ]
+  "exampleEntities": [ { "name": "alice", "entityType": "person" } ],
+  "exampleRelations": [ { "from": "alice", "relationType": "works_at", "to": "acme" } ]
 }
 ```
 
 - `similarTypes` always lists `{ "name", "score" }` pairs from the offline
   string engine. With the semantic tier enabled the list is sorted
   semantically first, then filled by the offline engine.
-- `exampleEntities` and `exampleRelations` are present on the semantic tier
-  only; without it the object holds just `similarTypes`.
+- `exampleEntities` (objects with `name` and `entityType`) and
+  `exampleRelations` (objects with `from`, `relationType` and `to`) are
+  present on the semantic tier only; without it the object holds just
+  `similarTypes`.
 
 The offline tier always runs: it compares the authored name against existing
 type names in the same graph. The semantic tier is additive: it requires
@@ -459,10 +461,10 @@ names and relation triples) and the suggestion engine matches against the
 serving snapshot.
 
 `suggest_taxonomy` exposes the same engine as a standalone tool (category
-`graph-read`). It takes `typeName`, an optional `kind` (`entityType`,
-`relationType`, `relation`; default `entityType`), and the optional
-`semanticSuggestions` hint; the response shape matches `taxonomySuggestions`
-above.
+`graph-read`). It takes `query` (required), an optional `kind`
+(`entityType`, `relationType`, `entity` or `relation`; default
+`entityType`), and an optional `topK` (1..100; default 10). The response
+shape matches `taxonomySuggestions` above.
 
 ### Observation format (1.0)
 

@@ -1199,8 +1199,11 @@ impl VectorStore {
                     .map_err(sqlite_err)
                     .ok()
                     .flatten()?;
-                let from = self.get_entity_name_type(&conn, from_id).ok().flatten()?.0;
-                let to = self.get_entity_name_type(&conn, to_id).ok().flatten()?.0;
+                // An endpoint that is gone (deleted or merged away) must not
+                // render a placeholder name: a suggestion engine would serve
+                // it as a real name. The relation path skips such rows.
+                let (from_name, _) = self.get_entity_name_type(&conn, from_id).ok().flatten()?;
+                let (to_name, _) = self.get_entity_name_type(&conn, to_id).ok().flatten()?;
                 let relation_type: String = conn
                     .query_row(
                         "SELECT name FROM type_dict WHERE id=?1 AND kind=1",
@@ -1212,7 +1215,7 @@ impl VectorStore {
                     .ok()
                     .flatten()?;
                 Some((
-                    format!("{from} -[{relation_type}]-> {to}"),
+                    format!("{from_name} -[{relation_type}]-> {to_name}"),
                     "relation".to_string(),
                 ))
             }
@@ -1819,6 +1822,33 @@ mod tests {
         );
         assert_eq!(env.vs.resolve_taxonomy(TaxonomyKind::Relation, 999), None);
         assert_eq!(env.vs.resolve_taxonomy(TaxonomyKind::EntityType, 999), None);
+    }
+
+    #[test]
+    fn taxonomy_resolve_relation_with_a_deleted_endpoint_returns_none() {
+        let env = setup(4);
+        create_test_entity(&env.kg, "alice", "person");
+        create_test_entity(&env.kg, "acme", "organization");
+        let alice = env.vs.entity_id_of("alice").unwrap().unwrap();
+        let acme = env.vs.entity_id_of("acme").unwrap().unwrap();
+        seed_type_dict(&env, 8, 1, "works_at");
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO taxonomy_relation(id,from_id,to_id,type_id,revision,deleted) VALUES(42,?1,?2,?3,1,0)",
+                params![alice, acme, 8],
+            )
+            .unwrap();
+        }
+        assert!(
+            env.vs
+                .resolve_taxonomy(TaxonomyKind::Relation, 42)
+                .is_some()
+        );
+        // The endpoint vanishes (delete or merge); the mirror row stays, and
+        // the resolution must refuse instead of rendering a placeholder.
+        env.kg.delete_entities(&["alice".into()]).unwrap();
+        assert_eq!(env.vs.resolve_taxonomy(TaxonomyKind::Relation, 42), None);
     }
 
     #[test]
