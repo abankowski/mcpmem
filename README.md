@@ -41,28 +41,38 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
 
 ---
 
-```
-                    ┌────────────────────────────────────────────────────┐
-                    │   mcpmem       (one binary · one SQLite file)        │
-                    │                                                      │
-     ┌────────┐     │  ┌──────────┐    ┌─────────────────────────────┐    │
-     │ Claude │─────┼─▶│  stdio   │───▶│ GraphHandle                 │    │
-     │  / LLM │     │  │   or     │    │  ├ LRU entity cache         │    │
-     │  agent │     │  │  HTTP    │    │  ├ FxHashMap  name → id     │    │
-     └────────┘     │  └────┬─────┘    │  └ FTS5 full-text index     │    │
-                    │       │          └──────────────┬──────────────┘    │
-                    │       ▼      (--enable-vectors)  │                   │
-                    │  ┌─────────┐   ┌────────────────┴──────────────┐    │
-                    │  │ dispatch│──▶│ VectorStore                   │    │
-                    │  └─────────┘   │  ├ ANN: HNSW *or* IVF-Flat    │    │
-                    │       │        │  └ petgraph adjacency cache   │    │
-                    │       ▼        └────────────────┬──────────────┘    │
-                    │  ┌─────────────────────────────────────────────┐    │
-                    │  │ SQLite (WAL · 4 KB pages · auto_vacuum)      │    │
-                    │  │ entity · observation · relation · *_fts ·    │    │
-                    │  │ type_dict · vector_embedding                 │    │
-                    │  └─────────────────────────────────────────────┘    │
-                    └────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  Agent["Claude / LLM agent<br/>(Claude Desktop · Claude Code · any MCP client)"]
+  Oidc["Your OpenID Connect provider<br/>authenticates the human — nothing more"]
+  Embed["Embedding provider<br/>Ollama · OpenAI-compatible · Amazon Bedrock"]
+  Hooks["Webhook receivers<br/>signed HTTPS · retries · dead-letter"]
+
+  subgraph mem["mcpmem — one binary · one SQLite file"]
+    direction TB
+    Tr["stdio · Streamable HTTP<br/>TLS + bearer-token auth"]
+    Mcp["mcp role — MCP tool dispatch"]
+    OAuth["OAuth 2.1 server — discovery · consent · tokens<br/>(--oidc-issuer)"]
+    Idx["indexer role — embedding worker<br/>(--features indexer)"]
+    Wbk["webhooks role — delivery outbox<br/>(--features webhooks)"]
+    Gr["GraphHandle<br/>LRU cache · name→id · FTS5"]
+    Vc["VectorStore<br/>usearch HNSW · IVF-Flat · TurboQuant"]
+    Cd["Code index — tree-sitter<br/>symbol + call graph · 10 languages"]
+    Sql[("SQLite — WAL · 4 KB pages<br/>graph tables · *_fts · vector_embedding")]
+
+    Tr --> Mcp
+    Mcp --> Gr & Vc & Cd
+    Gr & Vc & Cd --> Sql
+    OAuth -.-> Tr
+    Idx -.-> Vc
+    Wbk -.-> Sql
+  end
+
+  Agent <--> Tr
+  Agent -.-> OAuth
+  OAuth -.-> Oidc
+  Idx -.-> Embed
+  Wbk -.-> Hooks
 ```
 
 ## Installation
