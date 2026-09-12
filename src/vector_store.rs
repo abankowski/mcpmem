@@ -16,7 +16,8 @@ use crate::ivf::{IvfFlatIndex, Metric as IvfMetric};
 use crate::kg::push_json_str;
 use crate::turboquant::TurboQuantIndex;
 use mcpmem_core::jobs::{
-    AnnGenerationRepository, DistanceMetric, IndexProfileRegistry, StoreState, taxonomy_scan_invalid,
+    AnnGenerationRepository, DistanceMetric, IndexProfileRegistry, StoreState,
+    taxonomy_scan_invalid,
 };
 
 /// The taxonomy subject kinds a snapshot can serve. The discriminant matches
@@ -924,11 +925,18 @@ impl VectorStore {
 
     /// Rebuild and atomically publish a managed reader from a durable profile
     /// generation. This is worker-only; MCP searches never invoke it.
+    ///
+    /// Also drives taxonomy adoption for every kind, with the entity path's
+    /// candidate decision. Adoption runs first: a candidate refusal must not
+    /// let the entity path activate the registry on an unverified taxonomy
+    /// scan, and the error propagates to the caller, which tolerates it and
+    /// retries on the next poll exactly like an entity-side failure.
     pub fn reconcile_managed_snapshot(&self) -> Result<()> {
         let conn = self.db.lock();
         let registry = IndexProfileRegistry::new(&conn);
         let state = registry.state("default")?;
         let candidate = matches!(&state, StoreState::Rebuilding { .. });
+        self.adopt_taxonomy(&registry, candidate)?;
         let active = match state {
             StoreState::Active(profile) => Some((
                 profile,
@@ -1019,17 +1027,14 @@ impl VectorStore {
     /// re-verifies every kind with `taxonomy_scan_invalid` and refuses (an
     /// Err, so nothing is swapped) when any kind has missing or stale work;
     /// activating the registry stays with the caller.
-    pub fn adopt_taxonomy(
-        &mut self,
-        registry: &IndexProfileRegistry,
-        candidate: bool,
-    ) -> Result<()> {
+    pub fn adopt_taxonomy(&self, registry: &IndexProfileRegistry, candidate: bool) -> Result<()> {
         let conn = registry.connection();
         let state = registry.state("default")?;
         let profile = match state {
-            StoreState::Active(profile) | StoreState::Rebuilding { candidate: profile, .. } => {
-                Some(profile)
-            }
+            StoreState::Active(profile)
+            | StoreState::Rebuilding {
+                candidate: profile, ..
+            } => Some(profile),
             // Failed keeps serving whatever was already adopted, exactly like
             // the entity snapshot.
             StoreState::Failed { .. } => return Ok(()),
@@ -1720,11 +1725,12 @@ mod tests {
             vec![(7, 0.0)]
         );
         // A kind without a generation row stays absent: empty, not an error.
-        assert!(env
-            .vs
-            .search_taxonomy(TaxonomyKind::RelationType, &[1.0; 4], 10)
-            .unwrap()
-            .is_empty());
+        assert!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::RelationType, &[1.0; 4], 10)
+                .unwrap()
+                .is_empty()
+        );
         // The remaining kinds adopt on their own generation rows.
         seed_taxonomy_generation(&env, profile, 1, 1);
         seed_taxonomy_vector(&env, profile, 1, 9, 1, &make_embedding(4, -3.0));
@@ -1802,30 +1808,29 @@ mod tests {
             ))
         );
         assert_eq!(env.vs.resolve_taxonomy(TaxonomyKind::Relation, 999), None);
-        assert_eq!(
-            env.vs.resolve_taxonomy(TaxonomyKind::EntityType, 999),
-            None
-        );
+        assert_eq!(env.vs.resolve_taxonomy(TaxonomyKind::EntityType, 999), None);
     }
 
     #[test]
     fn taxonomy_absent_snapshot_returns_an_empty_search() {
         let mut env = setup(4);
         // Nothing adopted yet: empty result, not an error.
-        assert!(env
-            .vs
-            .search_taxonomy(TaxonomyKind::Relation, &[1.0; 4], 10)
-            .unwrap()
-            .is_empty());
+        assert!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::Relation, &[1.0; 4], 10)
+                .unwrap()
+                .is_empty()
+        );
         // A generation with no vector rows builds an empty snapshot.
         let profile = seed_taxonomy_profile(&env, 4);
         seed_taxonomy_generation(&env, profile, 0, 7);
         adopt(&mut env, false).unwrap();
-        assert!(env
-            .vs
-            .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
-            .unwrap()
-            .is_empty());
+        assert!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1930,6 +1935,64 @@ mod tests {
                 .unwrap(),
             vec![(7, 0.0)]
         );
+    }
+
+    #[test]
+    fn reconcile_defers_activation_when_taxonomy_scan_is_invalid() {
+        // D10 wiring: reconcile drives taxonomy adoption with the entity
+        // candidate decision. A refused taxonomy adoption must also defer the
+        // entity activation, or the candidate would activate on a stale
+        // taxonomy scan.
+        let env = setup(4);
+        let profile = seed_taxonomy_profile(&env, 4);
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "UPDATE index_profile_registry SET state='Rebuilding',serving_profile=NULL,candidate_profile=?1 WHERE store_key='default'",
+                [profile.to_string()],
+            )
+            .unwrap();
+            // begin_rebuild also seeds the entity generation row; the seed
+            // helper leaves it out because nothing else calls reconcile.
+            conn.execute(
+                "INSERT INTO ann_generation(profile_id) VALUES(?1)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        seed_taxonomy_generation(&env, profile, 0, 1);
+        // A counted type without any queued job makes the taxonomy scan
+        // invalid; the entity side alone is empty and would verify.
+        seed_type_dict(&env, 7, 0, "person");
+        let error = env.vs.reconcile_managed_snapshot().unwrap_err();
+        assert!(error.to_string().contains("taxonomy"), "got: {error}");
+        // Nothing was adopted or activated: the refusal is the gate.
+        let state = IndexProfileRegistry::new(&env.vs.db.lock())
+            .state("default")
+            .unwrap();
+        assert!(matches!(state, StoreState::Rebuilding { .. }));
+        assert!(env.vs.search_embeddings(&[1.0; 4], 10).unwrap().is_empty());
+        assert!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap()
+                .is_empty()
+        );
+        // A queued job clears the refusal, and the next poll completes the
+        // activation.
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO taxonomy_job(subject_kind,subject_id,profile_id,subject_revision,operation,state) VALUES(0,7,?1,1,'upsert','pending')",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        env.vs.reconcile_managed_snapshot().unwrap();
+        assert!(matches!(
+            IndexProfileRegistry::new(&env.vs.db.lock()).state("default").unwrap(),
+            StoreState::Active(active) if active == profile
+        ));
     }
 
     fn renamed_vector_fixture() -> (TestEnv, EntityId) {

@@ -18,10 +18,7 @@ pub(crate) fn serving_profile_ids(conn: &Connection) -> Result<Vec<Uuid>> {
     if profiles.is_empty() {
         profiles.push(uuid::Uuid::nil().to_string());
     }
-    profiles
-        .iter()
-        .map(|profile| parse_uuid(profile))
-        .collect()
+    profiles.iter().map(|profile| parse_uuid(profile)).collect()
 }
 
 pub(crate) fn enqueue_change(
@@ -34,11 +31,7 @@ pub(crate) fn enqueue_change(
     // provider profile. Managed serving and candidate profiles receive updates.
     let profiles = serving_profile_ids(conn)?;
     for profile in profiles {
-        let state = if profile.is_nil() {
-            "held"
-        } else {
-            "pending"
-        };
+        let state = if profile.is_nil() { "held" } else { "pending" };
         conn.execute("INSERT INTO index_job(entity_id,profile_id,entity_revision,operation,state) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(entity_id,profile_id) DO UPDATE SET entity_revision=excluded.entity_revision,operation=excluded.operation,state=excluded.state,lease_token=NULL,lease_epoch=lease_epoch+1,lease_until_us=0,attempts=0,next_attempt_us=0,last_error=NULL", params![entity_id,profile.to_string(),revision,if deleted {"delete"} else {"upsert"},state]).map_err(sql_error)?;
         conn.execute(
             "UPDATE ann_generation SET full_scan_generation=NULL WHERE profile_id=?1",
@@ -509,8 +502,23 @@ pub(crate) fn enqueue_taxonomy(
 ) -> Result<()> {
     // A nil profile is an explicitly held job, mirroring the entity path's
     // LegacyCompat fallback: the store has no managed profile to serve it.
-    let state = if profile_id.is_nil() { "held" } else { "pending" };
+    let state = if profile_id.is_nil() {
+        "held"
+    } else {
+        "pending"
+    };
     conn.execute("INSERT INTO taxonomy_job(subject_kind,subject_id,profile_id,subject_revision,operation,state) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(subject_kind,subject_id,profile_id) DO UPDATE SET subject_revision=excluded.subject_revision,operation=excluded.operation,state=excluded.state,lease_token=NULL,lease_epoch=lease_epoch+1,lease_until_us=0,attempts=0,next_attempt_us=0,last_error=NULL", params![kind,id,profile_id.to_string(),revision,match operation { IndexOperation::Upsert => "upsert", IndexOperation::Delete => "delete" },state]).map_err(sql_error)?;
+    // The first subject queued for a managed profile creates the kind's
+    // generation marker. A commit advances that row and reconciliation
+    // serves it; without the row, the commit bumps nothing and the kind
+    // never becomes serveable. A nil profile has nothing to serve.
+    if !profile_id.is_nil() {
+        conn.execute(
+            "INSERT INTO taxonomy_ann_generation(profile_id,subject_kind) VALUES(?1,?2) ON CONFLICT(profile_id,subject_kind) DO NOTHING",
+            params![profile_id.to_string(), kind],
+        )
+        .map_err(sql_error)?;
+    }
     conn.execute(
         "UPDATE taxonomy_ann_generation SET full_scan_generation=NULL WHERE profile_id=?1 AND subject_kind=?2",
         params![profile_id.to_string(), kind],
@@ -604,20 +612,42 @@ impl<'a> TaxonomyJobRepository<'a> {
         if !matches!(state,Some((state,until)) if state=="leased" && until>now) {
             return Ok(false);
         }
-        let (source_revision, source_deleted): (i64,bool) = match job.subject_kind {
+        let (source_revision, source_deleted): (i64, bool) = match job.subject_kind {
             0 | 1 => {
-                match self.conn.query_row("SELECT revision FROM type_dict WHERE id=?1 AND kind=?2", params![job.subject_id,job.subject_kind], |r| r.get(0)).optional().map_err(sql_error)? {
+                match self
+                    .conn
+                    .query_row(
+                        "SELECT revision FROM type_dict WHERE id=?1 AND kind=?2",
+                        params![job.subject_id, job.subject_kind],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(sql_error)?
+                {
                     Some(revision) => (revision, false),
                     None => return Ok(false),
                 }
             }
             2 => {
-                match self.conn.query_row("SELECT revision,deleted FROM taxonomy_relation WHERE id=?1", [job.subject_id], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(sql_error)? {
+                match self
+                    .conn
+                    .query_row(
+                        "SELECT revision,deleted FROM taxonomy_relation WHERE id=?1",
+                        [job.subject_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(sql_error)?
+                {
                     Some(row) => row,
                     None => return Ok(false),
                 }
             }
-            _ => return Err(MCSError::MemoryError("invalid taxonomy subject kind".into())),
+            _ => {
+                return Err(MCSError::MemoryError(
+                    "invalid taxonomy subject kind".into(),
+                ));
+            }
         };
         if source_revision != job.subject_revision {
             return Ok(false);
@@ -746,7 +776,11 @@ mod tests {
         assert!(token.is_none());
         assert_eq!(state, "pending");
         // The superseded lease cannot commit the old revision.
-        assert!(!repo.commit_vector(&first, 101, Some(&[1.0]), "worker").unwrap());
+        assert!(
+            !repo
+                .commit_vector(&first, 101, Some(&[1.0]), "worker")
+                .unwrap()
+        );
         assert_eq!(count(&conn, "taxonomy_vector"), 0);
         let generation: Option<i64> = conn
             .query_row(
@@ -786,9 +820,19 @@ mod tests {
         // The held job is never claimable and the second job is not due yet.
         assert!(repo.claim_due(100, 10).unwrap().is_none());
         // Complete the first job so its expired lease cannot be re-claimed.
-        assert!(repo.commit_vector(&first, 101, Some(&[1.0, 0.0]), "worker").unwrap());
+        assert!(
+            repo.commit_vector(&first, 101, Some(&[1.0, 0.0]), "worker")
+                .unwrap()
+        );
         let second = repo.claim_due(500, 10).unwrap().unwrap();
-        assert_eq!((second.subject_kind, second.subject_id, second.subject_revision), (2, 10, 9));
+        assert_eq!(
+            (
+                second.subject_kind,
+                second.subject_id,
+                second.subject_revision
+            ),
+            (2, 10, 9)
+        );
         assert_eq!(second.lease.until_us, 510);
         assert_eq!(count(&conn, "taxonomy_job"), 3);
     }
@@ -800,7 +844,11 @@ mod tests {
         enqueue_taxonomy(&conn, 0, 1, 7, IndexOperation::Upsert, profile).unwrap();
         let repo = TaxonomyJobRepository::new(&conn);
         let job = repo.claim_due(100, 10).unwrap().unwrap();
-        assert!(!repo.commit_vector(&job, 111, Some(&[1.0, 0.0]), "worker").unwrap());
+        assert!(
+            !repo
+                .commit_vector(&job, 111, Some(&[1.0, 0.0]), "worker")
+                .unwrap()
+        );
         assert_eq!(count(&conn, "taxonomy_vector"), 0);
         let state: String = conn
             .query_row(
@@ -823,7 +871,11 @@ mod tests {
             enqueue_taxonomy(&conn, kind, id, revision, IndexOperation::Upsert, profile).unwrap();
             let job = repo.claim_due(100 + id, 10).unwrap().unwrap();
             assert_eq!((job.subject_kind, job.subject_id), (kind, id));
-            assert!(!repo.commit_vector(&job, 101 + id, Some(&[1.0, 0.0]), "worker").unwrap());
+            assert!(
+                !repo
+                    .commit_vector(&job, 101 + id, Some(&[1.0, 0.0]), "worker")
+                    .unwrap()
+            );
         }
         assert_eq!(count(&conn, "taxonomy_vector"), 0);
         assert_eq!(count(&conn, "taxonomy_job"), 3);
@@ -847,7 +899,11 @@ mod tests {
         seed_relation(&conn, 13, 5, 1);
         enqueue_taxonomy(&conn, 2, 13, 5, IndexOperation::Upsert, profile).unwrap();
         let job = repo.claim_due(104, 10).unwrap().unwrap();
-        assert!(!repo.commit_vector(&job, 105, Some(&[1.0]), "worker").unwrap());
+        assert!(
+            !repo
+                .commit_vector(&job, 105, Some(&[1.0]), "worker")
+                .unwrap()
+        );
         assert_eq!(count(&conn, "taxonomy_vector"), 0);
         assert_eq!(count(&conn, "taxonomy_job"), 3);
     }
@@ -859,7 +915,10 @@ mod tests {
         enqueue_taxonomy(&conn, 0, 1, 7, IndexOperation::Upsert, profile).unwrap();
         let repo = TaxonomyJobRepository::new(&conn);
         let job = repo.claim_due(100, 10).unwrap().unwrap();
-        assert!(repo.commit_vector(&job, 105, Some(&[1.0, 0.0]), "worker").unwrap());
+        assert!(
+            repo.commit_vector(&job, 105, Some(&[1.0, 0.0]), "worker")
+                .unwrap()
+        );
         let (kind, revision, blob, created_at, source): (i64, i64, Vec<u8>, i64, String) = conn
             .query_row(
                 "SELECT subject_kind,subject_revision,blob,created_at_us,source FROM taxonomy_vector WHERE profile_id=?1 AND subject_kind=0 AND subject_id=1",
@@ -918,7 +977,11 @@ mod tests {
         let job = repo.claim_due(100, 10).unwrap().unwrap();
         // A fence-refused commit does not bump the generation. (The enqueue
         // already cleared the marker; the durable count is the signal.)
-        assert!(!repo.commit_vector(&job, 111, Some(&[1.0, 0.0]), "worker").unwrap());
+        assert!(
+            !repo
+                .commit_vector(&job, 111, Some(&[1.0, 0.0]), "worker")
+                .unwrap()
+        );
         let (durable, full_scan): (i64, Option<i64>) = conn
             .query_row(
                 "SELECT durable_generation,full_scan_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=0",
@@ -928,7 +991,10 @@ mod tests {
             .unwrap();
         assert_eq!((durable, full_scan), (4, None));
         // A successful commit bumps by one and clears the marker.
-        assert!(repo.commit_vector(&job, 105, Some(&[1.0, 0.0]), "worker").unwrap());
+        assert!(
+            repo.commit_vector(&job, 105, Some(&[1.0, 0.0]), "worker")
+                .unwrap()
+        );
         let (durable, full_scan): (i64, Option<i64>) = conn
             .query_row(
                 "SELECT durable_generation,full_scan_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=0",
@@ -981,19 +1047,30 @@ mod tests {
         // A fully indexed kind is valid.
         enqueue_taxonomy(&conn, 0, 1, 7, IndexOperation::Upsert, profile).unwrap();
         let job = repo.claim_due(100, 10).unwrap().unwrap();
-        assert!(repo.commit_vector(&job, 101, Some(&[1.0, 0.0]), "worker").unwrap());
+        assert!(
+            repo.commit_vector(&job, 101, Some(&[1.0, 0.0]), "worker")
+                .unwrap()
+        );
         assert!(!taxonomy_scan_invalid(&conn, profile, 0).unwrap());
         enqueue_taxonomy(&conn, 2, 10, 5, IndexOperation::Upsert, profile).unwrap();
         let job = repo.claim_due(200, 10).unwrap().unwrap();
-        assert!(repo.commit_vector(&job, 201, Some(&[1.0, 0.0]), "worker").unwrap());
+        assert!(
+            repo.commit_vector(&job, 201, Some(&[1.0, 0.0]), "worker")
+                .unwrap()
+        );
         assert!(!taxonomy_scan_invalid(&conn, profile, 2).unwrap());
         // A stale vector is invalid.
-        conn.execute("UPDATE type_dict SET revision=8 WHERE id=1", []).unwrap();
-        assert!(taxonomy_scan_invalid(&conn, profile, 0).unwrap());
-        conn.execute("UPDATE type_dict SET revision=7 WHERE id=1", []).unwrap();
-        // A missing job is invalid.
-        conn.execute("DELETE FROM taxonomy_job WHERE subject_kind=0 AND subject_id=1", [])
+        conn.execute("UPDATE type_dict SET revision=8 WHERE id=1", [])
             .unwrap();
+        assert!(taxonomy_scan_invalid(&conn, profile, 0).unwrap());
+        conn.execute("UPDATE type_dict SET revision=7 WHERE id=1", [])
+            .unwrap();
+        // A missing job is invalid.
+        conn.execute(
+            "DELETE FROM taxonomy_job WHERE subject_kind=0 AND subject_id=1",
+            [],
+        )
+        .unwrap();
         assert!(taxonomy_scan_invalid(&conn, profile, 0).unwrap());
         assert!(!taxonomy_scan_invalid(&conn, profile, 2).unwrap());
         // A pending job counts as queued work even before the vector exists.
@@ -1013,7 +1090,8 @@ mod tests {
         .unwrap();
         assert!(taxonomy_scan_invalid(&conn, profile, 2).unwrap());
         // A type without members is not a source.
-        conn.execute("UPDATE type_dict SET count=0 WHERE id=1", []).unwrap();
+        conn.execute("UPDATE type_dict SET count=0 WHERE id=1", [])
+            .unwrap();
         assert!(!taxonomy_scan_invalid(&conn, profile, 0).unwrap());
     }
 }

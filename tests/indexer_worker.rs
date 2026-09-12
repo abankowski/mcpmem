@@ -9,7 +9,7 @@ use std::time::Duration;
 use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::kg::GraphHandle;
 use mcpmem::types::EntityInput as Entity;
-use mcpmem::vector_store::VectorStore;
+use mcpmem::vector_store::{TaxonomyKind, VectorStore};
 use mcpmem_core::jobs::{DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization};
 use mcpmem_indexer::{EmbeddingProvider, IndexerWorker, ProviderError};
 use uuid::Uuid;
@@ -595,7 +595,9 @@ fn taxonomy_fixture(dir: &Path) -> (std::path::PathBuf, rusqlite::Connection, In
     let conn = rusqlite::Connection::open(&database).unwrap();
     mcpmem_core::schema::initialize_database(&conn).unwrap();
     let profile = profile();
-    IndexProfileRegistry::new(&conn).begin_rebuild(&profile).unwrap();
+    IndexProfileRegistry::new(&conn)
+        .begin_rebuild(&profile)
+        .unwrap();
     (database, conn, profile)
 }
 
@@ -751,7 +753,10 @@ fn vanished_taxonomy_subject_retries_then_dead_letters() {
             break;
         }
     }
-    assert!(dead_seen, "the job must be dead-lettered after max attempts");
+    assert!(
+        dead_seen,
+        "the job must be dead-lettered after max attempts"
+    );
     let (state, attempts): (String, i64) = conn
         .query_row(
             "SELECT state, attempts FROM taxonomy_job WHERE subject_kind=0 AND subject_id=1 AND profile_id=?1",
@@ -767,4 +772,65 @@ fn vanished_taxonomy_subject_retries_then_dead_letters() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn reconcile_adopts_taxonomy_after_the_worker_cycle() {
+    // D10 vertical slice: a write enqueues a taxonomy subject through the
+    // mutation path, the worker embeds it, and reconcile_managed_snapshot
+    // adopts the kind so search_taxonomy serves it. The taxonomy commit
+    // lands after the entity snapshot was published, so adoption must also
+    // run on a poll where the entity state did not move.
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let profile = profile();
+    IndexProfileRegistry::new(&conn)
+        .begin_rebuild(&profile)
+        .unwrap();
+    // The write names one new entity type, which enqueues a kind-0 taxonomy
+    // subject (and an entity job for the entity itself).
+    graph
+        .create_entities(&[Entity {
+            name: "alice".into(),
+            entity_type: "Person".into(),
+            observations: vec![],
+        }])
+        .unwrap();
+    let worker = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5));
+    let mut vectors = VectorStore::new(&database, 2).unwrap();
+    // One poll embeds the entity; the reconcile after it publishes the empty
+    // candidate (no taxonomy vector yet) and adopts an empty taxonomy.
+    assert_eq!(worker.run_once(now_us()).unwrap().committed, 1);
+    vectors.reconcile_managed_snapshot().unwrap();
+    assert_eq!(vectors.search_embeddings(&[1.0, 1.0], 10).unwrap().len(), 1);
+    assert!(
+        vectors
+            .search_taxonomy(TaxonomyKind::EntityType, &[1.0, 1.0], 10)
+            .unwrap()
+            .is_empty()
+    );
+    // The next poll embeds the taxonomy subject. Its commit advances only
+    // the kind generation; the entity snapshot still matches the profile.
+    assert_eq!(worker.run_once(now_us()).unwrap().committed, 1);
+    {
+        let (kind, subject): (i64, i64) = conn
+            .query_row(
+                "SELECT subject_kind, subject_id FROM taxonomy_vector WHERE profile_id=?1",
+                [profile.id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((kind, subject), (0, 1));
+    }
+    vectors.reconcile_managed_snapshot().unwrap();
+    let hits = vectors
+        .search_taxonomy(TaxonomyKind::EntityType, &[1.0, 1.0], 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0, 1);
+    assert!(hits[0].1.abs() < 1e-6);
+    // The entity side is untouched by the taxonomy adoption.
+    assert_eq!(vectors.search_embeddings(&[1.0, 1.0], 10).unwrap().len(), 1);
 }
