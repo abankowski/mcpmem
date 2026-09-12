@@ -149,6 +149,13 @@ impl<'a> IndexProfileRegistry<'a> {
         Self { conn }
     }
 
+    /// The connection this registry reads. The server crate serves taxonomy
+    /// snapshots through it: the generation read, the vector rows and the
+    /// publish mark then share one transaction view with the registry state.
+    pub fn connection(&self) -> &Connection {
+        self.conn
+    }
+
     pub fn get(&self, id: Uuid) -> Result<IndexProfile> {
         let text: String = self
             .conn
@@ -649,8 +656,9 @@ impl<'a> TaxonomyJobRepository<'a> {
 
 /// Soft full-scan completeness check for one taxonomy kind. It reports whether
 /// the kind is missing queued work or carries a stale vector, without failing
-/// the caller.
-pub(crate) fn taxonomy_scan_invalid(conn: &Connection, profile_id: Uuid, kind: i64) -> Result<bool> {
+/// the caller. Public because the server crate's VectorStore runs it before
+/// serving a candidate taxonomy snapshot.
+pub fn taxonomy_scan_invalid(conn: &Connection, profile_id: Uuid, kind: i64) -> Result<bool> {
     let profile = profile_id.to_string();
     let invalid: bool = match kind {
         // Kinds 0 and 1 read type_dict members as their source.
