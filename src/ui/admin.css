@@ -42,3 +42,7 @@ dialog input[type="text"] {
   border: 1px solid var(--border); border-radius: .35rem; padding: .35rem .5rem;
 }
 .scopes label { display: inline-block; margin: .2rem .8rem .2rem 0; }
+
+.badge.state-indexed { color: #7ee787; border-color: #2ea043; }
+.badge.state-error { color: #ff7b72; border-color: #f85149; }
+.badge.state-pending, .badge.state-cloning, .badge.state-indexing, .badge.state-removing { color: #d29922; border-color: #9e6a03; }

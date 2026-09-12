@@ -150,6 +150,7 @@ async function load() {
   }
   if (ok) setStatus("");
   await loadWebhooks();
+  await loadRepos();
 }
 
 async function loadWebhooks() {
@@ -504,6 +505,183 @@ async function removeWebhook(w) {
   }
 }
 
+async function loadRepos() {
+  const section = document.getElementById("repos");
+  const status = document.getElementById("repo-status");
+  let data;
+  try {
+    data = await api("/ui/api/repos");
+  } catch (e) {
+    // A build without the code feature has no such route; the section
+    // stays hidden instead of showing a table that cannot load.
+    if (e.message.startsWith("404")) return;
+    status.textContent = "Repositories failed: " + e.message;
+    return;
+  }
+  if (!data) return;
+  section.hidden = false;
+  renderRepos(data.repos);
+  document.getElementById("add-repo").hidden = false;
+  status.textContent = "";
+}
+
+const TRANSITIONAL = ["pending", "cloning", "indexing", "removing"];
+
+function renderRepos(repos) {
+  const tbody = document.getElementById("repo-rows");
+  tbody.textContent = "";
+  for (const r of repos) {
+    const tr = document.createElement("tr");
+    const key = document.createElement("td");
+    key.textContent = r.key;
+    key.className = "mono";
+    const url = document.createElement("td");
+    url.textContent = r.url;
+    url.className = "mono";
+    const auth = document.createElement("td");
+    auth.textContent = r.authKind;
+    const state = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = "badge state-" + r.state;
+    badge.textContent = r.state;
+    if (r.lastError) badge.title = r.lastError;
+    state.append(badge);
+    const last = document.createElement("td");
+    last.textContent = r.lastIndexedUs ? new Date(r.lastIndexedUs / 1000).toLocaleString() : "—";
+    const actions = document.createElement("td");
+    const reindex = document.createElement("button");
+    reindex.textContent = "Reindex";
+    reindex.disabled = TRANSITIONAL.includes(r.state);
+    reindex.onclick = () => triggerReindex(r);
+    const del = document.createElement("button");
+    del.textContent = "Remove";
+    del.disabled = TRANSITIONAL.includes(r.state);
+    del.onclick = () => removeRepo(r);
+    actions.append(reindex, del);
+    tr.append(key, url, auth, state, last, actions);
+    tbody.append(tr);
+  }
+}
+
+async function triggerReindex(r) {
+  try {
+    await api("/ui/api/repos/" + encodeURIComponent(r.key) + "/reindex", { method: "POST" });
+    pollRepos();
+  } catch (e) {
+    setStatus(e.message);
+  }
+}
+
+async function removeRepo(r) {
+  if (!confirm("Remove repository " + r.key + "? Its indexed database and local clone will be deleted.")) return;
+  try {
+    await api("/ui/api/repos/" + encodeURIComponent(r.key), { method: "DELETE" });
+    pollRepos();
+  } catch (e) {
+    setStatus(e.message);
+  }
+}
+
+// Poll the list until no repo is transitional. One flight at a time; a busy
+// row re-schedules us, and a terminal row stops the loop.
+let repoPolling = false;
+async function pollRepos() {
+  if (repoPolling) return;
+  repoPolling = true;
+  try {
+    for (;;) {
+      const data = await api("/ui/api/repos");
+      if (!data) return;
+      renderRepos(data.repos);
+      if (!data.repos.some((r) => TRANSITIONAL.includes(r.state))) return;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  } catch (e) {
+    setStatus(e.message);
+  } finally {
+    repoPolling = false;
+  }
+}
+
+function openRepoForm() {
+  const dialog = document.getElementById("form");
+  dialog.textContent = "";
+  const h = document.createElement("h2");
+  h.textContent = "Add repository";
+  dialog.append(h);
+
+  const fields = [
+    ["key", "Key (project identifier: [A-Za-z0-9_-], max 64)", ""],
+    ["url", "Git URL (https, http, or ssh; no embedded credentials)", ""],
+  ];
+  for (const [key, label, value] of fields) {
+    const row = document.createElement("label");
+    row.textContent = label + ": ";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.id = "f-repo-" + key;
+    input.value = value;
+    row.append(input);
+    dialog.append(row);
+  }
+
+  const authRow = document.createElement("label");
+  authRow.textContent = "Authentication: ";
+  const kind = document.createElement("select");
+  kind.id = "f-repo-authKind";
+  for (const value of ["none", "token", "ssh"]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value + (value === "none" ? " (public repo)" : "");
+    kind.append(option);
+  }
+  authRow.append(kind);
+  dialog.append(authRow);
+
+  const secretRow = document.createElement("label");
+  secretRow.textContent = "Token or private key: ";
+  const secret = document.createElement("textarea");
+  secret.id = "f-repo-authSecret";
+  secret.rows = 4;
+  secret.disabled = true;
+  secretRow.append(secret);
+  dialog.append(secretRow);
+  kind.onchange = () => { secret.disabled = kind.value === "none"; };
+
+  const snippets = document.createElement("label");
+  const snippetsBox = document.createElement("input");
+  snippetsBox.type = "checkbox";
+  snippetsBox.id = "f-repo-snippets";
+  snippets.append(snippetsBox, " Store body snippets (for semantic search)");
+  dialog.append(snippets);
+
+  const save = document.createElement("button");
+  save.textContent = "Add and index";
+  save.onclick = async () => {
+    const read = (id) => document.getElementById(id).value.trim();
+    const body = {
+      key: read("f-repo-key"),
+      url: read("f-repo-url"),
+      authKind: document.getElementById("f-repo-authKind").value,
+      snippets: document.getElementById("f-repo-snippets").checked,
+    };
+    const secretValue = secret.value.trim();
+    if (body.authKind !== "none") body.authSecret = secretValue;
+    try {
+      await api("/ui/api/repos", { method: "POST", body: JSON.stringify(body) });
+      dialog.close();
+      pollRepos();
+    } catch (e) {
+      setStatus(e.message);
+    }
+  };
+  const cancel = document.createElement("button");
+  cancel.textContent = "Cancel";
+  cancel.onclick = () => dialog.close();
+  dialog.append(save, cancel);
+  dialog.showModal();
+}
+
 function setStatus(text) {
   const el = document.getElementById("status");
   el.textContent = text;
@@ -512,6 +690,7 @@ function setStatus(text) {
 
 document.getElementById("add").onclick = () => openForm(null);
 document.getElementById("add-webhook").onclick = () => openWebhookForm(null);
+document.getElementById("add-repo").onclick = () => openRepoForm();
 
 (async function boot() {
   if (new URLSearchParams(location.search).has("code")) {
