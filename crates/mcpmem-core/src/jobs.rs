@@ -649,6 +649,15 @@ impl<'a> TaxonomyJobRepository<'a> {
                 params![job.subject_kind, job.subject_id, job.profile_id.to_string(), job.lease.token.to_string(), job.lease.epoch],
             )
             .map_err(sql_error)?;
+        // The kind generation is the freshness signal for the semantic tier:
+        // every committed vector retires the kind's snapshot, exactly like the
+        // entity path retires one per committed entity vector.
+        self.conn
+            .execute(
+                "UPDATE taxonomy_ann_generation SET durable_generation=durable_generation+1,full_scan_generation=NULL WHERE profile_id=?1 AND subject_kind=?2",
+                params![job.profile_id.to_string(), job.subject_kind],
+            )
+            .map_err(sql_error)?;
         tx.commit()?;
         Ok(true)
     }
@@ -893,6 +902,74 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "done");
+    }
+
+    #[test]
+    fn commit_bumps_the_kind_generation_on_success_only() {
+        let (conn, profile) = fixture();
+        conn.execute(
+            "INSERT INTO taxonomy_ann_generation(profile_id,subject_kind,durable_generation,published_generation,full_scan_generation) VALUES(?1,0,4,-1,4)",
+            [profile.to_string()],
+        )
+        .unwrap();
+        seed_type(&conn, 1, 0, 7);
+        enqueue_taxonomy(&conn, 0, 1, 7, IndexOperation::Upsert, profile).unwrap();
+        let repo = TaxonomyJobRepository::new(&conn);
+        let job = repo.claim_due(100, 10).unwrap().unwrap();
+        // A fence-refused commit does not bump the generation. (The enqueue
+        // already cleared the marker; the durable count is the signal.)
+        assert!(!repo.commit_vector(&job, 111, Some(&[1.0, 0.0]), "worker").unwrap());
+        let (durable, full_scan): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT durable_generation,full_scan_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=0",
+                [profile.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((durable, full_scan), (4, None));
+        // A successful commit bumps by one and clears the marker.
+        assert!(repo.commit_vector(&job, 105, Some(&[1.0, 0.0]), "worker").unwrap());
+        let (durable, full_scan): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT durable_generation,full_scan_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=0",
+                [profile.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((durable, full_scan), (5, None));
+        // A repeated completion is a no-op and does not bump again.
+        assert!(repo.commit_vector(&job, 106, None, "worker").unwrap());
+        let durable: i64 = conn
+            .query_row(
+                "SELECT durable_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=0",
+                [profile.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(durable, 5);
+        // A delete commit bumps its kind too.
+        conn.execute(
+            "INSERT INTO taxonomy_ann_generation(profile_id,subject_kind,durable_generation,published_generation,full_scan_generation) VALUES(?1,2,0,-1,NULL)",
+            [profile.to_string()],
+        )
+        .unwrap();
+        seed_relation(&conn, 10, 5, 1);
+        conn.execute(
+            "INSERT INTO taxonomy_vector VALUES(?1,2,10,5,X'000000000000803F',1,'old')",
+            [profile.to_string()],
+        )
+        .unwrap();
+        enqueue_taxonomy(&conn, 2, 10, 5, IndexOperation::Delete, profile).unwrap();
+        let job = repo.claim_due(200, 10).unwrap().unwrap();
+        assert!(repo.commit_vector(&job, 201, None, "worker").unwrap());
+        let (durable, full_scan): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT durable_generation,full_scan_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=2",
+                [profile.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((durable, full_scan), (1, None));
     }
 
     #[test]
