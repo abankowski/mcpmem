@@ -38,13 +38,14 @@ macro_rules! text_content {
 /// Upper bound on `consumerOrigin`. This is tighter than
 /// [`WebhookSubscription::validate`]'s own 256-byte ceiling, so a caller
 /// learns about an over-long origin at the tool boundary, before the row
-/// reaches the shared validator.
-const MAX_CONSUMER_ORIGIN_BYTES: usize = 231;
+/// reaches the shared validator. The admin API shares the bound.
+pub const MAX_CONSUMER_ORIGIN_BYTES: usize = 231;
 
 /// Cap on `eventOperations` / `entityTypes` / `ignoredOrigins` entries per
 /// request. A guard against an unbounded stored JSON array, not a functional
-/// limit — a real subscription needs only a few of each.
-const MAX_LIST_ITEMS: usize = 256;
+/// limit — a real subscription needs only a few of each. Shared by the MCP
+/// tools and the admin API.
+pub const MAX_LIST_ITEMS: usize = 256;
 
 /// Where the subscription table lives. [`init`] sets this once at server
 /// startup; each handler call opens a short-lived connection against it.
@@ -68,7 +69,9 @@ pub fn init(path: PathBuf, busy_timeout_ms: u64) {
 /// Open a short-lived connection to the subscription table's database. A
 /// handler holds it only for the span of one tool call, so a busy timeout is
 /// enough to ride out a concurrent writer; the connection needs no pool.
-fn open_connection() -> Result<Connection> {
+/// The admin API opens the same short-lived connection, so the two surfaces
+/// read and write one store.
+pub fn open_connection() -> Result<Connection> {
     let db = SUBSCRIPTION_DB.get().ok_or_else(|| {
         MCSError::MemoryError("webhook subscription store not initialized".into())
     })?;
@@ -126,8 +129,9 @@ fn guess_allowlist_host(endpoint: &str) -> Option<String> {
 /// registration call must not depend on the network. A single-entry
 /// allowlist built from [`guess_allowlist_host`], together with
 /// [`PlaceholderResolver`], neutralizes those two checks so only the URL
-/// shape is judged here.
-fn validate_endpoint_shape(endpoint: &str) -> Result<()> {
+/// shape is judged here. The admin API calls the same rule, so the MCP
+/// surface and the admin surface can never accept different endpoints.
+pub fn validate_endpoint_shape(endpoint: &str) -> Result<()> {
     let mut allowlist = BTreeSet::new();
     if let Some(host) = guess_allowlist_host(endpoint) {
         allowlist.insert(host);

@@ -72,6 +72,27 @@ impl<'a> SubscriptionRepository<'a> {
             .map_err(sql_error)
     }
 
+    /// Every subscription row, oldest first. The admin API lists through
+    /// this; the delivery worker reads [`matching`] instead, which applies
+    /// the enabled and filter predicates.
+    pub fn list(&self) -> Result<Vec<WebhookSubscription>> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT subscription_id,endpoint,event_operations,entity_types,ignored_origins,consumer_origin,secret_ref,enabled \
+                 FROM webhook_subscription ORDER BY created_at_us, subscription_id",
+            )
+            .map_err(sql_error)?;
+        statement
+            .query_map([], row)
+            .map_err(sql_error)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_error)?
+            .into_iter()
+            .map(decode)
+            .collect::<Result<Vec<_>>>()
+    }
+
     pub fn matching(&self, event: &ChangeEvent) -> Result<Vec<WebhookSubscription>> {
         let entity_type = event
             .change

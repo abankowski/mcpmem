@@ -30,6 +30,13 @@ This entry lists every change since that snapshot. The version line restarts at
   `webhook_subscription` table. The add tool validates the endpoint with the
   worker's own `validate_endpoint` rule (https, port 443, hostname, no
   fragment), and `secretRef` is a name, never key material.
+- **Webhook subscriptions in the admin UI.** `/ui/admin` lists, creates,
+  edits and deletes `webhook_subscription` rows through the new
+  `GET/POST /ui/api/webhooks` and `PATCH/DELETE /ui/api/webhooks/{id}`
+  endpoints, behind the same `admin` scope as the principals pages. The
+  admin API runs the MCP tools' own validation, so the two surfaces accept
+  the same payloads, and `secretRef` stays a name. A build without the
+  `webhooks` Cargo feature answers 404 and the page hides the section.
 
 - **The server computes embeddings.** Name `provider`, `model` and
   `dimensions` in the `[indexer]` section, and the server adopts an index

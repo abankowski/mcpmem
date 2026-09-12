@@ -56,6 +56,9 @@ jobs:
           cargo test --test role_composition --features indexer
           cargo test --test role_composition --features webhooks
           cargo test --test role_composition --features indexer,webhooks
+      - name: Test webhook subscription feature
+        run: |
+          cargo test --test webhook_tools --test webhook_admin --features webhooks -- --test-threads=1
       - name: Keep graph-only build free of HTTP and AWS clients
         run: |
           if cargo tree --no-default-features -e normal | rg -q '(^| )(reqwest|aws-[a-z0-9-]+|aws_sdk_[a-z0-9_]+) v'; then

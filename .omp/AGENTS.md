@@ -21,13 +21,13 @@ The repository's pre-flight is the CI pipeline
 exactly as one command:
 
 ```sh
-env OMP_PREFLIGHT_CMD="cargo fmt --all --check && scripts/check-release-version.sh && scripts/check-crate-includes.sh && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-targets -- --test-threads=1 && cargo test --test indexer_worker --features indexer -- --test-threads=1 && cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1 && cargo test --test role_composition --no-default-features && cargo test --test role_composition --features indexer && cargo test --test role_composition --features webhooks && cargo test --test role_composition --features indexer,webhooks && cargo package -p mcpmem-core --locked --allow-dirty && git rev-parse HEAD > \"\$(git rev-parse --git-dir)/omp-preflight-pass\"" bash -c '<the same command>'
+env OMP_PREFLIGHT_CMD="cargo fmt --all --check && scripts/check-release-version.sh && scripts/check-crate-includes.sh && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-targets -- --test-threads=1 && cargo test --test indexer_worker --features indexer -- --test-threads=1 && cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1 && cargo test --test role_composition --no-default-features && cargo test --test role_composition --features indexer && cargo test --test role_composition --features webhooks && cargo test --test role_composition --features indexer,webhooks && cargo test --test webhook_tools --test webhook_admin --features webhooks -- --test-threads=1 && cargo package -p mcpmem-core --locked --allow-dirty && git rev-parse HEAD > \"\$(git rev-parse --git-dir)/omp-preflight-pass\"" bash -c '<the same command>'
 ```
 
 Simpler form using the override only (the guard then suggests and accepts it):
 
 ```sh
-env OMP_PREFLIGHT_CMD="cargo fmt --all --check && scripts/check-release-version.sh && scripts/check-crate-includes.sh && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-targets -- --test-threads=1 && cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1 && cargo test --test role_composition --features indexer,webhooks && cargo package -p mcpmem-core --locked --allow-dirty && git rev-parse HEAD > \"\$(git rev-parse --git-dir)/omp-preflight-pass\"" [the command]
+env OMP_PREFLIGHT_CMD="cargo fmt --all --check && scripts/check-release-version.sh && scripts/check-crate-includes.sh && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-targets -- --test-threads=1 && cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1 && cargo test --test role_composition --features indexer,webhooks && cargo test --test webhook_tools --test webhook_admin --features webhooks -- --test-threads=1 && cargo package -p mcpmem-core --locked --allow-dirty && git rev-parse HEAD > \"\$(git rev-parse --git-dir)/omp-preflight-pass\"" [the command]
 ```
 
 The exact chain to run before every push/PR (identical in Bash and fish):
@@ -39,8 +39,9 @@ The exact chain to run before every push/PR (identical in Bash and fish):
 5. `cargo test --workspace --all-targets -- --test-threads=1`
 6. `cargo test --test indexer_worker --features indexer -- --test-threads=1` and `--no-default-features --features indexer`
 7. `cargo test --test role_composition` for `--no-default-features`, `--features indexer`, `--features webhooks`, `--features indexer,webhooks`
-8. `cargo package -p mcpmem-core --locked`
-9. write the marker: `git rev-parse HEAD > "$(git rev-parse --git-dir)/omp-preflight-pass"`
+8. `cargo test --test webhook_tools --test webhook_admin --features webhooks -- --test-threads=1`
+9. `cargo package -p mcpmem-core --locked`
+10. write the marker: `git rev-parse HEAD > "$(git rev-parse --git-dir)/omp-preflight-pass"`
 
 The `-D warnings` clippy must use `--all-features`; the plain default-feature
 run fails on pre-existing findings unrelated to the change.

@@ -43,6 +43,21 @@ use crate::server::{self, HttpOutcome};
 use crate::tools::ToolCategory;
 use crate::vector_store::VectorStore;
 
+/// The subscription tools and the admin handlers below share the store's
+/// validation: both call [`webhooks_actions`]' checks, so the MCP surface
+/// and the admin surface accept exactly the same payloads.
+#[cfg(feature = "webhooks")]
+use crate::actions::webhooks as webhooks_actions;
+/// The subscription store and its admin handlers exist only in a build with
+/// the `webhooks` feature, so everything they import is gated with them: a
+/// default build has no webhook types in `http.rs`'s namespace at all.
+#[cfg(feature = "webhooks")]
+use mcpmem_core::mutation::ChangeOperation;
+#[cfg(feature = "webhooks")]
+use mcpmem_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
+#[cfg(feature = "webhooks")]
+use uuid::Uuid;
+
 /// The graph viewer's static assets, embedded at build time (served from `/ui`).
 const UI_INDEX_HTML: &str = include_str!("ui/index.html");
 const UI_CSS: &str = include_str!("ui/graph.css");
@@ -241,6 +256,11 @@ pub fn router(state: HttpState) -> Router {
             post(admin_approve_waitlist),
         )
         .route("/ui/api/waitlist/{id}", delete(admin_dismiss_waitlist));
+    // The webhook-subscription admin API exists only in a build with the
+    // `webhooks` feature. Elsewhere the routes are absent and the SPA
+    // answers their 404 by hiding the section.
+    #[cfg(feature = "webhooks")]
+    let router = attach_webhook_admin_routes(router);
     // The two `.well-known` documents. With OAuth off both answer 404, so a
     // server without OAuth advertises no authorization server.
     crate::oauth_routes::attach(router)
@@ -982,7 +1002,291 @@ async fn admin_dismiss_waitlist(
     }
 }
 
-/// `GET /ui` — serve the browser graph viewer's HTML shell. The shell and its
+// ---------------------------------------------------------------------------
+// Webhook subscriptions (`/ui/api/webhooks`), behind the `webhooks` feature
+// ---------------------------------------------------------------------------
+
+/// The list response. A wrapper struct rather than a hand-built JSON map,
+/// so the rows serialize through the stored type's serde spelling — the
+/// same `subscriptionId` / `eventOperations` / `consumerOrigin` / `secretRef`
+/// keys the SPA echoes back unchanged.
+#[cfg(feature = "webhooks")]
+#[derive(serde::Serialize)]
+struct WebhookList {
+    subscriptions: Vec<WebhookSubscription>,
+}
+
+/// The create body: every stored field except the server-generated id.
+#[cfg(feature = "webhooks")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebhookInput {
+    endpoint: String,
+    consumer_origin: String,
+    secret_ref: String,
+    #[serde(default)]
+    event_operations: Vec<ChangeOperation>,
+    #[serde(default)]
+    entity_types: Vec<String>,
+    #[serde(default)]
+    ignored_origins: Vec<String>,
+    /// Matches the MCP tool: absent means enabled.
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+/// The patch body: every field optional; a named field replaces the stored
+/// value. An empty list in `eventOperations` / `entityTypes` /
+/// `ignoredOrigins` replaces with "deliver every operation / type / origin".
+#[cfg(feature = "webhooks")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebhookPatch {
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    consumer_origin: Option<String>,
+    #[serde(default)]
+    secret_ref: Option<String>,
+    #[serde(default)]
+    event_operations: Option<Vec<ChangeOperation>>,
+    #[serde(default)]
+    entity_types: Option<Vec<String>>,
+    #[serde(default)]
+    ignored_origins: Option<Vec<String>>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+/// Attach the webhook-subscription admin routes. Every handler is gated on
+/// the `admin` scope like the principals routes; the routes themselves exist
+/// only when the `webhooks` feature compiled them in.
+#[cfg(feature = "webhooks")]
+fn attach_webhook_admin_routes(router: Router<HttpState>) -> Router<HttpState> {
+    router
+        .route(
+            "/ui/api/webhooks",
+            get(admin_list_webhooks).post(admin_create_webhook),
+        )
+        .route(
+            "/ui/api/webhooks/{id}",
+            patch(admin_update_webhook).delete(admin_delete_webhook),
+        )
+}
+
+/// A 500 whose message names the webhook store, so an operator does not
+/// chase the principals store for a subscription failure.
+#[cfg(feature = "webhooks")]
+fn webhook_store_failure(e: impl std::fmt::Display) -> Response {
+    json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("webhook store: {e}"),
+    )
+}
+
+/// The caps the MCP add tool applies, so the admin API accepts nothing the
+/// tool would refuse. `Some(message)` is the 400 body; `None` proceeds.
+#[cfg(feature = "webhooks")]
+fn webhook_caps_error(subscription: &WebhookSubscription) -> Option<String> {
+    let max_origin = webhooks_actions::MAX_CONSUMER_ORIGIN_BYTES;
+    if subscription.consumer_origin.len() > max_origin {
+        return Some(format!("consumerOrigin too long (max {max_origin} bytes)"));
+    }
+    let max_items = webhooks_actions::MAX_LIST_ITEMS;
+    for (field, count) in [
+        ("eventOperations", subscription.event_operations.len()),
+        ("entityTypes", subscription.entity_types.len()),
+        ("ignoredOrigins", subscription.ignored_origins.len()),
+    ] {
+        if count > max_items {
+            return Some(format!("Too many entries in '{field}' (max {max_items})"));
+        }
+    }
+    None
+}
+
+/// `GET /ui/api/webhooks` — every subscription, oldest first.
+#[cfg(feature = "webhooks")]
+async fn admin_list_webhooks(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return *response;
+    }
+    let Some(_) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let conn = match webhooks_actions::open_connection() {
+        Ok(conn) => conn,
+        Err(e) => return webhook_store_failure(e),
+    };
+    let subscriptions = match SubscriptionRepository::new(&conn).list() {
+        Ok(rows) => rows,
+        Err(e) => return webhook_store_failure(e),
+    };
+    (StatusCode::OK, Json(WebhookList { subscriptions })).into_response()
+}
+
+/// `POST /ui/api/webhooks` — create one subscription. The rules are the MCP
+/// tool's own, imported rather than copied: the endpoint URL shape, the
+/// consumer-origin and list caps, and `WebhookSubscription::validate`
+/// through the store's upsert. The id is server-generated.
+#[cfg(feature = "webhooks")]
+async fn admin_create_webhook(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return *response;
+    }
+    let Some(_) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let input: WebhookInput = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return bad_request("the body must be a JSON subscription"),
+    };
+    let subscription = WebhookSubscription {
+        subscription_id: Uuid::new_v4(),
+        endpoint: input.endpoint,
+        event_operations: input.event_operations,
+        entity_types: input.entity_types,
+        ignored_origins: input.ignored_origins,
+        consumer_origin: input.consumer_origin,
+        secret_ref: input.secret_ref,
+        enabled: input.enabled.unwrap_or(true),
+    };
+    match webhooks_actions::validate_endpoint_shape(&subscription.endpoint) {
+        Ok(()) => {}
+        Err(e) => {
+            return bad_request(format!("invalid webhook endpoint: {e}"));
+        }
+    }
+    if let Some(message) = webhook_caps_error(&subscription) {
+        return bad_request(message);
+    }
+    let conn = match webhooks_actions::open_connection() {
+        Ok(conn) => conn,
+        Err(e) => return webhook_store_failure(e),
+    };
+    if let Err(e) = SubscriptionRepository::new(&conn).upsert(subscription.clone()) {
+        // The checks above are not the only validator: upsert runs
+        // `WebhookSubscription::validate` (non-empty fields, length and
+        // control-character bounds), and its refusal is a bad request, not
+        // a server fault.
+        if matches!(e, MCSError::InvalidParams(_)) {
+            return bad_request(format!("invalid webhook subscription: {e}"));
+        }
+        return webhook_store_failure(e);
+    }
+    (StatusCode::CREATED, Json(subscription)).into_response()
+}
+
+/// `PATCH /ui/api/webhooks/{id}` — change any subset of one subscription.
+/// A named field replaces the stored value; everything else stays.
+#[cfg(feature = "webhooks")]
+async fn admin_update_webhook(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return *response;
+    }
+    let Some(_) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let id = match Uuid::parse_str(id.as_str()) {
+        Ok(id) => id,
+        // A malformed id names no row, the same answer the principals routes
+        // give for an id their key format cannot parse.
+        Err(_) => return not_found(),
+    };
+    let patch: WebhookPatch = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return bad_request("the body must be a JSON patch"),
+    };
+    let conn = match webhooks_actions::open_connection() {
+        Ok(conn) => conn,
+        Err(e) => return webhook_store_failure(e),
+    };
+    let repo = SubscriptionRepository::new(&conn);
+    let row = match repo.get(id) {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(),
+        Err(e) => return webhook_store_failure(e),
+    };
+    let merged = WebhookSubscription {
+        subscription_id: id,
+        endpoint: patch
+            .endpoint
+            .as_deref()
+            .unwrap_or(&row.endpoint)
+            .to_owned(),
+        event_operations: patch.event_operations.unwrap_or(row.event_operations),
+        entity_types: patch.entity_types.unwrap_or(row.entity_types),
+        ignored_origins: patch.ignored_origins.unwrap_or(row.ignored_origins),
+        consumer_origin: patch
+            .consumer_origin
+            .as_deref()
+            .unwrap_or(&row.consumer_origin)
+            .to_owned(),
+        secret_ref: patch
+            .secret_ref
+            .as_deref()
+            .unwrap_or(&row.secret_ref)
+            .to_owned(),
+        enabled: patch.enabled.unwrap_or(row.enabled),
+    };
+    match webhooks_actions::validate_endpoint_shape(&merged.endpoint) {
+        Ok(()) => {}
+        Err(e) => {
+            return bad_request(format!("invalid webhook endpoint: {e}"));
+        }
+    }
+    if let Some(message) = webhook_caps_error(&merged) {
+        return bad_request(message);
+    }
+    if let Err(e) = repo.upsert(merged.clone()) {
+        if matches!(e, MCSError::InvalidParams(_)) {
+            return bad_request(format!("invalid webhook subscription: {e}"));
+        }
+        return webhook_store_failure(e);
+    }
+    (StatusCode::OK, Json(merged)).into_response()
+}
+
+/// `DELETE /ui/api/webhooks/{id}` — delete one subscription. Deleting an id
+/// that names no row is a 404, the same answer the principals routes give;
+/// the MCP tool's lenient delete is a separate contract.
+#[cfg(feature = "webhooks")]
+async fn admin_delete_webhook(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return *response;
+    }
+    let Some(_) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let id = match Uuid::parse_str(id.as_str()) {
+        Ok(id) => id,
+        Err(_) => return not_found(),
+    };
+    let conn = match webhooks_actions::open_connection() {
+        Ok(conn) => conn,
+        Err(e) => return webhook_store_failure(e),
+    };
+    match SubscriptionRepository::new(&conn).delete(id) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => not_found(),
+        Err(e) => webhook_store_failure(e),
+    }
+}
+
+/// `GET /ui — serve the browser graph viewer's HTML shell. The shell and its
 /// `/ui/graph.css` + `/ui/graph.js` assets hold no graph data, so they are served
 /// without auth; the data they fetch (`/ui/graph`, `/ui/expand`) is what carries
 /// the auth + permission gate.
