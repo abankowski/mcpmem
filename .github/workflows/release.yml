@@ -104,6 +104,9 @@ jobs:
     needs: publish
     if: github.event_name == 'release'
     strategy:
+      # One target must not cancel the rest: each leg attaches its own artefact
+      # with --clobber, so they are independent and individually re-runnable.
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -129,6 +132,10 @@ jobs:
       - name: Archive and attach
         env:
           TAG: ${{ github.event.release.tag_name }}
+          # gh does not read the runner's ambient token; it needs the variable
+          # named. Without it the upload fails at exit 4, which is how the
+          # v1.0.3 release lost all four binaries (2026-09-12).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           archive="/tmp/mcpmem-${TAG}-${{ matrix.target }}.tar.gz"
           tar -C "target/${{ matrix.target }}/release" -czf "${archive}" mcpmem
@@ -143,7 +150,11 @@ jobs:
   # was rejected by the repository rules), and a workflow pushing past its own
   # rule would fail loudly anyway.
   bump:
-    needs: [publish, binaries]
+    # publish alone gates the bump. The binaries job is a distribution nicety;
+    # letting it fail skip the bump left main naming v1.0.3 while crates.io
+    # already held 1.0.3, and every later release repeated the publish (v1.0.3,
+    # 2026-09-12). The bump runs in parallel with the binaries instead.
+    needs: publish
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
