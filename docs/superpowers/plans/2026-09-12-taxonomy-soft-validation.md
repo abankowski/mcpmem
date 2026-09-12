@@ -268,7 +268,7 @@ Start the server in-process per `tests/` conventions. `create_entities` with `en
 
 - [ ] **Step 2: Implement the helper and wire the three handlers**
 
-Each handler maps the result `Vec<Entity>`/`Vec<Relation>` to `Vec<Value>`, then maps each object through `enrich_with_suggestions` with the authored type from the request (match by name; the result may be reordered). Serialize the mapped vector.
+Each handler maps the result `Vec<Entity>`/`Vec<Relation>` to `Vec<Value>`, then looks the ready suggestion array up per object (matching entities by name; the result may be reordered). Serialize the mapped vector.
 
 - [ ] **Step 3: Run the suite, then commit**
 
@@ -426,7 +426,7 @@ Commit: `feat(server): semantic taxonomy suggestions`.
 - Modify: `src/actions/memory.rs`
 - Test: integration
 
-**Change:** `enrich_with_suggestions` gains the option `(vs, provider)`:
+**Change:** the suggestion assembly gains the optional semantic tier `(vs, provider)`:
 - Semantic tier active → `suggest_semantic` for the unknown type name.
 - Offline tier always fills any remaining slots (semantic misses types that string distance catches).
 - For kind 0: also attach up to 3 `exampleEntities` (`{name, entityType}`) from the top similar types via `search_nodes_filtered(type, None, 0, 3)`.
