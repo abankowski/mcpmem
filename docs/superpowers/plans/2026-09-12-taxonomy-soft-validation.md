@@ -68,7 +68,7 @@ These apply to every task. Copy them verbatim into each task brief.
 
 - [ ] **Step 1: Write the failing inventory test**
 
-The test `every_migration_version_and_checksum_is_pinned` already derives from the `MIGRATIONS` array. It fails on array size 5 vs. 6 when the registry row is added. Run it after Step 2.
+The anchor test `every_migration_version_and_checksum_is_pinned` hardcodes the expected `(version, sha256)` pairs under `super::MIGRATIONS` — it does not derive them. Add the `(6, <sha256 of the new file content>)` pair to the expected list, then run the test. It must fail RED before the pair is added (the registry holds 6 entries, the expectation 5) and pass GREEN after.
 
 - [ ] **Step 2: Create the migration file**
 
@@ -134,8 +134,8 @@ In `events.rs`, change `pub const MIGRATIONS: [(i64, &str); 5]` to `[(i64, &str)
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test --test every_migration_version_and_checksum_is_pinned`
-Expected: PASS. The anchor pins the new checksum automatically.
+Run: `cargo test -p mcpmem-core --test every_migration_version_and_checksum_is_pinned`
+Expected: RED first (expectation holds 5 pairs, registry holds 6), PASS after the expected list gains the sixth pair. The anchor's sha256 pin is the test's own value — copy it from the test's expected array, which the first RED run's assertion message names.
 
 - [ ] **Step 5: Commit**
 
