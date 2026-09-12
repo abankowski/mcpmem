@@ -589,3 +589,182 @@ fn active_profile_snapshot_refreshes_after_a_durable_generation_change() {
         2
     );
 }
+
+fn taxonomy_fixture(dir: &Path) -> (std::path::PathBuf, rusqlite::Connection, IndexProfile) {
+    let database = dir.join("memory.db");
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    mcpmem_core::schema::initialize_database(&conn).unwrap();
+    let profile = profile();
+    IndexProfileRegistry::new(&conn).begin_rebuild(&profile).unwrap();
+    (database, conn, profile)
+}
+
+fn seed_taxonomy_job(
+    conn: &rusqlite::Connection,
+    kind: i64,
+    id: i64,
+    revision: i64,
+    operation: &str,
+    profile: &Uuid,
+) {
+    conn.execute(
+        "INSERT INTO taxonomy_job(subject_kind, subject_id, profile_id, subject_revision, operation)
+         VALUES(?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![kind, id, profile.to_string(), revision, operation],
+    )
+    .unwrap();
+}
+
+#[test]
+fn worker_embeds_a_pending_taxonomy_job_into_taxonomy_vector() {
+    let dir = tempfile::tempdir().unwrap();
+    let (database, conn, profile) = taxonomy_fixture(dir.path());
+    conn.execute(
+        "INSERT INTO type_dict(id, kind, name, revision) VALUES(1, 0, 'person', 3)",
+        [],
+    )
+    .unwrap();
+    seed_taxonomy_job(&conn, 0, 1, 3, "upsert", &profile.id);
+    let report = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5))
+        .run_once(now_us())
+        .unwrap();
+    assert_eq!(report.claimed, 1);
+    assert_eq!(report.committed, 1);
+    let (kind, id, revision, blob): (i64, i64, i64, Vec<u8>) = conn
+        .query_row(
+            "SELECT subject_kind, subject_id, subject_revision, blob FROM taxonomy_vector WHERE profile_id=?1",
+            [profile.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((kind, id, revision), (0, 1, 3));
+    assert_eq!(blob.len(), 8);
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM taxonomy_job WHERE subject_kind=0 AND subject_id=1 AND profile_id=?1",
+            [profile.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "done");
+}
+
+#[test]
+fn stale_taxonomy_job_fails_the_fence_without_a_vector_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let (database, conn, profile) = taxonomy_fixture(dir.path());
+    conn.execute(
+        "INSERT INTO type_dict(id, kind, name, revision) VALUES(1, 0, 'person', 5)",
+        [],
+    )
+    .unwrap();
+    // The job names a revision three behind the source row. The document
+    // fence reads the mismatch as vanished, so the worker must route the job
+    // through the retry path without writing a vector.
+    seed_taxonomy_job(&conn, 0, 1, 2, "upsert", &profile.id);
+    let report = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5))
+        .run_once(now_us())
+        .unwrap();
+    assert_eq!(report.claimed, 1);
+    assert_eq!(report.committed, 0);
+    assert_eq!(report.retried, 1);
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM taxonomy_vector", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let (state, attempts, last_error, next_attempt): (String, i64, Option<String>, i64) = conn
+        .query_row(
+            "SELECT state, attempts, last_error, next_attempt_us FROM taxonomy_job WHERE subject_kind=0 AND subject_id=1 AND profile_id=?1",
+            [profile.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "pending");
+    assert_eq!(attempts, 1);
+    assert!(last_error.is_some());
+    assert!(next_attempt > 0);
+}
+
+#[test]
+fn worker_removes_the_vector_row_for_a_taxonomy_delete_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let (database, conn, profile) = taxonomy_fixture(dir.path());
+    // A relation tombstone at revision 5 with a vector row to remove.
+    conn.execute(
+        "INSERT INTO taxonomy_relation(id, from_id, to_id, type_id, revision, deleted) VALUES(10, 1, 2, 3, 5, 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO taxonomy_vector(profile_id, subject_kind, subject_id, subject_revision, blob, created_at_us, source) VALUES(?1, 2, 10, 5, X'0000000000000000', 1, 'seed')",
+        [profile.id.to_string()],
+    )
+    .unwrap();
+    seed_taxonomy_job(&conn, 2, 10, 5, "delete", &profile.id);
+    let report = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5))
+        .run_once(now_us())
+        .unwrap();
+    assert_eq!(report.claimed, 1);
+    assert_eq!(report.committed, 1);
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM taxonomy_vector", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM taxonomy_job WHERE subject_kind=2 AND subject_id=10 AND profile_id=?1",
+            [profile.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "done");
+}
+
+#[test]
+fn vanished_taxonomy_subject_retries_then_dead_letters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (database, conn, profile) = taxonomy_fixture(dir.path());
+    // The subject has no type_dict row, so the document fence reads it as
+    // vanished. A stale vector row stays until the job is dead-lettered,
+    // mirroring the entity dead-letter cleanup.
+    conn.execute(
+        "INSERT INTO taxonomy_vector(profile_id, subject_kind, subject_id, subject_revision, blob, created_at_us, source) VALUES(?1, 0, 1, 3, X'0000000000000000', 1, 'seed')",
+        [profile.id.to_string()],
+    )
+    .unwrap();
+    seed_taxonomy_job(&conn, 0, 1, 3, "upsert", &profile.id);
+    let worker = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(1));
+    // Each poll claims the same job and fails it. Every failure is a retry
+    // until the attempt budget is spent, then the job is dead-lettered. The
+    // worker schedules each retry 1s ahead, so the synthetic clock must
+    // advance past it or no later poll will ever claim the job again.
+    let start = now_us();
+    let mut dead_seen = false;
+    for i in 0..24 {
+        let report = worker.run_once(start + i * 2_000_000).unwrap();
+        dead_seen |= report.dead == 1;
+        if dead_seen {
+            break;
+        }
+    }
+    assert!(dead_seen, "the job must be dead-lettered after max attempts");
+    let (state, attempts): (String, i64) = conn
+        .query_row(
+            "SELECT state, attempts FROM taxonomy_job WHERE subject_kind=0 AND subject_id=1 AND profile_id=?1",
+            [profile.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "dead");
+    assert!(attempts >= 8);
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM taxonomy_vector", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
