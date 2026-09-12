@@ -216,8 +216,16 @@ finishes or errors.
   contains the git stderr tail (truncated, redacted of the auth header).
 - Duplicate key → 409.
 - Job in flight for key → 409 `already_in_progress`.
-- DB file deletion failure → remove returns error, row stays `removing`,
-  operator sees it in the list with error text.
+- DB file deletion failure → remove returns error, row transitions to
+  `error` with `last_error` set, so the operator sees it in the list with
+  error text and can retry reindex (worktree repair re-clones) or remove.
+  ~~row stays `removing`, operator sees it in the list with error text~~
+  **SUPERSEDED (2026-09-12, final review):** a row left in `removing` is
+  filtered from the list (the design's own list rule), so a stuck wipe was
+  invisible and the key unrecoverable from the UI. Transitioning to
+  `error` keeps the row visible and actionable. The wipe phase also
+  evicts the project's code-vector store (its HNSW index and live SQLite
+  connection on the same file) before deleting the database.
 - Server restart leaves rows mid-flight (`cloning`/`indexing`): on
   startup, mark those `pending`; a reindex or remove retries from a known
   point. Worktree repair: if the clone dir exists but is not a valid git

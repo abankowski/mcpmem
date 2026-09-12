@@ -104,3 +104,19 @@ pub fn resolve(project: &str) -> Result<Arc<VectorStore>> {
     g.warm.put(project.to_string(), Arc::clone(&store));
     Ok(store)
 }
+
+/// Close the canonical vector index for `project`: evict it from the warm LRU
+/// and forget the live weak entry. Once every caller drops its [`Arc`], the
+/// HNSW graph is freed and the per-project database file may be deleted.
+///
+/// Callers must run [`crate::code_registry::drop_project`] on the same
+/// project first, and stop any watcher before either call: a live handle
+/// keeps the SQLite file open.
+pub fn drop_project(project: &str) -> Result<()> {
+    crate::code_registry::validate_project(project)?;
+    let inner = INNER.get().expect("registry inner set alongside config");
+    let mut g = inner.lock();
+    g.live.remove(project);
+    g.warm.pop(project);
+    Ok(())
+}

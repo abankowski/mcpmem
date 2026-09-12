@@ -7,6 +7,7 @@ use mcpmem::actions::code::{
     handle_code_repo_add, handle_code_repo_list, handle_code_repo_reindex, handle_code_repo_remove,
 };
 use mcpmem::code_registry;
+use mcpmem::code_vec_registry;
 use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::kg::GraphHandle;
 use mcpmem::repos;
@@ -58,8 +59,13 @@ static FIXTURE: std::sync::LazyLock<(tempfile::TempDir, std::path::PathBuf)> =
             2,
         )
         .unwrap();
+        let code_base = std::path::PathBuf::from(format!("{}.code", db.display()));
+        code_vec_registry::init(
+            code_base.clone(),
+            code_vec_registry::DEFAULT_CODE_EMBEDDING_DIMS,
+        );
         code_registry::init(
-            std::path::PathBuf::from(format!("{}.code", db.display())),
+            code_base,
             Durability::Async,
             SqliteTuning::default(),
             std::num::NonZeroUsize::new(8).unwrap(),

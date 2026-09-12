@@ -5,10 +5,12 @@ use std::path::Path;
 use std::process::Command;
 
 use mcpmem::code_registry;
+use mcpmem::code_vec_registry;
 use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::errors::MCSError;
 use mcpmem::kg::GraphHandle;
 use mcpmem::repos::{self, RepoInput};
+use std::sync::Arc;
 
 fn git(args: &[&str], cwd: Option<&Path>) {
     let mut cmd = Command::new("git");
@@ -60,6 +62,10 @@ static SETUP: std::sync::LazyLock<(tempfile::TempDir, std::path::PathBuf)> =
         // The per-project index DBs and the clone worktrees share one base,
         // `<memory file>.code` — the sibling the server derives at startup.
         let code_base = dir.path().join("t.mcpmem.code");
+        code_vec_registry::init(
+            code_base.clone(),
+            code_vec_registry::DEFAULT_CODE_EMBEDDING_DIMS,
+        );
         code_registry::init(
             code_base,
             Durability::Async,
@@ -271,4 +277,67 @@ fn reindex_during_in_flight_job_conflicts() {
         matches!(repos::reindex("contested"), Err(MCSError::InvalidParams(_))),
         "a second trigger while one job is in flight conflicts"
     );
+}
+
+#[test]
+fn remove_evicts_the_vector_index() {
+    let (dir, _db) = setup();
+    let repo = fixture_repo(dir.path(), "upstream-vec");
+    let input = RepoInput {
+        key: "vec-key".into(),
+        url: repo.to_string_lossy().into_owned(),
+        auth_kind: "none".into(),
+        auth_secret: None,
+        snippets: false,
+    };
+    // Resolve first, exactly as code_semantic_search would: the resolve warms
+    // the registry. A remove that forgets to evict it would serve this Arc
+    // again over the deleted database file.
+    let first = code_vec_registry::resolve("vec-key").expect("resolve opens an index");
+    repos::add(&input).expect("add clones and indexes");
+    repos::remove("vec-key").expect("remove wipes the row, DB and worktree");
+    let second = code_vec_registry::resolve("vec-key").expect("resolve reopens after the wipe");
+    assert!(
+        !Arc::ptr_eq(&first, &second),
+        "the same Arc would prove the warm vector store survived the wipe"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_remove_marks_the_row_error_and_a_retry_recovers() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, _db) = setup();
+    let repo = fixture_repo(dir.path(), "upstream-sticky");
+    let input = RepoInput {
+        key: "sticky".into(),
+        url: repo.to_string_lossy().into_owned(),
+        auth_kind: "none".into(),
+        auth_secret: None,
+        snippets: false,
+    };
+    repos::add(&input).expect("add clones and indexes");
+    let wt = dir
+        .path()
+        .join("t.mcpmem.code")
+        .join("repos")
+        .join("sticky");
+    let mut perm = std::fs::metadata(&wt).unwrap().permissions();
+    perm.set_mode(0o500);
+    std::fs::set_permissions(&wt, perm).unwrap();
+    let removed = repos::remove("sticky");
+    assert!(removed.is_err(), "the wipe fails on the read-only worktree");
+    let mut perm = std::fs::metadata(&wt).unwrap().permissions();
+    perm.set_mode(0o700);
+    std::fs::set_permissions(&wt, perm).unwrap();
+    let row = repos::get_row("sticky")
+        .unwrap()
+        .expect("the row survives the failed wipe");
+    assert_eq!(
+        row.state, "error",
+        "a failed wipe must not stay hidden in `removing`"
+    );
+    assert!(row.last_error.is_some(), "the failure message is recorded");
+    repos::reindex("sticky").expect("reindex recovers after the permission is restored");
+    assert_eq!(repos::get_row("sticky").unwrap().unwrap().state, "indexed");
 }

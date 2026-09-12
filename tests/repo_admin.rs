@@ -7,6 +7,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use mcpmem::code_registry;
+use mcpmem::code_vec_registry;
 use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::repos;
 mod support;
@@ -69,6 +70,10 @@ async fn fixture() -> &'static Fixture {
             // uses — so wipe assertions and resolve paths stay aligned.
             let db_path = server.memory_db_path();
             let code_base = std::path::PathBuf::from(format!("{}.code", db_path.display()));
+            code_vec_registry::init(
+                code_base.clone(),
+                code_vec_registry::DEFAULT_CODE_EMBEDDING_DIMS,
+            );
             code_registry::init(
                 code_base.clone(),
                 Durability::Async,

@@ -526,6 +526,10 @@ async function loadRepos() {
 }
 
 const TRANSITIONAL = ["pending", "cloning", "indexing", "removing"];
+// Rows in these states have a job running right now, so their actions must
+// wait. `pending` is not busy: a crash leaves rows pending, and reindex
+// (re-clone) and remove (wipe) must stay available to recover them.
+const BUSY = ["cloning", "indexing", "removing"];
 
 function renderRepos(repos) {
   const tbody = document.getElementById("repo-rows");
@@ -551,11 +555,11 @@ function renderRepos(repos) {
     const actions = document.createElement("td");
     const reindex = document.createElement("button");
     reindex.textContent = "Reindex";
-    reindex.disabled = TRANSITIONAL.includes(r.state);
+    reindex.disabled = BUSY.includes(r.state);
     reindex.onclick = () => triggerReindex(r);
     const del = document.createElement("button");
     del.textContent = "Remove";
-    del.disabled = TRANSITIONAL.includes(r.state);
+    del.disabled = BUSY.includes(r.state);
     del.onclick = () => removeRepo(r);
     actions.append(reindex, del);
     tr.append(key, url, auth, state, last, actions);

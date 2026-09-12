@@ -427,8 +427,10 @@ fn prepare_auth(row: &FullRow) -> Result<PreparedAuth> {
                 .map_err(|e| MCSError::MemoryError(format!("ssh key stat failed: {e}")))?
                 .permissions();
             perm.set_mode(0o600);
-            std::fs::set_permissions(&path, perm)
-                .map_err(|e| MCSError::MemoryError(format!("ssh key chmod failed: {e}")))?;
+            if let Err(e) = std::fs::set_permissions(&path, perm) {
+                let _ = std::fs::remove_file(&path);
+                return Err(MCSError::MemoryError(format!("ssh key chmod failed: {e}")));
+            }
             Ok(PreparedAuth {
                 envs: vec![(
                     "GIT_SSH_COMMAND".to_owned(),
@@ -516,7 +518,10 @@ fn add_inner(key: &str) -> Result<Value> {
         let _ = set_state(key, STATE_ERROR, Some(&e), None);
         return Err(MCSError::MemoryError(e));
     }
-    set_state(key, STATE_INDEXING, None, None)?;
+    if let Err(e) = set_state(key, STATE_INDEXING, None, None) {
+        auth.cleanup();
+        return Err(e);
+    }
     let indexed = do_index(key, row.snippets);
     auth.cleanup();
     match indexed {
@@ -585,7 +590,9 @@ pub fn add_job(key: &str) -> Result<()> {
     std::thread::Builder::new()
         .name(format!("repo-add-{key}"))
         .spawn(move || {
-            let _ = add_inner(&key);
+            if let Err(e) = add_inner(&key) {
+                tracing::error!(error = %e, repo = %key, "the repository add job failed");
+            }
             end_job(&key);
         })
         .map_err(|e| MCSError::MemoryError(format!("job spawn failed: {e}")))?;
@@ -616,7 +623,9 @@ pub fn reindex_job(key: &str) -> Result<()> {
     std::thread::Builder::new()
         .name(format!("repo-reindex-{key}"))
         .spawn(move || {
-            let _ = reindex_inner(&key);
+            if let Err(e) = reindex_inner(&key) {
+                tracing::error!(error = %e, repo = %key, "the repository reindex job failed");
+            }
             end_job(&key);
         })
         .map_err(|e| MCSError::MemoryError(format!("job spawn failed: {e}")))?;
@@ -648,7 +657,9 @@ pub fn remove_job(key: &str) -> Result<()> {
     std::thread::Builder::new()
         .name(format!("repo-remove-{key}"))
         .spawn(move || {
-            let _ = remove_inner(&key);
+            if let Err(e) = remove_inner(&key) {
+                tracing::error!(error = %e, repo = %key, "the repository remove job failed");
+            }
             end_job(&key);
         })
         .map_err(|e| MCSError::MemoryError(format!("job spawn failed: {e}")))?;
@@ -682,10 +693,32 @@ fn remove_inner(key: &str) -> Result<()> {
         )
         .map_err(sql_error)?;
     }
+    match wipe_inner(key) {
+        Ok(()) => {
+            // Delete the row last: a failure above leaves a visible row.
+            open_connection()?
+                .execute("DELETE FROM code_repo WHERE key = ?1", [key])
+                .map_err(sql_error)?;
+            Ok(())
+        }
+        Err(e) => {
+            // A failed wipe must not stay hidden in `removing`: mark the row
+            // `error` so the list shows it with the failure and the operator
+            // can retry the remove. The row is deleted only on success.
+            let message = format!("{e}");
+            let _ = set_state(key, STATE_ERROR, Some(&message), None);
+            Err(e)
+        }
+    }
+}
+
+fn wipe_inner(key: &str) -> Result<()> {
     // Stop any watcher on this project before touching its database files.
     let _ = crate::watcher::stop_watcher(key);
-    // Evict the project handle so its SQLite connections close.
+    // Evict the code handle so its SQLite connections close.
     let _ = crate::code_registry::drop_project(key);
+    // Evict the vector index so its HNSW graph (and its file handle) close.
+    let _ = crate::code_vec_registry::drop_project(key);
     // Delete the per-project index DB and its WAL sidecars.
     let runtime = RUNTIME
         .get()
@@ -708,9 +741,5 @@ fn remove_inner(key: &str) -> Result<()> {
         std::fs::remove_dir_all(&wt)
             .map_err(|e| MCSError::MemoryError(format!("worktree cleanup failed: {e}")))?;
     }
-    // Delete the row last: a failure above leaves a visible `removing` row.
-    open_connection()?
-        .execute("DELETE FROM code_repo WHERE key = ?1", [key])
-        .map_err(sql_error)?;
     Ok(())
 }
