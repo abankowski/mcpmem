@@ -24,11 +24,11 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -204,7 +204,24 @@ pub fn router(state: HttpState) -> Router {
         .route("/ui/graph", get(ui_graph_handler))
         .route("/ui/search", get(ui_search_handler))
         .route("/ui/node", get(ui_node_handler))
-        .route("/ui/expand", get(ui_expand_handler));
+        .route("/ui/expand", get(ui_expand_handler))
+        // The admin API. Every handler is gated on the `admin` scope, and the
+        // static `/ui/admin` page routes arrive with their assets in the task
+        // that ships the admin UI.
+        .route(
+            "/ui/api/principals",
+            get(admin_list_principals).post(admin_create_principal),
+        )
+        .route(
+            "/ui/api/principals/{id}",
+            patch(admin_update_principal).delete(admin_delete_principal),
+        )
+        .route("/ui/api/waitlist", get(admin_list_waitlist))
+        .route(
+            "/ui/api/waitlist/{id}/approve",
+            post(admin_approve_waitlist),
+        )
+        .route("/ui/api/waitlist/{id}", delete(admin_dismiss_waitlist));
     // The two `.well-known` documents. With OAuth off both answer 404, so a
     // server without OAuth advertises no authorization server.
     crate::oauth_routes::attach(router)
@@ -499,6 +516,416 @@ fn principal_of_ui(
         }
         _ => None,
     })
+}
+
+/// The principal behind this request, if it holds the admin scope. The
+/// static bearer token can never hold admin, so every admin is a human
+/// resolved through an OAuth grant.
+fn admin_principal(state: &HttpState, headers: &HeaderMap) -> Option<Principal> {
+    let p = principal_of_ui(state, headers, None)?;
+    p.scopes
+        .contains(crate::principals::ADMIN_SCOPE)
+        .then_some(p)
+}
+
+/// The gate every `/ui/api/*` handler runs first. `Ok(())` when the caller
+/// holds the admin scope; `Err(Response)` is the 401/403 answer.
+fn admin_gate(state: &HttpState, headers: &HeaderMap) -> std::result::Result<(), Response> {
+    if admin_principal(state, headers).is_some() {
+        return Ok(());
+    }
+    let response = if principal_of_ui(state, headers, None).is_some() {
+        insufficient_scope(state, &[crate::principals::ADMIN_SCOPE])
+    } else {
+        unauthorized(state)
+    };
+    Err(response)
+}
+
+/// The id path segment → (iss, sub).
+fn key_of_id(id: &str) -> Option<(String, String)> {
+    mcpmem_oauth::parse_principal_id(id)
+}
+
+/// Whether a built-in principal owns this identity. The keys are owned
+/// pairs; `contains` cannot borrow a `(&str, &str)` from them, so the
+/// comparison is spelled out rather than cloned per row.
+fn is_builtin(oauth: &OauthState, iss: &str, sub: &str) -> bool {
+    oauth
+        .builtin_keys
+        .iter()
+        .any(|(i, s)| i == iss && s == sub)
+}
+
+/// One principal as the admin API answers it: built-ins from the principals
+/// file, runtime rows from the store, both in the one shape.
+#[derive(serde::Serialize)]
+struct PrincipalView {
+    id: String,
+    name: String,
+    iss: String,
+    sub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    scopes: Vec<String>,
+    builtin: bool,
+    masked_by_builtin: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct PrincipalInput {
+    name: String,
+    iss: String,
+    sub: String,
+    #[serde(default)]
+    label: Option<String>,
+    scopes: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct PrincipalPatch {
+    #[serde(default)]
+    name: Option<String>,
+    /// Some("") clears the label.
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct ApproveBody {
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
+}
+
+fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
+    (status, Json(serde_json::json!({ "error": message.into() }))).into_response()
+}
+
+fn bad_request(message: impl Into<String>) -> Response {
+    json_error(StatusCode::BAD_REQUEST, message)
+}
+
+fn conflict(message: impl Into<String>) -> Response {
+    json_error(StatusCode::CONFLICT, message)
+}
+
+fn not_found() -> Response {
+    json_error(StatusCode::NOT_FOUND, "no such row")
+}
+
+fn store_failure(e: impl std::fmt::Display) -> Response {
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("principals store: {e}"))
+}
+
+/// `GET /ui/api/principals` — every principal the server knows: the built-ins
+/// from the principals file, then the runtime rows, with a row whose identity
+/// a built-in owns marked `masked_by_builtin`. The sidebar reads the mask
+/// flag and the `defaultNewPrincipalScopes` list to render the create form.
+async fn admin_list_principals(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return response;
+    }
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut out: Vec<PrincipalView> = oauth
+        .config
+        .principals
+        .iter()
+        .map(|p| PrincipalView {
+            id: mcpmem_oauth::principal_id(&p.iss, &p.sub),
+            name: p.name.clone(),
+            iss: p.iss.clone(),
+            sub: p.sub.clone(),
+            label: p.label.clone(),
+            scopes: p.scopes.clone(),
+            builtin: true,
+            masked_by_builtin: false,
+        })
+        .collect();
+    let runtime = match oauth.with_principals(|s| s.list()) {
+        Ok(rows) => rows,
+        Err(e) => return store_failure(e),
+    };
+    for row in runtime {
+        let masked = is_builtin(oauth, &row.iss, &row.sub);
+        out.push(PrincipalView {
+            id: mcpmem_oauth::principal_id(&row.iss, &row.sub),
+            name: row.name,
+            iss: row.iss,
+            sub: row.sub,
+            label: row.label,
+            scopes: row.scopes,
+            builtin: false,
+            masked_by_builtin: masked,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "principals": out,
+            "defaultNewPrincipalScopes": oauth.config.default_new_principal_scopes,
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /ui/api/principals` — create one runtime principal. A key a
+/// built-in owns is refused before the store is touched: the principals file
+/// is the operator's source of truth for those identities.
+async fn admin_create_principal(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return response;
+    }
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let input: PrincipalInput = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return bad_request("the body must be a JSON principal"),
+    };
+    let name = input.name.trim();
+    if name.is_empty() || input.iss.is_empty() || input.sub.is_empty() {
+        return bad_request("name, iss and sub are required");
+    }
+    let scopes = match crate::principals::canonical_scopes(&input.scopes) {
+        Ok(s) if !s.is_empty() => s,
+        _ => return bad_request("at least one known scope is required"),
+    };
+    if is_builtin(oauth, &input.iss, &input.sub) {
+        return conflict("a built-in principal owns this identity; it is immutable");
+    }
+    // A duplicate runtime key is refused before the store is touched, so the
+    // answer is 409 and not the store's UNIQUE-constraint error.
+    match oauth.with_principals(|s| s.get(&input.iss, &input.sub)) {
+        Ok(Some(_)) => return conflict("a runtime principal already owns this identity"),
+        Ok(None) => {}
+        Err(e) => return store_failure(e),
+    }
+    if let Err(e) = oauth
+        .with_principals(|s| s.create(&input.iss, &input.sub, name, input.label.as_deref(), &scopes))
+    {
+        return store_failure(e);
+    }
+    let view = PrincipalView {
+        id: mcpmem_oauth::principal_id(&input.iss, &input.sub),
+        name: name.to_owned(),
+        iss: input.iss,
+        sub: input.sub,
+        label: input.label,
+        scopes,
+        builtin: false,
+        masked_by_builtin: false,
+    };
+    (StatusCode::CREATED, Json(view)).into_response()
+}
+
+/// `PATCH /ui/api/principals/{id}` — change name, label or scopes of one
+/// runtime principal. Every field is optional; a named field replaces the
+/// stored value.
+async fn admin_update_principal(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return response;
+    }
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((iss, sub)) = key_of_id(&id) else {
+        return not_found();
+    };
+    if is_builtin(oauth, &iss, &sub) {
+        return conflict("a built-in principal owns this identity; it is immutable");
+    }
+    let row = match oauth.with_principals(|s| s.get(&iss, &sub)) {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(),
+        Err(e) => return store_failure(e),
+    };
+    let patch: PrincipalPatch = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return bad_request("the body must be a JSON patch"),
+    };
+    let name = patch.name.as_deref().unwrap_or(&row.name).trim().to_owned();
+    if name.is_empty() {
+        return bad_request("name must not be empty");
+    }
+    let label = match patch.label {
+        Some(raw) if raw.is_empty() => None,
+        value => value.or(row.label.clone()),
+    };
+    let scopes = match patch.scopes {
+        Some(raw) => match crate::principals::canonical_scopes(&raw) {
+            Ok(s) if !s.is_empty() => s,
+            _ => return bad_request("at least one known scope is required"),
+        },
+        None => row.scopes.clone(),
+    };
+    if let Err(e) = oauth
+        .with_principals(|s| s.update(&iss, &sub, &name, label.as_deref(), &scopes))
+    {
+        return store_failure(e);
+    }
+    (
+        StatusCode::OK,
+        Json(PrincipalView {
+            id,
+            name,
+            iss,
+            sub,
+            label,
+            scopes,
+            builtin: false,
+            masked_by_builtin: false,
+        }),
+    )
+        .into_response()
+}
+
+/// `DELETE /ui/api/principals/{id}` — delete one runtime principal and
+/// revoke every live token family that names it.
+///
+/// The revocation runs by the row's *current* name. A token minted under the
+/// row's previous name survives a rename-then-delete; the v1 spec documents
+/// that gap and this task does not close it.
+async fn admin_delete_principal(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return response;
+    }
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((iss, sub)) = key_of_id(&id) else {
+        return not_found();
+    };
+    if is_builtin(oauth, &iss, &sub) {
+        return conflict("a built-in principal owns this identity; it is immutable");
+    }
+    let row = match oauth.with_principals(|s| s.get(&iss, &sub)) {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(),
+        Err(e) => return store_failure(e),
+    };
+    if let Err(e) = oauth.with_principals(|s| s.delete(&iss, &sub)) {
+        return store_failure(e);
+    }
+    let revoked = oauth.revoke_principal(&row.name).unwrap_or(0);
+    tracing::info!(name = %row.name, revoked, "deleted principal and revoked token families");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `GET /ui/api/waitlist` — every entry awaiting approval, in the order the
+/// store keeps them.
+async fn admin_list_waitlist(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return response;
+    }
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let entries = match oauth.with_principals(|s| s.waitlist()) {
+        Ok(rows) => rows,
+        Err(e) => return store_failure(e),
+    };
+    let out: Vec<serde_json::Value> = entries
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": mcpmem_oauth::principal_id(&e.iss, &e.sub),
+                "name": e.name,
+                "iss": e.iss,
+                "sub": e.sub,
+                "firstSeenUs": e.first_seen_us,
+                "lastSeenUs": e.last_seen_us,
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!({ "entries": out }))).into_response()
+}
+
+/// `POST /ui/api/waitlist/{id}/approve` — promote one entry to a runtime
+/// principal in one transaction. A body without a `scopes` member promotes
+/// with the configured default list.
+async fn admin_approve_waitlist(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return response;
+    }
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((iss, sub)) = key_of_id(&id) else {
+        return not_found();
+    };
+    let scopes = match serde_json::from_str::<ApproveBody>(&body) {
+        Ok(body) => body
+            .scopes
+            .unwrap_or_else(|| oauth.config.default_new_principal_scopes.clone()),
+        Err(_) => return bad_request("the body must be JSON with an optional scopes list"),
+    };
+    let scopes = match crate::principals::canonical_scopes(&scopes) {
+        Ok(s) if !s.is_empty() => s,
+        _ => return bad_request("at least one known scope is required"),
+    };
+    match oauth.with_principals(|s| s.approve(&iss, &sub, &scopes)) {
+        Ok(Some(row)) => (
+            StatusCode::CREATED,
+            Json(PrincipalView {
+                id: mcpmem_oauth::principal_id(&iss, &sub),
+                name: row.name,
+                iss,
+                sub,
+                label: None,
+                scopes,
+                builtin: false,
+                masked_by_builtin: false,
+            }),
+        )
+            .into_response(),
+        Ok(None) => not_found(),
+        Err(e) => store_failure(e),
+    }
+}
+
+/// `DELETE /ui/api/waitlist/{id}` — discard one entry without promoting it.
+async fn admin_dismiss_waitlist(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return response;
+    }
+    let Some(oauth) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((iss, sub)) = key_of_id(&id) else {
+        return not_found();
+    };
+    match oauth.with_principals(|s| s.dismiss_waitlist(&iss, &sub)) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => not_found(),
+        Err(e) => store_failure(e),
+    }
 }
 
 /// `GET /ui` — serve the browser graph viewer's HTML shell. The shell and its

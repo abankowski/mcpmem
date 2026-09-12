@@ -27,9 +27,9 @@
 //! [`Authorized::clock`] instead of sleeping.
 
 use axum::body::Body;
-use axum::http::{Request, Response, StatusCode};
+use axum::http::{Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
-use mcpmem_oauth::store::{CodeGrant, Grant, Store};
+use mcpmem_oauth::store::{CodeGrant, Grant, Store, TokenKind};
 use serde_json::Value;
 
 use super::fake_idp::{FakeIdp, IdpBehaviour};
@@ -906,4 +906,146 @@ fn hidden_field(body: &str, name: &str) -> String {
         .find('"')
         .unwrap_or_else(|| panic!("the hidden field {name} is unterminated"));
     rest[..end].to_owned()
+}
+
+/// Every scope the consent page offers, in page order.
+///
+/// That is what a browser that ticks every box posts, and reading it off the
+/// page keeps the caller free of knowing what the configured principal holds:
+/// the page offers the intersection of the request with the grant, and this
+/// returns exactly that intersection.
+fn offered_scopes(body: &str) -> Vec<String> {
+    let needle = "name=\"scope\" value=\"";
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find(needle) {
+        let value = &rest[start + needle.len()..];
+        let end = value.find('"').expect("the offered scope is unterminated");
+        out.push(value[..end].to_owned());
+        rest = &value[end + 1..];
+    }
+    assert!(!out.is_empty(), "the page offers no scope to consent to");
+    out
+}
+
+/// Drive one full login for `server`'s built-in principal and return the
+/// access token. The walk is the real one — register, authorize, through the
+/// fake provider, callback, the consent page, the token exchange — and it is
+/// the same sequence [`Flow::into_consent`] composes, reused rather than
+/// rewritten.
+///
+/// The authorization request names `graph-read` and the admin scope, and the
+/// form approves exactly what the page offers, so a principal holding either
+/// one reaches the token. A principal holding neither has no token to give,
+/// and the waitlist tests, whose allowed human the provider cannot
+/// authenticate at all, plant one instead: see [`plant_admin_token`].
+pub async fn admin_access_token(idp: &FakeIdp, server: &Server) -> String {
+    let redirect = format!("{}/ui/admin/callback", super::PUBLIC_URL);
+    let client_id = register(server, "admin-test", &redirect).await;
+    let scope = format!("graph-read {}", mcpmem::principals::ADMIN_SCOPE);
+    let challenge = code_challenge();
+    let params = vec![
+        ("response_type", "code"),
+        ("client_id", client_id.as_str()),
+        ("redirect_uri", redirect.as_str()),
+        ("scope", scope.as_str()),
+        ("state", "st"),
+        ("code_challenge", challenge.as_str()),
+        ("code_challenge_method", "S256"),
+    ];
+    let started = server
+        .request(
+            Request::get(format!("/oauth/authorize?{}", query_string(&params)))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        started.status(),
+        StatusCode::FOUND,
+        "the authorization request is accepted"
+    );
+    let back = idp.login(&super::header(&started, "location")).await;
+    let callback = server
+        .request(
+            Request::get(format!(
+                "/oauth/callback?code={}&state={}",
+                back.code, back.state
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        callback.status(),
+        StatusCode::OK,
+        "the callback answers the consent page"
+    );
+    let page = body_text(callback).await;
+    let scopes = offered_scopes(&page);
+    let csrf = hidden_field(&page, "csrf");
+    let form_state = hidden_field(&page, "state");
+    let mut fields: Vec<(&str, &str)> = vec![("csrf", csrf.as_str()), ("state", form_state.as_str())];
+    fields.extend(scopes.iter().map(|s| ("scope", s.as_str())));
+    let decided = server
+        .request(
+            Request::post("/oauth/consent")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(query_string(&fields)))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        decided.status(),
+        StatusCode::FOUND,
+        "the approval is accepted"
+    );
+    let code = code_from(&super::header(&decided, "location"));
+    let token_res = server
+        .request(
+            Request::post("/oauth/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "grant_type=authorization_code&code={code}&redirect_uri={redirect}&client_id={client_id}&code_verifier={verifier}",
+                    verifier = CODE_VERIFIER,
+                )))
+                .unwrap(),
+        )
+        .await;
+    let body: Value = super::json(token_res).await;
+    string_member(&body, "access_token")
+}
+
+/// Plant a live access token holding the admin scope.
+///
+/// For a server whose allowed human cannot complete a login. The fake
+/// provider authenticates `sub-1` and nobody else, so a server that allows
+/// somebody else — the waitlist tests — has no login that ever reaches the
+/// consent page and no token to walk out of it. The row is written the way
+/// every minted token is stored, and the bearer path validates it the same
+/// way, so the admin API cannot tell this credential from a walked one.
+pub fn plant_admin_token(server: &Server) -> String {
+    let token = mcpmem_oauth::new_token();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_micros() as i64;
+    with_store(server, |store| {
+        store
+            .put_token(
+                &token,
+                TokenKind::Access,
+                &Grant {
+                    client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
+                    principal: "adam".to_owned(),
+                    scopes: vec![mcpmem::principals::ADMIN_SCOPE.to_owned()],
+                    resource: format!("{}/mcp", super::PUBLIC_URL),
+                    family: mcpmem_oauth::new_token(),
+                },
+                now,
+                now + 60 * 60 * 1_000_000,
+            )
+            .expect("the store writes the planted token");
+    });
+    token
 }
