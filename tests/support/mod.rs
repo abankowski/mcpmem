@@ -172,9 +172,10 @@ impl Server {
             .expect("this server was built with a clock")
     }
 
-    /// The directory holding the database, for a test that inspects the files.
-    pub fn dir(&self) -> &std::path::Path {
-        self.dir.path()
+    /// The tempdir this server was built on, for fixtures that must live
+    /// near the memory DB (git fixture repos, code-db assertion paths).
+    pub fn dir(&self) -> &tempfile::TempDir {
+        &self.dir
     }
 
     /// The memory-database path this server was built on, for stores that

@@ -261,6 +261,10 @@ pub fn router(state: HttpState) -> Router {
     // answers their 404 by hiding the section.
     #[cfg(feature = "webhooks")]
     let router = attach_webhook_admin_routes(router);
+    // The managed-repo admin API exists only in a build with the `code`
+    // feature. Elsewhere the routes are absent and the SPA hides the section.
+    #[cfg(feature = "code")]
+    let router = attach_repo_admin_routes(router);
     // The two `.well-known` documents. With OAuth off both answer 404, so a
     // server without OAuth advertises no authorization server.
     crate::oauth_routes::attach(router)
@@ -1074,6 +1078,20 @@ fn attach_webhook_admin_routes(router: Router<HttpState>) -> Router<HttpState> {
         )
 }
 
+/// Attach the managed-repo admin routes. Every handler is gated on the
+/// `admin` scope like the principals routes; the routes themselves exist
+/// only when the `code` feature compiled them in.
+#[cfg(feature = "code")]
+fn attach_repo_admin_routes(router: Router<HttpState>) -> Router<HttpState> {
+    router
+        .route("/ui/api/repos", get(admin_list_repos).post(admin_create_repo))
+        .route(
+            "/ui/api/repos/{key}/reindex",
+            post(admin_reindex_repo),
+        )
+        .route("/ui/api/repos/{key}", delete(admin_remove_repo))
+}
+
 /// A 500 whose message names the webhook store, so an operator does not
 /// chase the principals store for a subscription failure.
 #[cfg(feature = "webhooks")]
@@ -1283,6 +1301,151 @@ async fn admin_delete_webhook(
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => not_found(),
         Err(e) => webhook_store_failure(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Managed repositories (`/ui/api/repos`), behind the `code` feature
+// ---------------------------------------------------------------------------
+
+/// `GET /ui/api/repos` — every managed repository with its live state.
+/// Mutations answer 202 and run the job on a detached thread; the next poll
+/// of the list shows the transition.
+#[cfg(feature = "code")]
+async fn admin_list_repos(State(state): State<HttpState>, headers: HeaderMap) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return *response;
+    }
+    match crate::repos::list() {
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "repos": rows })),
+        )
+            .into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("repos store: {e}"),
+        ),
+    }
+}
+
+/// `POST /ui/api/repos` — register one repository and schedule its clone +
+/// index job. The 202 answers before the job finishes; row state moves
+/// `pending` → `cloning` → `indexing` → `indexed` (or `error`) and the list
+/// shows it.
+#[cfg(feature = "code")]
+async fn admin_create_repo(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return *response;
+    }
+    let input: crate::repos::RepoInput = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return bad_request(
+                "the body must be a JSON repo: {key, url, authKind?, authSecret?, snippets?}",
+            )
+        }
+    };
+    if let Err(e) = crate::repos::register(&input) {
+        return match e {
+            MCSError::ConstraintViolation(message) => conflict(message),
+            MCSError::InvalidParams(message) => bad_request(message),
+            other => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("repos store: {other}"),
+            ),
+        };
+    }
+    let key = input.key.clone();
+    if let Err(e) = crate::repos::add_job(&key) {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("repos store: {e}"),
+        );
+    }
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "accepted", "key": key })),
+    )
+        .into_response()
+}
+
+/// `POST /ui/api/repos/{key}/reindex` — schedule a fetch + reindex job for
+/// one repository. An unknown key is a 404; a job already in flight for the
+/// key conflicts.
+#[cfg(feature = "code")]
+async fn admin_reindex_repo(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return *response;
+    }
+    match crate::repos::get_row(&key) {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(),
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("repos store: {e}"),
+            )
+        }
+    }
+    match crate::repos::reindex_job(&key) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "status": "accepted", "key": key })),
+        )
+            .into_response(),
+        Err(MCSError::InvalidParams(message)) => {
+            json_error(StatusCode::CONFLICT, message)
+        }
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("repos store: {e}"),
+        ),
+    }
+}
+
+/// `DELETE /ui/api/repos/{key}` — schedule the removal of one repository:
+/// its index DB, its worktree and its row. An unknown key is a 404.
+#[cfg(feature = "code")]
+async fn admin_remove_repo(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return *response;
+    }
+    match crate::repos::get_row(&key) {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found(),
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("repos store: {e}"),
+            )
+        }
+    }
+    match crate::repos::remove_job(&key) {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "status": "accepted", "key": key })),
+        )
+            .into_response(),
+        Err(MCSError::InvalidParams(message)) => {
+            json_error(StatusCode::CONFLICT, message)
+        }
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("repos store: {e}"),
+        ),
     }
 }
 

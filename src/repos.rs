@@ -597,8 +597,17 @@ pub fn reindex(key: &str) -> Result<Value> {
 }
 
 /// Schedule the reindex job on a detached thread. The HTTP reindex path.
+///
+/// The row is marked `indexing` here, before the thread starts, so a client
+/// that polls the list after the 202 sees the job in progress. Without that,
+/// the row keeps its stale `indexed` state for the microseconds before the
+/// thread's first write, and a poll in that window races the running job.
 pub fn reindex_job(key: &str) -> Result<()> {
     begin_checked(key)?;
+    if let Err(e) = set_state(key, STATE_INDEXING, None, None) {
+        end_job(key);
+        return Err(e);
+    }
     let key = key.to_owned();
     std::thread::Builder::new()
         .name(format!("repo-reindex-{key}"))
@@ -620,8 +629,17 @@ pub fn remove(key: &str) -> Result<()> {
 }
 
 /// Schedule the remove job on a detached thread. The HTTP remove path.
+///
+/// The row is marked `removing` here, before the thread starts, so the row
+/// disappears from the list at the 202. `list` hides `removing` rows, so a
+/// client polling after the 202 sees the removal as done and cannot race the
+/// running job.
 pub fn remove_job(key: &str) -> Result<()> {
     begin_checked(key)?;
+    if let Err(e) = set_state(key, STATE_REMOVING, None, None) {
+        end_job(key);
+        return Err(e);
+    }
     let key = key.to_owned();
     std::thread::Builder::new()
         .name(format!("repo-remove-{key}"))

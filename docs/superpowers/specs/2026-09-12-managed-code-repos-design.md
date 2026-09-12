@@ -109,9 +109,13 @@ DBs; lives under the same `.code` dir).
 
 ### 4. HTTP admin API — `src/http.rs` (existing pattern, `admin` scope gate)
 
-- `GET /ui/api/repos` — list (secrets masked), 200. Also returns
-  `codeSectionEnabled` so the UI can hide the section when code indexing is
-  compiled out / disabled.
+- `GET /ui/api/repos` — list (secrets masked), 200.
+  ~~Also returns `codeSectionEnabled` so the UI can hide the section when
+  code indexing is compiled out / disabled.~~ **SUPERSEDED (2026-09-12,
+  during implementation):** the routes exist only when built with the `code`
+  feature; a build without it answers 404 and the admin SPA hides the
+  section on 404 — the same convention the webhooks section already uses.
+  No flag is returned.
 - `POST /ui/api/repos` — `{key, url, auth_kind, auth_secret?, snippets?}`.
   202 Accepted, job started (clone+index). 409 on duplicate key or an
   in-flight job for that key. 400 on invalid key/url/state.
