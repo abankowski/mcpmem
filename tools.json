@@ -274,6 +274,32 @@
     "annotations": { "readOnlyHint": true }
   },
   {
+    "name": "suggest_taxonomy",
+    "description": "Suggest existing taxonomy names similar to a new name before it is created. For kind `entityType` or `relationType` the offline tier suggests the closest existing type names from the graph, scored by string similarity; use it to keep the memory schema consistent. Kinds `entity` and `relation` return an empty suggestions list until the semantic tier lands in a later change.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "The name to find similar taxonomy names for (required, must not be blank)"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["entityType", "relationType", "entity", "relation"],
+          "description": "What kind of taxonomy entry to suggest (optional, default entityType)"
+        },
+        "topK": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Maximum number of suggestions to return (optional, default 10)"
+        }
+      },
+      "required": ["query"]
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
     "name": "upsert_entities",
     "description": "Create-or-merge entities idempotently. Entities that do not exist are created; existing exact-name entities are retyped when `entityType` differs; observations are added only when new. Use this to safely re-assert facts without losing new observations.",
     "inputSchema": {

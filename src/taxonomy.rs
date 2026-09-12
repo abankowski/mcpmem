@@ -6,6 +6,10 @@
 //! names and counts, and it returns scored suggestions. It does no I/O.
 
 use serde::Serialize;
+use serde_json::{Value, json};
+
+use crate::errors::{MCSError, Result};
+use crate::kg::GraphHandle;
 
 /// The kind of subject a taxonomy entry describes.
 ///
@@ -137,8 +141,85 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[cb.len()]
 }
 
+/// Default `topK` when the caller omits the argument.
+const DEFAULT_SUGGESTION_K: usize = 10;
+/// Lowest allowed `topK`.
+const MIN_SUGGESTION_K: usize = 1;
+/// Highest allowed `topK`.
+const MAX_SUGGESTION_K: usize = 100;
+
+/// Handles the `suggest_taxonomy` read tool.
+///
+/// The tool suggests existing taxonomy names that are similar to `query`.
+/// For kind `entityType` and `relationType` the offline tier returns the type
+/// names kept by the string engine. For kind `entity` and `relation` it
+/// returns an empty list until the semantic tier lands in a later change.
+/// The result is a JSON object of the shape `{ "suggestions": [...] }`.
+pub fn handle_suggest_taxonomy(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+    let query = params
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| MCSError::InvalidParams("Missing 'query' parameter".into()))?;
+    // Blank text matches nothing and asks the engine to compare an empty
+    // string against every name. Refuse it before the counts query.
+    if query.trim().is_empty() {
+        return Err(MCSError::InvalidParams(
+            "'query' must not be empty or whitespace".into(),
+        ));
+    }
+
+    let kind = params
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("entityType");
+    match kind {
+        "entityType" | "relationType" | "entity" | "relation" => (),
+        _ => return Err(MCSError::InvalidParams(format!(
+            "'kind' must be one of entityType, relationType, entity, relation"
+        ))),
+    }
+    let top_k = opt_usize(params, "topK", DEFAULT_SUGGESTION_K)?
+        .clamp(MIN_SUGGESTION_K, MAX_SUGGESTION_K);
+
+    let mut suggestions: Vec<Suggestion> = match kind {
+        "entityType" => {
+            let counts = kg.entity_type_counts();
+            let existing: Vec<(&str, usize)> = counts
+                .iter()
+                .map(|(n, c)| (n.as_str(), *c))
+                .collect();
+            suggest_strings(query, &existing)
+        }
+        "relationType" => {
+            let counts = kg.relation_type_counts();
+            let existing: Vec<(&str, usize)> = counts
+                .iter()
+                .map(|(n, c)| (n.as_str(), *c))
+                .collect();
+            suggest_strings(query, &existing)
+        }
+        // The semantic tier fills these kinds in a later change.
+        _ => Vec::new(),
+    };
+    suggestions.truncate(top_k);
+
+    Ok(json!({ "suggestions": suggestions }))
+}
+
+/// Reads a non-negative integer argument, or `default` when it is absent.
+fn opt_usize(params: &Value, key: &str, default: usize) -> Result<usize> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v.as_u64().map(|n| n as usize).ok_or_else(|| {
+            MCSError::InvalidParams(format!("'{key}' must be a non-negative integer"))
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use super::*;
 
     #[test]
@@ -201,5 +282,143 @@ mod tests {
         ];
         let got = suggest_strings("zzzz", &existing);
         assert!(got.is_empty());
+    }
+
+    /// A graph over a temporary database, seeded with two entity types and two
+    /// relation types. `dir` stays alive for the whole test.
+    fn seeded_graph() -> (tempfile::TempDir, crate::kg::GraphHandle) {
+        let dir = tempfile::tempdir().unwrap();
+        let kg = crate::kg::GraphHandle::new(
+            &dir.path().join("memory.db"),
+            crate::config::Durability::Sync,
+            crate::config::SqliteTuning::default(),
+            std::num::NonZeroUsize::new(32).unwrap(),
+            2,
+        )
+        .unwrap();
+        crate::actions::memory::handle_create_entities(
+            &kg,
+            Some(&json!({"entities":[
+                {"name":"a","entityType":"person","observations":[]},
+                {"name":"b","entityType":"project","observations":[]}
+            ]})),
+        )
+        .unwrap();
+        crate::actions::memory::handle_create_relations(
+            &kg,
+            Some(&json!({"relations":[
+                {"from":"a","to":"b","relationType":"knows"},
+                {"from":"b","to":"a","relationType":"relates_to"}
+            ]})),
+        )
+        .unwrap();
+        (dir, kg)
+    }
+
+    #[test]
+    fn suggest_taxonomy_suggests_existing_type_names() {
+        let (_dir, kg) = seeded_graph();
+
+        // A misspelled query gets the established entity type. The kind
+        // defaults to entityType when the argument is omitted.
+        let value = handle_suggest_taxonomy(
+            &kg,
+            Some(&json!({ "query": "persn" })),
+        )
+        .unwrap();
+        let suggestions = &value["suggestions"];
+        assert!(suggestions.is_array());
+        assert_eq!(suggestions[0]["name"], "person");
+        assert!(suggestions[0]["score"].as_f64().unwrap() > 0.0);
+
+        // The relationType kind reads the relation-type names.
+        let value = handle_suggest_taxonomy(
+            &kg,
+            Some(&json!({ "query": "know_", "kind": "relationType" })),
+        )
+        .unwrap();
+        let suggestions = &value["suggestions"];
+        assert!(suggestions.as_array().unwrap().iter().any(|s| s["name"] == "knows"));
+    }
+
+    #[test]
+    fn suggest_taxonomy_rejects_blank_query_and_unknown_kind() {
+        let (_dir, kg) = seeded_graph();
+
+        let Err(err) = handle_suggest_taxonomy(&kg, Some(&json!({ "query": "   " })))
+            else {
+                panic!("expected a blank-query error");
+            };
+        let err = err.to_string();
+        assert!(err.contains("must not be empty or whitespace"), "{err}");
+
+        let Err(err) = handle_suggest_taxonomy(&kg, Some(&json!({})))
+            else {
+                panic!("expected a missing-query error");
+            };
+        let err = err.to_string();
+        assert!(err.contains("Missing 'query'"), "{err}");
+
+        let Err(err) = handle_suggest_taxonomy(
+            &kg,
+            Some(&json!({ "query": "persn", "kind": "taxonomy" })),
+        )
+        else {
+            panic!("expected an unknown-kind error");
+        };
+        let err = err.to_string();
+        assert!(err.contains("'kind'"), "{err}");
+    }
+
+    #[test]
+    fn suggest_taxonomy_entity_and_relation_kinds_are_empty_until_semantic_tier() {
+        let (_dir, kg) = seeded_graph();
+
+        let value = handle_suggest_taxonomy(
+            &kg,
+            Some(&json!({ "query": "persn", "kind": "entity" })),
+        )
+        .unwrap();
+        assert_eq!(
+            value["suggestions"].as_array().map(|a| a.len()),
+            Some(0)
+        );
+
+        let value = handle_suggest_taxonomy(
+            &kg,
+            Some(&json!({ "query": "know_", "kind": "relation" })),
+        )
+        .unwrap();
+        assert_eq!(
+            value["suggestions"].as_array().map(|a| a.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn suggest_taxonomy_clamps_top_k_to_the_allowed_range() {
+        let (_dir, kg) = seeded_graph();
+
+        // Two candidates qualify for "pers"; a topK of 1 keeps the best one
+        // and a topK of 0 clamps to 1 instead of returning an empty list.
+        let value = handle_suggest_taxonomy(
+            &kg,
+            Some(&json!({ "query": "pers", "kind": "entityType", "topK": 1 })),
+        )
+        .unwrap();
+        assert_eq!(
+            value["suggestions"].as_array().map(|a| a.len()),
+            Some(1)
+        );
+
+        let value = handle_suggest_taxonomy(
+            &kg,
+            Some(&json!({ "query": "pers", "kind": "entityType", "topK": 0 })),
+        )
+        .unwrap();
+        assert_eq!(
+            value["suggestions"].as_array().map(|a| a.len()),
+            Some(1)
+        );
     }
 }

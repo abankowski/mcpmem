@@ -159,6 +159,10 @@ pub const ALL_TOOLS: &[ToolMeta] = &[
         write: false,
     },
     ToolMeta {
+        name: "suggest_taxonomy",
+        write: false,
+    },
+    ToolMeta {
         name: "upsert_entities",
         write: true,
     },
@@ -325,11 +329,16 @@ mod tests {
     fn test_is_write_tool() {
         assert!(is_write_tool("create_entities"));
         assert!(!is_write_tool("read_graph"));
+        assert!(!is_write_tool("suggest_taxonomy"));
     }
 
     #[test]
     fn test_categories() {
         assert_eq!(category_of("read_graph"), Some(ToolCategory::GraphRead));
+        assert_eq!(
+            category_of("suggest_taxonomy"),
+            Some(ToolCategory::GraphRead)
+        );
         assert_eq!(
             category_of("create_entities"),
             Some(ToolCategory::GraphWrite)
