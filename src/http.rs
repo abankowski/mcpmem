@@ -48,6 +48,13 @@ const UI_INDEX_HTML: &str = include_str!("ui/index.html");
 const UI_CSS: &str = include_str!("ui/graph.css");
 const UI_JS: &str = include_str!("ui/graph.js");
 
+/// The admin SPA's static assets, embedded at build time (served from
+/// `/ui/admin`). Like the viewer's, the shell holds no data: the JSON API
+/// behind it is the gate.
+const ADMIN_INDEX_HTML: &str = include_str!("ui/admin.html");
+const ADMIN_JS: &str = include_str!("ui/admin.js");
+const ADMIN_CSS: &str = include_str!("ui/admin.css");
+
 /// Upper bound on entities returned to the viewer in one `GET /ui/graph` load,
 /// mirroring the `read_graph` search cap. Keeps the payload — and the browser's
 /// force layout — bounded for very large graphs.
@@ -205,6 +212,12 @@ pub fn router(state: HttpState) -> Router {
         .route("/ui/search", get(ui_search_handler))
         .route("/ui/node", get(ui_node_handler))
         .route("/ui/expand", get(ui_expand_handler))
+        // The admin SPA shell and its assets, static like the viewer's. The
+        // JSON API below is the gate: these routes hold no data.
+        .route("/ui/admin", get(admin_page_handler))
+        .route("/ui/admin/callback", get(admin_page_handler))
+        .route("/ui/admin.js", get(admin_js_handler))
+        .route("/ui/admin.css", get(admin_css_handler))
         // The admin API. Every handler is gated on the `admin` scope, and the
         // static `/ui/admin` page routes arrive with their assets in the task
         // that ships the admin UI.
@@ -970,6 +983,40 @@ async fn ui_js_handler() -> Response {
             "application/javascript; charset=utf-8",
         )],
         UI_JS,
+    )
+        .into_response()
+}
+
+/// `GET /ui/admin` — serve the admin SPA's HTML shell. The callback URL is
+/// the same shell: after the provider redirects back with `?code=`, the
+/// script in the page completes the PKCE exchange. The shell and its assets
+/// hold no data, so they are served without auth; the JSON API behind them is
+/// the gate.
+async fn admin_page_handler() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        ADMIN_INDEX_HTML,
+    )
+        .into_response()
+}
+
+/// `GET /ui/admin.css` — the admin stylesheet (static asset, no auth).
+async fn admin_css_handler() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        ADMIN_CSS,
+    )
+        .into_response()
+}
+
+/// `GET /ui/admin.js` — the admin application script (static asset, no auth).
+async fn admin_js_handler() -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        ADMIN_JS,
     )
         .into_response()
 }

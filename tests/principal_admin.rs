@@ -340,6 +340,31 @@ async fn a_non_admin_grant_is_refused() {
     );
 }
 
+/// `GET /ui/admin` and its two assets are static, like the viewer: the shell
+/// and the stylesheet/script hold no data, so they are served without auth.
+/// The JSON endpoints are the gate.
+#[tokio::test]
+async fn the_admin_page_and_assets_are_served() {
+    let (server, _token) = admin_server().await;
+    for (path, kind) in [
+        ("/ui/admin", "text/html"),
+        ("/ui/admin.js", "text/javascript"),
+        ("/ui/admin.css", "text/css"),
+    ] {
+        let res = server
+            .request(Request::get(path).body(Body::empty()).unwrap())
+            .await;
+        assert_eq!(res.status(), 200, "{path} serves");
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.starts_with(kind), "{path} content type is {ct}");
+    }
+}
+
 /// Register a waitlist-test client and walk one login that lands on the
 /// pending page, the way Task 6's first test does. The caller then holds the
 /// waitlist row for sub-1.

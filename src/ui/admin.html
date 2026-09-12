@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mcpmem — principals</title>
+  <link rel="stylesheet" href="/ui/admin.css">
+</head>
+<body>
+  <header>
+    <h1>Principals</h1>
+    <p class="hint" id="status"></p>
+  </header>
+  <main>
+    <section id="principals">
+      <h2>Who may authorize</h2>
+      <button id="add" hidden>Add principal</button>
+      <table>
+        <thead><tr><th>Name</th><th>Identity</th><th>Scopes</th><th></th></tr></thead>
+        <tbody id="principal-rows"></tbody>
+      </table>
+    </section>
+    <section id="waitlist">
+      <h2>Pending approvals</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Identity</th><th>First seen</th><th></th></tr></thead>
+        <tbody id="waitlist-rows"></tbody>
+      </table>
+    </section>
+  </main>
+  <dialog id="form"></dialog>
+  <script src="/ui/admin.js"></script>
+</body>
+</html>
