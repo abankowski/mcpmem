@@ -1609,7 +1609,7 @@ fn store_failure(e: impl std::fmt::Display) -> Response {
 }
 ```
 
-The `oauth` accessor, then the handlers. **Every store access in the handlers below goes through the Task 6 helper: rewrite each `oauth.runtime.X(...)` call as `oauth.with_principals(|s| s.X(...))`** — the store sits behind a `Mutex` because the connection is not `Sync` and the store uses `unchecked_transaction`. List:
+The `oauth` accessor, then the handlers. **Every store access in the handlers below goes through the Task 6 helper: rewrite each `oauth.runtime.X(...)` call as `oauth.with_principals(|s| s.X(...))`** — the store sits behind a `Mutex` because the connection is not `Sync` and the store uses `unchecked_transaction`. The handlers' `builtin_keys.contains(&key)` checks do not compile (`BTreeSet<(String, String)>` has no `Borrow` for `(&str, &str)`): use a small `fn is_builtin(set: &BTreeSet<(String, String)>, iss: &str, sub: &str) -> bool` helper comparing elements, same semantics, no per-row allocation. List:
 
 ```rust
 async fn admin_list_principals(State(state): State<HttpState>, headers: HeaderMap) -> Response {
@@ -1696,10 +1696,17 @@ async fn admin_create_principal(State(state): State<HttpState>, headers: HeaderM
         _ => return bad_request("at least one known scope is required"),
     };
     let key = (input.iss.as_str(), input.sub.as_str());
-    if oauth.builtin_keys.contains(&key) {
+    if is_builtin(&oauth.builtin_keys, &input.iss, &input.sub) {
         return conflict("a built-in principal owns this identity; it is immutable");
     }
-    if let Err(e) = oauth.runtime.create(&input.iss, &input.sub, name, input.label.as_deref(), &scopes) {
+    // A duplicate runtime key is 409, per the API contract — never a 500
+    // from the UNIQUE constraint.
+    match oauth.with_principals(|s| s.get(&input.iss, &input.sub)) {
+        Ok(Some(_)) => return conflict("a runtime principal already owns this identity"),
+        Ok(None) => {}
+        Err(e) => return store_failure(e),
+    }
+    if let Err(e) = oauth.with_principals(|s| s.create(&input.iss, &input.sub, name, input.label.as_deref(), &scopes)) {
         return store_failure(e);
     }
     let view = PrincipalView {
