@@ -185,6 +185,17 @@ This entry lists every change since that snapshot. The version line restarts at
   are upgraded in place, and the backfill mirrors each existing relation
   triple once.
 
+### Known limitation
+
+- **No taxonomy full-scan backfill for rebuilds.** A rebuild verifies its
+  candidate only for subjects it has queued work for, and the entity
+  upgrade path re-enqueues entities, but taxonomy subjects are re-enqueued
+  only by new writes. After an index-profile rebuild on a populated store,
+  candidate activation waits for those writes; incremental durability
+  keeps normal operation fresh. A subject whose only job is dead stays
+  unpublished until a new write re-enqueues it. A future migration or
+  worker change can add the backfill.
+
 ### Compatibility
 
 - The wire shape is additive: write responses gain an optional
