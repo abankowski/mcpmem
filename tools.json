@@ -275,7 +275,7 @@
   },
   {
     "name": "suggest_taxonomy",
-    "description": "Suggest existing taxonomy names similar to a new name before it is created. For kind `entityType` or `relationType` the offline tier suggests the closest existing type names from the graph, scored by string similarity; use it to keep the memory schema consistent. Kinds `entity` and `relation` return an empty suggestions list until the semantic tier lands in a later change.",
+    "description": "Suggest existing taxonomy names similar to a new name before it is created. For kind `entityType` or `relationType`, results prefer semantic similarity to the closest existing type names, with the offline string engine filling the remaining slots; use it to keep the memory schema consistent. For kind `entity` or `relation`, results come from the semantic tier (the entity ANN or the relation snapshot) when the embedding pipeline serves an index profile, and are empty otherwise.",
     "inputSchema": {
       "type": "object",
       "properties": {

@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use crate::errors::{MCSError, Result};
 use crate::kg::GraphHandle;
+use crate::vector_store::VectorStore;
 
 /// The kind of subject a taxonomy entry describes.
 ///
@@ -151,11 +152,19 @@ const MAX_SUGGESTION_K: usize = 100;
 /// Handles the `suggest_taxonomy` read tool.
 ///
 /// The tool suggests existing taxonomy names that are similar to `query`.
-/// For kind `entityType` and `relationType` the offline tier returns the type
-/// names kept by the string engine. For kind `entity` and `relation` it
-/// returns an empty list until the semantic tier lands in a later change.
-/// The result is a JSON object of the shape `{ "suggestions": [...] }`.
-pub fn handle_suggest_taxonomy(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
+/// For kind `entityType` and `relationType` the semantic tier returns the
+/// nearest type names from the ANN snapshot, and the offline string engine
+/// fills the remaining slots. For kind `entity` the entity ANN returns the
+/// nearest entity names. For kind `relation` the kind-2 taxonomy snapshot
+/// returns the nearest relation names. Every semantic failure falls back to
+/// the offline tier for the type kinds, and to an empty list for the other
+/// kinds, so the tool never errors on a missing semantic tier. The result
+/// is a JSON object of the shape `{ "suggestions": [...] }`.
+pub fn handle_suggest_taxonomy(
+    vs: Option<&VectorStore>,
+    kg: &GraphHandle,
+    args: Option<&Value>,
+) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
     let query = params
         .get("query")
@@ -184,27 +193,32 @@ pub fn handle_suggest_taxonomy(kg: &GraphHandle, args: Option<&Value>) -> Result
     let top_k = opt_usize(params, "topK", DEFAULT_SUGGESTION_K)?
         .clamp(MIN_SUGGESTION_K, MAX_SUGGESTION_K);
 
-    let mut suggestions: Vec<Suggestion> = match kind {
-        "entityType" => {
-            let counts = kg.entity_type_counts();
-            let existing: Vec<(&str, usize)> = counts
-                .iter()
-                .map(|(n, c)| (n.as_str(), *c))
-                .collect();
-            suggest_strings(query, &existing)
-        }
-        "relationType" => {
-            let counts = kg.relation_type_counts();
-            let existing: Vec<(&str, usize)> = counts
-                .iter()
-                .map(|(n, c)| (n.as_str(), *c))
-                .collect();
-            suggest_strings(query, &existing)
-        }
-        // The semantic tier fills these kinds in a later change.
-        _ => Vec::new(),
+    let offline = |counts: Vec<(String, usize)>| -> Vec<Suggestion> {
+        let existing: Vec<(&str, usize)> = counts
+            .iter()
+            .map(|(n, c)| (n.as_str(), *c))
+            .collect();
+        suggest_strings(query, &existing)
     };
-    suggestions.truncate(top_k);
+    let suggestions: Vec<Suggestion> = match kind {
+        "entityType" => semantic_first(
+            vs,
+            query,
+            SubjectKind::EntityType,
+            top_k,
+            offline(kg.entity_type_counts()),
+        ),
+        "relationType" => semantic_first(
+            vs,
+            query,
+            SubjectKind::RelationType,
+            top_k,
+            offline(kg.relation_type_counts()),
+        ),
+        "entity" => entity_suggestions(vs, query, top_k),
+        "relation" => semantic_first(vs, query, SubjectKind::Relation, top_k, Vec::new()),
+        _ => unreachable!("the kind was validated above"),
+    };
 
     Ok(json!({ "suggestions": suggestions }))
 }
@@ -340,6 +354,161 @@ pub fn suggest_semantic(
     Ok(groups)
 }
 
+/// Merges the semantic results with the offline results.
+///
+/// The semantic results sort first. The offline tier then fills the
+/// remaining slots, skipping a name the semantic tier already returned.
+/// Any missing piece of the semantic tier, and any semantic failure, falls
+/// back to the offline tier alone.
+#[cfg(feature = "indexer")]
+fn semantic_first(
+    vs: Option<&VectorStore>,
+    query: &str,
+    kind: SubjectKind,
+    top_k: usize,
+    offline: Vec<Suggestion>,
+) -> Vec<Suggestion> {
+    let mut out: Vec<Suggestion> = Vec::new();
+    // The tier is advisory: every failure must fall back, never error.
+    if let Some(store) = vs
+        && crate::indexer_provider::get().is_some()
+        && store.serving_profile().ok().flatten().is_some()
+        && let Ok(groups) = suggest_semantic(store, &[query.to_owned()], kind, top_k)
+        && let Some(first) = groups.into_iter().next()
+    {
+        out = first;
+    }
+    for suggestion in offline {
+        if !out.iter().any(|s| s.name == suggestion.name) {
+            out.push(suggestion);
+        }
+    }
+    out.truncate(top_k);
+    out
+}
+
+/// Without the `indexer` feature the offline tier stands alone.
+#[cfg(not(feature = "indexer"))]
+fn semantic_first(
+    _vs: Option<&VectorStore>,
+    _query: &str,
+    _kind: SubjectKind,
+    top_k: usize,
+    mut offline: Vec<Suggestion>,
+) -> Vec<Suggestion> {
+    offline.truncate(top_k);
+    offline
+}
+
+/// Suggests entity names through the entity ANN.
+///
+/// The tier is advisory: any missing piece or any failure returns an empty
+/// list, never an error, because entity names are not taxonomy types and
+/// there is no offline fallback for them.
+#[cfg(feature = "indexer")]
+fn entity_suggestions(vs: Option<&VectorStore>, query: &str, top_k: usize) -> Vec<Suggestion> {
+    if let Some(store) = vs
+        && crate::indexer_provider::get().is_some()
+        && store.serving_profile().ok().flatten().is_some()
+        && let Ok(picks) = suggest_entities(store, query, top_k)
+    {
+        return picks;
+    }
+    Vec::new()
+}
+
+/// Without the `indexer` feature there is no entity ANN to query.
+#[cfg(not(feature = "indexer"))]
+fn entity_suggestions(_vs: Option<&VectorStore>, _query: &str, _top_k: usize) -> Vec<Suggestion> {
+    Vec::new()
+}
+
+/// Embeds the query text and searches the entity ANN for the nearest
+/// entities.
+///
+/// The score is `1.0 - distance`, the convention `semantic_search` results
+/// use. The search caps the result at `top_k`.
+#[cfg(feature = "indexer")]
+fn suggest_entities(vs: &VectorStore, query: &str, top_k: usize) -> Result<Vec<Suggestion>> {
+    use mcpmem_core::jobs::Normalization;
+    use mcpmem_indexer::EmbeddingProvider;
+
+    let top_k = top_k.clamp(1, 100);
+
+    let profile = vs.serving_profile()?.ok_or_else(|| {
+        MCSError::InvalidParams(
+            "This store serves no index profile, so the server does not know which model to \
+             embed with. Name a provider, a model and a dimension in the [indexer] section of \
+             the configuration file, then restart the server."
+                .into(),
+        )
+    })?;
+
+    let provider = crate::indexer_provider::get().ok_or_else(|| {
+        MCSError::InvalidParams(format!(
+            "No embedding provider is configured, so the server cannot embed the query text. \
+             The serving profile names the provider kind '{}'. Configure that provider in the \
+             [indexer] section of the configuration file, then restart the server.",
+            profile.provider_kind
+        ))
+    })?;
+
+    let texts = [query.to_owned()];
+    let vectors = provider
+        .embed_texts(&profile, &texts)
+        .map_err(|e| MCSError::MemoryError(format!("Embedding the query text failed: {e}")))?;
+
+    // One text goes in, so one vector must come back. Any other count is a
+    // provider fault.
+    let returned = vectors.len();
+    let mut query_vec = vectors
+        .into_iter()
+        .next()
+        .filter(|_| returned == 1)
+        .ok_or_else(|| {
+            MCSError::MemoryError(format!(
+                "The embedding provider returned {returned} vectors for one query text; it must \
+                 return exactly one"
+            ))
+        })?;
+
+    if query_vec.len() != profile.dimensions as usize {
+        return Err(MCSError::MemoryError(format!(
+            "The embedding provider returned {} dimensions and the serving profile names model \
+             '{}' at {} dimensions. The provider and the profile disagree.",
+            query_vec.len(),
+            profile.model,
+            profile.dimensions
+        )));
+    }
+    // Nothing validates a query vector, and cosine distance against an
+    // unnormalized query ranks the results wrongly, so normalize it here,
+    // exactly as `handle_semantic_search` does.
+    if profile.normalization == Normalization::L2 {
+        l2_normalize(&mut query_vec);
+    }
+    let json = vs.search_entities_json(&query_vec, top_k, None)?;
+    let parsed: Value = serde_json::from_str(&json).map_err(MCSError::JsonError)?;
+    let mut out: Vec<Suggestion> = Vec::new();
+    if let Some(rows) = parsed.get("results").and_then(Value::as_array) {
+        for row in rows {
+            // The store emits the distance under the `score` key; the
+            // suggestion score is `1.0 - distance`, so the nearest entity
+            // sorts first with the highest score.
+            let Some(name) = row.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let distance = row.get("score").and_then(Value::as_f64).unwrap_or(1.0);
+            out.push(Suggestion {
+                name: name.to_owned(),
+                score: 1.0 - distance,
+            });
+        }
+    }
+    out.truncate(top_k);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -447,6 +616,7 @@ mod tests {
         // A misspelled query gets the established entity type. The kind
         // defaults to entityType when the argument is omitted.
         let value = handle_suggest_taxonomy(
+            None,
             &kg,
             Some(&json!({ "query": "persn" })),
         )
@@ -458,6 +628,7 @@ mod tests {
 
         // The relationType kind reads the relation-type names.
         let value = handle_suggest_taxonomy(
+            None,
             &kg,
             Some(&json!({ "query": "know_", "kind": "relationType" })),
         )
@@ -470,14 +641,14 @@ mod tests {
     fn suggest_taxonomy_rejects_blank_query_and_unknown_kind() {
         let (_dir, kg) = seeded_graph();
 
-        let Err(err) = handle_suggest_taxonomy(&kg, Some(&json!({ "query": "   " })))
+        let Err(err) = handle_suggest_taxonomy(None, &kg, Some(&json!({ "query": "   " })))
             else {
                 panic!("expected a blank-query error");
             };
         let err = err.to_string();
         assert!(err.contains("must not be empty or whitespace"), "{err}");
 
-        let Err(err) = handle_suggest_taxonomy(&kg, Some(&json!({})))
+        let Err(err) = handle_suggest_taxonomy(None, &kg, Some(&json!({})))
             else {
                 panic!("expected a missing-query error");
             };
@@ -485,6 +656,7 @@ mod tests {
         assert!(err.contains("Missing 'query'"), "{err}");
 
         let Err(err) = handle_suggest_taxonomy(
+            None,
             &kg,
             Some(&json!({ "query": "persn", "kind": "taxonomy" })),
         )
@@ -496,6 +668,7 @@ mod tests {
 
         // A non-string kind must be rejected, not silently defaulted.
         let Err(err) = handle_suggest_taxonomy(
+            None,
             &kg,
             Some(&json!({ "query": "persn", "kind": 7 })),
         )
@@ -507,10 +680,14 @@ mod tests {
     }
 
     #[test]
-    fn suggest_taxonomy_entity_and_relation_kinds_are_empty_until_semantic_tier() {
+    fn suggest_taxonomy_entity_and_relation_kinds_need_the_semantic_tier() {
+        // Without a vector store the semantic tier cannot run, and entity
+        // names and relation names have no offline equivalent: both kinds
+        // return an empty list, without an error.
         let (_dir, kg) = seeded_graph();
 
         let value = handle_suggest_taxonomy(
+            None,
             &kg,
             Some(&json!({ "query": "persn", "kind": "entity" })),
         )
@@ -521,6 +698,7 @@ mod tests {
         );
 
         let value = handle_suggest_taxonomy(
+            None,
             &kg,
             Some(&json!({ "query": "know_", "kind": "relation" })),
         )
@@ -538,6 +716,7 @@ mod tests {
         // Two candidates qualify for "pers"; a topK of 1 keeps the best one
         // and a topK of 0 clamps to 1 instead of returning an empty list.
         let value = handle_suggest_taxonomy(
+            None,
             &kg,
             Some(&json!({ "query": "pers", "kind": "entityType", "topK": 1 })),
         )
@@ -548,6 +727,7 @@ mod tests {
         );
 
         let value = handle_suggest_taxonomy(
+            None,
             &kg,
             Some(&json!({ "query": "pers", "kind": "entityType", "topK": 0 })),
         )
@@ -859,6 +1039,18 @@ mod tests {
             .unwrap();
         }
 
+        /// The type-dict id of a live type row, so snapshot seeding points a
+        /// vector at a subject the graph really owns.
+        fn type_id(env: &Env, kind: i64, name: &str) -> i64 {
+            let conn = env.vs.db.lock();
+            conn.query_row(
+                "SELECT id FROM type_dict WHERE kind=?1 AND name=?2",
+                params![kind, name],
+                |row| row.get(0),
+            )
+            .unwrap()
+        }
+
         /// Builds the per-kind snapshots for the seeded profile, the way the
         /// indexer worker does after a committed batch.
         fn adopt(env: &mut Env) -> Result<()> {
@@ -1081,6 +1273,159 @@ mod tests {
             };
             let text = err.to_string();
             assert!(text.contains("[indexer]") && text.contains("no index profile"), "{text}");
+        }
+
+        #[test]
+        fn suggest_taxonomy_entity_type_prefers_semantic_hits_then_offline_fill() {
+            let mut env = env(4);
+            // "person" carries a snapshot vector (semantic hit) while
+            // "persons" has none, so only the offline tier can find it. The
+            // offline scores alone would rank "persons" first for "persn";
+            // the semantic tier must override that order.
+            create_test_entity(&env.kg, "person one", "person");
+            create_test_entity(&env.kg, "persons alpha", "persons");
+            let profile = seed_profile(&env, 4, Normalization::None);
+            seed_generation(&env, profile, 0, 1);
+            seed_vector(&env, profile, 0, type_id(&env, 0, "person"), &[1.0; 4]);
+            adopt(&mut env).unwrap();
+
+            let value = handle_suggest_taxonomy(
+                Some(&env.vs),
+                &env.kg,
+                Some(&json!({ "query": "persn", "kind": "entityType" })),
+            )
+            .unwrap();
+            let suggestions = value["suggestions"].as_array().unwrap();
+            assert_eq!(
+                suggestions[0]["name"], "person",
+                "the semantic hit must sort first: {suggestions:?}"
+            );
+            assert_eq!(suggestions[0]["score"], 1.0);
+            assert_eq!(
+                suggestions.iter().filter(|s| s["name"] == "person").count(),
+                1,
+                "the offline copy of a semantic hit must be skipped: {suggestions:?}"
+            );
+            assert!(
+                suggestions.iter().any(|s| s["name"] == "persons"),
+                "the offline tier must fill the remaining slots: {suggestions:?}"
+            );
+        }
+
+        #[test]
+        fn suggest_taxonomy_falls_back_to_offline_without_a_profile() {
+            let env = env(4);
+            create_test_entity(&env.kg, "person one", "person");
+            create_test_entity(&env.kg, "persons alpha", "persons");
+            // No profile and no snapshot: the tool must answer from the
+            // offline tier and never call the provider.
+            let calls_before = fake_embeddings().recorded().len();
+            let value = handle_suggest_taxonomy(
+                Some(&env.vs),
+                &env.kg,
+                Some(&json!({ "query": "persn", "kind": "entityType" })),
+            )
+            .unwrap();
+            let suggestions = value["suggestions"].as_array().unwrap();
+            assert!(
+                suggestions.iter().any(|s| s["name"] == "person"),
+                "the offline tier must answer: {suggestions:?}"
+            );
+            assert_eq!(
+                fake_embeddings().recorded().len(),
+                calls_before,
+                "no provider call may happen without a serving profile"
+            );
+        }
+
+        #[test]
+        fn suggest_taxonomy_entity_kind_queries_the_entity_ann() {
+            let env = env(4);
+            // The entity ANN is populated before the profile exists, because
+            // a serving profile turns off direct vector writes.
+            create_test_entity(&env.kg, "alice", "person");
+            create_test_entity(&env.kg, "acme", "organization");
+            env.vs.upsert_embedding("alice", &[1.0; 4], "test").unwrap();
+            env.vs
+                .upsert_embedding("acme", &[1.0, 0.0, 0.0, 0.0], "test")
+                .unwrap();
+            let _ = seed_profile(&env, 4, Normalization::None);
+
+            // The provider returns all-ones, so alice sits at distance 0
+            // (score 1.0) and acme, which points elsewhere than the query,
+            // ranks second with a lower score.
+            let value = handle_suggest_taxonomy(
+                Some(&env.vs),
+                &env.kg,
+                Some(&json!({ "query": "who works here", "kind": "entity" })),
+            )
+            .unwrap();
+            let suggestions = value["suggestions"].as_array().unwrap();
+            assert_eq!(suggestions[0]["name"], "alice");
+            assert_eq!(suggestions[0]["score"], 1.0);
+            assert_eq!(
+                suggestions.iter().map(|s| s["name"].as_str().unwrap()).collect::<Vec<_>>(),
+                vec!["alice", "acme"]
+            );
+            assert!(
+                suggestions[1]["score"].as_f64().unwrap() < 1.0,
+                "a non-identical entity must score below the exact match: {suggestions:?}"
+            );
+        }
+
+        #[test]
+        fn suggest_taxonomy_relation_kind_queries_the_kind_two_snapshot() {
+            let mut env = env(4);
+            let profile = seed_profile(&env, 4, Normalization::None);
+            seed_type(&env, 7, 0, "person");
+            seed_type(&env, 8, 1, "works_at");
+            create_test_entity(&env.kg, "alice", "person");
+            create_test_entity(&env.kg, "acme", "organization");
+            let alice = env.vs.entity_id_of("alice").unwrap().unwrap();
+            let acme = env.vs.entity_id_of("acme").unwrap().unwrap();
+            {
+                let conn = env.vs.db.lock();
+                conn.execute(
+                    "INSERT INTO taxonomy_relation(id,from_id,to_id,type_id,revision,deleted) VALUES(42,?1,?2,?3,1,0)",
+                    params![alice, acme, 8],
+                )
+                .unwrap();
+            }
+            // Only the kind-2 snapshot holds a vector, so the suggestion can
+            // come from nowhere else.
+            seed_generation(&env, profile, 2, 1);
+            seed_vector(&env, profile, 2, 42, &[1.0; 4]);
+            adopt(&mut env).unwrap();
+
+            let value = handle_suggest_taxonomy(
+                Some(&env.vs),
+                &env.kg,
+                Some(&json!({ "query": "knows-ish", "kind": "relation" })),
+            )
+            .unwrap();
+            let suggestions = value["suggestions"].as_array().unwrap();
+            assert_eq!(suggestions[0]["name"], "alice -[works_at]-> acme");
+            assert_eq!(suggestions[0]["score"], 1.0);
+        }
+
+        #[test]
+        fn suggest_taxonomy_never_errors_when_the_semantic_path_is_unavailable() {
+            // A store with no serving profile: entity and relation have no
+            // offline tier, so they must return empty lists, never errors.
+            let env = env(4);
+            for kind in ["entity", "relation"] {
+                let value = handle_suggest_taxonomy(
+                    Some(&env.vs),
+                    &env.kg,
+                    Some(&json!({ "query": "query", "kind": kind })),
+                )
+                .unwrap();
+                assert_eq!(
+                    value["suggestions"].as_array().map(|a| a.len()),
+                    Some(0),
+                    "kind {kind} without a profile must be empty"
+                );
+            }
         }
     }
 }
