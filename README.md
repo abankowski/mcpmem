@@ -1208,7 +1208,7 @@ pre-populated, on a **MacBook Pro (Apple M1 Pro, 32 GB)**. Averages; run
 **Read:** `read_graph`, `search_nodes`, `open_nodes`, `batch_get_entities`, `get_entity`,
 `entity_exists`, `graph_stats`, `search_relations`, `describe_entity`, `degree`, `find_path`,
 `find_all_paths`, `extract_subgraph`, `get_neighbors`, `list_entity_types`, `list_relation_types`,
-`export_graph`.
+`suggest_taxonomy`, `export_graph`.
 
 ### Vector (`--enable-vectors`)
 
