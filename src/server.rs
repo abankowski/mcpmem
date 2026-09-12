@@ -916,7 +916,7 @@ fn semantic_search_available(vs: Option<&VectorStore>) -> bool {
         .is_some_and(|provider| provider.supports_provider_kind(&profile.provider_kind))
 }
 #[cfg(not(feature = "indexer"))]
-fn semantic_search_available(_vs: Option<&VectorStore>) -> bool {
+const fn semantic_search_available(_vs: Option<&VectorStore>) -> bool {
     false
 }
 

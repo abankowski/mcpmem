@@ -13,7 +13,7 @@
 //! The file never carries a secret. It names the file that holds one, exactly
 //! as `--auth-token-file` and `--oidc-client-secret-file` already do.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use clap::parser::ValueSource;
@@ -638,6 +638,9 @@ pub fn static_secret_provider(
 /// keys are read here, once at startup, and an empty file or a missing file
 /// stops the process: a webhook signed with an empty key would be forgeable,
 /// and a missing key would dead-letter every delivery later, invisibly.
+#[cfg(any(feature = "webhooks", test))]
+use std::collections::BTreeSet;
+
 #[cfg(any(feature = "webhooks", test))]
 pub fn webhook_worker_config(
     file: Option<&FileConfig>,
