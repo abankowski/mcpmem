@@ -859,11 +859,16 @@ impl PrincipalsStore {
     fn evict(&self, ttl_us: i64) -> Result<()> {
         let now = (self.now_us)();
         let tx = self.conn.unchecked_transaction().map_err(sql_error)?;
-        tx.execute(
-            "DELETE FROM principal_waitlist WHERE first_seen_us < ?1",
-            params![now.saturating_sub(ttl_us)],
-        )
-        .map_err(sql_error)?;
+        // ttl_us == 0 disables the TTL sweep: `now - 0 == now` would delete
+        // every prior entry on the next refused login. Guard the expiry
+        // DELETE; the cap trim below stays unconditional.
+        if ttl_us > 0 {
+            tx.execute(
+                "DELETE FROM principal_waitlist WHERE first_seen_us < ?1",
+                params![now.saturating_sub(ttl_us)],
+            )
+            .map_err(sql_error)?;
+        }
         let count: i64 = tx
             .query_row("SELECT count(*) FROM principal_waitlist", [], |r| r.get(0))
             .map_err(sql_error)?;
