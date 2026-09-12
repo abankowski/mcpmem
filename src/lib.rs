@@ -23,6 +23,7 @@ pub mod runtime;
 pub mod runtime_principals;
 pub mod server;
 pub mod tls;
+pub mod taxonomy;
 pub mod tools;
 pub mod turboquant;
 pub use mcpmem_core::types;
