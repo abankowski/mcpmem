@@ -406,3 +406,372 @@ fn canonical_document(
         })
     }))
 }
+
+/// Build the canonical document for a taxonomy subject, in the fencing style
+/// of [`canonical_document`].
+///
+/// `kind` is 0 for an entity type, 1 for a relation type and 2 for a relation
+/// instance. A `None` return means the subject is missing or superseded, or
+/// deleted for a relation instance. The worker routes that through the retry
+/// path.
+pub fn taxonomy_document(
+    conn: &Connection,
+    kind: i64,
+    subject_id: i64,
+    expected_revision: i64,
+) -> Result<Option<CanonicalDocument>, rusqlite::Error> {
+    match kind {
+        0 => entity_type_document(conn, subject_id, expected_revision),
+        1 => relation_type_document(conn, subject_id, expected_revision),
+        2 => relation_instance_document(conn, subject_id, expected_revision),
+        _ => Ok(None),
+    }
+}
+
+/// Fence one `type_dict` row of `kind` on its `revision`.
+fn fenced_type_name(
+    conn: &Connection,
+    kind: i64,
+    subject_id: i64,
+    expected_revision: i64,
+) -> Result<Option<(String, i64)>, rusqlite::Error> {
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT name, revision FROM type_dict WHERE kind=?1 AND id=?2",
+            [kind, subject_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((name, revision)) = row else {
+        return Ok(None);
+    };
+    if revision != expected_revision {
+        return Ok(None);
+    }
+    Ok(Some((name, revision)))
+}
+
+/// Kind 0: one entity type, its `entityType` name and its members.
+fn entity_type_document(
+    conn: &Connection,
+    subject_id: i64,
+    expected_revision: i64,
+) -> Result<Option<CanonicalDocument>, rusqlite::Error> {
+    let Some((name, revision)) = fenced_type_name(conn, 0, subject_id, expected_revision)? else {
+        return Ok(None);
+    };
+    let mut stmt =
+        conn.prepare("SELECT name FROM entity WHERE type_id=?1 AND flags=0 ORDER BY id LIMIT 128")?;
+    let members: Vec<String> = stmt
+        .query_map([subject_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(Some(CanonicalDocument {
+        entity_id: subject_id,
+        revision,
+        name: format!("entityType: {}", name),
+        entity_type: "".to_string(),
+        observations: members,
+    }))
+}
+
+/// Kind 1: one relation type, its `relationType` name and its distinct
+/// endpoint-type triples.
+fn relation_type_document(
+    conn: &Connection,
+    subject_id: i64,
+    expected_revision: i64,
+) -> Result<Option<CanonicalDocument>, rusqlite::Error> {
+    let Some((name, revision)) = fenced_type_name(conn, 1, subject_id, expected_revision)? else {
+        return Ok(None);
+    };
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT ft.name, ty.name, tt.name
+         FROM relation r
+         JOIN entity f ON f.id = r.from_id
+         JOIN type_dict ft ON ft.id = f.type_id
+         JOIN entity t ON t.id = r.to_id
+         JOIN type_dict tt ON tt.id = t.type_id
+         JOIN type_dict ty ON ty.id = r.type_id
+         WHERE r.type_id = ?1 AND f.flags = 0 AND t.flags = 0
+         ORDER BY ft.name, tt.name
+         LIMIT 128",
+    )?;
+    let triples: Vec<String> = stmt
+        .query_map([subject_id], |r| {
+            let from_type: String = r.get(0)?;
+            let relation_type: String = r.get(1)?;
+            let to_type: String = r.get(2)?;
+            Ok(format!("{} {} {}", from_type, relation_type, to_type))
+        })?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(Some(CanonicalDocument {
+        entity_id: subject_id,
+        revision,
+        name: format!("relationType: {}", name),
+        entity_type: "".to_string(),
+        observations: triples,
+    }))
+}
+
+/// Kind 2: one relation instance, fenced on its `taxonomy_relation` mirror
+/// row. The document mirrors the entity shape: the formatted triple is the
+/// name and its single observation line.
+fn relation_instance_document(
+    conn: &Connection,
+    subject_id: i64,
+    expected_revision: i64,
+) -> Result<Option<CanonicalDocument>, rusqlite::Error> {
+    let row: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT revision, deleted FROM taxonomy_relation WHERE id=?1",
+            [subject_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((revision, deleted)) = row else {
+        return Ok(None);
+    };
+    if deleted != 0 || revision != expected_revision {
+        return Ok(None);
+    }
+    let row: Option<(String, String, String, String, String)> = conn
+        .query_row(
+            "SELECT f.name, ft.name, ty.name, t.name, tt.name
+             FROM taxonomy_relation r
+             JOIN entity f ON f.id = r.from_id
+             JOIN type_dict ft ON ft.id = f.type_id
+             JOIN entity t ON t.id = r.to_id
+             JOIN type_dict tt ON tt.id = t.type_id
+             JOIN type_dict ty ON ty.id = r.type_id
+             WHERE r.id = ?1 AND f.flags = 0 AND t.flags = 0
+             ORDER BY f.id, t.id
+             LIMIT 1",
+            [subject_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    let Some((from_name, from_type, relation_type, to_name, to_type)) = row else {
+        return Ok(None);
+    };
+    let line = format!(
+        "{} ({}) -[{}]-> {} ({})",
+        from_name, from_type, relation_type, to_name, to_type,
+    );
+    Ok(Some(CanonicalDocument {
+        entity_id: subject_id,
+        revision,
+        name: line.clone(),
+        entity_type: "".to_string(),
+        observations: vec![line],
+    }))
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+
+    /// One in-memory database with every migration applied.
+    fn test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        mcpmem_core::schema::initialize_database(&conn).unwrap();
+        conn
+    }
+
+    fn seed_type(conn: &Connection, id: i64, kind: i64, name: &str, revision: i64) {
+        conn.execute(
+            "INSERT INTO type_dict(id, kind, name, revision) VALUES(?1, ?2, ?3, ?4)",
+            params![id, kind, name, revision],
+        )
+        .unwrap();
+    }
+
+    fn seed_entity(conn: &Connection, id: i64, name: &str, type_id: i64) {
+        conn.execute(
+            "INSERT INTO entity(id, name_hash, name, type_id, created_us, updated_us) \
+             VALUES(?1, 0, ?2, ?3, 1, 1)",
+            params![id, name, type_id],
+        )
+        .unwrap();
+    }
+
+    fn seed_relation(conn: &Connection, from_id: i64, to_id: i64, type_id: i64) {
+        conn.execute(
+            "INSERT INTO relation(from_id, to_id, type_id, created_us) VALUES(?1, ?2, ?3, 1)",
+            params![from_id, to_id, type_id],
+        )
+        .unwrap();
+    }
+
+    fn seed_taxonomy_relation(
+        conn: &Connection,
+        id: i64,
+        from_id: i64,
+        to_id: i64,
+        type_id: i64,
+        revision: i64,
+        deleted: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO taxonomy_relation(id, from_id, to_id, type_id, revision, deleted) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, from_id, to_id, type_id, revision, deleted],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn entity_type_document_lists_its_members_in_id_order() {
+        let conn = test_db();
+        seed_type(&conn, 1, 0, "person", 7);
+        seed_entity(&conn, 1, "ada", 1);
+        seed_entity(&conn, 2, "grace", 1);
+        seed_entity(&conn, 3, "alice", 1);
+        let doc = taxonomy_document(&conn, 0, 1, 7)
+            .unwrap()
+            .expect("the seeded type must produce a document");
+        assert_eq!(doc.entity_id, 1);
+        assert_eq!(doc.revision, 7);
+        assert_eq!(doc.name, "entityType: person");
+        assert_eq!(doc.entity_type, "");
+        assert_eq!(
+            doc.observations,
+            vec!["ada".to_string(), "grace".to_string(), "alice".to_string()]
+        );
+        assert_eq!(doc.text(), "entityType: person\n\nada\ngrace\nalice");
+    }
+
+    #[test]
+    fn relation_type_document_lists_distinct_endpoint_type_triples() {
+        let conn = test_db();
+        seed_type(&conn, 1, 0, "person", 0);
+        seed_type(&conn, 2, 0, "company", 0);
+        seed_type(&conn, 3, 1, "works_at", 9);
+        seed_entity(&conn, 1, "ada", 1);
+        seed_entity(&conn, 2, "grace", 1);
+        seed_entity(&conn, 3, "acme", 2);
+        seed_entity(&conn, 4, "globex", 2);
+        seed_relation(&conn, 1, 3, 3);
+        seed_relation(&conn, 2, 3, 3);
+        seed_relation(&conn, 4, 1, 3);
+        let doc = taxonomy_document(&conn, 1, 3, 9)
+            .unwrap()
+            .expect("the seeded relation type must produce a document");
+        assert_eq!(doc.name, "relationType: works_at");
+        assert_eq!(doc.entity_type, "");
+        assert_eq!(
+            doc.observations,
+            vec![
+                "company works_at person".to_string(),
+                "person works_at company".to_string(),
+            ]
+        );
+        assert_eq!(
+            doc.text(),
+            "relationType: works_at\n\ncompany works_at person\nperson works_at company"
+        );
+    }
+
+    #[test]
+    fn relation_instance_document_formats_the_triple() {
+        let conn = test_db();
+        seed_type(&conn, 1, 0, "person", 0);
+        seed_type(&conn, 2, 0, "company", 0);
+        seed_type(&conn, 3, 1, "works_at", 0);
+        seed_entity(&conn, 1, "ada lovelace", 1);
+        seed_entity(&conn, 2, "acme ltd", 2);
+        seed_taxonomy_relation(&conn, 1, 1, 2, 3, 5, 0);
+        let doc = taxonomy_document(&conn, 2, 1, 5)
+            .unwrap()
+            .expect("the seeded relation must produce a document");
+        assert_eq!(doc.entity_id, 1);
+        assert_eq!(doc.revision, 5);
+        assert_eq!(
+            doc.name,
+            "ada lovelace (person) -[works_at]-> acme ltd (company)"
+        );
+        assert_eq!(doc.entity_type, "");
+        assert_eq!(
+            doc.observations,
+            vec!["ada lovelace (person) -[works_at]-> acme ltd (company)".to_string()]
+        );
+        assert_eq!(
+            doc.text(),
+            "ada lovelace (person) -[works_at]-> acme ltd (company)\n\n\
+ada lovelace (person) -[works_at]-> acme ltd (company)"
+        );
+    }
+
+    #[test]
+    fn revision_mismatch_returns_none_for_every_kind() {
+        let conn = test_db();
+        seed_type(&conn, 1, 0, "person", 7);
+        seed_type(&conn, 2, 0, "company", 0);
+        seed_type(&conn, 3, 1, "works_at", 9);
+        seed_entity(&conn, 1, "ada", 1);
+        seed_entity(&conn, 2, "acme", 2);
+        seed_taxonomy_relation(&conn, 1, 1, 2, 3, 5, 0);
+        assert!(taxonomy_document(&conn, 0, 1, 8).unwrap().is_none());
+        assert!(taxonomy_document(&conn, 1, 3, 1).unwrap().is_none());
+        assert!(taxonomy_document(&conn, 2, 1, 6).unwrap().is_none());
+    }
+
+    #[test]
+    fn deleted_taxonomy_relation_returns_none() {
+        let conn = test_db();
+        seed_type(&conn, 1, 0, "person", 0);
+        seed_type(&conn, 2, 0, "company", 0);
+        seed_type(&conn, 3, 1, "works_at", 0);
+        seed_entity(&conn, 1, "ada", 1);
+        seed_entity(&conn, 2, "acme", 2);
+        seed_taxonomy_relation(&conn, 1, 1, 2, 3, 5, 1);
+        assert!(taxonomy_document(&conn, 2, 1, 5).unwrap().is_none());
+    }
+
+    #[test]
+    fn missing_subject_returns_none() {
+        let conn = test_db();
+        assert!(taxonomy_document(&conn, 0, 99, 1).unwrap().is_none());
+        assert!(taxonomy_document(&conn, 1, 99, 1).unwrap().is_none());
+        assert!(taxonomy_document(&conn, 2, 99, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn entity_type_document_caps_members_at_128() {
+        let conn = test_db();
+        seed_type(&conn, 1, 0, "person", 1);
+        for id in 1..=129 {
+            seed_entity(&conn, id, &format!("member{}", id), 1);
+        }
+        let doc = taxonomy_document(&conn, 0, 1, 1)
+            .unwrap()
+            .expect("the seeded type must produce a document");
+        assert_eq!(doc.observations.len(), 128);
+        assert_eq!(doc.observations[0], "member1");
+        assert_eq!(doc.observations[127], "member128");
+    }
+
+    #[test]
+    fn relation_type_document_caps_distinct_triples_at_128() {
+        let conn = test_db();
+        seed_type(&conn, 130, 0, "target_type", 0);
+        seed_type(&conn, 131, 1, "relates_to", 1);
+        seed_entity(&conn, 200, "target", 130);
+        for id in 1..=129 {
+            seed_type(&conn, id, 0, &format!("from_type_{}", id), 0);
+            seed_entity(&conn, id, &format!("from_{}", id), id);
+            seed_relation(&conn, id, 200, 131);
+        }
+        let doc = taxonomy_document(&conn, 1, 131, 1)
+            .unwrap()
+            .expect("the seeded relation type must produce a document");
+        assert_eq!(doc.observations.len(), 128);
+        assert!(
+            doc.observations
+                .iter()
+                .all(|line| line.ends_with(" relates_to target_type"))
+        );
+    }
+}
