@@ -145,7 +145,7 @@ impl<'a> IndexProfileRegistry<'a> {
     /// The connection this registry reads. The server crate serves taxonomy
     /// snapshots through it: the generation read, the vector rows and the
     /// publish mark then share one transaction view with the registry state.
-    pub fn connection(&self) -> &Connection {
+    pub const fn connection(&self) -> &Connection {
         self.conn
     }
 

@@ -799,7 +799,7 @@ fn reconcile_adopts_taxonomy_after_the_worker_cycle() {
         }])
         .unwrap();
     let worker = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5));
-    let mut vectors = VectorStore::new(&database, 2).unwrap();
+    let vectors = VectorStore::new(&database, 2).unwrap();
     // One poll embeds the entity; the reconcile after it publishes the empty
     // candidate (no taxonomy vector yet) and adopts an empty taxonomy.
     assert_eq!(worker.run_once(now_us()).unwrap().committed, 1);

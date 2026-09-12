@@ -36,7 +36,7 @@ impl TaxonomyKind {
         TaxonomyKind::Relation,
     ];
 
-    fn as_i64(self) -> i64 {
+    const fn as_i64(self) -> i64 {
         self as i64
     }
 }
@@ -1147,7 +1147,12 @@ impl VectorStore {
         let mut matches: Vec<_> = snapshot
             .vectors
             .iter()
-            .map(|(id, vector)| (*id, managed_distance(snapshot.metric, query, vector) as f64))
+            .map(|(id, vector)| {
+                (
+                    *id,
+                    f64::from(managed_distance(snapshot.metric, query, vector)),
+                )
+            })
             .collect();
         matches.sort_by(|left, right| left.1.total_cmp(&right.1));
         matches.truncate(top_k.clamp(1, 100));
