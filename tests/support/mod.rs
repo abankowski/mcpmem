@@ -176,6 +176,12 @@ impl Server {
     pub fn dir(&self) -> &std::path::Path {
         self.dir.path()
     }
+
+    /// The memory-database path this server was built on, for stores that
+    /// share the main DB file (e.g. the managed-repo store).
+    pub fn memory_db_path(&self) -> std::path::PathBuf {
+        self.dir.path().join("t.mcpmem")
+    }
 }
 
 /// The thread holding [`CATEGORY_FLAGS`], or `None` when the guard is free.

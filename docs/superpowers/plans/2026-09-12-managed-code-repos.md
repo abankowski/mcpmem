@@ -541,8 +541,10 @@ fn fixture_repo(parent: &Path, name: &str) -> std::path::PathBuf {
 fn setup() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("t.mcpmem");
+    // The code base is `{db}.code` — the same derivation repos.rs and the
+    // server use. See the D3 field correction below.
     code_registry::init(
-        dir.path().join("code"),
+        std::path::PathBuf::from(format!("{}.code", db.display())),
         Durability::Async,
         SqliteTuning::default(),
         std::num::NonZeroUsize::new(8).unwrap(),
@@ -595,8 +597,8 @@ fn lifecycle_register_add_reindex_remove() {
     // Remove wipes everything.
     repos::remove("acme-api").expect("remove wipes");
     assert!(repos::get_row("acme-api").unwrap().is_none());
-    assert!(!dir.path().join("code").join("acme-api.code.db").exists());
-    assert!(!dir.path().join("code").join("repos").join("acme-api").exists());
+    assert!(!dir.path().join("t.mcpmem.code").join("acme-api.code.db").exists());
+    assert!(!dir.path().join("t.mcpmem.code").join("repos").join("acme-api").exists());
 }
 
 #[test]
@@ -663,6 +665,7 @@ Write the full file:
 
 use std::collections::HashSet;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -758,7 +761,7 @@ pub fn init(db_path: PathBuf, busy_timeout_ms: u64) {
         git_ok,
     });
     let _ = IN_FLIGHT.set(Mutex::new(HashSet::new()));
-    let _ = std::fs::create_dir_all(db_path.with_extension("code").join("repos"));
+    let _ = std::fs::create_dir_all(PathBuf::from(format!("{}.code", db_path.display())).join("repos"));
     if let Ok(conn) = open_connection() {
         let _ = conn.execute(
             "UPDATE code_repo SET state = ?1
@@ -786,7 +789,7 @@ fn repos_base() -> Result<PathBuf> {
     let runtime = RUNTIME
         .get()
         .ok_or_else(|| MCSError::MemoryError("managed-repo store not initialized".into()))?;
-    Ok(runtime.db_path.with_extension("code").join("repos"))
+    Ok(PathBuf::from(format!("{}.code", runtime.db_path.display())).join("repos"))
 }
 
 fn worktree_of(key: &str) -> Result<PathBuf> {
@@ -846,7 +849,8 @@ pub fn register(input: &RepoInput) -> Result<()> {
     )
     .map_err(|e| match e {
         rusqlite::Error::SqliteFailure(failure, _)
-            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                || failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
         {
             MCSError::ConstraintViolation(format!("key '{}' is already registered", input.key))
         }
@@ -947,12 +951,6 @@ fn end_job(key: &str) {
     if let Some(set) = IN_FLIGHT.get() {
         set.lock().remove(key);
     }
-}
-
-fn job_in_flight(key: &str) -> bool {
-    IN_FLIGHT
-        .get()
-        .is_some_and(|set| set.lock().contains(key))
 }
 
 /// Run `git` with the given environment. Returns stdout on success or a
@@ -1070,7 +1068,8 @@ fn prepare_auth(row: &FullRow) -> Result<PreparedAuth> {
                 envs: vec![(
                     "GIT_SSH_COMMAND".to_owned(),
                     format!(
-                        "ssh -i {path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+                        "ssh -i {} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+                        path.display()
                     ),
                 )],
                 ssh_key_file: Some(path),
@@ -1120,7 +1119,7 @@ fn do_index(key: &str, snippets: bool) -> Result<Value> {
         "snippets": snippets,
     });
     let wrapper = crate::actions::code::handle_code_index(Some(&args))?;
-    let text = wrapper.get("text").and_then(|t| t.as_str()).unwrap_or("");
+    let text = wrapper["content"][0]["text"].as_str().unwrap_or("");
     let mut counters: Value = serde_json::from_str(text)
         .map_err(|e| MCSError::MemoryError(format!("index result parse failed: {e}")))?;
     counters["status"] = json!("indexed");
@@ -1305,7 +1304,7 @@ fn remove_inner(key: &str) -> Result<()> {
     let runtime = RUNTIME
         .get()
         .ok_or_else(|| MCSError::MemoryError("managed-repo store not initialized".into()))?;
-    let db = runtime.db_path.with_extension("code").join(format!("{key}.code.db"));
+    let db = PathBuf::from(format!("{}.code", runtime.db_path.display())).join(format!("{key}.code.db"));
     let db = db.to_string_lossy().into_owned();
     for ext in ["", "-wal", "-shm"] {
         if let Err(e) = std::fs::remove_file(format!("{db}{ext}")) {
@@ -1358,6 +1357,26 @@ The webhooks init at `server.rs:448-451` uses the identical field expression `co
 Run: `cargo test --test repo_service --features code -- --test-threads=1`
 
 Expected: PASS. (`git` present on the runner; the fixture repo clones over `file://`.)
+
+Field corrections, verified by the implementing agent (2026-09-12; the plan's
+original code had six defects, all fixed in the committed source):
+
+- D1: `PermissionsExt` must be imported for `set_mode` (unix trait); `PathBuf`
+  implements no `Display` — the SSH command formats `path.display()`.
+- D2: `handle_code_index` returns the MCP content envelope
+  (`{"content":[{"type":"text","text":"<json>"}]}`); unwrap
+  `wrapper["content"][0]["text"]`, not `wrapper.get("text")` (matches
+  `src/vector_store.rs:1510`).
+- D3: the code base is `{memory_file}.code` (append), never
+  `with_extension("code")` which yields `t.code`; three sites (init,
+  `repos_base`, `remove_inner`) use `PathBuf::from(format!("{}.code", …))`.
+- D4: the test fixture migrates the memory DB via a `GraphHandle::new` open
+  before `repos::init` (the store needs migration 0006's table).
+- D5: `setup()` is one shared `LazyLock` fixture for the whole binary — the
+  stores are first-wins process singletons, so per-test tempdirs break every
+  test after the first (`CannotOpen` on the deleted dir).
+- D6: a duplicate `code_repo.key` is a PRIMARY KEY violation (extended code
+  1555), not UNIQUE (2067); `register` accepts both codes.
 
 - [ ] **Step 8: Commit**
 
@@ -1432,22 +1451,37 @@ fn fixture(parent: &Path, name: &str) -> std::path::PathBuf {
     repo
 }
 
-fn setup() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    code_registry::init(
-        dir.path().join("code"),
-        Durability::Async,
-        SqliteTuning::default(),
-        std::num::NonZeroUsize::new(8).unwrap(),
-        2,
-    );
-    repos::init(dir.path().join("t.mcpmem"), 5000);
-    dir
+// The repos and code_registry stores are first-wins process singletons, so
+// every test in this binary must share one backing directory. The code base
+// is `{db}.code` — the same derivation repos.rs uses — so wipe and resolve
+// paths stay aligned.
+static FIXTURE: std::sync::LazyLock<(tempfile::TempDir, std::path::PathBuf)> =
+    std::sync::LazyLock::new(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.mcpmem");
+        code_registry::init(
+            std::path::PathBuf::from(format!("{}.code", db.display())),
+            Durability::Async,
+            SqliteTuning::default(),
+            std::num::NonZeroUsize::new(8).unwrap(),
+            2,
+        );
+        repos::init(db.clone(), 5000);
+        (dir, db)
+    });
+
+fn setup() -> &'static (tempfile::TempDir, std::path::PathBuf) {
+    &FIXTURE
+}
+
+/// The text field of an MCP text-content result.
+fn text_of(wrapper: &serde_json::Value) -> &str {
+    wrapper["content"][0]["text"].as_str().unwrap_or("")
 }
 
 #[test]
 fn mcp_add_list_reindex_remove_round_trip() {
-    let dir = setup();
+    let (dir, _db) = setup();
     let repo = fixture(dir.path(), "up");
 
     let added = handle_code_repo_add(Some(&serde_json::json!({
@@ -1456,10 +1490,10 @@ fn mcp_add_list_reindex_remove_round_trip() {
         "authKind": "none",
     })))
     .expect("add succeeds");
-    assert_eq!(added["text"].as_str().unwrap().contains("indexed"), true, "{added}");
+    assert!(text_of(&added).contains("indexed"), "{added}");
 
     let listed = handle_code_repo_list(None).expect("list succeeds");
-    let text = listed["text"].as_str().unwrap();
+    let text = text_of(&listed);
     assert!(text.contains("cli-repo"), "{listed}");
     assert!(!text.contains("authSecret"), "secrets never listed: {listed}");
 
@@ -1468,11 +1502,11 @@ fn mcp_add_list_reindex_remove_round_trip() {
     git(&["commit", "-q", "-m", "second"], Some(&repo));
     let reindexed = handle_code_repo_reindex(Some(&serde_json::json!({ "key": "cli-repo" })))
         .expect("reindex succeeds");
-    assert!(reindexed["text"].as_str().unwrap().contains("\"symbols\":2"), "{reindexed}");
+    assert!(text_of(&reindexed).contains("\"symbols\":2"), "{reindexed}");
 
     let removed = handle_code_repo_remove(Some(&serde_json::json!({ "key": "cli-repo" })))
         .expect("remove succeeds");
-    assert!(removed["text"].as_str().unwrap().contains("removed"), "{removed}");
+    assert!(text_of(&removed).contains("removed"), "{removed}");
     assert!(repos::get_row("cli-repo").unwrap().is_none());
 }
 
@@ -1765,7 +1799,10 @@ async fn fixture() -> &'static Fixture {
             let server = support::server(Some(config), support::Scopes::all(), None).await;
             let token = support::flow::admin_access_token(&idp, &server).await;
             // Point the process-wide stores at THIS server's memory DB.
-            let code_base = server.dir().path().join("code");
+            // The code base is `{db}.code` — the same derivation repos.rs
+            // uses — so wipe assertions and resolve paths stay aligned.
+            let db_path = server.memory_db_path();
+            let code_base = std::path::PathBuf::from(format!("{}.code", db_path.display()));
             code_registry::init(
                 code_base.clone(),
                 Durability::Async,

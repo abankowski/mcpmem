@@ -450,6 +450,12 @@ impl MCPServer {
             config.busy_timeout_ms,
         );
 
+        #[cfg(feature = "code")]
+        crate::repos::init(
+            std::path::PathBuf::from(&config.memory_file_path),
+            config.busy_timeout_ms,
+        );
+
         Ok(Self {
             config: Arc::new(config),
             kg,
