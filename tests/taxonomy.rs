@@ -12,6 +12,7 @@ use mcpmem::actions::memory::{
 };
 use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::kg::GraphHandle;
+#[cfg(feature = "indexer")]
 use mcpmem::vector_store::VectorStore;
 use serde_json::{Value, json};
 use std::num::NonZeroUsize;
