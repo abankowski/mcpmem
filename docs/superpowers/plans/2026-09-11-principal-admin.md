@@ -602,6 +602,8 @@ Expected: FAIL — module and methods do not exist.
 
 - [ ] **Step 3: Implement**
 
+This task gains one supporting change: `MCSError` (src/errors.rs, the binary crate's own error type) gains a `ConstraintViolation(String)` variant for the duplicate-key classification below — additive, no downstream exhaustive matches break. `sql_error` maps extended code 2067 (SQLITE_CONSTRAINT_UNIQUE) to it. The Task 7 create handler additionally maps `ConstraintViolation` to 409; it arrives with this task because the store owns the constraint.
+
 `src/runtime_principals.rs`:
 
 ```rust
@@ -881,6 +883,14 @@ impl PrincipalsStore {
 }
 
 fn sql_error(e: rusqlite::Error) -> MCSError {
+    // Classify a duplicate-key breach distinctly, so the create handler
+    // answers 409 for a concurrent identical POST instead of a 500.
+    // Extended code 2067 is SQLITE_CONSTRAINT_UNIQUE.
+    if let Some(code) = e.sqlite_error_code() {
+        if code.extended_code == 2067 {
+            return MCSError::ConstraintViolation(format!("principals store: {e}"));
+        }
+    }
     MCSError::MemoryError(format!("principals store: {e}"))
 }
 
@@ -1405,6 +1415,9 @@ async fn list_marks_builtins_immutable_and_lists_runtime_rows() {
     let body = json(res).await;
     let items = body["principals"].as_array().unwrap();
     assert!(items.iter().any(|p| p["builtin"].as_bool() == Some(true)));
+    // The masked flag ships camelCase; the SPA reads p.maskedByBuiltin.
+    let first = items[0].clone();
+    assert!(first.get("maskedByBuiltin").is_some(), "masked flag uses the contract key");
     // The built-in owns an identity an admin cannot touch: PATCH and
     // DELETE on its id are refused.
     let builtin = items.iter().find(|p| p["builtin"].as_bool() == Some(true)).unwrap();
@@ -1558,6 +1571,7 @@ struct PrincipalView {
     label: Option<String>,
     scopes: Vec<String>,
     builtin: bool,
+    #[serde(rename = "maskedByBuiltin")]
     masked_by_builtin: bool,
 }
 
@@ -1805,27 +1819,29 @@ async fn admin_update_principal(
 }
 ```
 
-Delete (revokes families by the row's name; note the v1 limitation documented in the spec):
+Delete (revoke BEFORE deleting the row — a revoke failure must leave the row intact and retryable; token validation never cross-checks the principals store, so a swallowed revoke error would leave a deleted admin's tokens live while the handler reports 204):
 
 ```rust
 async fn admin_delete_principal(State(state): State<HttpState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
     if let Err(response) = admin_gate(&state, &headers) { return response; }
     let Some(oauth) = state.oauth.as_ref() else { return StatusCode::NOT_FOUND.into_response(); };
     let Some((iss, sub)) = key_of_id(&id) else { return not_found(); };
-    let key = (iss.as_str(), sub.as_str());
-    if oauth.builtin_keys.contains(&key) {
+    if is_builtin(&oauth.builtin_keys, &iss, &sub) {
         return conflict("a built-in principal owns this identity; it is immutable");
     }
-    let Some(row) = match oauth.runtime.get(&iss, &sub) {
+    let Some(row) = match oauth.with_principals(|s| s.get(&iss, &sub)) {
         Ok(Some(row)) => Some(row),
         Ok(None) => None,
         Err(e) => return store_failure(e),
     } else {
         return not_found();
     };
-    if let Err(e) = oauth.runtime.delete(&iss, &sub) { return store_failure(e); }
-    let revoked = oauth.revoke_principal(&row.name).unwrap_or(0);
-    tracing::info!(name = %row.name, revoked, "deleted principal and revoked token families");
+    match oauth.revoke_principal(&row.name) {
+        Ok(_revoked) => {}
+        Err(e) => return store_failure(e),
+    }
+    if let Err(e) = oauth.with_principals(|s| s.delete(&iss, &sub)) { return store_failure(e); }
+    tracing::info!(name = %row.name, "deleted principal and revoked token families");
     StatusCode::NO_CONTENT.into_response()
 }
 ```
