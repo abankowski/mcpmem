@@ -342,7 +342,7 @@ Commit: `feat(indexer): add canonical documents for taxonomy subjects`.
   - `pub struct TaxonomyJob { pub subject_kind: i64, pub subject_id: i64, pub subject_revision: i64, pub profile_id: Uuid, pub operation: IndexOperation, pub lease: Lease }`
   - `pub(crate) fn enqueue_taxonomy(conn, kind, id, revision, operation, profile)` — insert/update like `enqueue_change` (jobs.rs:32 shape, ON CONFLICT update + `lease_epoch+1`); also `UPDATE taxonomy_ann_generation SET full_scan_generation=NULL`.
   - `claim_due`, `renew`, `commit_vector` — same lease/epoch/revision gates as the entity path: commit refuses when `state != 'leased'`, `lease_token`/`lease_epoch` mismatch, or the subject's current revision differs from `job.subject_revision` for `upsert`; for `delete` the gate is `taxonomy_relation.deleted=1 AND revision == job.subject_revision` (kind 2) or unconditional (kinds 0/1 never delete).
-  - `verify_full_scan`-equivalent staleness query: `taxonomy_vector` `subject_revision` vs. current source revision per kind, excluding subjects with a `pending/leased/held/dead` job.
+  - `verify_full_scan`-equivalent staleness query: `taxonomy_vector` `subject_revision` vs. current source revision per kind. A source row is invalid when it has no live (`pending`/`leased`/`held`) job, or its only job is `dead` — the full-scan rebuild re-enqueues such subjects. This mirrors the entity clause `AND NOT EXISTS(... d.state='dead')`.
 
 - [ ] **Step 1-3: Tests first (fence rejection, deletion gate, staleness), then implement**
 
