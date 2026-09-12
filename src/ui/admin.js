@@ -89,7 +89,11 @@ async function completeAuth() {
   const body = await res.json();
   accessToken = body.access_token;
   sessionStorage.setItem(TOKEN_KEY, accessToken);
-  history.replaceState(null, "", "/ui/admin");
+  // The admin root is the page path minus a trailing /callback. A
+  // literal "/ui/admin" would drop a path-prefixed --public-url from the
+  // address bar; after a reload the SPA would re-derive an origin-only
+  // redirect and the next login would be refused byte-for-byte.
+  history.replaceState(null, "", location.pathname.replace(/\/callback$/, ""));
   try {
     await load();
   } catch (e) {
