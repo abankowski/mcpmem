@@ -6,25 +6,48 @@
 //! `Arc<GraphHandle>` for its lifetime so the canonical instance stays open.
 //! The watcher uses OS-native filesystem events (`notify` crate) with a 2-second
 //! debounce window to avoid thrashing during bulk edits / git operations.
+//!
+//! A process-wide registry maps project names to live watcher threads.
+//! [`stop_watcher`] signals and joins one so the managed-repo remove path can
+//! drop the project handle and delete its database without a race.
 
 #![cfg(feature = "code")]
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use notify::Watcher as _;
+use parking_lot::Mutex;
 
 use crate::code::lang;
 use crate::kg::GraphHandle;
+
+/// A live watcher thread and its stop flag.
+struct WatchHandle {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+static WATCHERS: OnceLock<Mutex<HashMap<String, WatchHandle>>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<HashMap<String, WatchHandle>> {
+    WATCHERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Spawn a background thread that watches `path` (recursively) for file
 /// modifications and re-indexes changed files under the given `project`.
 ///
 /// `kg_arc` is the project's handle; the thread holds it to pin the canonical
 /// instance open. The watcher debounces events for 2 seconds of quiet before
-/// triggering a re-index batch.
+/// triggering a re-index batch. The thread wakes at least every 2 seconds, so
+/// [`stop_watcher`] is noticed within that window.
 pub fn spawn_watcher(kg_arc: Arc<GraphHandle>, path: String, project: &str, snippets: bool) {
-    let _ = std::thread::Builder::new()
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop);
+    let project_owned = project.to_owned();
+    let Ok(handle) = std::thread::Builder::new()
         .name(format!("watcher-{project}"))
         .spawn(move || {
             // Held for the thread's lifetime to keep the project DB's canonical
@@ -56,11 +79,13 @@ pub fn spawn_watcher(kg_arc: Arc<GraphHandle>, path: String, project: &str, snip
             let mut last_event = Instant::now();
 
             loop {
+                if stop_flag.load(Ordering::Relaxed) {
+                    break;
+                }
                 let elapsed = last_event.elapsed().as_millis() as u64;
                 let timeout = Duration::from_millis(DEBOUNCE_MS.saturating_sub(elapsed));
                 match rx.recv_timeout(timeout) {
                     Ok(first) => {
-                        // Process the event that woke us, then drain any queued behind it.
                         let mut collect = |event: notify::Event| {
                             for p in &event.paths {
                                 if lang::detect(p).is_some() {
@@ -100,5 +125,26 @@ pub fn spawn_watcher(kg_arc: Arc<GraphHandle>, path: String, project: &str, snip
                     Err(_) => {}
                 }
             }
-        });
+        })
+    else {
+        return;
+    };
+    registry().lock().insert(
+        project_owned,
+        WatchHandle {
+            stop,
+            thread: handle,
+        },
+    );
+}
+
+/// Stop the watcher for `project`, if any: set its stop flag, join the thread,
+/// and remove the registry entry. Returns whether a watcher existed.
+pub fn stop_watcher(project: &str) -> bool {
+    let Some(watch) = registry().lock().remove(project) else {
+        return false;
+    };
+    watch.stop.store(true, Ordering::Relaxed);
+    let _ = watch.thread.join();
+    true
 }

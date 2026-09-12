@@ -264,8 +264,10 @@ fn stop_watcher_joins_and_answers_once() {
         !mcpmem::watcher::stop_watcher("watchme"),
         "the second stop reports no watcher"
     );
-    // The thread is joined; the project handle is no longer pinned anywhere.
-    assert_eq!(Arc::strong_count(&kg), 0); // the local binding still holds one
+    // The thread is joined, so it no longer pins the project handle; the
+    // local binding and the registry's warm slot are the only strong
+    // references left (resolve warms a strong Arc, so the count is 2).
+    assert_eq!(Arc::strong_count(&kg), 2);
 }
 
 #[test]
@@ -274,8 +276,6 @@ fn stop_watcher_on_unknown_project_is_false() {
     assert!(!mcpmem::watcher::stop_watcher("never-started"));
 }
 ```
-
-Fix the strong-count assertion: the local binding holds one strong `Arc`. Use `Arc::strong_count(&kg) == 1` after the watcher joined.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -2465,5 +2465,5 @@ If clean, nothing to commit. If not, commit the fixes with a message naming the 
 - **Spec coverage:** every spec section maps to a task (sweep in Task 8 Step 4). Two spec details changed deliberately: the UI section hides via HTTP 404 like webhooks (no `codeSectionEnabled` flag in the API — the 404 convention already exists); `code_repo` rows keep no `created_us` (not needed by any consumer; the design table listed only the columns implemented).
 - **JSON contract:** `RepoInput` and `RepoRow` carry `#[serde(rename_all = "camelCase")]` (Task 4), so the HTTP/UI contract `key/url/authKind/authSecret/snippets/state/lastError/lastIndexedUs` matches the MCP descriptors and the UI reads `authKind`, `lastIndexedUs`, `lastError`.
 - **LruCache pop:** verified in the vendored source (`~/.cargo/registry/src/*/lru-0.12.5/src/lib.rs:1109`, `pub fn pop<Q>(&mut self, k: &Q) -> Option<V>`).
-- **The watcher test's strong-count assertion:** `Arc::strong_count(&kg) == 1` after stop (the test's own binding), not 0.
+- **The watcher test's strong-count assertion:** `Arc::strong_count(&kg) == 2` after stop (the test's own binding plus the registry's warm slot; resolve warms a strong Arc, so 1 is unreachable).
 - **`busy_timeout_ms`:** the webhooks init at `server.rs:448-451` uses `config.busy_timeout_ms` in the same scope; the repos init copies it.
