@@ -148,7 +148,7 @@ fn repair_preserves_deterministic_keepers_verifies_backup_and_is_idempotent() {
     );
     assert!(
         reopened
-            .execute("INSERT INTO relation VALUES(1,2,2,999)", [])
+            .execute("INSERT INTO relation VALUES(1,2,2,999,0)", [])
             .is_err()
     );
     let after = snapshot(&reopened);
@@ -161,11 +161,11 @@ fn repair_preserves_deterministic_keepers_verifies_backup_and_is_idempotent() {
 #[test]
 fn all_dangling_variants_refuse_without_changing_the_source() {
     for row in [
-        "(99,2,2,0)",
-        "(1,99,2,0)",
-        "(1,2,99,0)",
-        "(1,2,1,0)",
-        "(1,2,4,0)",
+        "(99,2,2,0,0)",
+        "(1,99,2,0,0)",
+        "(1,2,99,0,0)",
+        "(1,2,1,0,0)",
+        "(1,2,4,0,0)",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("legacy.db");
@@ -272,11 +272,11 @@ fn bootstrap_enforces_fresh_uniqueness_but_server_open_never_repairs_legacy() {
     let fresh = Connection::open_in_memory().unwrap();
     initialize_database(&fresh).unwrap();
     fresh
-        .execute("INSERT INTO relation VALUES(1,2,3,0)", [])
+        .execute("INSERT INTO relation VALUES(1,2,3,0,0)", [])
         .unwrap();
     assert!(
         fresh
-            .execute("INSERT INTO relation VALUES(1,2,3,1)", [])
+            .execute("INSERT INTO relation VALUES(1,2,3,1,0)", [])
             .is_err()
     );
     let dir = tempfile::tempdir().unwrap();
