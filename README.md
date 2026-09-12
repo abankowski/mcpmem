@@ -656,9 +656,9 @@ JSON file.
 
 The page lists all principals together — built-ins and runtime rows — and
 offers edit, add and remove for the runtime ones. Removing a runtime principal
-revokes its live token families immediately; an access token already minted
-lives out its one-hour TTL, and every refresh and new login is refused from
-that moment.
+revokes its live token families immediately — an already-minted access token
+is refused from the moment of deletion, not after its one-hour TTL — and every
+refresh and new login is refused from that moment.
 
 **Built-ins are immutable, server-side.** An entry from the principals file
 cannot be edited, removed, or shadowed: a runtime row whose `iss` and `sub`

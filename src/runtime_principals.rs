@@ -289,11 +289,17 @@ impl PrincipalsStore {
     fn evict(&self, ttl_us: i64) -> Result<()> {
         let now = (self.now_us)();
         let tx = self.conn.unchecked_transaction().map_err(sql_error)?;
-        tx.execute(
-            "DELETE FROM principal_waitlist WHERE first_seen_us < ?1",
-            params![now.saturating_sub(ttl_us)],
-        )
-        .map_err(sql_error)?;
+        // ttl 0 disables the time-based sweep; the cap trim below still
+        // applies, so the list stays bounded either way. An unconditional
+        // DELETE here would use a threshold of now - 0 and wipe every prior
+        // entry on the next refused login.
+        if ttl_us > 0 {
+            tx.execute(
+                "DELETE FROM principal_waitlist WHERE first_seen_us < ?1",
+                params![now.saturating_sub(ttl_us)],
+            )
+            .map_err(sql_error)?;
+        }
         let count: i64 = tx
             .query_row("SELECT count(*) FROM principal_waitlist", [], |r| r.get(0))
             .map_err(sql_error)?;
@@ -450,6 +456,29 @@ mod tests {
         store.record_waitlist("iss", "b", "b", ttl_us).unwrap();
         assert!(store.waitlist_get("iss", "a").unwrap().is_none());
         assert!(store.waitlist_get("iss", "b").unwrap().is_some());
+    }
+
+    #[test]
+    fn ttl_zero_keeps_old_entries_but_not_over_the_cap() {
+        let (clock, t) = moved_clock();
+        let (store, _dir) = store_at(clock);
+        // With ttl 0 no entry may expire, however old it is.
+        store.record_waitlist("iss", "a", "a", 0).unwrap();
+        *t.lock() += 100 * 86_400_000_000;
+        store.record_waitlist("iss", "b", "b", 0).unwrap();
+        assert!(store.waitlist_get("iss", "a").unwrap().is_some());
+        assert!(store.waitlist_get("iss", "b").unwrap().is_some());
+        // The cap still applies, and it evicts by activity, not age: a is
+        // the least recently seen, so a goes when the list overflows.
+        for i in 0..24 {
+            *t.lock() += 1;
+            let name = format!("u{i}");
+            store.record_waitlist("iss", &name, &name, 0).unwrap();
+        }
+        let rows = store.waitlist().unwrap();
+        assert_eq!(rows.len() as i64, WAITLIST_CAP);
+        assert!(rows.iter().all(|r| r.sub != "a"));
+        assert!(rows.iter().any(|r| r.sub == "b"));
     }
 
     #[test]
