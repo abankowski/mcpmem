@@ -2422,7 +2422,7 @@ curl -s http://127.0.0.1:8901/ui/admin | grep -c 'id="repos"'
 curl -s http://127.0.0.1:8901/ui/admin.js | grep -c 'loadRepos'
 ```
 
-Expected: both print 1 (the section exists in the served shell). Full interactive verification needs the OAuth flow, which the runbook covers; the browser walk is a manual step in Task 8 if a live IdP is available.
+Expected: `grep -c 'id="repos"'` prints 1, and `grep -c 'loadRepos'` prints 2 (the function definition and its single call site in `load()`). A count of 0 means the stale binary predates the edits; rebuild first.
 
 - [ ] **Step 6: Commit**
 

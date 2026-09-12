@@ -17,10 +17,10 @@ pub mod kg;
 pub mod oauth_routes;
 pub mod principals;
 pub mod protocol;
-pub mod runtime;
-pub mod runtime_principals;
 #[cfg(feature = "code")]
 pub mod repos;
+pub mod runtime;
+pub mod runtime_principals;
 pub mod server;
 pub mod tls;
 pub mod tools;

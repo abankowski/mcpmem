@@ -831,9 +831,8 @@ pub fn handle_code_watch(args: Option<&Value>) -> Result<Value> {
 
 fn repo_input(args: Option<&Value>) -> Result<crate::repos::RepoInput> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
-    serde_json::from_value(params.clone()).map_err(|e| {
-        MCSError::InvalidParams(format!("invalid repository input: {e}"))
-    })
+    serde_json::from_value(params.clone())
+        .map_err(|e| MCSError::InvalidParams(format!("invalid repository input: {e}")))
 }
 
 pub fn handle_code_repo_add(args: Option<&Value>) -> Result<Value> {

@@ -22,9 +22,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::errors::{MCSError, Result};
 use mcpmem_core::events::{now_us, sql_error};
@@ -115,8 +115,7 @@ pub fn init(db_path: PathBuf, busy_timeout_ms: u64) {
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false);
-    let repos_dir =
-        std::path::PathBuf::from(format!("{}.code", db_path.display())).join("repos");
+    let repos_dir = std::path::PathBuf::from(format!("{}.code", db_path.display())).join("repos");
     let _ = RUNTIME.set(RepoRuntime {
         db_path,
         busy_timeout_ms,
@@ -134,9 +133,9 @@ pub fn init(db_path: PathBuf, busy_timeout_ms: u64) {
 }
 
 fn open_connection() -> Result<Connection> {
-    let runtime = RUNTIME.get().ok_or_else(|| {
-        MCSError::MemoryError("managed-repo store not initialized".into())
-    })?;
+    let runtime = RUNTIME
+        .get()
+        .ok_or_else(|| MCSError::MemoryError("managed-repo store not initialized".into()))?;
     let conn = Connection::open(&runtime.db_path).map_err(sql_error)?;
     conn.busy_timeout(Duration::from_millis(runtime.busy_timeout_ms))
         .map_err(sql_error)?;
@@ -245,7 +244,8 @@ pub fn list() -> Result<Vec<RepoRow>> {
             })
         })
         .map_err(sql_error)?;
-    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(sql_error)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(sql_error)
 }
 
 /// Fetch one row (secrets excluded). `Ok(None)` for an unknown key.
@@ -290,7 +290,12 @@ fn full_row(key: &str) -> Result<Option<FullRow>> {
     .map_err(sql_error)
 }
 
-fn set_state(key: &str, state: &str, last_error: Option<&str>, last_indexed_us: Option<i64>) -> Result<()> {
+fn set_state(
+    key: &str,
+    state: &str,
+    last_error: Option<&str>,
+    last_indexed_us: Option<i64>,
+) -> Result<()> {
     let conn = open_connection()?;
     conn.execute(
         "UPDATE code_repo
@@ -337,26 +342,20 @@ fn run_git(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to start git: {e}"))?;
-    let out_reader = child
-        .stdout
-        .take()
-        .map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut s = String::new();
-                let _ = pipe.read_to_string(&mut s);
-                s
-            })
-        });
-    let err_reader = child
-        .stderr
-        .take()
-        .map(|mut pipe| {
-            std::thread::spawn(move || {
-                let mut s = String::new();
-                let _ = pipe.read_to_string(&mut s);
-                s
-            })
-        });
+    let out_reader = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = pipe.read_to_string(&mut s);
+            s
+        })
+    });
+    let err_reader = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = pipe.read_to_string(&mut s);
+            s
+        })
+    });
     let deadline = Instant::now() + GIT_TIMEOUT;
     let status = loop {
         if let Some(status) = child
@@ -385,7 +384,10 @@ fn run_git(
             .rev()
             .collect::<Vec<_>>()
             .join("\n");
-        Err(format!("git failed (exit {}): {tail}", status.code().unwrap_or(-1)))
+        Err(format!(
+            "git failed (exit {}): {tail}",
+            status.code().unwrap_or(-1)
+        ))
     }
 }
 
@@ -438,7 +440,9 @@ fn prepare_auth(row: &FullRow) -> Result<PreparedAuth> {
                 ssh_key_file: Some(path),
             })
         }
-        other => Err(MCSError::MemoryError(format!("unknown auth_kind '{other}'"))),
+        other => Err(MCSError::MemoryError(format!(
+            "unknown auth_kind '{other}'"
+        ))),
     }
 }
 
@@ -664,7 +668,9 @@ fn remove_inner(key: &str) -> Result<()> {
     {
         let conn = open_connection()?;
         let exists: Option<i64> = conn
-            .query_row("SELECT 1 FROM code_repo WHERE key = ?1", [key], |r| r.get(0))
+            .query_row("SELECT 1 FROM code_repo WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
             .optional()
             .map_err(sql_error)?;
         if exists.is_none() {

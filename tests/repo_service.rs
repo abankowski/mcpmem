@@ -12,11 +12,20 @@ use mcpmem::repos::{self, RepoInput};
 
 fn git(args: &[&str], cwd: Option<&Path>) {
     let mut cmd = Command::new("git");
-    cmd.args(args).env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t");
-    if let Some(dir) = cwd { cmd.current_dir(dir); }
+    cmd.args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t");
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
     let out = cmd.output().expect("git runs");
-    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Build a local repository with one Rust file; return its path (usable as a
@@ -63,7 +72,7 @@ static SETUP: std::sync::LazyLock<(tempfile::TempDir, std::path::PathBuf)> =
     });
 
 fn setup() -> &'static (tempfile::TempDir, std::path::PathBuf) {
-    &*SETUP
+    &SETUP
 }
 
 fn wait_state(key: &str, wanted: &[&str]) -> String {
@@ -96,11 +105,19 @@ fn lifecycle_register_add_reindex_remove() {
     assert!(row.last_indexed_us.is_some());
 
     // A new commit + reindex grows the symbol count.
-    std::fs::write(repo.join("src/lib.rs"), "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { 2 }\n").unwrap();
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { 2 }\n",
+    )
+    .unwrap();
     git(&["add", "."], Some(&repo));
     git(&["commit", "-q", "-m", "second"], Some(&repo));
     let result = repos::reindex("acme-api").expect("reindex fetches and indexes");
-    assert_eq!(result["symbols"].as_u64(), Some(2), "second symbol indexed: {result}");
+    assert_eq!(
+        result["symbols"].as_u64(),
+        Some(2),
+        "second symbol indexed: {result}"
+    );
 
     // Duplicate key is refused.
     let dup = repos::register(&input);
@@ -109,8 +126,19 @@ fn lifecycle_register_add_reindex_remove() {
     // Remove wipes everything.
     repos::remove("acme-api").expect("remove wipes");
     assert!(repos::get_row("acme-api").unwrap().is_none());
-    assert!(!dir.path().join("t.mcpmem.code").join("acme-api.code.db").exists());
-    assert!(!dir.path().join("t.mcpmem.code").join("repos").join("acme-api").exists());
+    assert!(
+        !dir.path()
+            .join("t.mcpmem.code")
+            .join("acme-api.code.db")
+            .exists()
+    );
+    assert!(
+        !dir.path()
+            .join("t.mcpmem.code")
+            .join("repos")
+            .join("acme-api")
+            .exists()
+    );
 }
 
 #[test]
@@ -118,34 +146,103 @@ fn invalid_inputs_are_refused() {
     let (dir, _db) = setup();
     let repo = fixture_repo(dir.path(), "upstream2");
 
-    let bad_key = RepoInput { key: "bad/key".into(), url: repo.to_string_lossy().into_owned(), auth_kind: "none".into(), auth_secret: None, snippets: false };
-    assert!(matches!(repos::register(&bad_key), Err(MCSError::InvalidParams(_))));
+    let bad_key = RepoInput {
+        key: "bad/key".into(),
+        url: repo.to_string_lossy().into_owned(),
+        auth_kind: "none".into(),
+        auth_secret: None,
+        snippets: false,
+    };
+    assert!(matches!(
+        repos::register(&bad_key),
+        Err(MCSError::InvalidParams(_))
+    ));
 
-    let bad_kind = RepoInput { key: "k".into(), url: repo.to_string_lossy().into_owned(), auth_kind: "api".into(), auth_secret: None, snippets: false };
-    assert!(matches!(repos::register(&bad_kind), Err(MCSError::InvalidParams(_))));
+    let bad_kind = RepoInput {
+        key: "k".into(),
+        url: repo.to_string_lossy().into_owned(),
+        auth_kind: "api".into(),
+        auth_secret: None,
+        snippets: false,
+    };
+    assert!(matches!(
+        repos::register(&bad_kind),
+        Err(MCSError::InvalidParams(_))
+    ));
 
-    let empty_url = RepoInput { key: "k2".into(), url: "  ".into(), auth_kind: "none".into(), auth_secret: None, snippets: false };
-    assert!(matches!(repos::register(&empty_url), Err(MCSError::InvalidParams(_))));
+    let empty_url = RepoInput {
+        key: "k2".into(),
+        url: "  ".into(),
+        auth_kind: "none".into(),
+        auth_secret: None,
+        snippets: false,
+    };
+    assert!(matches!(
+        repos::register(&empty_url),
+        Err(MCSError::InvalidParams(_))
+    ));
 
-    let embedded_creds = RepoInput { key: "k3".into(), url: "https://user:pass@example.com/r.git".into(), auth_kind: "none".into(), auth_secret: None, snippets: false };
-    assert!(matches!(repos::register(&embedded_creds), Err(MCSError::InvalidParams(_))));
+    let embedded_creds = RepoInput {
+        key: "k3".into(),
+        url: "https://user:pass@example.com/r.git".into(),
+        auth_kind: "none".into(),
+        auth_secret: None,
+        snippets: false,
+    };
+    assert!(matches!(
+        repos::register(&embedded_creds),
+        Err(MCSError::InvalidParams(_))
+    ));
 
-    let bare_token = RepoInput { key: "k4".into(), url: repo.to_string_lossy().into_owned(), auth_kind: "token".into(), auth_secret: None, snippets: false };
-    assert!(matches!(repos::register(&bare_token), Err(MCSError::InvalidParams(_))));
+    let bare_token = RepoInput {
+        key: "k4".into(),
+        url: repo.to_string_lossy().into_owned(),
+        auth_kind: "token".into(),
+        auth_secret: None,
+        snippets: false,
+    };
+    assert!(matches!(
+        repos::register(&bare_token),
+        Err(MCSError::InvalidParams(_))
+    ));
 
     // A bare user name is not a credential: scp-style and ssh:// URLs pass.
-    let scp_url = RepoInput { key: "k5".into(), url: "git@github.com:org/repo.git".into(), auth_kind: "none".into(), auth_secret: None, snippets: false };
-    assert!(matches!(repos::register(&scp_url), Ok(())), "scp-style user@host:path passes");
+    let scp_url = RepoInput {
+        key: "k5".into(),
+        url: "git@github.com:org/repo.git".into(),
+        auth_kind: "none".into(),
+        auth_secret: None,
+        snippets: false,
+    };
+    assert!(
+        matches!(repos::register(&scp_url), Ok(())),
+        "scp-style user@host:path passes"
+    );
 
-    let ssh_url = RepoInput { key: "k6".into(), url: "ssh://git@host/path".into(), auth_kind: "none".into(), auth_secret: None, snippets: false };
-    assert!(matches!(repos::register(&ssh_url), Ok(())), "ssh url with a user passes");
+    let ssh_url = RepoInput {
+        key: "k6".into(),
+        url: "ssh://git@host/path".into(),
+        auth_kind: "none".into(),
+        auth_secret: None,
+        snippets: false,
+    };
+    assert!(
+        matches!(repos::register(&ssh_url), Ok(())),
+        "ssh url with a user passes"
+    );
 }
 
 #[test]
 fn in_flight_jobs_conflict() {
     let (dir, _db) = setup();
     let repo = fixture_repo(dir.path(), "upstream3");
-    let input = RepoInput { key: "busy".into(), url: repo.to_string_lossy().into_owned(), auth_kind: "none".into(), auth_secret: None, snippets: false };
+    let input = RepoInput {
+        key: "busy".into(),
+        url: repo.to_string_lossy().into_owned(),
+        auth_kind: "none".into(),
+        auth_secret: None,
+        snippets: false,
+    };
     repos::register(&input).unwrap();
     repos::add_job("busy").expect("first job starts");
     // The job may finish quickly; poll until in-flight or done, then assert a
@@ -159,13 +256,19 @@ fn in_flight_jobs_conflict() {
 fn reindex_during_in_flight_job_conflicts() {
     let (dir, _db) = setup();
     let repo = fixture_repo(dir.path(), "upstream4");
-    let input = RepoInput { key: "contested".into(), url: repo.to_string_lossy().into_owned(), auth_kind: "none".into(), auth_secret: None, snippets: false };
+    let input = RepoInput {
+        key: "contested".into(),
+        url: repo.to_string_lossy().into_owned(),
+        auth_kind: "none".into(),
+        auth_secret: None,
+        snippets: false,
+    };
     repos::register(&input).unwrap();
     repos::add_job("contested").expect("first job starts");
     // The add job is still in flight: clone + index take far longer than the
     // microseconds until this reindex arrives.
-    assert!(matches!(
-        repos::reindex("contested"),
-        Err(MCSError::InvalidParams(_))
-    ), "a second trigger while one job is in flight conflicts");
+    assert!(
+        matches!(repos::reindex("contested"), Err(MCSError::InvalidParams(_))),
+        "a second trigger while one job is in flight conflicts"
+    );
 }

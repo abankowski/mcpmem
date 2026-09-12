@@ -162,7 +162,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let base = dir.path().join("code");
         init(
-            base.clone(),
+            base,
             crate::config::Durability::Async,
             crate::config::SqliteTuning::default(),
             NonZeroUsize::new(8).unwrap(),

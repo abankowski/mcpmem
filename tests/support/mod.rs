@@ -174,7 +174,7 @@ impl Server {
 
     /// The tempdir this server was built on, for fixtures that must live
     /// near the memory DB (git fixture repos, code-db assertion paths).
-    pub fn dir(&self) -> &tempfile::TempDir {
+    pub const fn dir(&self) -> &tempfile::TempDir {
         &self.dir
     }
 

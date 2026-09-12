@@ -25,7 +25,12 @@ fn stop_watcher_joins_and_answers_once() {
     std::fs::create_dir_all(&watched).unwrap();
     let kg = warm_project(&dir);
 
-    mcpmem::watcher::spawn_watcher(kg.clone(), watched.to_string_lossy().into_owned(), "watchme", false);
+    mcpmem::watcher::spawn_watcher(
+        kg.clone(),
+        watched.to_string_lossy().into_owned(),
+        "watchme",
+        false,
+    );
     // Give the OS watcher thread a moment to register.
     std::thread::sleep(std::time::Duration::from_millis(300));
 

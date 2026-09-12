@@ -1084,11 +1084,11 @@ fn attach_webhook_admin_routes(router: Router<HttpState>) -> Router<HttpState> {
 #[cfg(feature = "code")]
 fn attach_repo_admin_routes(router: Router<HttpState>) -> Router<HttpState> {
     router
-        .route("/ui/api/repos", get(admin_list_repos).post(admin_create_repo))
         .route(
-            "/ui/api/repos/{key}/reindex",
-            post(admin_reindex_repo),
+            "/ui/api/repos",
+            get(admin_list_repos).post(admin_create_repo),
         )
+        .route("/ui/api/repos/{key}/reindex", post(admin_reindex_repo))
         .route("/ui/api/repos/{key}", delete(admin_remove_repo))
 }
 
@@ -1317,11 +1317,7 @@ async fn admin_list_repos(State(state): State<HttpState>, headers: HeaderMap) ->
         return *response;
     }
     match crate::repos::list() {
-        Ok(rows) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "repos": rows })),
-        )
-            .into_response(),
+        Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "repos": rows }))).into_response(),
         Err(e) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("repos store: {e}"),
@@ -1347,7 +1343,7 @@ async fn admin_create_repo(
         Err(_) => {
             return bad_request(
                 "the body must be a JSON repo: {key, url, authKind?, authSecret?, snippets?}",
-            )
+            );
         }
     };
     if let Err(e) = crate::repos::register(&input) {
@@ -1360,7 +1356,7 @@ async fn admin_create_repo(
             ),
         };
     }
-    let key = input.key.clone();
+    let key = input.key;
     if let Err(e) = crate::repos::add_job(&key) {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1393,7 +1389,7 @@ async fn admin_reindex_repo(
             return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("repos store: {e}"),
-            )
+            );
         }
     }
     match crate::repos::reindex_job(&key) {
@@ -1402,9 +1398,7 @@ async fn admin_reindex_repo(
             Json(serde_json::json!({ "status": "accepted", "key": key })),
         )
             .into_response(),
-        Err(MCSError::InvalidParams(message)) => {
-            json_error(StatusCode::CONFLICT, message)
-        }
+        Err(MCSError::InvalidParams(message)) => json_error(StatusCode::CONFLICT, message),
         Err(e) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("repos store: {e}"),
@@ -1430,7 +1424,7 @@ async fn admin_remove_repo(
             return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("repos store: {e}"),
-            )
+            );
         }
     }
     match crate::repos::remove_job(&key) {
@@ -1439,9 +1433,7 @@ async fn admin_remove_repo(
             Json(serde_json::json!({ "status": "accepted", "key": key })),
         )
             .into_response(),
-        Err(MCSError::InvalidParams(message)) => {
-            json_error(StatusCode::CONFLICT, message)
-        }
+        Err(MCSError::InvalidParams(message)) => json_error(StatusCode::CONFLICT, message),
         Err(e) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("repos store: {e}"),

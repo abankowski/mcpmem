@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use mcpmem::code_registry;
 use mcpmem::config::{Durability, SqliteTuning};
@@ -22,7 +22,11 @@ fn git(args: &[&str], cwd: Option<&Path>) {
         cmd.current_dir(dir);
     }
     let out = cmd.output().expect("git runs");
-    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Build a local git repository with one Rust file; used as a clone URL.
@@ -52,10 +56,12 @@ static FIXTURE: tokio::sync::OnceCell<Fixture> = tokio::sync::OnceCell::const_ne
 async fn fixture() -> &'static Fixture {
     FIXTURE
         .get_or_init(|| async {
-            let idp = support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default())
-                .await;
+            let idp =
+                support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default()).await;
             let mut config = support::oauth_config(&idp.issuer);
-            config.principals[0].scopes.push(mcpmem::principals::ADMIN_SCOPE.into());
+            config.principals[0]
+                .scopes
+                .push(mcpmem::principals::ADMIN_SCOPE.into());
             let server = support::server(Some(config), support::Scopes::all(), None).await;
             let token = support::flow::admin_access_token(&idp, &server).await;
             // Point the process-wide stores at THIS server's memory DB.
@@ -72,7 +78,7 @@ async fn fixture() -> &'static Fixture {
             );
             repos::init(server.memory_db_path(), 5000);
             let repo_url = make_repo(server.dir().path(), "upstream");
-            let _ = std::mem::drop(idp); // the idp stays alive for the token's lifetime
+            std::mem::drop(idp); // the idp stays alive for the token's lifetime
             Fixture {
                 server,
                 token,
@@ -107,11 +113,10 @@ async fn json(res: axum::response::Response) -> serde_json::Value {
 async fn wait_settled(fix: &Fixture) -> serde_json::Value {
     for _ in 0..100 {
         let body = json(fix.server.request(get(fix, "/ui/api/repos")).await).await;
-        let settled = body["repos"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|r| !["pending", "cloning", "indexing", "removing"].contains(&r["state"].as_str().unwrap_or("")));
+        let settled = body["repos"].as_array().unwrap().iter().all(|r| {
+            !["pending", "cloning", "indexing", "removing"]
+                .contains(&r["state"].as_str().unwrap_or(""))
+        });
         if settled {
             return body;
         }
@@ -175,7 +180,7 @@ async fn add_accepts_202_and_settles_to_indexed() {
     let removed = fix
         .server
         .request(
-            Request::delete(format!("/ui/api/repos/admin-api"))
+            Request::delete("/ui/api/repos/admin-api".to_string())
                 .header(header::AUTHORIZATION, format!("Bearer {}", fix.token))
                 .body(Body::empty())
                 .unwrap(),
@@ -191,7 +196,11 @@ async fn reindex_triggers_and_remove_wipes() {
     let _ = add_and_settle(fix, "reindex-target").await;
     let res = fix
         .server
-        .request(post(fix, "/ui/api/repos/reindex-target/reindex", &serde_json::json!({})))
+        .request(post(
+            fix,
+            "/ui/api/repos/reindex-target/reindex",
+            &serde_json::json!({}),
+        ))
         .await;
     assert_eq!(res.status(), StatusCode::ACCEPTED);
     let _ = wait_settled(fix).await;
@@ -199,7 +208,7 @@ async fn reindex_triggers_and_remove_wipes() {
     let removed = fix
         .server
         .request(
-            Request::delete(format!("/ui/api/repos/reindex-target"))
+            Request::delete("/ui/api/repos/reindex-target".to_string())
                 .header(header::AUTHORIZATION, format!("Bearer {}", fix.token))
                 .body(Body::empty())
                 .unwrap(),
@@ -227,7 +236,11 @@ async fn reindex_triggers_and_remove_wipes() {
     // The row is gone: a direct reindex on it is a 404.
     let miss = fix
         .server
-        .request(post(fix, "/ui/api/repos/reindex-target/reindex", &serde_json::json!({})))
+        .request(post(
+            fix,
+            "/ui/api/repos/reindex-target/reindex",
+            &serde_json::json!({}),
+        ))
         .await;
     assert_eq!(miss.status(), StatusCode::NOT_FOUND);
 }
@@ -250,12 +263,20 @@ async fn duplicate_key_conflicts_and_bad_bodies_are_400() {
     // Unknown key reindex -> 404; malformed body -> 400.
     let miss = fix
         .server
-        .request(post(fix, "/ui/api/repos/nope/reindex", &serde_json::json!({})))
+        .request(post(
+            fix,
+            "/ui/api/repos/nope/reindex",
+            &serde_json::json!({}),
+        ))
         .await;
     assert_eq!(miss.status(), StatusCode::NOT_FOUND);
     let bad = fix
         .server
-        .request(post(fix, "/ui/api/repos", &serde_json::json!({ "key": "x" })))
+        .request(post(
+            fix,
+            "/ui/api/repos",
+            &serde_json::json!({ "key": "x" }),
+        ))
         .await;
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
     // Remove the row again: the fixture and its list are process-wide, and a
@@ -263,7 +284,7 @@ async fn duplicate_key_conflicts_and_bad_bodies_are_400() {
     let removed = fix
         .server
         .request(
-            Request::delete(format!("/ui/api/repos/dup-target"))
+            Request::delete("/ui/api/repos/dup-target".to_string())
                 .header(header::AUTHORIZATION, format!("Bearer {}", fix.token))
                 .body(Body::empty())
                 .unwrap(),

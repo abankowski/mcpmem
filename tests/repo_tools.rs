@@ -22,7 +22,11 @@ fn git(args: &[&str], cwd: Option<&Path>) {
         cmd.current_dir(dir);
     }
     let out = cmd.output().expect("git runs");
-    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn fixture(parent: &Path, name: &str) -> std::path::PathBuf {
@@ -90,9 +94,16 @@ fn mcp_add_list_reindex_remove_round_trip() {
     let listed = handle_code_repo_list(None).expect("list succeeds");
     let text = text_of(&listed);
     assert!(text.contains("cli-repo"), "{listed}");
-    assert!(!text.contains("authSecret"), "secrets never listed: {listed}");
+    assert!(
+        !text.contains("authSecret"),
+        "secrets never listed: {listed}"
+    );
 
-    std::fs::write(repo.join("src/lib.rs"), "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { 2 }\n").unwrap();
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { 2 }\n",
+    )
+    .unwrap();
     git(&["add", "."], Some(&repo));
     git(&["commit", "-q", "-m", "second"], Some(&repo));
     let reindexed = handle_code_repo_reindex(Some(&serde_json::json!({ "key": "cli-repo" })))
