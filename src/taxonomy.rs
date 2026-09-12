@@ -219,6 +219,121 @@ fn opt_usize(params: &Value, key: &str, default: usize) -> Result<usize> {
     }
 }
 
+/// Scales a vector to unit length in place.
+///
+/// A zero vector keeps its value. Dividing by a zero norm would fill the
+/// vector with NaN, and every later comparison against NaN is false, so the
+/// search would silently return nothing. This is a copy of the private
+/// `vector_actions::l2_normalize`; keep the two in step.
+#[cfg(feature = "indexer")]
+fn l2_normalize(vector: &mut [f32]) {
+    let norm = vector
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum::<f64>()
+        .sqrt();
+    if norm > 0.0 && norm.is_finite() {
+        let scale = 1.0 / norm;
+        for value in vector.iter_mut() {
+            *value = (f64::from(*value) * scale) as f32;
+        }
+    }
+}
+
+/// Suggests taxonomy subjects through the semantic tier.
+///
+/// The server embeds every text with the model the serving index profile
+/// names, then searches the profile's per-kind ANN snapshots for the nearest
+/// subjects. One provider call embeds all texts; each text searches the
+/// kind's snapshot separately. A suggestion's score is `1.0 - distance`, the
+/// convention `semantic_search` results use. An absent snapshot yields an
+/// empty list, never an error, so the caller can fall back to the offline
+/// string engine.
+#[cfg(feature = "indexer")]
+pub fn suggest_semantic(
+    vs: &crate::vector_store::VectorStore,
+    texts: &[String],
+    kind: SubjectKind,
+    top_k: usize,
+) -> Result<Vec<Suggestion>> {
+    use mcpmem_core::jobs::Normalization;
+    use mcpmem_indexer::EmbeddingProvider;
+
+    let top_k = top_k.clamp(1, 100);
+
+    let profile = vs.serving_profile()?.ok_or_else(|| {
+        MCSError::InvalidParams(
+            "This store serves no index profile, so the server does not know which model to \
+             embed with. Name a provider, a model and a dimension in the [indexer] section of \
+             the configuration file, then restart the server."
+                .into(),
+        )
+    })?;
+
+    let provider = crate::indexer_provider::get().ok_or_else(|| {
+        MCSError::InvalidParams(format!(
+            "No embedding provider is configured, so the server cannot embed the query text. \
+             The serving profile names the provider kind '{}'. Configure that provider in the \
+             [indexer] section of the configuration file, then restart the server.",
+            profile.provider_kind
+        ))
+    })?;
+
+    // One call for the whole batch: each call bills for the request. A wrong
+    // count is a provider fault; the per-text loop below would otherwise pair
+    // results with the wrong texts.
+    let vectors = provider
+        .embed_texts(&profile, &texts)
+        .map_err(|e| MCSError::MemoryError(format!("Embedding the taxonomy texts failed: {e}")))?;
+    if vectors.len() != texts.len() {
+        return Err(MCSError::MemoryError(format!(
+            "The embedding provider returned {} vectors for {} texts; it must return exactly \
+             one vector per text",
+            vectors.len(),
+            texts.len()
+        )));
+    }
+
+    // `SubjectKind` and `TaxonomyKind` are the same numeric contract: the
+    // variants line up by discriminant, matching the `subject_kind` column.
+    let taxonomy_kind = match kind {
+        SubjectKind::EntityType => crate::vector_store::TaxonomyKind::EntityType,
+        SubjectKind::RelationType => crate::vector_store::TaxonomyKind::RelationType,
+        SubjectKind::Relation => crate::vector_store::TaxonomyKind::Relation,
+    };
+    let mut suggestions: Vec<Suggestion> = Vec::new();
+    for mut query in vectors {
+        if query.len() != profile.dimensions as usize {
+            return Err(MCSError::MemoryError(format!(
+                "The embedding provider returned {} dimensions and the serving profile names \
+                 model '{}' at {} dimensions. The provider and the profile disagree.",
+                query.len(),
+                profile.model,
+                profile.dimensions
+            )));
+        }
+        // Nothing validates a query vector, and cosine distance against an
+        // unnormalized query ranks the results wrongly, so normalize it here,
+        // exactly as `handle_semantic_search` does.
+        if profile.normalization == Normalization::L2 {
+            l2_normalize(&mut query);
+        }
+        let mut hits = vs.search_taxonomy(taxonomy_kind, &query, top_k)?;
+        // The snapshot search already returns at most top_k hits; the clamp
+        // keeps the per-text bound local to this function.
+        hits.truncate(top_k);
+        for (id, distance) in hits {
+            // A vector may point at a deleted subject: the snapshot never
+            // sees the deletion, so the row resolves to nothing. Skip it.
+            let Some((name, _)) = vs.resolve_taxonomy(taxonomy_kind, id) else {
+                continue;
+            };
+            suggestions.push(Suggestion { name, score: 1.0 - distance });
+        }
+    }
+    Ok(suggestions)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -433,5 +548,530 @@ mod tests {
             value["suggestions"].as_array().map(|a| a.len()),
             Some(1)
         );
+    }
+
+    #[cfg(feature = "indexer")]
+    mod semantic {
+        use super::*;
+        use crate::config::{Durability, SqliteTuning};
+        use crate::kg::GraphHandle;
+        use crate::types::EntityInput as Entity;
+        use crate::vector_store::VectorStore;
+        use mcpmem_core::jobs::{DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization};
+        use mcpmem_indexer::OpenAiCompatibleProvider;
+        use parking_lot::Mutex;
+        use rusqlite::params;
+        use serde_json::json;
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::num::NonZeroUsize;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        /// One `/v1/embeddings` request the fake server recorded.
+        ///
+        /// The recorded batch is the input array exactly as the provider sent
+        /// it, so an assertion on it proves how many texts one call carried.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct RecordedCall {
+            texts: Vec<String>,
+        }
+
+        /// The shared state of the fake embeddings server.
+        struct FakeState {
+            calls: Mutex<Vec<RecordedCall>>,
+        }
+
+        /// A fake OpenAI-compatible embeddings endpoint on a loopback port.
+        ///
+        /// [`crate::indexer_provider`] holds one [`ProviderRegistry`], and a
+        /// registry can hold only the concrete Ollama and OpenAI providers,
+        /// both plain HTTP clients. A trait-level stub can never reach
+        /// [`suggest_semantic`], so the stub must speak HTTP itself. The
+        /// server returns all-ones vectors of the requested dimension and
+        /// records each request. One server lives for the whole test binary;
+        /// every semantic test shares it through the process-wide registry.
+        struct FakeEmbeddings {
+            url: String,
+            state: Arc<FakeState>,
+        }
+
+        /// One loopback embeddings server for the whole test binary.
+        static FAKE: std::sync::LazyLock<Arc<FakeEmbeddings>> = std::sync::LazyLock::new(|| {
+            Arc::new(FakeEmbeddings::start())
+        });
+
+        fn fake_embeddings() -> &'static FakeEmbeddings {
+            FAKE.as_ref()
+        }
+
+        impl FakeEmbeddings {
+            fn start() -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0")
+                    .expect("bind the fake embeddings listener");
+                let addr = listener
+                    .local_addr()
+                    .expect("read back the fake embeddings port");
+                let state = Arc::new(FakeState { calls: Mutex::new(Vec::new()) });
+                let thread_state = Arc::clone(&state);
+                let _ = std::thread::Builder::new()
+                    .name("taxonomy-semantic-fake".into())
+                    .spawn(move || {
+                        loop {
+                            // A dying client is an accept or read failure,
+                            // never a server fault; keep serving.
+                            let Some((conn, _peer)) = listener.accept().ok() else {
+                                continue;
+                            };
+                            handle_connection(conn, Arc::clone(&thread_state));
+                        }
+                    });
+                Self {
+                    url: format!("http://{addr}/v1/embeddings"),
+                    state,
+                }
+            }
+
+            /// Every request the server has seen so far, in arrival order.
+            fn recorded(&self) -> Vec<RecordedCall> {
+                (self.state.calls.lock()).clone()
+            }
+        }
+
+        /// Installs the fake server into the process-wide registry cell.
+        ///
+        /// The cell accepts one value for the lifetime of the process, and
+        /// every test registers the same fake server, so whichever call wins
+        /// the race the registry is equivalent.
+        fn install_fake_provider() {
+            let fake = fake_embeddings();
+            let provider = OpenAiCompatibleProvider::new(
+                fake.url.clone(),
+                "test-key".into(),
+                Duration::from_secs(5),
+            )
+            .expect("make an OpenAI provider without a request");
+            crate::indexer_provider::init(Arc::new(mcpmem_indexer::ProviderRegistry::new(
+                None,
+                Some(Arc::new(provider)),
+            )));
+        }
+
+        /// Serves one connection: read the whole request, record it, answer
+        /// with fixed embeddings, then close.
+        fn handle_connection(mut conn: TcpStream, state: Arc<FakeState>) {
+            let mut buf = Vec::new();
+            let mut chunk = vec![0u8; 8192];
+            loop {
+                let read = conn.read(&mut chunk);
+                if read.is_err() {
+                    return;
+                }
+                let n = read.unwrap();
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some((headers_end, body_len)) = request_frame(&buf) {
+                    // The body follows the blank-line separator.
+                    let body_start = headers_end + 4;
+                    if buf.len() >= body_start + body_len {
+                        respond(&mut conn, &buf[body_start..body_start + body_len], Arc::clone(&state));
+                        return;
+                    }
+                }
+            }
+        }
+
+        /// The header-block end and the `Content-Length` of a request.
+        ///
+        /// Returns None until the full header block is buffered.
+        fn request_frame(buf: &[u8]) -> Option<(usize, usize)> {
+            let text = String::from_utf8_lossy(buf).to_string();
+            let Some(headers_end) = text.find("\r\n\r\n") else {
+                return None;
+            };
+            let mut length: usize = 0;
+            for line in text[..headers_end].lines() {
+                let Some(colon) = line.find(':') else {
+                    continue;
+                };
+                if line[..colon].trim().eq_ignore_ascii_case("content-length") {
+                    length = line[colon + 1..].trim().parse::<usize>().ok().unwrap_or(0);
+                }
+            }
+            Some((headers_end, length))
+        }
+
+        /// Records the request and answers with all-ones embeddings.
+        ///
+        /// Two sentinel texts drive the fault paths: `WRONG_DIMENSIONS` makes
+        /// the server return half-width vectors and `WRONG_COUNT` makes it
+        /// return a single vector. Both faults are provider behavior the
+        /// engine must detect. Each request produces the same fault.
+        fn respond(conn: &mut TcpStream, body: &[u8], state: Arc<FakeState>) {
+            let text = String::from_utf8_lossy(body).to_string();
+            let Some(value) = serde_json::from_str::<serde_json::Value>(text.as_str()).ok()
+            else {
+                return;
+            };
+            let input: Vec<String> = value["input"]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|row| row.as_str().expect("an input text").to_owned())
+                        .collect()
+                })
+                .unwrap_or(Vec::new());
+            let dimensions: usize = value["dimensions"].as_u64().map(|n| n as usize).unwrap_or(0);
+            state.calls.lock().extend_from_slice(&[RecordedCall { texts: input.clone() }]);
+
+            let wrong_dimensions = input.first().is_some_and(|text| *text == "WRONG_DIMENSIONS");
+            let wrong_count = input.first().is_some_and(|text| *text == "WRONG_COUNT");
+            let count = if wrong_count {
+                input.len() + 1
+            } else {
+                input.len()
+            };
+            let dims = if wrong_dimensions {
+                (dimensions / 2).max(1)
+            } else {
+                dimensions
+            };
+            let data: Vec<_> = (0..count)
+                .map(|_| json!({"embedding": vec![1.0; dims]}))
+                .collect();
+            let payload = json!({"data": data}).to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = conn.write_all(head.as_bytes());
+            let _ = conn.write_all(payload.as_bytes());
+        }
+
+        /// A temporary store over a fresh database, with the fake provider
+        /// installed. All vectors the server returns are all-ones, so tests
+        /// seed snapshot vectors and derive exact distances from them.
+        struct Env {
+            // Held alive so the store's database file stays on disk.
+            _dir: tempfile::TempDir,
+            kg: GraphHandle,
+            vs: VectorStore,
+        }
+
+        fn env(dims: u32) -> Env {
+            install_fake_provider();
+            let dir = tempfile::tempdir().unwrap();
+            let db_path = dir.path().join("memory.db");
+            let kg = GraphHandle::new(
+                &db_path,
+                Durability::Async,
+                SqliteTuning::default(),
+                NonZeroUsize::new(10000).unwrap(),
+                4,
+            )
+            .unwrap();
+            let vs = VectorStore::new(&db_path, dims).unwrap();
+            Env { _dir: dir, kg, vs }
+        }
+
+        fn create_test_entity(kg: &GraphHandle, name: &str, etype: &str) {
+            kg.create_entities(&[Entity {
+                name: name.into(),
+                entity_type: etype.into(),
+                observations: vec!["test observation".into()],
+            }])
+            .unwrap();
+        }
+
+        /// Registers a serving profile for the store and returns its id.
+        ///
+        /// The registry rows are inserted directly, the way a completed
+        /// rebuild would leave them; the entity index is not rebuilt, because
+        /// only the taxonomy snapshots matter here.
+        fn seed_profile(env: &Env, dims: u32, normalization: Normalization) -> uuid::Uuid {
+            let profile = IndexProfile {
+                id: uuid::Uuid::new_v4(),
+                store_key: "default".into(),
+                provider_kind: "openai".into(),
+                model: "test-model".into(),
+                dimensions: dims,
+                representation_version: "v1".into(),
+                normalization,
+                distance_metric: DistanceMetric::L2Squared,
+                vector_encoding_version: "f32le-v1".into(),
+            };
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO index_profile VALUES(?1,'default',?2,?3,'Active')",
+                params![
+                    profile.id.to_string(),
+                    "taxonomy-semantic-fixture",
+                    serde_json::to_string(&profile).unwrap()
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE index_profile_registry SET state='Active',serving_profile=?1 WHERE store_key='default'",
+                [profile.id.to_string()],
+            )
+            .unwrap();
+            profile.id
+        }
+
+        fn seed_generation(env: &Env, profile: uuid::Uuid, kind: i64, durable: i64) {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO taxonomy_ann_generation(profile_id,subject_kind,durable_generation) VALUES(?1,?2,?3)",
+                params![profile.to_string(), kind, durable],
+            )
+            .unwrap();
+        }
+
+        fn seed_vector(env: &Env, profile: uuid::Uuid, kind: i64, id: i64, embedding: &[f32]) {
+            let bytes: Vec<u8> = embedding
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO taxonomy_vector VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(profile_id,subject_kind,subject_id) DO UPDATE SET subject_revision=excluded.subject_revision,blob=excluded.blob,created_at_us=excluded.created_at_us,source=excluded.source",
+                params![profile.to_string(), kind, id, 1i64, bytes, 1i64, "test"],
+            )
+            .unwrap();
+        }
+
+        fn seed_type(env: &Env, id: i64, kind: i64, name: &str) {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO type_dict(id,kind,name,count,revision) VALUES(?1,?2,?3,1,1)",
+                params![id, kind, name],
+            )
+            .unwrap();
+        }
+
+        /// Builds the per-kind snapshots for the seeded profile, the way the
+        /// indexer worker does after a committed batch.
+        fn adopt(env: &mut Env) -> Result<()> {
+            let conn = rusqlite::Connection::open(&env.vs.db_path).unwrap();
+            let registry = IndexProfileRegistry::new(&conn);
+            env.vs.adopt_taxonomy(&registry, false)
+        }
+
+        #[test]
+        fn batches_all_texts_into_one_provider_call() {
+            let mut env = env(4);
+            let profile = seed_profile(&env, 4, Normalization::None);
+            seed_type(&env, 7, 0, "person");
+            seed_generation(&env, profile, 0, 1);
+            seed_vector(&env, profile, 0, 7, &[1.0; 4]);
+            adopt(&mut env).unwrap();
+
+            let texts: Vec<String> = vec!["alpha".into(), "beta".into(), "gamma".into()];
+            let got = suggest_semantic(&env.vs, &texts, SubjectKind::EntityType, 2).unwrap();
+
+            // One search per text: the single seeded subject comes back for
+            // each of the three texts.
+            assert_eq!(got.len(), 3);
+            assert!(got.iter().all(|s| s.name == "person"));
+
+            // And the three texts rode one embed_texts call.
+            let calls = fake_embeddings().recorded();
+            let matches = calls.iter().filter(|call| call.texts == texts).count();
+            assert!(
+                matches == 1,
+                "one embed_texts call must carry the whole batch; calls: {calls:?}"
+            );
+        }
+
+        #[test]
+        fn maps_distances_to_scores() {
+            let mut env = env(4);
+            let profile = seed_profile(&env, 4, Normalization::None);
+            seed_type(&env, 7, 0, "person");
+            seed_type(&env, 8, 0, "organization");
+            seed_type(&env, 9, 0, "acme");
+            seed_generation(&env, profile, 0, 1);
+            seed_vector(&env, profile, 0, 7, &[1.0; 4]);
+            seed_vector(&env, profile, 0, 8, &[2.0, 1.0, 1.0, 1.0]);
+            seed_vector(&env, profile, 0, 9, &[1.0, 1.0, 1.0, 2.0]);
+            adopt(&mut env).unwrap();
+
+            let query = "query".to_owned();
+            let got = suggest_semantic(&env.vs, &[query], SubjectKind::EntityType, 10).unwrap();
+
+            // The provider returns all-ones, so the L2Squared distances are
+            // exactly 0.0, 1.0 and 1.0, and the scores are 1 - distance.
+            assert_eq!(got[0].name, "person");
+            assert_eq!(got[0].score, 1.0);
+            assert_eq!(got[1].name, "organization");
+            assert_eq!(got[1].score, 0.0);
+            assert_eq!(got[2].name, "acme");
+            assert_eq!(got[2].score, 0.0);
+        }
+
+        #[test]
+        fn routes_the_subject_kind_through_the_numeric_contract() {
+            let mut env = env(4);
+            let profile = seed_profile(&env, 4, Normalization::None);
+            seed_type(&env, 7, 0, "person");
+            seed_type(&env, 8, 1, "works_at");
+            create_test_entity(&env.kg, "alice", "person");
+            create_test_entity(&env.kg, "acme", "organization");
+            let alice = env.vs.entity_id_of("alice").unwrap().unwrap();
+            let acme = env.vs.entity_id_of("acme").unwrap().unwrap();
+            {
+                let conn = env.vs.db.lock();
+                conn.execute(
+                    "INSERT INTO taxonomy_relation(id,from_id,to_id,type_id,revision,deleted) VALUES(42,?1,?2,?3,1,0)",
+                    params![alice, acme, 8],
+                )
+                .unwrap();
+            }
+            for (kind, id) in [(0, 7), (1, 8), (2, 42)] {
+                seed_generation(&env, profile, kind, 1);
+                seed_vector(&env, profile, kind, id, &[1.0; 4]);
+            }
+            adopt(&mut env).unwrap();
+
+            let entity_types = suggest_semantic(
+                &env.vs,
+                &["query".into()],
+                SubjectKind::EntityType,
+                10,
+            )
+            .unwrap();
+            assert_eq!(entity_types.len(), 1);
+            assert_eq!(entity_types[0].name, "person");
+
+            let relation_types = suggest_semantic(
+                &env.vs,
+                &["query".into()],
+                SubjectKind::RelationType,
+                10,
+            )
+            .unwrap();
+            assert_eq!(relation_types.len(), 1);
+            assert_eq!(relation_types[0].name, "works_at");
+
+            let relations = suggest_semantic(
+                &env.vs,
+                &["query".into()],
+                SubjectKind::Relation,
+                10,
+            )
+            .unwrap();
+            assert_eq!(relations.len(), 1);
+            assert_eq!(relations[0].name, "alice -[works_at]-> acme");
+        }
+
+        #[test]
+        fn skips_rows_whose_subject_was_deleted() {
+            let mut env = env(4);
+            let profile = seed_profile(&env, 4, Normalization::None);
+            seed_type(&env, 7, 0, "person");
+            seed_generation(&env, profile, 0, 1);
+            seed_vector(&env, profile, 0, 7, &[1.0; 4]);
+            // Subject 999 has a vector but no relation row: the snapshot
+            // keeps serving it until the next rebuild, and the engine must
+            // drop it rather than surface a name that no longer resolves.
+            seed_generation(&env, profile, 2, 1);
+            seed_vector(&env, profile, 2, 999, &[1.0; 4]);
+            adopt(&mut env).unwrap();
+
+            let relations = suggest_semantic(
+                &env.vs,
+                &["query".into()],
+                SubjectKind::Relation,
+                10,
+            )
+            .unwrap();
+            assert!(relations.is_empty(), "a dangling vector must be skipped: {relations:?}");
+
+            let entity_types = suggest_semantic(
+                &env.vs,
+                &["query".into()],
+                SubjectKind::EntityType,
+                10,
+            )
+            .unwrap();
+            assert_eq!(entity_types[0].name, "person");
+        }
+
+        #[test]
+        fn returns_empty_when_the_snapshot_is_absent() {
+            let env = env(4);
+            let _ = seed_profile(&env, 4, Normalization::None);
+            // A serving profile with no adopted snapshot for the kind: the
+            // engine must fall back to the offline tier, not fail.
+            let got = suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 10)
+                .unwrap();
+            assert!(got.is_empty());
+        }
+
+        #[test]
+        fn rejects_wrong_dimensions_from_the_provider() {
+            let env = env(4);
+            let _ = seed_profile(&env, 4, Normalization::None);
+            let Err(err) = suggest_semantic(
+                &env.vs,
+                &["WRONG_DIMENSIONS".into()],
+                SubjectKind::EntityType,
+                10,
+            )
+            else {
+                panic!("expected a dimension-mismatch error");
+            };
+            let text = err.to_string();
+            assert!(text.contains("dimensions") && text.contains("disagree"), "{text}");
+        }
+
+        #[test]
+        fn rejects_a_wrong_vector_count_from_the_provider() {
+            let env = env(4);
+            let _ = seed_profile(&env, 4, Normalization::None);
+            let Err(err) = suggest_semantic(
+                &env.vs,
+                &["WRONG_COUNT".into()],
+                SubjectKind::EntityType,
+                10,
+            )
+            else {
+                panic!("expected a count-mismatch error");
+            };
+            let text = err.to_string();
+            assert!(text.contains("one vector per text"), "{text}");
+        }
+
+        #[test]
+        fn normalizes_the_query_when_the_profile_asks_for_l2() {
+            let mut env = env(4);
+            let profile = seed_profile(&env, 4, Normalization::L2);
+            seed_type(&env, 7, 0, "person");
+            seed_generation(&env, profile, 0, 1);
+            seed_vector(&env, profile, 0, 7, &[0.5; 4]);
+            adopt(&mut env).unwrap();
+
+            let got = suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 10)
+                .unwrap();
+            // The provider returns all-ones. L2 normalization scales it to
+            // 0.5 per component, which exactly matches the seeded unit
+            // vector; without normalization the distance would be 1.0 and the
+            // score would be 0.0.
+            assert_eq!(got[0].name, "person");
+            assert_eq!(got[0].score, 1.0);
+        }
+
+        #[test]
+        fn without_a_serving_profile_names_the_indexer_section() {
+            let env = env(4);
+            let Err(err) = suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 5)
+            else {
+                panic!("expected a missing-profile error");
+            };
+            let text = err.to_string();
+            assert!(text.contains("[indexer]") && text.contains("no index profile"), "{text}");
+        }
     }
 }
