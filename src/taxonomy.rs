@@ -184,9 +184,9 @@ pub fn handle_suggest_taxonomy(
     match kind {
         "entityType" | "relationType" | "entity" | "relation" => (),
         _ => {
-            return Err(MCSError::InvalidParams(format!(
-                "'kind' must be one of entityType, relationType, entity, relation"
-            )));
+            return Err(MCSError::InvalidParams(
+                "'kind' must be one of entityType, relationType, entity, relation".into(),
+            ));
         }
     }
     let top_k =
@@ -297,7 +297,7 @@ pub fn suggest_semantic(
     // count is a provider fault; the per-text loop below would otherwise pair
     // results with the wrong texts.
     let vectors = provider
-        .embed_texts(&profile, &texts)
+        .embed_texts(&profile, texts)
         .map_err(|e| MCSError::MemoryError(format!("Embedding the taxonomy texts failed: {e}")))?;
     if vectors.len() != texts.len() {
         return Err(MCSError::MemoryError(format!(
@@ -517,11 +517,7 @@ mod tests {
     fn fallback_suggests_typo_and_underscore_variants() {
         // "persn" is a typo for "person". The entry with count 0 is invisible,
         // and the exact typo variant must not match itself.
-        let existing = vec![
-            ("person".into(), 3usize),
-            ("persn".into(), 0usize),
-            ("project".into(), 2usize),
-        ];
+        let existing = vec![("person", 3usize), ("persn", 0usize), ("project", 2usize)];
         let got = suggest_strings("persn", &existing);
         assert!(got.iter().any(|s| s.name == "person"));
         assert!(got.iter().all(|s| s.name != "persn"));
@@ -531,7 +527,7 @@ mod tests {
     fn fallback_orders_by_score_then_name() {
         // "related_to" is closer to "relatedTo" than "relates_to" is, so it
         // must sort first.
-        let existing = vec![("relates_to".into(), 1usize), ("related_to".into(), 2usize)];
+        let existing = vec![("relates_to", 1usize), ("related_to", 2usize)];
         let got = suggest_strings("relatedTo", &existing);
         assert_eq!(got[0].name, "related_to");
         assert!(
@@ -540,7 +536,7 @@ mod tests {
         );
 
         // Two candidates with an equal score must sort by name ascending.
-        let tied = vec![("abcdx".into(), 1usize), ("abcde".into(), 1usize)];
+        let tied = vec![("abcdx", 1usize), ("abcde", 1usize)];
         let got = suggest_strings("abc", &tied);
         assert_eq!(got[0].name, "abcde");
     }
@@ -549,7 +545,7 @@ mod tests {
     fn fallback_skips_exact_self_match_with_count() {
         // The exact match must be skipped even when its count is non-zero.
         // The lowercase comparison also handles a case-different query.
-        let existing = vec![("person".into(), 3usize), ("project".into(), 2usize)];
+        let existing = vec![("person", 3usize), ("project", 2usize)];
         let got = suggest_strings("person", &existing);
         assert!(got.iter().all(|s| s.name != "person"));
 
@@ -559,7 +555,7 @@ mod tests {
 
     #[test]
     fn fallback_returns_empty_for_garbage() {
-        let existing = vec![("person".into(), 3usize), ("project".into(), 2usize)];
+        let existing = vec![("person", 3usize), ("project", 2usize)];
         let got = suggest_strings("zzzz", &existing);
         assert!(got.is_empty());
     }
@@ -785,7 +781,7 @@ mod tests {
                             let Some((conn, _peer)) = listener.accept().ok() else {
                                 continue;
                             };
-                            handle_connection(conn, Arc::clone(&thread_state));
+                            handle_connection(conn, &thread_state);
                         }
                     });
                 Self {
@@ -821,7 +817,7 @@ mod tests {
 
         /// Serves one connection: read the whole request, record it, answer
         /// with fixed embeddings, then close.
-        fn handle_connection(mut conn: TcpStream, state: Arc<FakeState>) {
+        fn handle_connection(mut conn: TcpStream, state: &Arc<FakeState>) {
             let mut buf = Vec::new();
             let mut chunk = vec![0u8; 8192];
             loop {
@@ -838,11 +834,7 @@ mod tests {
                     // The body follows the blank-line separator.
                     let body_start = headers_end + 4;
                     if buf.len() >= body_start + body_len {
-                        respond(
-                            &mut conn,
-                            &buf[body_start..body_start + body_len],
-                            Arc::clone(&state),
-                        );
+                        respond(&mut conn, &buf[body_start..body_start + body_len], state);
                         return;
                     }
                 }
@@ -854,9 +846,7 @@ mod tests {
         /// Returns None until the full header block is buffered.
         fn request_frame(buf: &[u8]) -> Option<(usize, usize)> {
             let text = String::from_utf8_lossy(buf).to_string();
-            let Some(headers_end) = text.find("\r\n\r\n") else {
-                return None;
-            };
+            let headers_end: usize = text.find("\r\n\r\n")?;
             let mut length: usize = 0;
             for line in text[..headers_end].lines() {
                 let Some(colon) = line.find(':') else {
@@ -875,7 +865,7 @@ mod tests {
         /// the server return half-width vectors and `WRONG_COUNT` makes it
         /// return a single vector. Both faults are provider behavior the
         /// engine must detect. Each request produces the same fault.
-        fn respond(conn: &mut TcpStream, body: &[u8], state: Arc<FakeState>) {
+        fn respond(conn: &mut TcpStream, body: &[u8], state: &Arc<FakeState>) {
             let text = String::from_utf8_lossy(body).to_string();
             let Some(value) = serde_json::from_str::<serde_json::Value>(text.as_str()).ok() else {
                 return;
