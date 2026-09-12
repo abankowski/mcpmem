@@ -26,8 +26,6 @@ html, body {
   padding: 8px 14px; background: var(--chrome);
   border-bottom: 1px solid var(--border); flex: 0 0 auto; z-index: 4;
 }
-.brand { font-weight: 700; letter-spacing: .2px; margin-right: 4px; }
-.brand small { color: var(--muted); font-weight: 500; }
 .spacer { flex: 1 1 auto; }
 .stats { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .group { display: inline-flex; align-items: center; gap: 8px; }

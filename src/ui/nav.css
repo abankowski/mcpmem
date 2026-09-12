@@ -1,0 +1,37 @@
+/* Site navigation — the one topbar shared by the graph viewer (/ui) and the
+ * administration SPA (/ui/admin). The two pages keep their own palettes (the
+ * viewer is light, the admin page dark), so this bar carries its own tokens
+ * and never borrows either page's.
+ *
+ * The graph page's shell is a fixed full-viewport flex column, so the bar
+ * sits as its first child and `position: sticky` is inert there; the admin
+ * page shares the bar and needs the stickiness. One rule, both pages. */
+:root {
+  --nav-bg: #171c22;
+  --nav-fg: #dbe4ee;
+  --nav-muted: #8b98a5;
+  --nav-border: #2a323c;
+  --nav-hover: #26303c;
+  --nav-active-bg: #2f4b7a;
+  --nav-active-fg: #ffffff;
+}
+#sitenav {
+  display: flex; align-items: center; gap: 16px;
+  padding: 8px 16px;
+  background: var(--nav-bg); color: var(--nav-fg);
+  border-bottom: 1px solid var(--nav-border);
+  font: 13px/1.4 system-ui, sans-serif;
+  position: sticky; top: 0; z-index: 10;
+}
+#sitenav .nav-brand {
+  font-weight: 700; letter-spacing: .2px; text-decoration: none;
+  color: var(--nav-active-fg); margin-right: 4px;
+}
+#sitenav a {
+  color: var(--nav-fg); text-decoration: none;
+  padding: 3px 11px; border-radius: 6px;
+}
+#sitenav a:hover { background: var(--nav-hover); color: var(--nav-active-fg); }
+#sitenav a[aria-current="page"] {
+  background: var(--nav-active-bg); color: var(--nav-active-fg); font-weight: 600;
+}

@@ -33,16 +33,104 @@
     return colorOf.get(t);
   }
 
-  // ── Auth token: URL hash (#token=…, never sent to the server / not logged),
-  //    else sessionStorage. Kept client-side; forwarded as a Bearer header.
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  // Two ways this page's data requests authenticate, chosen by what the
+  // server's 401 challenge advertises. When OAuth is on, the challenge names
+  // the authorization server (`resource_metadata=…`), and this viewer is a
+  // public PKCE client of it — exactly like the admin SPA: the browser goes
+  // to `/oauth/authorize` and comes back with `?code=`, which is exchanged
+  // here for an access token. When OAuth is off the challenge is a bare
+  // `Bearer`, and the token box is the whole login.
+  //
+  // The static bearer token, for the deployments that configure one: URL hash
+  // (`#token=…`, never sent to the server / not logged), else sessionStorage.
+  // Kept client-side; forwarded as an Authorization header.
   function readHashToken() {
     const m = /[#&]token=([^&]+)/.exec(location.hash || "");
     return m ? decodeURIComponent(m[1]) : null;
   }
-  let token = readHashToken() || sessionStorage.getItem("mcpmem_token") || "";
+  const OAUTH_CLIENT_ID = "mcpmem-graph-ui";
+  const OAUTH_TOKEN_KEY = "mcpmem_graph_access";
+  const OAUTH_VERIFIER_KEY = "mcpmem_graph_verifier";
+  // The client is seeded with "{public_url}/ui" and /oauth/authorize compares
+  // redirect_uri byte-for-byte, so this derives the redirect from the page's
+  // own path: a path-prefixed --public-url must not lose its prefix.
+  const OAUTH_REDIRECT = location.origin + location.pathname.replace(/\/+$/, "");
+
+  let token = readHashToken()
+    || sessionStorage.getItem("mcpmem_token")
+    || sessionStorage.getItem(OAUTH_TOKEN_KEY)
+    || "";
   if (readHashToken()) {
     sessionStorage.setItem("mcpmem_token", token);
     history.replaceState(null, "", location.pathname + location.search);
+  }
+
+  function b64url(bytes) {
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function randomVerifier() {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    return b64url(bytes);
+  }
+  async function pkceChallenge(verifier) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+    return b64url(new Uint8Array(digest));
+  }
+  function oauthAdvertised(res) {
+    return (res.headers.get("WWW-Authenticate") || "").includes("resource_metadata");
+  }
+  async function beginOAuth() {
+    const verifier = randomVerifier();
+    sessionStorage.setItem(OAUTH_VERIFIER_KEY, verifier);
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id: OAUTH_CLIENT_ID,
+      redirect_uri: OAUTH_REDIRECT,
+      scope: "graph-read",
+      state: "graph",
+      code_challenge_method: "S256",
+      code_challenge: await pkceChallenge(verifier),
+    });
+    location.href = "/oauth/authorize?" + params;
+  }
+  async function completeOAuth() {
+    const params = new URLSearchParams(location.search);
+    const code = params.get("code");
+    const verifier = sessionStorage.getItem(OAUTH_VERIFIER_KEY);
+    sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
+    // The code is single-use; keep it out of the address bar either way.
+    history.replaceState(null, "", location.pathname);
+    if (!code || !verifier) return false;
+    const form = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: OAUTH_REDIRECT,
+      client_id: OAUTH_CLIENT_ID,
+      code_verifier: verifier,
+    });
+    let res;
+    try {
+      res = await fetch("/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form,
+      });
+    } catch {
+      overlay("Sign-in failed", "The token exchange could not be completed. Reload to try again.", { err: true });
+      return false;
+    }
+    if (!res.ok) {
+      overlay("Sign-in failed", await res.text().catch(() => ""), { err: true });
+      return false;
+    }
+    const body = await res.json();
+    token = body.access_token;
+    sessionStorage.setItem(OAUTH_TOKEN_KEY, token);
+    return true;
   }
 
   // ── State ─────────────────────────────────────────────────────────────────
@@ -88,7 +176,13 @@
   const hideOverlay = () => $("overlay").classList.remove("show");
   async function handleError(res) {
     if (res.ok) return false;
-    if (res.status === 401) overlay("Authentication required", "This server requires a bearer token.", { token: true, err: true });
+    if (res.status === 401) {
+      // OAuth on: the challenge names the authorization server, so run the
+      // same PKCE login the admin SPA does. OAuth off: bare challenge, and
+      // the token box is the whole login.
+      if (oauthAdvertised(res)) { await beginOAuth(); return true; }
+      overlay("Authentication required", "This server requires a bearer token.", { token: true, err: true });
+    }
     else if (res.status === 403) overlay("Graph reading disabled", (await res.text().catch(() => "")) || "Start the server with --enable-graph-read (or --enable-all).", { err: true });
     else overlay("Error " + res.status, await res.text().catch(() => ""), { err: true });
     return true;
@@ -680,5 +774,12 @@
   });
 
   resize();
-  load();
+  (async function boot() {
+    if (new URLSearchParams(location.search).has("code")) {
+      // The provider sent `?code=` back. Exchange it before the first load;
+      // a failed exchange has already explained itself on the overlay.
+      if (!await completeOAuth()) return;
+    }
+    load();
+  })();
 })();

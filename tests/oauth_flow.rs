@@ -20,7 +20,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::json;
 
 mod support;
-use support::flow::{self, Authorized, CODE_VERIFIER, Flow, Tokens};
+use support::flow::{self, Authorized, CODE_VERIFIER, Flow, Tokens, body_text};
 use support::{PUBLIC_URL, header, json as json_body};
 
 /// The resource identifier this server protects. One spelling here, against
@@ -559,6 +559,41 @@ async fn the_viewer_refuses_an_anonymous_request_with_the_challenge() {
         "{}",
         res.www_authenticate
     );
+}
+
+/// The reserved graph-viewer client walks the whole browser login — no
+/// registration, because startup seeded the client. This is exactly what
+/// `src/ui/graph.js` drives on an OAuth server: authorize against the seeded
+/// client and its `{public_url}/ui` redirect, through the provider, the
+/// consent page, the exchange — and the token it yields opens `/ui/graph`.
+/// A break in the seed or in the script's derivation of its own redirect
+/// shows up here as a refused authorization request, which is what the
+/// browser would see.
+#[tokio::test]
+async fn the_reserved_graph_client_walks_the_viewer_login_and_reads_the_graph() {
+    let flow = Flow::new("graph-read").redirect_uri(format!("{PUBLIC_URL}/ui").as_str());
+    let started = flow.start().await;
+    let client_id = mcpmem_oauth::GRAPH_CLIENT_ID.to_owned();
+    let authorize = started.authorize(client_id.as_str()).await;
+    assert_eq!(
+        authorize.status(),
+        StatusCode::FOUND,
+        "the seeded viewer client must be accepted: {}",
+        body_text(authorize).await
+    );
+    let back = started.idp().login(&header(&authorize, "location")).await;
+    let callback = started.callback(&back.code, &back.state).await;
+    let authorized = started
+        .into_stage(callback, back.state, client_id)
+        .into_consent()
+        .await;
+    let code = authorized.approve(&["graph-read"]).await;
+    let tokens = authorized.exchange(&code).await;
+    let res = authorized
+        .get("/ui/graph", Some(&tokens.access_token))
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert!(res.body["entities"].is_array(), "{}", res.body);
 }
 
 /// Both scopes granted, so the write tool is listed and it answers. Without

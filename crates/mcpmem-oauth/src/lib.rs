@@ -53,6 +53,12 @@ pub fn s256_challenge(verifier: &str) -> String {
 /// startup. The UI is a public PKCE client of this server's AS.
 pub const ADMIN_CLIENT_ID: &str = "mcpmem-admin-ui";
 
+/// The reserved client id of this server's own graph viewer, seeded at OAuth
+/// startup like the admin UI. The viewer is a public PKCE client of this
+/// server's AS, so a human who opens `/ui` on an OAuth server completes the
+/// same login the admin SPA does.
+pub const GRAPH_CLIENT_ID: &str = "mcpmem-graph-ui";
+
 /// The id of a principal in the admin API: base64url of `iss\0sub`.
 ///
 /// One path segment, so a route never needs to split an issuer URL.

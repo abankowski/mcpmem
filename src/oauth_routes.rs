@@ -229,9 +229,10 @@ impl OauthState {
             .map_err(|e| open_failed(&e))?;
         let now = now_us();
         let store = mcpmem_oauth::store::Store::new(conn);
-        // The admin UI is a public PKCE client of this server's own AS. Seed
-        // it once; put_client upserts, so a repeat start only refreshes the
-        // row, and the same clock reading stamps `created_us` and `last_used_us`.
+        // The browser UIs are public PKCE clients of this server's own AS:
+        // the admin SPA and the graph viewer. Seed each once; put_client
+        // upserts, so a repeat start only refreshes the row, and the same
+        // clock reading stamps `created_us` and `last_used_us`.
         store
             .put_client(&mcpmem_oauth::store::ClientRecord {
                 client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
@@ -244,6 +245,24 @@ impl OauthState {
             .map_err(|e| {
                 crate::errors::MCSError::MemoryError(format!(
                     "failed to seed the admin UI client: {e}"
+                ))
+            })?;
+        // The viewer's redirect is the shell page itself (`/ui`), where
+        // `graph.js` completes the exchange when the provider sends `?code=`
+        // back. It is registered byte-for-byte, and the script derives it
+        // from its own path so a path-prefixed --public-url stays intact.
+        store
+            .put_client(&mcpmem_oauth::store::ClientRecord {
+                client_id: mcpmem_oauth::GRAPH_CLIENT_ID.to_owned(),
+                client_name: "mcpmem graph viewer".to_owned(),
+                redirect_uris: vec![format!("{}/ui", config.public_url)],
+                source: mcpmem_oauth::store::ClientRecord::RESERVED.to_owned(),
+                created_us: now,
+                last_used_us: now,
+            })
+            .map_err(|e| {
+                crate::errors::MCSError::MemoryError(format!(
+                    "failed to seed the graph UI client: {e}"
                 ))
             })?;
         // The runtime store opens the same file on its own connection, like

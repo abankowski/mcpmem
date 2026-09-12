@@ -524,8 +524,12 @@ it directly chooses their own bucket, and every limit is then bypassable.
 a request carrying an issued OAuth token is resolved as that token, and anything
 else falls back to the static token.
 
-The graph viewer takes **either** credential in the `Authorization` header, so
-OAuth alone is enough for a human at `/ui`: open
+The graph viewer takes **either** credential in the `Authorization` header. On
+an OAuth server, opening `/ui` runs the same login as the admin UI: the viewer
+is a reserved PKCE client of this server's own AS, so the first 401 redirects
+it through the consent flow and it keeps the resulting access token in
+`sessionStorage` — no token to paste. On a no-OAuth server, the static token
+routes below apply: open
 `https://mem.example.com/ui#token=<access token>`, and the viewer keeps the
 token client-side and sends it as a header. The fragment never reaches the
 server, so the token stays out of the proxy log. The `?token=` query fallback on
@@ -682,6 +686,11 @@ revokes its live token families immediately — an already-minted access token
 is refused from the moment of deletion, not after its one-hour TTL — and every
 refresh and new login is refused from that moment.
 
+The graph viewer signs in the same way: `/ui` is a reserved PKCE client too
+(`mcpmem-graph-ui`, asking for the `graph-read` scope alone), so an OAuth
+server serves both pages with one login. Both shells carry the same topbar,
+linking Graph and Administration each way.
+
 **Built-ins are immutable, server-side.** An entry from the principals file
 cannot be edited, removed, or shadowed: a runtime row whose `iss` and `sub`
 collide with a built-in key is refused with `409`. A stale runtime row under a
@@ -744,14 +753,17 @@ The `http` transport serves a **Neo4j-Browser-style knowledge-graph viewer** —
 - A **node inspector** (type, observations, relationships — click a relationship to jump), plus
   **Isolate** / **Dismiss** actions, a label filter, and Esc-to-deselect.
 
-It is served as three static assets — `index.html`, `graph.css`, `graph.js` — with **no external
-dependencies** (no CDNs, no telemetry; everything renders locally on a `<canvas>`). The viewer is a
-distinct browser front-end: it talks only to the `/ui/*` HTTP routes below and adds **no MCP tools**
-and no stdio behaviour.
+It is served as static assets — `index.html`, `graph.css`, `graph.js` and the
+shared `nav.css` topbar stylesheet (the administration SPA shares the bar) —
+with **no external dependencies** (no CDNs, no telemetry; everything renders
+locally on a `<canvas>`). The viewer is a distinct browser front-end: it talks
+only to the `/ui/*` HTTP routes below and adds **no MCP tools** and no stdio
+behaviour.
 
 | Route | Purpose |
 |-------|---------|
-| `GET /ui` | The viewer page (app shell + `/ui/graph.css` + `/ui/graph.js`; carries no graph data, so it needs no auth). |
+| `GET /ui` | The viewer page (app shell + `/ui/nav.css` + `/ui/graph.css` + `/ui/graph.js`; carries no graph data, so it needs no auth). |
+| `GET /ui/nav.css` | The shared site-navigation stylesheet, linked by both browser shells. |
 | `GET /ui/graph` | A page of the graph: `{ entities, relations, entityTypes, stats, page }`. Entities carry `obsCount` (not the observation bodies — those are lazy-loaded). Query params: `entityType` (filter), `offset`, `limit` (≤ 1,000), `token`. |
 | `GET /ui/search` | A page of FTS5 matches (matched nodes only): same shape as `/ui/graph`. Query params: `q` (prefix-matched), `entityType`, `offset`, `limit` (≤ 1,000), `token`. |
 | `GET /ui/node` | One entity with its observation **bodies**, lazy-loaded by the inspector on select. Query params: `name` (required), `token`. |
@@ -766,10 +778,13 @@ pages and hub expansions stay at interactive frame rates.
 
 The viewer reads the graph, so `/ui/graph`, `/ui/search`, `/ui/node`, and `/ui/expand` require
 **`--enable-graph-read`** (or `--enable-all`); without it they return `403` and the page says so.
-They honor the same bearer token
-as the MCP endpoints: pass it as `Authorization: Bearer <token>`, as a `?token=` query parameter, or
-open `http://<bind>/ui#token=<token>` — the `#`-fragment stays client-side (never sent to the server
-or written to logs) and the page forwards it as a header.
+They honor the same credential
+as the MCP endpoints: with OAuth on, the viewer fetches its own access token
+through the login flow when the server's 401 challenge names the authorization
+server; otherwise pass a token as `Authorization: Bearer <token>`, as a
+`?token=` query parameter, or open `http://<bind>/ui#token=<token>` — the
+`#`-fragment stays client-side (never sent to the server or written to logs)
+and the page forwards it as a header.
 
 ```sh
 mcpmem --enable-graph-read --transport http --bind 127.0.0.1:8080
@@ -1212,7 +1227,7 @@ pre-populated, on a **MacBook Pro (Apple M1 Pro, 32 GB)**. Averages; run
 main.rs → MCPServer { kg, vs: Option<VectorStore> }
   ├── run_stdio()  — newline-delimited JSON-RPC over stdio
   └── run_http()   — MCP Streamable HTTP (axum, POST/GET /mcp)
-        ├── GET /ui        — graph viewer shell + /ui/graph.css + /ui/graph.js (static)
+        ├── GET /ui        — graph viewer shell + /ui/nav.css + /ui/graph.css + /ui/graph.js (static)
         ├── GET /ui/graph  — a paged view of the graph for the viewer (gated by graph-read)
         ├── GET /ui/search — paged FTS5 search for the viewer (gated)
         ├── GET /ui/expand — a node's neighbourhood for double-click traversal (gated)

@@ -352,34 +352,41 @@ intended, and that your proxy overwrites it.
 
 ### Opening the viewer in a browser
 
-**The viewer takes either credential, and it takes it in the `Authorization`
-header.** `src/ui/graph.js` reads `#token=` out of the URL fragment, keeps it in
-`sessionStorage`, removes it from the address bar, and sends it as
-`Authorization: Bearer …` on every data request. The server resolves that
-header as an issued OAuth token first and as the static bearer token second, so
-**OAuth alone is enough for a human at `/ui`** — you do not need
-`--auth-token-file` for the viewer.
+**With OAuth on, opening `/ui` runs the same login the admin UI runs.** The
+viewer is a seeded PKCE client of this server's own AS (`mcpmem-graph-ui`,
+seeded at startup beside `mcpmem-admin-ui`). The first graph request comes
+back 401, the `WWW-Authenticate` challenge names the authorization server
+(`resource_metadata=…`), and the page redirects to `/oauth/authorize`. After
+the consent page the provider returns with `?code=`, `graph.js` exchanges it
+at `/oauth/token`, and the access token is kept in `sessionStorage` and sent
+as `Authorization: Bearer …` on every data request. There is no token to
+paste; there is no separate viewer login. Both browser pages carry the same
+topbar, so a human moves between the graph (`/ui`) and the administration SPA
+(`/ui/admin`) without re-authenticating.
 
-The browser route:
+The pasted-token routes below are for **deployments with no OAuth**, where
+`--auth-token-file` is the whole gate:
 
-```sh
-# Identical in Bash and fish.
-echo 'https://mem.example.com/ui#token=<paste the access token>'
-```
+- **The URL fragment `#token=…`.** `src/ui/graph.js` reads it on load, keeps
+  it in `sessionStorage`, removes it from the address bar, and sends it as
+  `Authorization: Bearer …` on every data request. The fragment is the part
+  of a URL a browser never sends to the server, so the token does not reach
+  your proxy log, your access log or a `Referer` header.
 
-The fragment is the part of a URL a browser never sends to the server, so the
-token does not reach your proxy log, your access log or a `Referer` header. The
-viewer also offers a box to paste a token into when a request comes back 401,
-which avoids putting it in the address bar at all.
+  ```sh
+  # Identical in Bash and fish.
+  echo 'https://mem.example.com/ui#token=<paste the static bearer token>'
+  ```
 
-A human gets an access token the same way a connector does: by completing the
-consent flow. There is no separate viewer login.
+- **The box the viewer shows when a request comes back 401 with a bare
+  challenge** — one that names no `resource_metadata=`, which only a
+  no-OAuth server sends. Pasting there avoids the address bar altogether.
 
 **The `?token=` query fallback is for the static bearer token alone**, and it
 works on the data endpoints (`/ui/graph`, `/ui/search`, `/ui/node`,
-`/ui/expand`), not on `/ui` itself — `/ui` is an unauthenticated shell, and
-`graph.js` never reads the query string. It exists for scripts and for
-deployments with no OAuth:
+`/ui/expand`), not on `/ui` itself — the shell is unauthenticated, and
+`graph.js` reads only the OAuth `?code=` the provider sends back. It exists
+for scripts and for deployments with no OAuth:
 
 ```sh
 # Identical in Bash and fish. The static token only; an OAuth token in a query

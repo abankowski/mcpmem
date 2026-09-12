@@ -322,6 +322,20 @@ fn test_ui_shell_served_as_html() {
         body.contains("/ui/graph.js"),
         "shell should load the script"
     );
+    // The shell carries the shared topbar, linking the viewer and the
+    // administration SPA on every page.
+    assert!(
+        body.contains("/ui/nav.css"),
+        "shell should load the shared navigation stylesheet"
+    );
+    assert!(
+        body.contains("/ui/admin"),
+        "shell should link the administration SPA"
+    );
+    assert!(
+        body.contains("aria-current=\"page\""),
+        "shell should mark its own section as active"
+    );
 }
 
 #[test]
@@ -346,6 +360,17 @@ fn test_ui_assets_served_with_content_types() {
     assert!(
         body.contains("/ui/expand"),
         "viewer should call /ui/expand to traverse"
+    );
+
+    let (status, headers, body) = get(srv.port, "/ui/nav.css", None);
+    assert_eq!(status, 200, "GET /ui/nav.css should succeed");
+    assert!(
+        headers.to_lowercase().contains("content-type: text/css"),
+        "nav.css must be served as text/css, headers: {headers}"
+    );
+    assert!(
+        body.contains("#sitenav"),
+        "the shared stylesheet styles the site navigation bar"
     );
 }
 

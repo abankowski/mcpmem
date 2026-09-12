@@ -4,13 +4,18 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>mcp-memory · knowledge graph</title>
+<link rel="stylesheet" href="/ui/nav.css" />
 <link rel="stylesheet" href="/ui/graph.css" />
 </head>
 <body>
 <div id="app">
-  <header id="toolbar">
-    <span class="brand">mcp&#8209;memory <small>graph</small></span>
+  <nav id="sitenav" aria-label="Sections">
+    <a class="nav-brand" href="/ui">mcp&#8209;memory</a>
+    <a href="/ui" aria-current="page">Graph</a>
+    <a href="/ui/admin">Administration</a>
+  </nav>
 
+  <header id="toolbar">
     <div class="group">
       <label class="ctl">Label
         <select id="typeFilter"><option value="">all labels</option></select>

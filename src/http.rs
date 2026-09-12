@@ -48,6 +48,11 @@ const UI_INDEX_HTML: &str = include_str!("ui/index.html");
 const UI_CSS: &str = include_str!("ui/graph.css");
 const UI_JS: &str = include_str!("ui/graph.js");
 
+/// The site navigation bar shared by both browser shells. The two pages keep
+/// their own palettes, so this one stylesheet carries the bar's own tokens
+/// and never borrows either page's.
+const UI_NAV_CSS: &str = include_str!("ui/nav.css");
+
 /// The admin SPA's static assets, embedded at build time (served from
 /// `/ui/admin`). Like the viewer's, the shell holds no data: the JSON API
 /// behind it is the gate.
@@ -206,6 +211,7 @@ pub fn router(state: HttpState) -> Router {
         .route("/mcp", post(post_handler).get(get_handler))
         .route("/", post(post_handler).get(get_handler))
         .route("/ui", get(ui_handler))
+        .route("/ui/nav.css", get(ui_nav_css_handler))
         .route("/ui/graph.css", get(ui_css_handler))
         .route("/ui/graph.js", get(ui_js_handler))
         .route("/ui/graph", get(ui_graph_handler))
@@ -991,6 +997,16 @@ async fn ui_handler() -> Response {
 /// `GET /ui/graph.css` — the viewer stylesheet (static asset, no auth).
 async fn ui_css_handler() -> Response {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], UI_CSS).into_response()
+}
+
+/// `GET /ui/nav.css` — the shared site-navigation stylesheet (static asset,
+/// no auth).
+async fn ui_nav_css_handler() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        UI_NAV_CSS,
+    )
+        .into_response()
 }
 
 /// `GET /ui/graph.js` — the viewer application script (static asset, no auth).

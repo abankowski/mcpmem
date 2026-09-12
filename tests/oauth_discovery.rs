@@ -296,6 +296,26 @@ async fn startup_seeds_the_reserved_admin_ui_client() {
     assert_eq!(record.last_used_us, FIXED);
 }
 
+/// OAuth startup seeds the reserved graph-viewer client beside the admin UI:
+/// one row, source `reserved`, its redirect the viewer shell's own path (the
+/// page the provider sends `?code=` back to), stamped with the server clock.
+#[tokio::test]
+async fn startup_seeds_the_reserved_graph_client() {
+    const FIXED: i64 = 1_700_000_000_000_000;
+    let server = support::oauth_server_with_clock(support::Clock::at(FIXED)).await;
+    let record = server.oauth().with_store(|store| {
+        store
+            .get_client(mcpmem_oauth::GRAPH_CLIENT_ID)
+            .expect("the store answers")
+            .expect("startup seeded the graph viewer client")
+    });
+    assert_eq!(record.client_name, "mcpmem graph viewer");
+    assert_eq!(record.source, "reserved");
+    assert_eq!(record.redirect_uris, vec![format!("{PUBLIC_URL}/ui")]);
+    assert_eq!(record.created_us, FIXED);
+    assert_eq!(record.last_used_us, FIXED);
+}
+
 /// A repeat start refreshes the seeded row instead of duplicating it:
 /// `put_client` upserts, and the second open rewrites `last_used_us` but
 /// never `created_us`.
@@ -332,15 +352,23 @@ async fn reopening_the_store_upserts_the_reserved_client() {
             .query_row("SELECT COUNT(*) FROM oauth_client", [], |r| r.get(0))
             .expect("the store counts its clients")
     });
-    assert_eq!(count, 1, "a repeat start must upsert, not duplicate");
-    let after = second.with_store(|store| {
+    assert_eq!(count, 2, "a repeat start must upsert, not duplicate");
+    let after_admin = second.with_store(|store| {
         store
             .get_client(mcpmem_oauth::ADMIN_CLIENT_ID)
             .expect("the store answers")
             .expect("the admin client survives the second open")
     });
-    assert_eq!(after.created_us, created_us);
-    assert_eq!(after.last_used_us, FIXED);
+    assert_eq!(after_admin.created_us, created_us);
+    assert_eq!(after_admin.last_used_us, FIXED);
+    let after_graph = second.with_store(|store| {
+        store
+            .get_client(mcpmem_oauth::GRAPH_CLIENT_ID)
+            .expect("the store answers")
+            .expect("the graph client survives the second open")
+    });
+    assert_eq!(after_graph.created_us, FIXED);
+    assert_eq!(after_graph.last_used_us, FIXED);
 }
 
 /// `OauthState::revoke_principal` reaches the store through the same lock a
