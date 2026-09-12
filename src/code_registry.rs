@@ -136,3 +136,61 @@ pub fn resolve(project: &str) -> Result<Arc<GraphHandle>> {
     g.warm.put(project.to_string(), Arc::clone(&handle));
     Ok(handle)
 }
+
+/// Close the canonical handle for `project`: evict it from the warm LRU and
+/// forget the live weak entry. Once every caller drops its `Arc`, the
+/// SQLite connections close and the database files may be deleted.
+///
+/// Callers must stop any watcher on `project` first: a running watcher pins
+/// a strong reference and would keep the connections open.
+pub fn drop_project(project: &str) -> Result<()> {
+    validate_project(project)?;
+    let inner = INNER.get().expect("registry inner set alongside config");
+    let mut g = inner.lock();
+    g.live.remove(project);
+    g.warm.pop(project);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn drop_project_evicts_the_canonical_handle() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("code");
+        init(
+            base.clone(),
+            crate::config::Durability::Async,
+            crate::config::SqliteTuning::default(),
+            NonZeroUsize::new(8).unwrap(),
+            2,
+        );
+        let handle = resolve("dropme").expect("resolve opens a project");
+        // A fresh resolve warms a strong ref in the LRU in addition to the
+        // local binding, so the handle is held twice.
+        assert_eq!(Arc::strong_count(&handle), 2);
+
+        drop_project("dropme").expect("drop_project succeeds");
+
+        // drop_project evicted the warm entry and forgot the live weak ref, so
+        // only the local binding keeps this handle alive now.
+        assert_eq!(Arc::strong_count(&handle), 1);
+
+        // A subsequent resolve must reopen a fresh handle.
+        let reopened = resolve("dropme").expect("resolve reopens after drop");
+        assert!(!Arc::ptr_eq(&handle, &reopened));
+
+        // The reopened handle is again the canonical instance.
+        let again = resolve("dropme").expect("resolve is stable");
+        assert!(Arc::ptr_eq(&reopened, &again));
+    }
+
+    #[test]
+    fn drop_project_refuses_invalid_names() {
+        assert!(drop_project("bad/name").is_err());
+        assert!(drop_project("").is_err());
+    }
+}
