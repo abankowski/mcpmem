@@ -434,6 +434,17 @@ sqlite3 /var/lib/mcpmem/memory.mcpmem \
    metadata document** — an HTTPS URL that is both its identifier and its
    metadata.
 
+**Choose dynamic client registration for the OpenAI Codex connector.** The
+client binds a fresh loopback port on each run and presents it as part of the
+redirect URI. Its metadata document declares the URI without a port
+(`http://127.0.0.1/callback` and `http://localhost/callback`), and this server
+compares the port byte for byte, so the document path always answers
+`redirect_uri is not registered for this client`. Dynamic registration records
+the live port before the authorization request and matches. The connector's
+`Auto` registration setting selects the metadata-document path, which fails;
+set the method to **DCR** explicitly. Claude registers the same way on both
+paths, because its callback URI carries no port component.
+
 The metadata-document path only works for a host on the allow list.
 `chatgpt.com` and `claude.ai` are the defaults; the match is a **whole host**,
 case-insensitive, so `auth.chatgpt.com` needs its own entry:
@@ -472,8 +483,18 @@ sqlite3 /var/lib/mcpmem/memory.mcpmem 'SELECT client_id, source FROM oauth_clien
 A native client that persists its `client_id` across restarts and binds a fresh
 ephemeral loopback port presents a redirect URI its identifier never
 registered, and gets `redirect_uri is not registered for this client`. The
-recovery is to register again. `mcpmem` implements no RFC 7592 client
-management, so a registration cannot be updated.
+recovery depends on how it registered:
+
+- **Dynamic registration:** the client registers again, once per port. A
+  registration cannot be updated; `mcpmem` implements no RFC 7592 client
+  management.
+- **Metadata document:** re-registering does not help. The re-fetch returns
+  the same document, and the document cannot name the port the client will
+  bind on its next run. The connector must switch to dynamic registration
+  instead. OpenAI's Codex is the concrete case: its document declares
+  `http://127.0.0.1/callback` and `http://localhost/callback`, while the
+  client presents `http://127.0.0.1:<port>/callback` with a fresh port each
+  run, so only a dynamic registration made after the port is bound can match.
 
 ## 6. Revoking access
 
