@@ -276,7 +276,17 @@ impl PrincipalsStore {
 }
 
 fn sql_error(e: rusqlite::Error) -> MCSError {
-    MCSError::MemoryError(format!("principals store: {e}"))
+    match e {
+        // The one avoidable conflict this store produces: a duplicate key on
+        // create. Classified so the admin API can answer 409; every other
+        // failure is a store fault (500).
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            MCSError::ConstraintViolation("duplicate key".to_owned())
+        }
+        other => MCSError::MemoryError(format!("principals store: {other}")),
+    }
 }
 
 fn row_to_principal(r: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimePrincipal> {

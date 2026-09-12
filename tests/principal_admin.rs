@@ -184,6 +184,10 @@ async fn list_marks_builtins_immutable_and_lists_runtime_rows() {
         items.iter().any(|p| p["name"] == "adam"),
         "the configured built-in is listed"
     );
+    assert!(
+        items.iter().all(|p| p.get("maskedByBuiltin").is_some()),
+        "every view serializes the mask flag under maskedByBuiltin"
+    );
     // The built-in owns an identity an admin cannot touch: PATCH and
     // DELETE on its id are refused.
     let builtin = items
@@ -270,6 +274,18 @@ async fn create_update_delete_round_trip_and_delete_revokes() {
         )
         .await;
     assert_eq!(dup.status(), 409, "a duplicate runtime key is refused");
+
+    // The runtime row lists under the same camelCase key, unmasked.
+    let listed = server.request(bearer_get(&token, "/ui/api/principals")).await;
+    let listed = support::json(listed).await;
+    let row = listed["principals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"].as_str() == Some(&id))
+        .expect("the created principal is listed");
+    assert_eq!(row["maskedByBuiltin"], false);
+    assert_eq!(row["builtin"], false);
 
     let patch = server
         .request(

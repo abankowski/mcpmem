@@ -569,6 +569,9 @@ struct PrincipalView {
     label: Option<String>,
     scopes: Vec<String>,
     builtin: bool,
+    /// The SPA reads this key; the underscore spelling is the field's, the
+    /// wire spelling is the contract's.
+    #[serde(rename = "maskedByBuiltin")]
     masked_by_builtin: bool,
 }
 
@@ -712,6 +715,13 @@ async fn admin_create_principal(
     if let Err(e) = oauth
         .with_principals(|s| s.create(&input.iss, &input.sub, name, input.label.as_deref(), &scopes))
     {
+        // The pre-check above is not a lock: two concurrent identical POSTs
+        // can both pass it, and the second then hits the UNIQUE constraint.
+        // That race is classified by the store and answered as a conflict
+        // too, so the caller sees the same 409 either way.
+        if matches!(e, crate::errors::MCSError::ConstraintViolation(_)) {
+            return conflict("a runtime principal already owns this identity");
+        }
         return store_failure(e);
     }
     let view = PrincipalView {
@@ -821,10 +831,17 @@ async fn admin_delete_principal(
         Ok(None) => return not_found(),
         Err(e) => return store_failure(e),
     };
+    // Revoke before the row goes: a swallowed revoke error would leave a
+    // deleted principal's tokens live, and token validation never
+    // cross-checks the principals store. On a revoke failure the row stays
+    // intact, so the delete is retryable.
+    let revoked = match oauth.revoke_principal(&row.name) {
+        Ok(n) => n,
+        Err(e) => return store_failure(e),
+    };
     if let Err(e) = oauth.with_principals(|s| s.delete(&iss, &sub)) {
         return store_failure(e);
     }
-    let revoked = oauth.revoke_principal(&row.name).unwrap_or(0);
     tracing::info!(name = %row.name, revoked, "deleted principal and revoked token families");
     StatusCode::NO_CONTENT.into_response()
 }
