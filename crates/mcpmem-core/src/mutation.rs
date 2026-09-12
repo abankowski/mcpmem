@@ -559,6 +559,37 @@ fn type_id(conn: &Connection, name: &str, kind: i64) -> Result<i64> {
     Ok(conn.last_insert_rowid())
 }
 
+/// Queue one taxonomy subject for every serving profile, using the same
+/// lookup as the entity job path. Without a serving profile the job is
+/// explicitly held by the queue function itself.
+fn enqueue_taxonomy_jobs(
+    conn: &Connection,
+    kind: i64,
+    id: i64,
+    revision: i64,
+    operation: crate::jobs::IndexOperation,
+) -> Result<()> {
+    for profile_id in crate::jobs::serving_profile_ids(conn)? {
+        crate::jobs::enqueue_taxonomy(conn, kind, id, revision, operation, profile_id)?;
+    }
+    Ok(())
+}
+
+/// Tombstone the taxonomy mirror of one deleted relation triple and enqueue
+/// the delete. A missing mirror is a legacy row: insert it tombstoned.
+fn tombstone_relation_mirror(conn: &Connection, from_id: i64, to_id: i64, type_id: i64) -> Result<()> {
+    let (id, revision): (i64, i64) = conn
+        .query_row(
+            "INSERT INTO taxonomy_relation(from_id,to_id,type_id,revision,deleted) VALUES(?1,?2,?3,1,1) \
+             ON CONFLICT(from_id,to_id,type_id) DO UPDATE SET revision=revision+1,deleted=1 \
+             RETURNING id,revision",
+            params![from_id, to_id, type_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(sql_error)?;
+    enqueue_taxonomy_jobs(conn, 2, id, revision, crate::jobs::IndexOperation::Delete)
+}
+
 fn insert_observations(
     graph: &GraphHandle,
     conn: &Connection,
@@ -629,12 +660,35 @@ fn create_relation(conn: &Connection, relation: &Relation) -> Result<bool> {
     };
     let kind = type_id(conn, &relation.relation_type, 1)?;
     let changed = conn.execute("INSERT INTO relation(from_id,to_id,type_id,created_us) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM relation WHERE from_id=?1 AND to_id=?2 AND type_id=?3)", params![from.entity_id,to.entity_id,kind,now_us()]).map_err(sql_error)?;
+    if changed > 0 {
+        // Mirror the triple for the taxonomy worker. The mirror id tracks the
+        // physical rowid; a delete + recreate resets the row and its revision.
+        let rowid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO taxonomy_relation(id,from_id,to_id,type_id,revision,deleted) VALUES(?1,?2,?3,?4,1,0) \
+             ON CONFLICT(from_id,to_id,type_id) DO UPDATE SET revision=1,deleted=0,id=excluded.id",
+            params![rowid, from.entity_id, to.entity_id, kind],
+        )
+        .map_err(sql_error)?;
+        enqueue_taxonomy_jobs(conn, 2, rowid, 1, crate::jobs::IndexOperation::Upsert)?;
+    }
     Ok(changed > 0)
 }
 
 fn delete_entities(conn: &Connection, names: &[String]) -> Result<()> {
     for name in names.iter().collect::<BTreeSet<_>>() {
         if let Some(entity) = read_entity(conn, name)? {
+            let triples = conn
+                .prepare_cached(
+                    "SELECT from_id, to_id, type_id FROM relation WHERE from_id=?1 OR to_id=?1",
+                )
+                .map_err(sql_error)?
+                .query_map([entity.entity_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+                })
+                .map_err(sql_error)?
+                .collect::<rusqlite::Result<Vec<(i64, i64, i64)>>>()
+                .map_err(sql_error)?;
             conn.execute(
                 "DELETE FROM observation WHERE entity_id=?1",
                 [entity.entity_id],
@@ -652,6 +706,9 @@ fn delete_entities(conn: &Connection, names: &[String]) -> Result<()> {
             .map_err(sql_error)?;
             conn.execute("DELETE FROM entity WHERE id=?1", [entity.entity_id])
                 .map_err(sql_error)?;
+            for (from_id, to_id, type_id) in triples {
+                tombstone_relation_mirror(conn, from_id, to_id, type_id)?;
+            }
         }
     }
     Ok(())
@@ -717,7 +774,30 @@ fn execute(
         }
         MutationRequest::DeleteRelations { relations } => {
             for relation in relations {
+                let triples = conn.prepare_cached(
+                    "SELECT rowid, from_id, to_id, type_id FROM relation \
+                     WHERE from_id IN (SELECT id FROM entity WHERE name_hash=?1 AND name=?2 AND flags=0) \
+                     AND to_id IN (SELECT id FROM entity WHERE name_hash=?3 AND name=?4 AND flags=0) \
+                     AND type_id IN (SELECT id FROM type_dict WHERE kind=1 AND name=?5)",
+                )
+                .map_err(sql_error)?
+                .query_map(
+                    params![name_hash(&relation.from), relation.from, name_hash(&relation.to), relation.to, relation.relation_type],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .map_err(sql_error)?
+                .collect::<rusqlite::Result<Vec<(i64, i64, i64)>>>()
+                .map_err(sql_error)?;
                 conn.execute("DELETE FROM relation WHERE from_id IN (SELECT id FROM entity WHERE name_hash=?1 AND name=?2 AND flags=0) AND to_id IN (SELECT id FROM entity WHERE name_hash=?3 AND name=?4 AND flags=0) AND type_id IN (SELECT id FROM type_dict WHERE kind=1 AND name=?5)", params![name_hash(&relation.from),relation.from,name_hash(&relation.to),relation.to,relation.relation_type]).map_err(sql_error)?;
+                for (from_id, to_id, type_id) in triples {
+                    tombstone_relation_mirror(conn, from_id, to_id, type_id)?;
+                }
             }
             Ok(MutationResult::Unit)
         }
@@ -868,14 +948,39 @@ fn update_counters(
     for (new, count) in &after.relation_rows {
         *type_deltas.entry((1, &new.relation_type)).or_default() += count;
     }
-    for ((kind, name), delta) in type_deltas {
-        if delta != 0 {
-            conn.execute(
-                "UPDATE type_dict SET count=count+?1 WHERE kind=?2 AND name=?3",
+    // Affected types are the union of the net-delta keys and the types of
+    // every entity change. Each affected type gets ONE count/revision update
+    // and ONE enqueue, never one per change.
+    let mut affected_types: BTreeSet<(i64, &str)> = type_deltas.keys().copied().collect();
+    for change in changes {
+        if let Some(before) = &change.before {
+            affected_types.insert((0, before.entity_type.as_str()));
+        }
+        if let Some(after) = &change.after {
+            affected_types.insert((0, after.entity_type.as_str()));
+        }
+        if let Some(delta) = &change.relation_delta {
+            for relation in delta.added.iter().chain(delta.removed.iter()) {
+                affected_types.insert((1, relation.relation_type.as_str()));
+            }
+        }
+    }
+    for (kind, name) in affected_types {
+        let delta = type_deltas.get(&(kind, name)).copied().unwrap_or(0);
+        let revision: i64 = conn
+            .query_row(
+                "UPDATE type_dict SET count=count+?1, revision=revision+1 WHERE kind=?2 AND name=?3 RETURNING revision",
                 params![delta, kind, name],
+                |row| row.get(0),
             )
             .map_err(sql_error)?;
-        }
+        enqueue_taxonomy_jobs(
+            conn,
+            kind,
+            type_id(conn, name, kind)?,
+            revision,
+            crate::jobs::IndexOperation::Upsert,
+        )?;
     }
     let observations = |snapshot: &Snapshot| {
         snapshot
@@ -930,4 +1035,258 @@ fn update_counters(
         .map_err(sql_error)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::GraphHandle;
+    use crate::storage::{Durability, SqliteTuning};
+    use crate::types::EntityInput as Entity;
+    use std::num::NonZeroUsize;
+    use std::ops::Deref;
+    use std::path::PathBuf;
+
+    struct TestKg(GraphHandle, PathBuf);
+
+    impl Deref for TestKg {
+        type Target = GraphHandle;
+        fn deref(&self) -> &GraphHandle {
+            &self.0
+        }
+    }
+
+    impl Drop for TestKg {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.1);
+            let _ = std::fs::remove_file(self.1.with_extension("db-wal"));
+            let _ = std::fs::remove_file(self.1.with_extension("db-shm"));
+        }
+    }
+
+    fn new_kg() -> TestKg {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::atomic::Ordering;
+        static COUNTER: AtomicU64 = AtomicU64::new(200_000);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!("kg_mutation_{}_{}.db", std::process::id(), n));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let kg = GraphHandle::new(
+            &path,
+            Durability::Async,
+            SqliteTuning::default(),
+            NonZeroUsize::new(10000).unwrap(),
+            4,
+        )
+        .expect("create test kg");
+        TestKg(kg, path)
+    }
+
+    /// One managed serving profile, so taxonomy jobs land pending instead of
+    /// held.
+    fn serving_profile(kg: &GraphHandle) -> Uuid {
+        let profile = Uuid::new_v4();
+        let conn = kg.writer.lock();
+        conn.execute(
+            "UPDATE index_profile_registry SET state='Active', serving_profile=?1 WHERE store_key='default'",
+            [profile.to_string()],
+        )
+        .expect("activate serving profile");
+        profile
+    }
+
+    fn entity(name: &str, entity_type: &str) -> Entity {
+        Entity {
+            name: name.into(),
+            entity_type: entity_type.into(),
+            observations: vec![],
+        }
+    }
+
+    fn relation(from: &str, to: &str, relation_type: &str) -> Relation {
+        Relation {
+            from: from.into(),
+            to: to.into(),
+            relation_type: relation_type.into(),
+        }
+    }
+
+    /// (subject_kind, subject_id, subject_revision, operation, state)
+    fn taxonomy_jobs(kg: &GraphHandle) -> Vec<(i64, i64, i64, String, String)> {
+        let conn = kg.writer.lock();
+        let mut stmt = conn
+            .prepare("SELECT subject_kind, subject_id, subject_revision, operation, state FROM taxonomy_job ORDER BY subject_kind, subject_id")
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    }
+
+    /// (count, revision) of one type_dict row.
+    fn type_row(kg: &GraphHandle, kind: i64, name: &str) -> (i64, i64) {
+        let conn = kg.writer.lock();
+        conn.query_row(
+            "SELECT count, revision FROM type_dict WHERE kind=?1 AND name=?2",
+            params![kind, name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// (id, revision, deleted) of the mirror row for one relation triple.
+    fn mirror_row(kg: &GraphHandle, from: &str, to: &str, relation_type: &str) -> (i64, i64, i64) {
+        let conn = kg.writer.lock();
+        conn.query_row(
+            "SELECT m.id, m.revision, m.deleted
+             FROM taxonomy_relation m
+             JOIN entity f ON f.id = m.from_id
+             JOIN entity t ON t.id = m.to_id
+             JOIN type_dict d ON d.id = m.type_id
+             WHERE f.name=?1 AND t.name=?2 AND d.name=?3 AND d.kind=1",
+            params![from, to, relation_type],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn create_entity_enqueues_one_type_job_at_revision_one() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person")]).unwrap();
+
+        let jobs = taxonomy_jobs(&kg);
+        assert_eq!(jobs.len(), 1, "exactly one taxonomy job expected");
+        assert_eq!(jobs[0].0, 0, "entity type job expected");
+        assert_eq!(jobs[0].2, 1, "first revision expected");
+        assert_eq!(jobs[0].3, "upsert");
+        assert_eq!(jobs[0].4, "pending");
+        let (count, revision) = type_row(&kg, 0, "person");
+        assert_eq!((count, revision), (1, 1));
+    }
+
+    #[test]
+    fn second_entity_of_same_type_upserts_job_to_revision_two() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person")]).unwrap();
+        kg.create_entities(&[entity("bob", "person")]).unwrap();
+
+        let jobs = taxonomy_jobs(&kg);
+        assert_eq!(jobs.len(), 1, "one job row per affected type expected");
+        assert_eq!((jobs[0].0, jobs[0].2, jobs[0].3.as_str()), (0, 2, "upsert"));
+        let (count, revision) = type_row(&kg, 0, "person");
+        assert_eq!((count, revision), (2, 2));
+    }
+
+    #[test]
+    fn rename_bumps_type_revision_without_count_change() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person")]).unwrap();
+        kg.rename_entity("ada", "ada lovelace").unwrap();
+
+        let (count, revision) = type_row(&kg, 0, "person");
+        assert_eq!((count, revision), (1, 2), "count stable, revision bumped");
+        let jobs = taxonomy_jobs(&kg);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!((jobs[0].0, jobs[0].2, jobs[0].3.as_str()), (0, 2, "upsert"));
+    }
+
+    #[test]
+    fn create_relation_writes_mirror(){
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")]).unwrap();
+        kg.create_relations(&[relation("ada", "bob", "knows")]).unwrap();
+
+        let (mirror_id, mirror_revision, deleted) = mirror_row(&kg, "ada", "bob", "knows");
+        assert_eq!((mirror_revision, deleted), (1, 0), "fresh mirror expected");
+
+        let jobs = taxonomy_jobs(&kg);
+        let kind2: Vec<_> = jobs.iter().filter(|job| job.0 == 2).collect();
+        assert_eq!(kind2.len(), 1, "one kind-2 job expected");
+        assert_eq!((kind2[0].1, kind2[0].2, kind2[0].3.as_str()), (mirror_id, 1, "upsert"));
+        let (count, revision) = type_row(&kg, 1, "knows");
+        assert_eq!((count, revision), (1, 1));
+    }
+
+    #[test]
+    fn delete_relation_tombstones_mirror_and_enqueues_delete(){
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")]).unwrap();
+        kg.create_relations(&[relation("ada", "bob", "knows")]).unwrap();
+        let (mirror_id, _, _) = mirror_row(&kg, "ada", "bob", "knows");
+
+        kg.delete_relations(&[relation("ada", "bob", "knows")]).unwrap();
+
+        let (mirror_id_after, revision, deleted) = mirror_row(&kg, "ada", "bob", "knows");
+        assert_eq!((mirror_id_after, revision, deleted), (mirror_id, 2, 1), "tombstone expected");
+        let conn = kg.writer.lock();
+        let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM relation", [], |r| r.get(0)).unwrap();
+        drop(conn);
+        assert_eq!(remaining, 0, "physical triple deleted");
+        let jobs = taxonomy_jobs(&kg);
+        let kind2: Vec<_> = jobs.iter().filter(|job| job.0 == 2).collect();
+        assert_eq!(kind2.len(), 1);
+        assert_eq!((kind2[0].1, kind2[0].2, kind2[0].3.as_str()), (mirror_id, 2, "delete"));
+    }
+
+    #[test]
+    fn one_mutation_with_many_changes_bumps_each_type_once(){
+        let kg = new_kg();
+        serving_profile(&kg);
+        // Two creations of one new type in a single call. The union ruling
+        // demands one revision bump and one job row for the affected type.
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")]).unwrap();
+
+        let (count, revision) = type_row(&kg, 0, "person");
+        assert_eq!((count, revision), (2, 1), "one bump, not one per change");
+        let jobs = taxonomy_jobs(&kg);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!((jobs[0].0, jobs[0].2), (0, 1));
+    }
+
+    #[test]
+    fn delete_entity_tombstones_its_relation_mirrors(){
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")]).unwrap();
+        kg.create_relations(&[relation("ada", "bob", "knows")]).unwrap();
+        let (mirror_id, _, _) = mirror_row(&kg, "ada", "bob", "knows");
+
+        kg.delete_entities(&["ada".into()]).unwrap();
+
+        let conn = kg.writer.lock();
+        let (revision, deleted): (i64, i64) = conn
+            .query_row(
+                "SELECT revision, deleted FROM taxonomy_relation WHERE id=?1",
+                [mirror_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!((revision, deleted), (2, 1), "cascade tombstone expected");
+        let jobs = taxonomy_jobs(&kg);
+        let kind2: Vec<_> = jobs.iter().filter(|job| job.0 == 2).collect();
+        assert_eq!(kind2.len(), 1);
+        assert_eq!((kind2[0].2, kind2[0].3.as_str()), (2, "delete"));
+        let (count, revision) = type_row(&kg, 0, "person");
+        // Bump once at entity creation, once at relation creation (the
+        // relation delta makes an entity change for each endpoint), once at
+        // the delete. Count drops to the one survivor.
+        assert_eq!((count, revision), (1, 3), "survivor count and bumps");
+    }
 }
