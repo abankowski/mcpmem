@@ -1146,10 +1146,10 @@ fn handle_tools_call(
         "search_nodes" => memory::handle_search_nodes(kg, tool_args).map(HandlerResult::RawResult),
         // Standard Value handlers.
         "create_entities" => {
-            memory::handle_create_entities(kg, tool_args).map(HandlerResult::Value)
+            memory::handle_create_entities(kg, vs, tool_args).map(HandlerResult::Value)
         }
         "create_relations" => {
-            memory::handle_create_relations(kg, tool_args).map(HandlerResult::Value)
+            memory::handle_create_relations(kg, vs, tool_args).map(HandlerResult::Value)
         }
         "add_observations" => {
             memory::handle_add_observations(kg, tool_args).map(HandlerResult::Value)
@@ -1194,7 +1194,7 @@ fn handle_tools_call(
             taxonomy::handle_suggest_taxonomy(kg, tool_args).map(HandlerResult::Value)
         }
         "upsert_entities" => {
-            memory::handle_upsert_entities(kg, tool_args).map(HandlerResult::Value)
+            memory::handle_upsert_entities(kg, vs, tool_args).map(HandlerResult::Value)
         }
         "export_graph" => memory::handle_export_graph(kg, tool_args).map(HandlerResult::Value),
         "merge_entities" => memory::handle_merge_entities(kg, tool_args).map(HandlerResult::Value),
@@ -1289,6 +1289,7 @@ mod tests {
         .unwrap();
         memory::handle_create_entities(
             &kg,
+            None,
             Some(&json!({"entities":[
                 {"name":"seed","entityType":"person","observations":[]}
             ]})),

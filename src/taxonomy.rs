@@ -249,13 +249,17 @@ fn l2_normalize(vector: &mut [f32]) {
 /// convention `semantic_search` results use. An absent snapshot yields an
 /// empty list, never an error, so the caller can fall back to the offline
 /// string engine.
+///
+/// The result groups by input text: `out[i]` holds the suggestions for
+/// `texts[i]`. A caller that batches one write's unknown types keeps the
+/// one-provider-call bound and still splits the results back per type.
 #[cfg(feature = "indexer")]
 pub fn suggest_semantic(
     vs: &crate::vector_store::VectorStore,
     texts: &[String],
     kind: SubjectKind,
     top_k: usize,
-) -> Result<Vec<Suggestion>> {
+) -> Result<Vec<Vec<Suggestion>>> {
     use mcpmem_core::jobs::Normalization;
     use mcpmem_indexer::EmbeddingProvider;
 
@@ -301,7 +305,7 @@ pub fn suggest_semantic(
         SubjectKind::RelationType => crate::vector_store::TaxonomyKind::RelationType,
         SubjectKind::Relation => crate::vector_store::TaxonomyKind::Relation,
     };
-    let mut suggestions: Vec<Suggestion> = Vec::new();
+    let mut groups: Vec<Vec<Suggestion>> = Vec::with_capacity(texts.len());
     for mut query in vectors {
         if query.len() != profile.dimensions as usize {
             return Err(MCSError::MemoryError(format!(
@@ -322,16 +326,18 @@ pub fn suggest_semantic(
         // The snapshot search already returns at most top_k hits; the clamp
         // keeps the per-text bound local to this function.
         hits.truncate(top_k);
+        let mut group: Vec<Suggestion> = Vec::with_capacity(hits.len());
         for (id, distance) in hits {
             // A vector may point at a deleted subject: the snapshot never
             // sees the deletion, so the row resolves to nothing. Skip it.
             let Some((name, _)) = vs.resolve_taxonomy(taxonomy_kind, id) else {
                 continue;
             };
-            suggestions.push(Suggestion { name, score: 1.0 - distance });
+            group.push(Suggestion { name, score: 1.0 - distance });
         }
+        groups.push(group);
     }
-    Ok(suggestions)
+    Ok(groups)
 }
 
 #[cfg(test)]
@@ -415,6 +421,7 @@ mod tests {
         .unwrap();
         crate::actions::memory::handle_create_entities(
             &kg,
+            None,
             Some(&json!({"entities":[
                 {"name":"a","entityType":"person","observations":[]},
                 {"name":"b","entityType":"project","observations":[]}
@@ -423,6 +430,7 @@ mod tests {
         .unwrap();
         crate::actions::memory::handle_create_relations(
             &kg,
+            None,
             Some(&json!({"relations":[
                 {"from":"a","to":"b","relationType":"knows"},
                 {"from":"b","to":"a","relationType":"relates_to"}
@@ -872,9 +880,9 @@ mod tests {
             let got = suggest_semantic(&env.vs, &texts, SubjectKind::EntityType, 2).unwrap();
 
             // One search per text: the single seeded subject comes back for
-            // each of the three texts.
+            // each of the three texts, grouped by input text.
             assert_eq!(got.len(), 3);
-            assert!(got.iter().all(|s| s.name == "person"));
+            assert!(got.iter().all(|group| group.len() == 1 && group[0].name == "person"));
 
             // And the three texts rode one embed_texts call.
             let calls = fake_embeddings().recorded();
@@ -900,15 +908,16 @@ mod tests {
 
             let query = "query".to_owned();
             let got = suggest_semantic(&env.vs, &[query], SubjectKind::EntityType, 10).unwrap();
+            let group = &got[0];
 
             // The provider returns all-ones, so the L2Squared distances are
             // exactly 0.0, 1.0 and 1.0, and the scores are 1 - distance.
-            assert_eq!(got[0].name, "person");
-            assert_eq!(got[0].score, 1.0);
-            assert_eq!(got[1].name, "organization");
-            assert_eq!(got[1].score, 0.0);
-            assert_eq!(got[2].name, "acme");
-            assert_eq!(got[2].score, 0.0);
+            assert_eq!(group[0].name, "person");
+            assert_eq!(group[0].score, 1.0);
+            assert_eq!(group[1].name, "organization");
+            assert_eq!(group[1].score, 0.0);
+            assert_eq!(group[2].name, "acme");
+            assert_eq!(group[2].score, 0.0);
         }
 
         #[test]
@@ -943,7 +952,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(entity_types.len(), 1);
-            assert_eq!(entity_types[0].name, "person");
+            assert_eq!(entity_types[0][0].name, "person");
 
             let relation_types = suggest_semantic(
                 &env.vs,
@@ -953,7 +962,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(relation_types.len(), 1);
-            assert_eq!(relation_types[0].name, "works_at");
+            assert_eq!(relation_types[0][0].name, "works_at");
 
             let relations = suggest_semantic(
                 &env.vs,
@@ -963,7 +972,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(relations.len(), 1);
-            assert_eq!(relations[0].name, "alice -[works_at]-> acme");
+            assert_eq!(relations[0][0].name, "alice -[works_at]-> acme");
         }
 
         #[test]
@@ -987,7 +996,7 @@ mod tests {
                 10,
             )
             .unwrap();
-            assert!(relations.is_empty(), "a dangling vector must be skipped: {relations:?}");
+            assert!(relations[0].is_empty(), "a dangling vector must be skipped: {relations:?}");
 
             let entity_types = suggest_semantic(
                 &env.vs,
@@ -996,7 +1005,7 @@ mod tests {
                 10,
             )
             .unwrap();
-            assert_eq!(entity_types[0].name, "person");
+            assert_eq!(entity_types[0][0].name, "person");
         }
 
         #[test]
@@ -1007,7 +1016,7 @@ mod tests {
             // engine must fall back to the offline tier, not fail.
             let got = suggest_semantic(&env.vs, &["query".into()], SubjectKind::EntityType, 10)
                 .unwrap();
-            assert!(got.is_empty());
+            assert!(got[0].is_empty());
         }
 
         #[test]
@@ -1059,8 +1068,8 @@ mod tests {
             // 0.5 per component, which exactly matches the seeded unit
             // vector; without normalization the distance would be 1.0 and the
             // score would be 0.0.
-            assert_eq!(got[0].name, "person");
-            assert_eq!(got[0].score, 1.0);
+            assert_eq!(got[0][0].name, "person");
+            assert_eq!(got[0][0].score, 1.0);
         }
 
         #[test]

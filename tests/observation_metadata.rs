@@ -20,7 +20,7 @@ fn observation_metadata_canonical_creation_and_strict_input() {
         2,
     )
     .unwrap();
-    let result = handle_create_entities(&graph, Some(&json!({"entities":[{"name":"a","entityType":"test","observations":[{"body":"fact","occurredAtUs":42}]}]}))).unwrap();
+    let result = handle_create_entities(&graph, None, Some(&json!({"entities":[{"name":"a","entityType":"test","observations":[{"body":"fact","occurredAtUs":42}]}]}))).unwrap();
     let entities: serde_json::Value =
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(entities[0]["observations"][0]["body"], "fact");
@@ -50,7 +50,7 @@ fn observation_metadata_canonical_creation_and_strict_input() {
         json!({"body":"x","createdAtUs":1}),
         json!({"body":"x","originEntityName":"injected"}),
     ] {
-        assert!(handle_create_entities(&graph, Some(&json!({"entities":[{"name":"invalid","entityType":"test","observations":[{"body":"valid"},invalid]}]}))).is_err());
+        assert!(handle_create_entities(&graph, None, Some(&json!({"entities":[{"name":"invalid","entityType":"test","observations":[{"body":"valid"},invalid]}]}))).is_err());
         assert!(graph.get_entity("invalid").unwrap().is_none());
     }
 }
