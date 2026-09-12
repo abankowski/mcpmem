@@ -32,7 +32,9 @@ fn graph() -> (tempfile::TempDir, GraphHandle) {
 
 /// The inner JSON of a tool response: the parsed `content[0].text`.
 fn body(response: Value) -> Value {
-    serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap()
+    let parsed = serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap();
+    drop(response);
+    parsed
 }
 
 #[test]
@@ -251,7 +253,7 @@ mod semantic {
                         let Some((conn, _peer)) = listener.accept().ok() else {
                             continue;
                         };
-                        handle_connection(conn, Arc::clone(&thread_state));
+                        handle_connection(conn, &thread_state);
                     }
                 });
             Self {
@@ -287,7 +289,7 @@ mod semantic {
 
     /// Serves one connection: read the whole request, record it, answer
     /// with fixed embeddings, then close.
-    fn handle_connection(mut conn: TcpStream, state: Arc<FakeState>) {
+    fn handle_connection(mut conn: TcpStream, state: &Arc<FakeState>) {
         let mut buf = Vec::new();
         let mut chunk = vec![0u8; 8192];
         loop {
@@ -304,11 +306,7 @@ mod semantic {
                 // The body follows the blank-line separator.
                 let body_start = headers_end + 4;
                 if buf.len() >= body_start + body_len {
-                    respond(
-                        &mut conn,
-                        &buf[body_start..body_start + body_len],
-                        Arc::clone(&state),
-                    );
+                    respond(&mut conn, &buf[body_start..body_start + body_len], state);
                     return;
                 }
             }
@@ -320,9 +318,7 @@ mod semantic {
     /// Returns None until the full header block is buffered.
     fn request_frame(buf: &[u8]) -> Option<(usize, usize)> {
         let text = String::from_utf8_lossy(buf).to_string();
-        let Some(headers_end) = text.find("\r\n\r\n") else {
-            return None;
-        };
+        let headers_end: usize = text.find("\r\n\r\n")?;
         let mut length: usize = 0;
         for line in text[..headers_end].lines() {
             let Some(colon) = line.find(':') else {
@@ -340,7 +336,7 @@ mod semantic {
     /// A batch whose first text contains `FAIL_ME` gets HTTP 500 instead, the
     /// provider fault that the hook must swallow. Each request produces the
     /// same answer for all its texts.
-    fn respond(conn: &mut TcpStream, body: &[u8], state: Arc<FakeState>) {
+    fn respond(conn: &mut TcpStream, body: &[u8], state: &Arc<FakeState>) {
         let text = String::from_utf8_lossy(body).to_string();
         let Some(value) = serde_json::from_str::<serde_json::Value>(text.as_str()).ok() else {
             return;
