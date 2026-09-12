@@ -6,14 +6,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub(crate) fn enqueue_change(
-    conn: &Connection,
-    entity_id: i64,
-    revision: i64,
-    deleted: bool,
-) -> Result<()> {
-    // A nil profile is an explicitly held LegacyCompat job, never a claimable
-    // provider profile. Managed serving and candidate profiles receive updates.
+/// Profile ids that must receive an index-job update. When no managed
+/// profile serves the store, the list holds the nil id so the job is held.
+pub(crate) fn serving_profile_ids(conn: &Connection) -> Result<Vec<Uuid>> {
     let mut stmt = conn.prepare("SELECT serving_profile FROM index_profile_registry WHERE serving_profile IS NOT NULL UNION SELECT candidate_profile FROM index_profile_registry WHERE state='Rebuilding' AND candidate_profile IS NOT NULL").map_err(sql_error)?;
     let mut profiles = stmt
         .query_map([], |r| r.get::<_, String>(0))
@@ -23,16 +18,31 @@ pub(crate) fn enqueue_change(
     if profiles.is_empty() {
         profiles.push(uuid::Uuid::nil().to_string());
     }
+    profiles
+        .iter()
+        .map(|profile| parse_uuid(profile))
+        .collect()
+}
+
+pub(crate) fn enqueue_change(
+    conn: &Connection,
+    entity_id: i64,
+    revision: i64,
+    deleted: bool,
+) -> Result<()> {
+    // A nil profile is an explicitly held LegacyCompat job, never a claimable
+    // provider profile. Managed serving and candidate profiles receive updates.
+    let profiles = serving_profile_ids(conn)?;
     for profile in profiles {
-        let state = if profile == uuid::Uuid::nil().to_string() {
+        let state = if profile.is_nil() {
             "held"
         } else {
             "pending"
         };
-        conn.execute("INSERT INTO index_job(entity_id,profile_id,entity_revision,operation,state) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(entity_id,profile_id) DO UPDATE SET entity_revision=excluded.entity_revision,operation=excluded.operation,state=excluded.state,lease_token=NULL,lease_epoch=lease_epoch+1,lease_until_us=0,attempts=0,next_attempt_us=0,last_error=NULL", params![entity_id,profile,revision,if deleted {"delete"} else {"upsert"},state]).map_err(sql_error)?;
+        conn.execute("INSERT INTO index_job(entity_id,profile_id,entity_revision,operation,state) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(entity_id,profile_id) DO UPDATE SET entity_revision=excluded.entity_revision,operation=excluded.operation,state=excluded.state,lease_token=NULL,lease_epoch=lease_epoch+1,lease_until_us=0,attempts=0,next_attempt_us=0,last_error=NULL", params![entity_id,profile.to_string(),revision,if deleted {"delete"} else {"upsert"},state]).map_err(sql_error)?;
         conn.execute(
             "UPDATE ann_generation SET full_scan_generation=NULL WHERE profile_id=?1",
-            [&profile],
+            [profile.to_string()],
         )
         .map_err(sql_error)?;
     }
