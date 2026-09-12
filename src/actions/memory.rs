@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use mcpmem_core::mutation::{
     MutationContext, MutationRequest, MutationResult, MutationService, ObservationUpdate,
 };
@@ -5,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::errors::{MCSError, Result};
 use crate::kg::{GraphHandle, push_json_str};
+use crate::taxonomy::{SubjectKind, Suggestion, suggest_strings};
 
 const MAX_NAME_BYTES: usize = 1024;
 const MAX_OBSERVATION_BYTES: usize = 65536;
@@ -70,6 +73,75 @@ fn apply_mutation(kg: &GraphHandle, request: MutationRequest) -> Result<Mutation
         .map(|(_, result)| result)
 }
 
+/// Adds "taxonomySuggestions" to `value`, whose authored type was unknown
+/// before the write, and returns it. The suggestion array is computed once
+/// per distinct authored type by [`suggestion_map`], never per result object.
+fn enrich_result_object(mut value: Value, candidates: &[Suggestion]) -> Value {
+    value
+        .as_object_mut()
+        .expect("a result object is a JSON object")
+        .insert("taxonomySuggestions".into(), json!(candidates));
+    value
+}
+
+/// Runs the suggestion engine once per distinct authored type.
+///
+/// One counts query runs per kind. `types` is the set of authored types that
+/// were unknown before the write; the write itself inserts the authored type
+/// row, so existence must be captured before the mutation and the engine must
+/// skip the exact self-match (it does).
+fn suggestion_map<'a>(
+    kg: &GraphHandle,
+    types: impl Iterator<Item = &'a str>,
+    kind: SubjectKind,
+) -> HashMap<String, Vec<Suggestion>> {
+    let mut types: Vec<&str> = types.collect();
+    types.sort_unstable();
+    types.dedup();
+    if types.is_empty() {
+        return HashMap::new();
+    }
+    let counts = match kind {
+        SubjectKind::EntityType => kg.entity_type_counts(),
+        SubjectKind::RelationType => kg.relation_type_counts(),
+        SubjectKind::Relation => Vec::new(),
+    };
+    let existing: Vec<(&str, usize)> = counts.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+    types
+        .into_iter()
+        .map(|authored_type| {
+            (
+                authored_type.to_string(),
+                suggest_strings(authored_type, &existing),
+            )
+        })
+        .collect()
+}
+
+/// Maps result entity objects through the suggestion hook. An object is
+/// matched by name to its authored type and pre-write existence, because the
+/// result may skip entities and reorder them. The suggestion array for each
+/// distinct authored type is read from `suggestions`.
+fn enrich_entities(
+    values: Vec<Value>,
+    authored: &HashMap<String, (String, bool)>,
+    suggestions: &HashMap<String, Vec<Suggestion>>,
+) -> Vec<Value> {
+    values
+        .into_iter()
+        .map(|value| {
+            let name = value.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let Some((authored_type, _)) = authored.get(name) else {
+                return value;
+            };
+            match suggestions.get(authored_type) {
+                Some(candidates) => enrich_result_object(value, candidates),
+                None => value,
+            }
+        })
+        .collect()
+}
+
 pub fn handle_read_graph(kg: &GraphHandle, args: Option<&Value>) -> Result<String> {
     let params = args.unwrap_or(&Value::Null);
     let filter_type = params
@@ -111,6 +183,21 @@ pub fn handle_create_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
         }
     }
 
+    // The write inserts the authored type row, so existence must be captured
+    // before the mutation.
+    let authored: HashMap<String, (String, bool)> = input_entities
+        .iter()
+        .map(|entity| {
+            (
+                entity.name.clone(),
+                (
+                    entity.entity_type.clone(),
+                    kg.entity_type_exists(&entity.entity_type),
+                ),
+            )
+        })
+        .collect();
+
     let MutationResult::Entities(result) = apply_mutation(
         kg,
         MutationRequest::CreateEntities {
@@ -120,7 +207,20 @@ pub fn handle_create_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
     else {
         unreachable!("entity mutation result")
     };
-    let text = serde_json::to_string(&result).map_err(MCSError::JsonError)?;
+    let values: Vec<Value> = match serde_json::to_value(result).map_err(MCSError::JsonError)? {
+        Value::Array(items) => items,
+        _ => unreachable!("entity mutation result is an array"),
+    };
+    let suggestions = suggestion_map(
+        kg,
+        authored
+            .values()
+            .filter(|(_, known)| !*known)
+            .map(|(authored_type, _)| authored_type.as_str()),
+        SubjectKind::EntityType,
+    );
+    let values = enrich_entities(values, &authored, &suggestions);
+    let text = serde_json::to_string(&values).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }
 
@@ -145,6 +245,19 @@ pub fn handle_create_relations(kg: &GraphHandle, args: Option<&Value>) -> Result
         validate_name(&rel.relation_type)?;
     }
 
+    // The write inserts the authored type row, so existence must be captured
+    // before the mutation. The result relations are the request relations
+    // verbatim, so their own relationType value is the authored type.
+    let known_before: HashMap<String, bool> = input_relations
+        .iter()
+        .map(|relation| {
+            (
+                relation.relation_type.clone(),
+                kg.relation_type_exists(&relation.relation_type),
+            )
+        })
+        .collect();
+
     let MutationResult::Relations(result) = apply_mutation(
         kg,
         MutationRequest::CreateRelations {
@@ -154,7 +267,32 @@ pub fn handle_create_relations(kg: &GraphHandle, args: Option<&Value>) -> Result
     else {
         unreachable!("relation mutation result")
     };
-    let text = serde_json::to_string(&result).map_err(MCSError::JsonError)?;
+    let values: Vec<Value> = match serde_json::to_value(result).map_err(MCSError::JsonError)? {
+        Value::Array(items) => items,
+        _ => unreachable!("relation mutation result is an array"),
+    };
+    let suggestions = suggestion_map(
+        kg,
+        known_before
+            .iter()
+            .filter(|(_, known)| !**known)
+            .map(|(authored_type, _)| authored_type.as_str()),
+        SubjectKind::RelationType,
+    );
+    let values: Vec<Value> = values
+        .into_iter()
+        .map(|value| {
+            let authored_type = value
+                .get("relationType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match suggestions.get(authored_type) {
+                Some(candidates) => enrich_result_object(value, candidates),
+                None => value,
+            }
+        })
+        .collect();
+    let text = serde_json::to_string(&values).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }
 
@@ -533,6 +671,21 @@ pub fn handle_upsert_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
         }
     }
 
+    // The write inserts the authored type row, so existence must be captured
+    // before the mutation.
+    let authored: HashMap<String, (String, bool)> = input_entities
+        .iter()
+        .map(|entity| {
+            (
+                entity.name.clone(),
+                (
+                    entity.entity_type.clone(),
+                    kg.entity_type_exists(&entity.entity_type),
+                ),
+            )
+        })
+        .collect();
+
     let MutationResult::Entities(results) = apply_mutation(
         kg,
         MutationRequest::UpsertEntities {
@@ -542,8 +695,20 @@ pub fn handle_upsert_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<
     else {
         unreachable!("upsert mutation result")
     };
-    let text =
-        serde_json::to_string(&json!({ "results": results })).map_err(MCSError::JsonError)?;
+    let values: Vec<Value> = match serde_json::to_value(results).map_err(MCSError::JsonError)? {
+        Value::Array(items) => items,
+        _ => unreachable!("upsert mutation result is an array"),
+    };
+    let suggestions = suggestion_map(
+        kg,
+        authored
+            .values()
+            .filter(|(_, known)| !*known)
+            .map(|(authored_type, _)| authored_type.as_str()),
+        SubjectKind::EntityType,
+    );
+    let values = enrich_entities(values, &authored, &suggestions);
+    let text = serde_json::to_string(&json!({ "results": values })).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }
 

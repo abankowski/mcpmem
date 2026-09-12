@@ -235,22 +235,32 @@ Expected: PASS.
 
 **Interfaces:**
 - Consumes: Task 2 `*_exists`, Task 3 `suggest_strings`/`SubjectKind`, `GraphHandle::entity_type_counts`, `relation_type_counts`.
-- Produces: result objects that carry an optional `taxonomySuggestions: [{ name, score }]` field, present only when the object's type was unknown at post-commit time. The top-level response shape does not change.
+- Produces: result objects that carry an optional `taxonomySuggestions: [{ name, score }]` field, present only when the object's authored type was unknown before the write. The top-level response shape does not change.
 
-Composition helper (in `memory.rs`):
+Composition (in `memory.rs`) — as built by Task 4:
 
 ```rust
-/// Adds "taxonomySuggestions" to a result object when its authored type is
-/// unknown in the graph. Returns the object unchanged otherwise.
-fn enrich_with_suggestions(
+/// Runs the suggestion engine once per distinct authored type. One counts
+/// query runs per kind.
+fn suggestion_map<'a>(
     kg: &GraphHandle,
-    value: &Value,             // one created entity/relation object
-    authored_type: &str,
+    types: impl Iterator<Item = &'a str>, // authored types unknown before the write
     kind: SubjectKind,
-) -> Value
+) -> HashMap<String, Vec<Suggestion>>
+
+/// Appends the ready suggestion array to a result object.
+fn enrich_result_object(value: Value, candidates: &[Suggestion]) -> Value
 ```
 
-The helper checks the post-commit state (types are never deleted, so this is stable), serializes `suggest_strings` to a JSON array, and inserts the key into a clone of the object value.
+SUPERSEDED (2026-09-12, Task 4 execution): this section originally specified a
+per-object helper that "checks the post-commit state". That is impossible: the
+mutation inserts the authored type row (`type_id` in
+`crates/mcpmem-core/src/mutation.rs:542`), so a post-commit existence check
+always reports a self-authored type as existing and the feature could never
+fire. Each handler captures existence for each authored type before the
+mutation, builds the suggestion map once per distinct unknown type, and then
+looks the ready array up per result object (matching entities by name; the
+result may be reordered).
 
 - [ ] **Step 1: Write the failing integration test**
 
