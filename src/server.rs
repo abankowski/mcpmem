@@ -19,6 +19,7 @@ use crate::config::Config;
 use crate::errors::{MCSError, Result};
 use crate::kg::GraphHandle;
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+use crate::taxonomy;
 use crate::tools;
 use crate::vector_actions;
 use crate::vector_store::{VectorConfig, VectorStore};
@@ -721,7 +722,8 @@ const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
 /// `instructions` surfaced to the client and appended to the model's system prompt.
 const SERVER_INSTRUCTIONS: &str = "Knowledge-graph memory MCP server. Entity names are unique and \
 case-sensitive. Use `create_entities`/`create_relations` to build the graph, `add_observations` to \
-attach facts, and `search_nodes`/`open_nodes`/`read_graph` to retrieve. Prefer `upsert_entities` for \
+attach facts, and `search_nodes`/`open_nodes`/`read_graph` to retrieve. Use `suggest_taxonomy` to \
+find the closest existing taxonomy names before naming a new type. Prefer `upsert_entities` for \
 idempotent writes and `merge_entities` to collapse duplicates. Tool failures are returned with \
 `isError: true` rather than as protocol errors — read the message and retry.";
 
@@ -1188,6 +1190,9 @@ fn handle_tools_call(
         }
         "list_entity_types" => memory::handle_list_entity_types(kg).map(HandlerResult::Value),
         "list_relation_types" => memory::handle_list_relation_types(kg).map(HandlerResult::Value),
+        "suggest_taxonomy" => {
+            taxonomy::handle_suggest_taxonomy(kg, tool_args).map(HandlerResult::Value)
+        }
         "upsert_entities" => {
             memory::handle_upsert_entities(kg, tool_args).map(HandlerResult::Value)
         }
@@ -1264,5 +1269,108 @@ mod tests {
         let outcome = process_request(&req, &kg, None, &allowed);
         GRAPH_WRITE_ENABLED.store(was_on, std::sync::atomic::Ordering::Relaxed);
         assert!(outcome.is_ok(), "control failed");
+    }
+
+    /// The manifest, the tools/list output and the dispatch arm must agree on
+    /// `suggest_taxonomy`: the compiled manifest announces it as a read-only
+    /// tool, the list exposes it under the graph-read gate, and the call
+    /// returns type suggestions from a seeded graph. The graph-read flag is
+    /// process-wide, so it is restored afterwards.
+    #[test]
+    fn suggest_taxonomy_is_listed_and_dispatched_for_a_seeded_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let kg = GraphHandle::new(
+            &dir.path().join("memory.db"),
+            crate::config::Durability::Sync,
+            crate::config::SqliteTuning::default(),
+            NonZeroUsize::new(32).unwrap(),
+            2,
+        )
+        .unwrap();
+        memory::handle_create_entities(
+            &kg,
+            Some(&json!({"entities":[
+                {"name":"seed","entityType":"person","observations":[]}
+            ]})),
+        )
+        .unwrap();
+
+        let was_on = graph_read_enabled();
+        GRAPH_READ_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+        let principal = authz::bearer_principal(&[tools::ToolCategory::GraphRead]);
+
+        // The compiled manifest advertises the tool with read annotations.
+        let entry = base_tools()
+                .iter()
+                .find(|t| t["name"].as_str() == Some("suggest_taxonomy"))
+                .expect("tools.json lists suggest_taxonomy");
+            assert_eq!(
+                entry["annotations"]["readOnlyHint"].as_bool(),
+                Some(true)
+            );
+            assert_eq!(
+                entry["inputSchema"]["properties"]["kind"]["enum"]
+                    .as_array()
+                    .map(|a| a.len()),
+                Some(4)
+            );
+
+            // tools/list exposes it under the graph-read gate.
+            let listed = handle_tools_list(None, &principal);
+            let names: Vec<String> = listed["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(String::from))
+                .collect();
+            assert!(
+names.iter().any(|n| n == "suggest_taxonomy"),
+            "tools/list must announce suggest_taxonomy"
+            );
+
+            // The dispatch arm answers with suggestions for a seeded graph.
+            let req: JsonRpcRequest = serde_json::from_value(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "suggest_taxonomy",
+                    "arguments": { "query": "persn" }
+                }
+            }))
+            .unwrap();
+            let Ok(HandlerResult::Value(result)) =
+                process_request(&req, &kg, None, &principal)
+            else {
+                panic!("expected a suggestion value");
+            };
+let suggestions = &result["suggestions"];
+        assert!(suggestions.is_array());
+            assert_eq!(suggestions[0]["name"], "person");
+
+            // A blank query fails through the same dispatch arm, as an
+            // isError tool result rather than a protocol error.
+            let req: JsonRpcRequest = serde_json::from_value(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "suggest_taxonomy",
+                    "arguments": { "query": "  " }
+                }
+            }))
+            .unwrap();
+            let Ok(HandlerResult::Value(result)) =
+                process_request(&req, &kg, None, &principal)
+            else {
+                panic!("expected a tool error value");
+            };
+            assert_eq!(result["isError"].as_bool(), Some(true));
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(
+                text.contains("must not be empty or whitespace"),
+                "{text}"
+            );
+        GRAPH_READ_ENABLED.store(was_on, std::sync::atomic::Ordering::Relaxed);
     }
 }
