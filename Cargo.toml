@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "mcpmem"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2024"
 authors = ["Artur Bańkowski", "Piyush <original mcp-memory author>"]
 description = "MCP server giving LLM agents persistent memory: a SQLite knowledge graph with FTS5 search, tree-sitter code indexing (11 languages) with semantic code search, and optional vector + hybrid search (usearch HNSW or IVF-Flat) with batch upsert, more-like-this, recommendations, and MMR diversification"
@@ -43,11 +43,11 @@ dashmap = "6"
 petgraph = "0.7"
 usearch = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
-mcpmem-core = { path = "crates/mcpmem-core", version = "1.0.4" }
-mcpmem-runtime = { path = "crates/mcpmem-runtime", version = "1.0.4" }
-mcpmem-indexer = { path = "crates/mcpmem-indexer", version = "1.0.4", optional = true }
-mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.4", optional = true }
-mcpmem-oauth = { path = "crates/mcpmem-oauth", version = "1.0.4" }
+mcpmem-core = { path = "crates/mcpmem-core", version = "1.1.0" }
+mcpmem-runtime = { path = "crates/mcpmem-runtime", version = "1.1.0" }
+mcpmem-indexer = { path = "crates/mcpmem-indexer", version = "1.1.0", optional = true }
+mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.1.0", optional = true }
+mcpmem-oauth = { path = "crates/mcpmem-oauth", version = "1.1.0" }
 uuid = { version = "1" }
 # Percent-encoding, for the two places the OAuth routes meet a query string:
 # parsing the consent form body (which repeats `scope`, so no `Deserialize`
@@ -121,7 +121,7 @@ hmac = "0.12"
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1.41", features = ["process"] }
-mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.0.4" }
+mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "1.1.0" }
 # Drive the axum router in-process (`oneshot`) and collect a response body,
 # so the HTTP tests need no socket and no HTTP client.
 tower = { version = "0.5", features = ["util"] }
