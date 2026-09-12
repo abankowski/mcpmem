@@ -429,6 +429,41 @@ The database path is resolved in order:
 The same SQLite file works with or without `--enable-vectors`, so you can populate the graph
 plain and later serve it with vectors enabled.
 
+### Soft taxonomy validation
+
+A write that names an entity type or relation type the server does not know
+yet always succeeds. The server never refuses an unknown type; instead the
+write response gains a `taxonomySuggestions` object on every result whose
+authored type is new. Suggestions are advisory only — nothing enforces them.
+
+```json
+"taxonomySuggestions": {
+  "similarTypes": [ { "name": "person", "score": 0.9 } ],
+  "exampleEntities": [ "alice" ],
+  "exampleRelations": [ "alice -[works_at]-> acme" ]
+}
+```
+
+- `similarTypes` always lists `{ "name", "score" }` pairs from the offline
+  string engine. With the semantic tier enabled the list is sorted
+  semantically first, then filled by the offline engine.
+- `exampleEntities` and `exampleRelations` are present on the semantic tier
+  only; without it the object holds just `similarTypes`.
+
+The offline tier always runs: it compares the authored name against existing
+type names in the same graph. The semantic tier is additive: it requires
+`--enable-vectors`, a build with the `indexer` Cargo feature, and a serving
+`[indexer]` profile (see [Configuring the embedding worker](#configuring-the-embedding-worker)).
+With those in place, the indexer worker also embeds taxonomy subjects (type
+names and relation triples) and the suggestion engine matches against the
+serving snapshot.
+
+`suggest_taxonomy` exposes the same engine as a standalone tool (category
+`graph-read`). It takes `typeName`, an optional `kind` (`entityType`,
+`relationType`, `relation`; default `entityType`), and the optional
+`semanticSuggestions` hint; the response shape matches `taxonomySuggestions`
+above.
+
 ### Observation format (1.0)
 
 MCP observation writes use objects: `{ "body": "…", "occurredAtUs": 1780000000000000 }`.

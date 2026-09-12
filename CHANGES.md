@@ -154,6 +154,44 @@ This entry lists every change since that snapshot. The version line restarts at
   and the README no longer calls the `indexer` role "idle in 1.0.1" — since
   1.0.2 the server embeds on write and in `semantic_search`.
 
+## 1.1.0 — 2026-09-12
+
+### Added
+
+- **Soft taxonomy validation.** A write that names an unknown entity type or
+  relation type always succeeds; the response carries `taxonomySuggestions`
+  instead of a refusal. The offline tier (string-similarity over existing
+  type names, relations and examples) always runs. The semantic tier is an
+  additive extension: with `--enable-vectors`, the `indexer` Cargo feature
+  and a serving `[indexer]` profile, suggestions also match embedded
+  taxonomy subjects in vector space, and the response `taxonomySuggestions`
+  object gains `similarTypes`, `exampleEntities` and `exampleRelations`
+  alongside the always-present `{ name, score }` list.
+- **`suggest_taxonomy` tool.** One explicit entry point for suggestion
+  lookups, reading the same offline engine and the same serving snapshot.
+  It is a new tool name, so the tool surface is additive.
+- **Taxonomy subjects embed through the indexer worker.** Entity types,
+  relation types and relation triples are queued on write and embedded by
+  the same `indexer` poll that embeds entities; the runtime reconcile
+  publishes per-kind ANN snapshots that suggestions read. The serving
+  profile changes are traffic that the existing vector path already
+  handles.
+
+### Migration note
+
+- Migration `0006` (taxonomy tables) applies automatically during startup
+  on every database, the same way earlier migrations do. No manual step is
+  required. New databases get the tables at first open; existing databases
+  are upgraded in place, and the backfill mirrors each existing relation
+  triple once.
+
+### Compatibility
+
+- The wire shape is additive: write responses gain an optional
+  `taxonomySuggestions` field, and the new `suggest_taxonomy` tool is added
+  without changing any existing tool's arguments or results. A client that
+  ignores unknown response fields and unknown tool names is unaffected.
+
 ## 1.0.0 — 2026-09-10
 
 ### Breaking changes
