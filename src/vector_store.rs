@@ -16,8 +16,29 @@ use crate::ivf::{IvfFlatIndex, Metric as IvfMetric};
 use crate::kg::push_json_str;
 use crate::turboquant::TurboQuantIndex;
 use mcpmem_core::jobs::{
-    AnnGenerationRepository, DistanceMetric, IndexProfileRegistry, StoreState,
+    AnnGenerationRepository, DistanceMetric, IndexProfileRegistry, StoreState, taxonomy_scan_invalid,
 };
+
+/// The taxonomy subject kinds a snapshot can serve. The discriminant matches
+/// the `subject_kind` column of `taxonomy_vector`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaxonomyKind {
+    EntityType = 0,
+    RelationType = 1,
+    Relation = 2,
+}
+
+impl TaxonomyKind {
+    pub const ALL: [TaxonomyKind; 3] = [
+        TaxonomyKind::EntityType,
+        TaxonomyKind::RelationType,
+        TaxonomyKind::Relation,
+    ];
+
+    fn as_i64(self) -> i64 {
+        self as i64
+    }
+}
 
 /// What [`VectorStore::adopt_profile`] did. Reported rather than logged inside,
 /// so the caller decides how loud each outcome is.
@@ -303,6 +324,10 @@ pub struct VectorStore {
     /// before searching, so a completed rebuild never exposes a half-built
     /// candidate generation.
     managed_snapshot: RwLock<Option<Arc<ManagedSnapshot>>>,
+    /// Per-kind taxonomy snapshots, one entry per [`TaxonomyKind`]
+    /// discriminant. Readers clone the Arc before searching, so a completed
+    /// adopt never exposes a half-built kind.
+    taxonomy_snapshots: RwLock<[Option<Arc<TaxonomySnapshot>>; 3]>,
 }
 
 struct ManagedSnapshot {
@@ -310,6 +335,15 @@ struct ManagedSnapshot {
     durable_generation: i64,
     metric: DistanceMetric,
     vectors: Vec<(EntityId, Vec<f32>)>,
+}
+
+/// One kind's adopted taxonomy snapshot: immutable vectors at one durable
+/// generation. Additive to the entity `ManagedSnapshot`.
+struct TaxonomySnapshot {
+    profile: uuid::Uuid,
+    durable_generation: i64,
+    metric: DistanceMetric,
+    vectors: Vec<(i64, Vec<f32>)>,
 }
 
 fn sqlite_err(e: rusqlite::Error) -> MCSError {
@@ -352,6 +386,25 @@ fn managed_distance(metric: DistanceMetric, left: &[f32], right: &[f32]) -> f32 
             }
         }
     }
+}
+
+/// Publish gate for one taxonomy kind, mirroring
+/// `AnnGenerationRepository::mark_published` against the
+/// `taxonomy_ann_generation` table. Refuses (false) when a concurrent durable
+/// advance moved the generation past the one this snapshot was built from.
+fn mark_taxonomy_published(
+    conn: &Connection,
+    profile: uuid::Uuid,
+    kind: i64,
+    generation: i64,
+) -> Result<bool> {
+    let changed = conn
+        .execute(
+            "UPDATE taxonomy_ann_generation SET published_generation=?3 WHERE profile_id=?1 AND subject_kind=?2 AND durable_generation=?3",
+            params![profile.to_string(), kind, generation],
+        )
+        .map_err(sqlite_err)?;
+    Ok(changed == 1)
 }
 
 /// `INSERT OR REPLACE … VALUES (?,?,?,?,?),(…),…` with `rows` tuples. Full
@@ -491,6 +544,7 @@ impl VectorStore {
             ivf_nprobe: cfg.ivf_nprobe,
             db_path: db_path.to_path_buf(),
             managed_snapshot: RwLock::new(None),
+            taxonomy_snapshots: RwLock::new([None, None, None]),
         };
         store.load_existing()?;
 
@@ -951,6 +1005,205 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Builds one ANN snapshot per taxonomy kind from the durable
+    /// `taxonomy_vector` rows, mirroring [`Self::reconcile_managed_snapshot`].
+    /// The registry owns the connection this call reads and writes: callers
+    /// hold the store's db lock and pass a registry built on that connection,
+    /// so the generation read, the vector load and the publish mark share one
+    /// transaction view.
+    ///
+    /// A kind whose generation row is absent, or whose durable generation did
+    /// not move since the last build, is left untouched. A non-candidate build
+    /// publishes through `taxonomy_ann_generation` and is refused when a
+    /// concurrent durable advance queued newer work. A candidate build
+    /// re-verifies every kind with `taxonomy_scan_invalid` and refuses (an
+    /// Err, so nothing is swapped) when any kind has missing or stale work;
+    /// activating the registry stays with the caller.
+    pub fn adopt_taxonomy(
+        &mut self,
+        registry: &IndexProfileRegistry,
+        candidate: bool,
+    ) -> Result<()> {
+        let conn = registry.connection();
+        let state = registry.state("default")?;
+        let profile = match state {
+            StoreState::Active(profile) | StoreState::Rebuilding { candidate: profile, .. } => {
+                Some(profile)
+            }
+            // Failed keeps serving whatever was already adopted, exactly like
+            // the entity snapshot.
+            StoreState::Failed { .. } => return Ok(()),
+            StoreState::LegacyCompat => None,
+        };
+        let Some(profile) = profile else {
+            *self.taxonomy_snapshots.write() = [None, None, None];
+            return Ok(());
+        };
+        let profile_def = registry.get(profile)?;
+        let existing = self.taxonomy_snapshots.read().clone();
+        let mut snapshots = [None, None, None];
+        for kind in TaxonomyKind::ALL {
+            let idx = kind as usize;
+            let generation: Option<i64> = conn
+                .query_row(
+                    "SELECT durable_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=?2",
+                    params![profile.to_string(), kind.as_i64()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sqlite_err)?;
+            // No durable work for this kind: nothing to serve. A previous
+            // snapshot is dropped so a retired profile cannot linger.
+            let Some(generation) = generation else {
+                continue;
+            };
+            // A candidate build re-verifies every kind even when its
+            // generation did not move: activation must not ride on a stale
+            // scan. The refusal leaves every snapshot in place.
+            if candidate && taxonomy_scan_invalid(conn, profile, kind.as_i64())? {
+                return Err(MCSError::InvalidParams(
+                    "candidate taxonomy snapshot has missing or stale vectors or jobs".into(),
+                ));
+            }
+            let unchanged = existing[idx]
+                .as_ref()
+                .map(|snapshot| (snapshot.profile, snapshot.durable_generation))
+                == Some((profile, generation));
+            if unchanged {
+                snapshots[idx] = existing[idx].clone();
+                continue;
+            }
+            let mut statement = conn
+                .prepare(
+                    "SELECT subject_id,blob FROM taxonomy_vector WHERE profile_id=?1 AND subject_kind=?2 ORDER BY subject_id",
+                )
+                .map_err(sqlite_err)?;
+            let vectors = statement
+                .query_map(params![profile.to_string(), kind.as_i64()], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(sqlite_err)?
+                .map(|row| {
+                    let (id, blob) = row.map_err(sqlite_err)?;
+                    if blob.len() != profile_def.dimensions as usize * std::mem::size_of::<f32>() {
+                        return Err(MCSError::MemoryError(
+                            "taxonomy vector has invalid byte length".into(),
+                        ));
+                    }
+                    let (chunks, _) = blob.as_chunks::<4>();
+                    let vector = chunks
+                        .iter()
+                        .map(|bytes| f32::from_le_bytes(*bytes))
+                        .collect::<Vec<_>>();
+                    profile_def.validate_vector(&vector)?;
+                    Ok((id, vector))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            // Serve only durable generations. A concurrent durable advance
+            // past the generation this build read refuses the publish; the
+            // caller re-adopts after the next committed batch.
+            if !candidate && !mark_taxonomy_published(conn, profile, kind.as_i64(), generation)? {
+                return Ok(());
+            }
+            snapshots[idx] = Some(Arc::new(TaxonomySnapshot {
+                profile,
+                durable_generation: generation,
+                metric: profile_def.distance_metric,
+                vectors,
+            }));
+        }
+        *self.taxonomy_snapshots.write() = snapshots;
+        Ok(())
+    }
+
+    /// Nearest taxonomy subjects for a query in the kind's adopted snapshot,
+    /// as `(subject_id, distance)` ascending. An absent snapshot returns an
+    /// empty list, not an error, so the suggestion engine falls back to the
+    /// offline tier. Distances use the snapshot's profile metric.
+    pub fn search_taxonomy(
+        &self,
+        kind: TaxonomyKind,
+        query: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(i64, f64)>> {
+        let Some(snapshot) = self.taxonomy_snapshots.read()[kind as usize].clone() else {
+            return Ok(Vec::new());
+        };
+        if query.len()
+            != snapshot
+                .vectors
+                .first()
+                .map_or(query.len(), |(_, vector)| vector.len())
+        {
+            return Err(MCSError::InvalidParams(
+                "query dimensions do not match active taxonomy profile".into(),
+            ));
+        }
+        let mut matches: Vec<_> = snapshot
+            .vectors
+            .iter()
+            .map(|(id, vector)| (*id, managed_distance(snapshot.metric, query, vector) as f64))
+            .collect();
+        matches.sort_by(|left, right| left.1.total_cmp(&right.1));
+        matches.truncate(top_k.clamp(1, 100));
+        Ok(matches)
+    }
+
+    /// Resolves a taxonomy subject id to its current `(name, kind_label)`.
+    /// Kinds 0/1 read `type_dict` names; kind 2 renders the live entity names
+    /// around the relation mirror row. Returns None for an unknown subject.
+    pub fn resolve_taxonomy(&self, kind: TaxonomyKind, id: i64) -> Option<(String, String)> {
+        let conn = self.db.lock();
+        match kind {
+            TaxonomyKind::EntityType | TaxonomyKind::RelationType => {
+                let label = if kind == TaxonomyKind::EntityType {
+                    "entityType"
+                } else {
+                    "relationType"
+                };
+                let name: String = conn
+                    .query_row(
+                        "SELECT name FROM type_dict WHERE id=?1 AND kind=?2",
+                        params![id, kind.as_i64()],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_err)
+                    .ok()
+                    .flatten()?;
+                Some((name, label.to_string()))
+            }
+            TaxonomyKind::Relation => {
+                let (from_id, to_id, type_id): (i64, i64, i64) = conn
+                    .query_row(
+                        "SELECT from_id,to_id,type_id FROM taxonomy_relation WHERE id=?1",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(sqlite_err)
+                    .ok()
+                    .flatten()?;
+                let from = self.get_entity_name_type(&conn, from_id).ok().flatten()?.0;
+                let to = self.get_entity_name_type(&conn, to_id).ok().flatten()?.0;
+                let relation_type: String = conn
+                    .query_row(
+                        "SELECT name FROM type_dict WHERE id=?1 AND kind=1",
+                        [type_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_err)
+                    .ok()
+                    .flatten()?;
+                Some((
+                    format!("{from} -[{relation_type}]-> {to}"),
+                    "relation".to_string(),
+                ))
+            }
+        }
+    }
+
     pub fn search_entities_json(
         &self,
         query: &[f32],
@@ -1372,6 +1625,311 @@ mod tests {
 
     fn make_embedding(dims: u32, value: f32) -> Vec<f32> {
         vec![value; dims as usize]
+    }
+
+    /// Register one serving profile in the store. The taxonomy tables carry
+    /// per-kind generations for this profile, which adopt() serves.
+    fn seed_taxonomy_profile(env: &TestEnv, dims: u32) -> uuid::Uuid {
+        use mcpmem_core::jobs::{DistanceMetric, IndexProfile, Normalization};
+        let profile = IndexProfile {
+            id: uuid::Uuid::new_v4(),
+            store_key: "default".into(),
+            provider_kind: "test".into(),
+            model: "test".into(),
+            dimensions: dims,
+            representation_version: "v1".into(),
+            normalization: Normalization::None,
+            distance_metric: DistanceMetric::L2Squared,
+            vector_encoding_version: "f32le-v1".into(),
+        };
+        let conn = env.vs.db.lock();
+        conn.execute(
+            "INSERT INTO index_profile VALUES(?1,'default',?2,?3,'Active')",
+            params![
+                profile.id.to_string(),
+                "taxonomy-test-fixture",
+                serde_json::to_string(&profile).unwrap()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE index_profile_registry SET state='Active',serving_profile=?1 WHERE store_key='default'",
+            [profile.id.to_string()],
+        )
+        .unwrap();
+        profile.id
+    }
+
+    fn seed_taxonomy_generation(env: &TestEnv, profile: uuid::Uuid, kind: i64, durable: i64) {
+        let conn = env.vs.db.lock();
+        conn.execute(
+            "INSERT INTO taxonomy_ann_generation(profile_id,subject_kind,durable_generation) VALUES(?1,?2,?3)",
+            params![profile.to_string(), kind, durable],
+        )
+        .unwrap();
+    }
+
+    fn seed_taxonomy_vector(
+        env: &TestEnv,
+        profile: uuid::Uuid,
+        kind: i64,
+        id: i64,
+        revision: i64,
+        embedding: &[f32],
+    ) {
+        let bytes: Vec<u8> = embedding
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let conn = env.vs.db.lock();
+        conn.execute(
+            "INSERT INTO taxonomy_vector VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(profile_id,subject_kind,subject_id) DO UPDATE SET subject_revision=excluded.subject_revision,blob=excluded.blob,created_at_us=excluded.created_at_us,source=excluded.source",
+            params![profile.to_string(), kind, id, revision, bytes, 1i64, "test"],
+        )
+        .unwrap();
+    }
+
+    fn seed_type_dict(env: &TestEnv, id: i64, kind: i64, name: &str) {
+        let conn = env.vs.db.lock();
+        conn.execute(
+            "INSERT INTO type_dict(id,kind,name,count,revision) VALUES(?1,?2,?3,1,1)",
+            params![id, kind, name],
+        )
+        .unwrap();
+    }
+
+    fn adopt(env: &mut TestEnv, candidate: bool) -> Result<()> {
+        // A worker-style connection, like mcpmem-indexer's run_once: the
+        // registry owns it, and adopt_taxonomy shares its transaction view.
+        let conn = rusqlite::Connection::open(&env.vs.db_path).unwrap();
+        let registry = IndexProfileRegistry::new(&conn);
+        env.vs.adopt_taxonomy(&registry, candidate)
+    }
+
+    #[test]
+    fn taxonomy_snapshots_build_and_serve_one_kind_at_a_time() {
+        let mut env = setup(4);
+        let profile = seed_taxonomy_profile(&env, 4);
+        seed_taxonomy_generation(&env, profile, 0, 1);
+        seed_taxonomy_vector(&env, profile, 0, 7, 1, &make_embedding(4, 1.0));
+        adopt(&mut env, false).unwrap();
+        assert_eq!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap(),
+            vec![(7, 0.0)]
+        );
+        // A kind without a generation row stays absent: empty, not an error.
+        assert!(env
+            .vs
+            .search_taxonomy(TaxonomyKind::RelationType, &[1.0; 4], 10)
+            .unwrap()
+            .is_empty());
+        // The remaining kinds adopt on their own generation rows.
+        seed_taxonomy_generation(&env, profile, 1, 1);
+        seed_taxonomy_vector(&env, profile, 1, 9, 1, &make_embedding(4, -3.0));
+        seed_taxonomy_generation(&env, profile, 2, 1);
+        seed_taxonomy_vector(&env, profile, 2, 3, 1, &make_embedding(4, 5.0));
+        adopt(&mut env, false).unwrap();
+        assert_eq!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::RelationType, &[1.0; 4], 10)
+                .unwrap(),
+            vec![(9, 64.0)]
+        );
+        assert_eq!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::Relation, &[5.0; 4], 10)
+                .unwrap(),
+            vec![(3, 0.0)]
+        );
+    }
+
+    #[test]
+    fn taxonomy_search_returns_the_nearest_subject() {
+        let mut env = setup(4);
+        let profile = seed_taxonomy_profile(&env, 4);
+        seed_taxonomy_generation(&env, profile, 0, 1);
+        for (id, value) in [(7, -2.0), (8, 4.0), (9, 1.0)] {
+            seed_taxonomy_vector(&env, profile, 0, id, 1, &make_embedding(4, value));
+        }
+        adopt(&mut env, false).unwrap();
+        let hits = env
+            .vs
+            .search_taxonomy(TaxonomyKind::EntityType, &[3.9; 4], 10)
+            .unwrap();
+        assert_eq!(hits[0].0, 8);
+        assert!(hits[0].1 < hits[1].1);
+        assert_eq!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[3.9; 4], 2)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn taxonomy_resolve_maps_ids_to_names_for_all_kinds() {
+        let env = setup(4);
+        create_test_entity(&env.kg, "alice", "person");
+        create_test_entity(&env.kg, "acme", "organization");
+        let alice = env.vs.entity_id_of("alice").unwrap().unwrap();
+        let acme = env.vs.entity_id_of("acme").unwrap().unwrap();
+        seed_type_dict(&env, 7, 0, "person");
+        seed_type_dict(&env, 8, 1, "works_at");
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO taxonomy_relation(id,from_id,to_id,type_id,revision,deleted) VALUES(42,?1,?2,?3,1,0)",
+                params![alice, acme, 8],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            env.vs.resolve_taxonomy(TaxonomyKind::EntityType, 7),
+            Some(("person".to_string(), "entityType".to_string()))
+        );
+        assert_eq!(
+            env.vs.resolve_taxonomy(TaxonomyKind::RelationType, 8),
+            Some(("works_at".to_string(), "relationType".to_string()))
+        );
+        assert_eq!(
+            env.vs.resolve_taxonomy(TaxonomyKind::Relation, 42),
+            Some((
+                "alice -[works_at]-> acme".to_string(),
+                "relation".to_string()
+            ))
+        );
+        assert_eq!(env.vs.resolve_taxonomy(TaxonomyKind::Relation, 999), None);
+        assert_eq!(
+            env.vs.resolve_taxonomy(TaxonomyKind::EntityType, 999),
+            None
+        );
+    }
+
+    #[test]
+    fn taxonomy_absent_snapshot_returns_an_empty_search() {
+        let mut env = setup(4);
+        // Nothing adopted yet: empty result, not an error.
+        assert!(env
+            .vs
+            .search_taxonomy(TaxonomyKind::Relation, &[1.0; 4], 10)
+            .unwrap()
+            .is_empty());
+        // A generation with no vector rows builds an empty snapshot.
+        let profile = seed_taxonomy_profile(&env, 4);
+        seed_taxonomy_generation(&env, profile, 0, 7);
+        adopt(&mut env, false).unwrap();
+        assert!(env
+            .vs
+            .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn taxonomy_stale_generation_refuses_to_publish() {
+        let mut env = setup(4);
+        let profile = seed_taxonomy_profile(&env, 4);
+        seed_taxonomy_generation(&env, profile, 0, 5);
+        seed_taxonomy_vector(&env, profile, 0, 7, 1, &make_embedding(4, 1.0));
+        adopt(&mut env, false).unwrap();
+        assert_eq!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap(),
+            vec![(7, 0.0)]
+        );
+        // The worker overwrites the vector but durable stays at 5: the
+        // unchanged-generation early return keeps serving the old snapshot.
+        seed_taxonomy_vector(&env, profile, 0, 7, 1, &make_embedding(4, 2.0));
+        adopt(&mut env, false).unwrap();
+        assert_eq!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap(),
+            vec![(7, 0.0)]
+        );
+        // And it must not have re-published the same generation.
+        let conn = env.vs.db.lock();
+        let published: i64 = conn
+            .query_row(
+                "SELECT published_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=0",
+                [profile.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(published, 5);
+        // A build prepared against generation 5 is refused once durable
+        // advanced to 6; the gate accepts only the current generation.
+        conn.execute(
+            "UPDATE taxonomy_ann_generation SET durable_generation=6 WHERE profile_id=?1 AND subject_kind=0",
+            [profile.to_string()],
+        )
+        .unwrap();
+        assert!(!mark_taxonomy_published(&conn, profile, 0, 5).unwrap());
+        assert!(mark_taxonomy_published(&conn, profile, 0, 6).unwrap());
+        drop(conn);
+        // The normal flow: durable advanced, the next adopt rebuilds, serves
+        // the new vector and publishes generation 6.
+        seed_taxonomy_vector(&env, profile, 0, 7, 2, &make_embedding(4, 2.0));
+        adopt(&mut env, false).unwrap();
+        assert_eq!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap(),
+            vec![(7, 4.0)]
+        );
+        let conn = env.vs.db.lock();
+        let published: i64 = conn
+            .query_row(
+                "SELECT published_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=0",
+                [profile.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(published, 6);
+    }
+
+    #[test]
+    fn taxonomy_candidate_refuses_when_the_scan_is_invalid() {
+        let mut env = setup(4);
+        let profile = seed_taxonomy_profile(&env, 4);
+        seed_taxonomy_generation(&env, profile, 0, 1);
+        seed_type_dict(&env, 7, 0, "person");
+        seed_taxonomy_vector(&env, profile, 0, 7, 1, &make_embedding(4, 1.0));
+        {
+            // A live job makes the kind scan-clean.
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO taxonomy_job(subject_kind,subject_id,profile_id,subject_revision,operation,state) VALUES(0,7,?1,1,'upsert','pending')",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        adopt(&mut env, true).unwrap();
+        assert_eq!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap(),
+            vec![(7, 0.0)]
+        );
+        // A stale source revision makes the candidate scan invalid: the build
+        // is refused and the served snapshot is not replaced.
+        {
+            let conn = env.vs.db.lock();
+            conn.execute("UPDATE type_dict SET revision=2 WHERE id=7", [])
+                .unwrap();
+        }
+        let error = adopt(&mut env, true).unwrap_err();
+        assert!(error.to_string().contains("taxonomy"));
+        assert_eq!(
+            env.vs
+                .search_taxonomy(TaxonomyKind::EntityType, &[1.0; 4], 10)
+                .unwrap(),
+            vec![(7, 0.0)]
+        );
     }
 
     fn renamed_vector_fixture() -> (TestEnv, EntityId) {
