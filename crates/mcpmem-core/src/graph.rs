@@ -1545,6 +1545,20 @@ impl GraphHandle {
         select_all_types(&conn, 1).unwrap_or_default()
     }
 
+    /// Whether an entity type with the given name exists. Read-only: a missing
+    /// type stays absent and no row is inserted.
+    pub fn entity_type_exists(&self, name: &str) -> bool {
+        let conn = self.readers.get();
+        lookup_type_id(&conn, name, 0).is_some()
+    }
+
+    /// Whether a relation type with the given name exists. Read-only: a missing
+    /// type stays absent and no row is inserted.
+    pub fn relation_type_exists(&self, name: &str) -> bool {
+        let conn = self.readers.get();
+        lookup_type_id(&conn, name, 1).is_some()
+    }
+
     pub fn batch_get_entities(&self, names: &[String]) -> Vec<Option<Entity>> {
         names
             .iter()
@@ -3398,6 +3412,51 @@ mod tests {
         // The phantom type must not have been inserted by the read.
         let types = kg.relation_type_counts();
         assert!(types.iter().all(|(t, _)| t != "does_not_exist"));
+    }
+
+    #[test]
+    fn test_entity_type_exists() {
+        let kg = new_kg_with_pool(2);
+        kg.create_entities(&[Entity {
+            name: "a".into(),
+            entity_type: "person".into(),
+            observations: vec![],
+        }])
+        .unwrap();
+        assert!(kg.entity_type_exists("person"));
+        assert!(!kg.entity_type_exists("persn"));
+        // The negative read must not have inserted a phantom type row.
+        let types = kg.entity_type_counts();
+        assert!(types.iter().all(|(t, _)| t != "persn"));
+    }
+
+    #[test]
+    fn test_relation_type_exists() {
+        let kg = new_kg_with_pool(2);
+        kg.create_entities(&[
+            Entity {
+                name: "a".into(),
+                entity_type: "person".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "b".into(),
+                entity_type: "person".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
+        kg.create_relations(&[Relation {
+            from: "a".into(),
+            to: "b".into(),
+            relation_type: "knows".into(),
+        }])
+        .unwrap();
+        assert!(kg.relation_type_exists("knows"));
+        assert!(!kg.relation_type_exists("unknown_kind"));
+        // The negative read must not have inserted a phantom type row.
+        let types = kg.relation_type_counts();
+        assert!(types.iter().all(|(t, _)| t != "unknown_kind"));
     }
 
     #[test]
