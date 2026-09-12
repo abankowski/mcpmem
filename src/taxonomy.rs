@@ -169,10 +169,12 @@ pub fn handle_suggest_taxonomy(kg: &GraphHandle, args: Option<&Value>) -> Result
         ));
     }
 
-    let kind = params
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("entityType");
+    let kind: &str = match params.get("kind") {
+        None | Some(Value::Null) => "entityType",
+        Some(v) => v.as_str().ok_or_else(|| {
+            MCSError::InvalidParams("'kind' must be a string".into())
+        })?,
+    };
     match kind {
         "entityType" | "relationType" | "entity" | "relation" => (),
         _ => return Err(MCSError::InvalidParams(format!(
@@ -368,6 +370,17 @@ mod tests {
         };
         let err = err.to_string();
         assert!(err.contains("'kind'"), "{err}");
+
+        // A non-string kind must be rejected, not silently defaulted.
+        let Err(err) = handle_suggest_taxonomy(
+            &kg,
+            Some(&json!({ "query": "persn", "kind": 7 })),
+        )
+        else {
+            panic!("expected a non-string kind error");
+        };
+        let err = err.to_string();
+        assert!(err.contains("'kind' must be a string"), "{err}");
     }
 
     #[test]
