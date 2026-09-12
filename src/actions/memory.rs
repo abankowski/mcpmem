@@ -36,6 +36,16 @@ const MAX_TAXONOMY_EXAMPLES: usize = 3;
 #[cfg(feature = "indexer")]
 const SEMANTIC_SUGGESTION_K: usize = 10;
 
+/// The suggestion payload budget of the write hook, in every build: the
+/// tool path defaults its `topK` to the same value.
+const TAXONOMY_SUGGESTION_BUDGET: usize = 10;
+
+/// The semantic tier's payload ceiling per provider call: the plan bounds
+/// one embed call to this many texts. The write hook sends the first batch
+/// semantically and lets the offline tier fill the rest.
+#[cfg(feature = "indexer")]
+const TAXONOMY_SEMANTIC_BATCH: usize = 12;
+
 /// The `taxonomySuggestions` payload for one result object.
 ///
 /// `similarTypes` lists the similar existing type names. The semantic tier's
@@ -180,6 +190,9 @@ fn suggestion_map<'a>(
                     similar.push(suggestion);
                 }
             }
+            // One budget for the delivered payload, matching the tool path's
+            // top_k.
+            similar.truncate(TAXONOMY_SUGGESTION_BUDGET);
             let (example_entities, example_relations) = match kind {
                 SubjectKind::EntityType => (example_entities(kg, &similar), Vec::new()),
                 SubjectKind::RelationType => (Vec::new(), example_relations(kg, &similar)),
@@ -201,10 +214,11 @@ fn suggestion_map<'a>(
 ///
 /// The tier is active only when the `indexer` feature is compiled, a vector
 /// store exists, the store serves an index profile, and an embedding
-/// provider is configured. One provider call embeds the whole batch of
-/// unknown type texts of one kind. Every failure — a missing profile, a
-/// missing provider, an embed error, a wrong vector count — yields an empty
-/// map, so the write falls back to the offline tier and never fails.
+/// provider is configured. One provider call embeds the first batch of
+/// unknown type texts of one kind; the batch is bounded, and the offline
+/// tier covers the rest. Every failure — a missing profile, a missing
+/// provider, an embed error, a wrong vector count — yields an empty map, so
+/// the write falls back to the offline tier and never fails.
 #[cfg(feature = "indexer")]
 fn semantic_suggestions(
     vs: Option<&VectorStore>,
@@ -221,12 +235,16 @@ fn semantic_suggestions(
     if store.serving_profile().ok().flatten().is_none() {
         return out;
     }
-    let texts: Vec<String> = types.iter().map(|s| (*s).to_string()).collect();
+    let texts: Vec<String> = types
+        .iter()
+        .take(TAXONOMY_SEMANTIC_BATCH)
+        .map(|s| (*s).to_string())
+        .collect();
     let Ok(groups) = crate::taxonomy::suggest_semantic(store, &texts, kind, SEMANTIC_SUGGESTION_K)
     else {
         return out;
     };
-    for (authored_type, group) in types.iter().zip(groups) {
+    for (authored_type, group) in types.iter().take(TAXONOMY_SEMANTIC_BATCH).zip(groups) {
         out.insert((*authored_type).to_string(), group);
     }
     out
@@ -257,6 +275,9 @@ fn example_entities(kg: &GraphHandle, similar: &[Suggestion]) -> Vec<ExampleEnti
             break;
         }
         for entity in kg.search_nodes_filtered(&suggestion.name, None, 0, MAX_TAXONOMY_EXAMPLES) {
+            if entity.entity_type != suggestion.name {
+                continue;
+            }
             if seen.insert((entity.name.clone(), entity.entity_type.clone())) {
                 out.push(ExampleEntity {
                     name: entity.name,
