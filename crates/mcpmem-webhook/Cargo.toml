@@ -1,6 +1,6 @@
 [package]
 name = "mcpmem-webhook"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Durable webhook delivery worker for the mcpmem MCP server."
@@ -9,7 +9,7 @@ readme = "README.md"
 
 [dependencies]
 hmac = "0.12"
-mcpmem-core = { path = "../mcpmem-core", version = "1.0.4" }
+mcpmem-core = { path = "../mcpmem-core", version = "1.1.0" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

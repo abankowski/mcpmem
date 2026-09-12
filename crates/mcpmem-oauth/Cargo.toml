@@ -1,6 +1,6 @@
 [package]
 name = "mcpmem-oauth"
-version = "1.0.4"
+version = "1.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "OAuth 2.1 authorization server for the mcpmem MCP server."
@@ -8,7 +8,7 @@ repository = "https://github.com/abankowski/mcpmem"
 readme = "README.md"
 
 [dependencies]
-mcpmem-core = { path = "../mcpmem-core", version = "1.0.4" }
+mcpmem-core = { path = "../mcpmem-core", version = "1.1.0" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
