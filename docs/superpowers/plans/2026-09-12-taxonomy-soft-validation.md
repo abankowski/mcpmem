@@ -4,7 +4,7 @@
 
 **Goal:** When a write introduces an entity type or a relation type that does not exist yet, the server returns suggestions of similar existing types, entities, and relations — by string similarity always, and by semantic similarity when the embedding pipeline is available — while never refusing the write.
 
-**Architecture:** Two tiers share one hook. The offline tier compares the new type name against `type_dict` names (trigram + Levenshtein). The semantic tier embeds types, relation types, and relation instances through the existing durable job-queue worker (`index_job` pattern), stores the vectors in new tables, serves them through per-kind ANN snapshots in `VectorStore`, and embeds the query text through the same `indexer_provider` seam that `semantic_search` uses. The hook lives in the server layer (`src/actions/memory.rs`) and composes an additive, per-object `taxonomySuggestions` field into create/upsert results. The core mutation path never rejects an unknown type.
+**Architecture:** Two tiers share one hook. The offline tier compares the new type name against `type_dict` names (trigram + Levenshtein). The semantic tier embeds types, relation types, and relation instances through the existing durable job-queue worker (`index_job` pattern), stores the vectors in new tables, serves them through per-kind snapshots that mirror the entity `ManagedSnapshot` (flat vectors, linear nearest-neighbour — the codebase's established profile-serving shape, `vector_store.rs:1145-1158`; a per-kind usearch index is the documented scale-up path if relation-instance volume ever demands it), and embeds the query text through the same `indexer_provider` seam that `semantic_search` uses. Freshness mirrors the entity loop: each successful `commit_vector` bumps the kind's durable generation (`jobs.rs:434` mirror), and the reconcile rebuilds when `published < durable`. The hook lives in the server layer (`src/actions/memory.rs`) and composes an additive, per-object `taxonomySuggestions` field into create/upsert results. The core mutation path never rejects an unknown type.
 
 **Tech Stack:** Rust, rusqlite (SQLite with STRICT tables), FTS5 for text, USearch HNSW/IVF for ANN, trigram + Levenshtein for the offline tier.
 
@@ -35,6 +35,7 @@ These apply to every task. Copy them verbatim into each task brief.
 |D6|Enqueue happens in `mutation.rs::update_counters`, in the writer transaction, one place for all mutation kinds|`update_counters` receives the before/after snapshots already; type deltas already derive there|
 |D7|The semantic tier reuses `vs.serving_profile()` and `crate::indexer_provider::get()`; no new provider wiring|`handle_semantic_search` shows the exact seam (`vector_actions.rs:803-824`)|
 |D8|Query embedding batches one provider call per write hook|The semantic engine takes `&[String]` and calls `provider.embed_texts` once (Task 11)|
+|D9|Taxonomy snapshot freshness mirrors the entity loop: `commit_vector` bumps the kind's durable generation (mirror of `jobs.rs:434`); the reconcile rebuilds when `published < durable`|`builds one flat per-kind snapshot` in Task 10; the bump lives in Task 7's `commit_vector` success path|
 
 ## File map
 
@@ -394,7 +395,7 @@ Commit: `feat(indexer): process taxonomy jobs in the worker`.
 **Interfaces:**
 - Produces:
   - `pub enum TaxonomyKind { EntityType = 0, RelationType = 1, Relation = 2 }`
-  - `pub fn adopt_taxonomy(&mut self, registry: &IndexProfileRegistry, candidate: bool) -> Result<()>` — builds one ANN per kind from `taxonomy_vector` rows, mirrors the `adopt_profile` generation flow and `taxonomy_ann_generation` marks.
+  - `pub fn adopt_taxonomy(&mut self, registry: &IndexProfileRegistry, candidate: bool) -> Result<()>` — builds one flat per-kind snapshot from `taxonomy_vector` rows, mirroring `adopt_profile`'s `ManagedSnapshot` (flat vectors, linear search; the entity snapshot is itself flat — see D9).
   - `pub fn search_taxonomy(&self, kind: TaxonomyKind, query: &[f32], top_k: usize) -> Result<Vec<(i64, f64)>>` — nearest `(subject_id, distance)` in the kind's snapshot.
   - `pub fn resolve_taxonomy(&self, kind: TaxonomyKind, id: i64) -> Option<(String, String)>` — `(name, kind_label)` via `type_dict` (kinds 0/1) or `taxonomy_relation` + entity names (kind 2).
 
