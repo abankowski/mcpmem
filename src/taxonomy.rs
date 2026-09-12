@@ -182,6 +182,18 @@ mod tests {
     }
 
     #[test]
+    fn fallback_skips_exact_self_match_with_count() {
+        // The exact match must be skipped even when its count is non-zero.
+        // The lowercase comparison also handles a case-different query.
+        let existing = vec![("person".into(), 3usize), ("project".into(), 2usize)];
+        let got = suggest_strings("person", &existing);
+        assert!(got.iter().all(|s| s.name != "person"));
+
+        let got = suggest_strings("Person", &existing);
+        assert!(got.iter().all(|s| s.name != "person"));
+    }
+
+    #[test]
     fn fallback_returns_empty_for_garbage() {
         let existing = vec![
             ("person".into(), 3usize),
