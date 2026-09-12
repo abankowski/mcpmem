@@ -414,7 +414,7 @@ Commit: `feat(server): serve per-kind taxonomy ANN snapshots`.
 
 **Interfaces:**
 - Consumes: `vs.serving_profile()`, `crate::indexer_provider::get()` — the exact seam `handle_semantic_search` uses (`vector_actions.rs:803-824`).
-- Produces: `pub fn suggest_semantic(vs: &VectorStore, texts: &[String], kind: SubjectKind, top_k: usize) -> Result<Vec<Suggestion>>`. One `embed_texts` call for all texts; one `search_taxonomy` per text; maps distances to scores `1.0 - distance`; clamps to 1..100; labels via `resolve_taxonomy`.
+- Produces: `pub fn suggest_semantic(vs: &VectorStore, texts: &[String], kind: SubjectKind, top_k: usize) -> Result<Vec<Vec<Suggestion>>>`. The outer vec groups results per input text (one inner vec per text) — required so the write hook can split per-type results under one provider call. One `embed_texts` call for all texts; one `search_taxonomy` per text; maps distances to scores `1.0 - distance`; clamps to 1..100; labels via `resolve_taxonomy`.
 
 - [ ] **Step 1: Write the failing tests** — embedding batching (one provider call), score mapping, kind routing.
 - [ ] **Step 2: Implement, run, commit**
