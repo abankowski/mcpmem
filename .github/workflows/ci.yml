@@ -50,6 +50,11 @@ jobs:
         run: |
           cargo test --test indexer_worker --features indexer -- --test-threads=1
           cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1
+      # The taxonomy unit tests are gated on the `indexer` feature, so the
+      # default workspace run never builds them and the `--test indexer_worker`
+      # leg does not run them. This leg executes them directly.
+      - name: Test lib with the indexer feature
+        run: cargo test --lib --features indexer -- --test-threads=1
       - name: Test runtime role feature matrix
         run: |
           cargo test --test role_composition --no-default-features

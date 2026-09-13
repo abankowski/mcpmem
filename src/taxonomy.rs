@@ -1336,6 +1336,10 @@ mod tests {
             create_test_entity(&env.kg, "alice", "person");
             create_test_entity(&env.kg, "acme", "organization");
             let _ = seed_profile(&env, 4, Normalization::None);
+            // Capture the profile id before any db lock: serving_profile()
+            // takes the non-reentrant vs.db mutex itself, so calling it
+            // inside a locked block deadlocks.
+            let profile_id = env.vs.serving_profile().unwrap().unwrap().id.to_string();
             // Seed identity chunks the way the worker would, then publish the
             // managed snapshot (the 2.0.0 surface has no client ingestion).
             let seed_identity = |name: &str, embedding: &[f32]| {
@@ -1360,12 +1364,7 @@ mod tests {
                     .collect();
                 conn.execute(
                     "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source) VALUES(?1,'identity','entity',?2,0,?3,1,?4,1,'test')",
-                    params![
-                        env.vs.serving_profile().unwrap().unwrap().id.to_string(),
-                        owner_id,
-                        type_id,
-                        bytes
-                    ],
+                    params![profile_id, owner_id, type_id, bytes],
                 )
                 .unwrap();
             };
@@ -1375,7 +1374,7 @@ mod tests {
                 let conn = env.vs.db.lock();
                 conn.execute(
                     "INSERT INTO ann_generation(profile_id) VALUES(?1)",
-                    [env.vs.serving_profile().unwrap().unwrap().id.to_string()],
+                    [&profile_id],
                 )
                 .unwrap();
             }
