@@ -25,7 +25,7 @@ This entry lists every change since that snapshot. The version line restarts at
 - **`vector_store_stats` changes shape.** `embeddingCount` reports chunk rows
   in the serving snapshot. `indexKind`, `indexCapacity` and `indexMemoryBytes`
   are gone with the ANN layers.
-- **The legacy vector tables drop.** Migration `0009` removes
+- **The legacy vector tables drop.** Migration `0010` removes
   `vector_embedding`, `profile_vector` and `index_job`, and deletes the kind-2
   rows from `taxonomy_vector` and `taxonomy_job`. The 1.x rows cannot survive,
   because the tables are gone.
@@ -35,7 +35,7 @@ This entry lists every change since that snapshot. The version line restarts at
 - **Chunked embeddings.** The indexer no longer embeds one vector per entity.
   Every entity gets an identity chunk (its name and type); every observation
   becomes its own chunk; every live relation gets one chunk embedding its
-  triple `from -> TYPE -> to`. Rows live in `chunk_vector` (migration `0008`),
+  triple `from -> TYPE -> to`. Rows live in `chunk_vector` (migration `0009`),
   keyed by profile and owner, and the serving snapshot is rebuilt from them.
   Search ranks owners by their best matching chunk.
 - **Kind-marked results and `filter`.** Every search result row carries `kind`
@@ -58,13 +58,13 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Migration note
 
-- Migration `0009` (embedding cleanup) applies automatically during startup,
+- Migration `0010` (embedding cleanup) applies automatically during startup,
   the same way earlier migrations do. No manual step is required.
 - **Code embeddings keep their own store, and 1.x code embeddings do not
   survive.** The code tools still accept client-supplied symbol embeddings and
   keep a usearch HNSW index per project, now persisted in a dedicated
   `code_vector` table in each per-project database (the same blob header format
-  as 1.x). Migration `0009` drops the legacy `vector_embedding` table, and
+  as 1.x). Migration `0010` drops the legacy `vector_embedding` table, and
   per-project code databases run the full migration set on open. The first
   post-upgrade open therefore erases every persisted code embedding; clients
   re-ingest with `code_embed`.
