@@ -23,10 +23,10 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
   subgraphs, centrality). Survives restarts; portable as a single file.
 - ⚡ **Fast and embedded.** Pure Rust on SQLite in WAL mode. Sub-microsecond cache hits,
   microsecond reads, batched writes. No external services, no network round-trips, no daemons.
-- 🔎 **Semantic + hybrid search.** Bring your own embeddings; the server indexes them in a
-  [usearch](https://github.com/unum-cloud/usearch) **HNSW** (or IVF-Flat) index and fuses vector
-  similarity with full-text relevance and graph centrality — RAG retrieval, more-like-this,
-  recommendations, and MMR diversification included.
+- 🔎 **Semantic + hybrid search.** With the `indexer` feature and a serving
+  profile, the server embeds entity, observation and relation chunks by itself,
+  then fuses vector similarity with full-text relevance and graph centrality —
+  semantic, hybrid and MMR retrieval included.
 - 🗺️ **Code intelligence built in.** Point it at a repo and it parses **11 languages** with
   tree-sitter into a searchable symbol + call graph — then optionally embed symbols for
   meaning-based code search. A live, incremental, token-cheap map of your codebase.
@@ -56,9 +56,9 @@ flowchart TB
     Idx["indexer role — embedding worker<br/>(--features indexer)"]
     Wbk["webhooks role — delivery outbox<br/>(--features webhooks)"]
     Gr["GraphHandle<br/>LRU cache · name→id · FTS5"]
-    Vc["VectorStore<br/>usearch HNSW · IVF-Flat · TurboQuant"]
+    Vc["VectorStore<br/>chunk snapshot · exact scan"]
     Cd["Code index — tree-sitter<br/>symbol + call graph · 10 languages"]
-    Sql[("SQLite — WAL · 4 KB pages<br/>graph tables · *_fts · vector_embedding")]
+    Sql[("SQLite — WAL · 4 KB pages<br/>graph tables · *_fts · chunk_vector")]
 
     Tr --> Mcp
     Mcp --> Gr & Vc & Cd
@@ -206,7 +206,8 @@ mcpmem --role mcp,indexer --enable-all
 
 ### Turning automatic embedding on
 
-Name a provider, a model and a dimension, and the server embeds entity text by itself:
+Name a provider, a model and a dimension, and the server embeds every entity,
+observation and relation by itself:
 
 ```toml
 [indexer]
@@ -220,16 +221,18 @@ dimensions = 768
 
 Those three keys are the **vector-space contract**: the profile the store serves. On startup the
 server compares them against the profile already in the database, by fingerprint, so an unchanged
-file is a no-op. A change to any of the five starts a rebuild, which re-embeds every live entity.
+file is a no-op. A change to any of the five starts a rebuild, which re-embeds every live entity
+and every live relation as chunks; the old chunks keep serving until the new profile is complete.
 
-> **A profile ends legacy compatibility.** Once the store serves one, `vector_upsert_embedding`
-> and `vector_batch_upsert` are refused with `direct_vector_writes_disabled`. That is the point —
-> the server now owns the vectors — but a client that pushes its own embeddings breaks at that
-> moment. Adopt a profile deliberately, not by accident.
+> **The server owns every vector.** The 1.x client embedding tools —
+> `vector_upsert_embedding`, `vector_delete_embedding`, `vector_batch_upsert`,
+> `vector_get_embedding`, `vector_reindex`, `vector_recommend` — are removed in
+> 2.0.0. There is no path that writes a vector except the indexer worker.
+> Adopt a profile deliberately, not by accident.
 
-Without those three keys the store stays in legacy compatibility: the worker starts, polls every
-250 ms and finds nothing, and you keep supplying vectors yourself. That is the correct setup for
-a deployment whose client already computes embeddings.
+Without those three keys there is no serving profile: the worker starts, polls every 250 ms and
+finds nothing, the search tools answer from an empty snapshot, and `semantic_search` is hidden
+from `tools/list`. The serving profile is what makes the store answer.
 
 ### Webhook delivery
 
@@ -409,7 +412,7 @@ and rejected from `tools/call` as if they never existed — least privilege by d
 |------|----------|-------|
 | `--enable-graph-read` | **graph-read** | `read_graph`, `search_nodes`, `open_nodes`, `get_entity`, `graph_stats`, `search_relations`, `find_path`/`find_all_paths`, `get_neighbors`, `describe_entity`, `list_entity_types`, `list_relation_types`, `suggest_taxonomy`, `export_graph`, `extract_subgraph`, `batch_get_entities`, `entity_exists`, `degree` |
 | `--enable-graph-write` | **graph-write** | `create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `upsert_entities`, `merge_entities`, `rename_entity`, `set_type_description`, `compact` |
-| `--enable-vectors` | **vectors** | `vector_*` + `hybrid_search` (usearch HNSW or IVF-Flat) |
+| `--enable-vectors` | **vectors** | `vector_*` + `hybrid_search` |
 | `--enable-code` | **code** | `code_index`, `code_outline`, `code_search`, `code_get_symbol`, `code_watch`, `code_embed`, `code_semantic_search` |
 | `--enable-all` | *(all)* | Every category. Overrides the individual flags. |
 
@@ -854,8 +857,9 @@ symbols are ordinary graph entities, every graph tool (`search_nodes`, `extract_
   agent reads the exact lines on demand (far fewer tokens than grep-then-read-whole-file).
 - **Semantic code search.** Pass `code_index {"snippets": true}` to also store each symbol's
   bounded body text; embed those with your model via `code_embed`, then `code_semantic_search`
-  does ANN (usearch **HNSW**) lookup to find code *by meaning*. Embeddings live in the same
-  per-project database, keyed by symbol id; dimension defaults to **768** (`--code-embedding-dims`).
+  does ANN (usearch **HNSW**) lookup to find code *by meaning*. Embeddings live in a dedicated
+  `code_vector` table in each per-project database, keyed by symbol id; dimension defaults to
+  **768** (`--code-embedding-dims`).
 - **Incremental & live.** Each file's content hash is stored, so re-indexing only re-parses what
   changed. `code_watch` keeps the map fresh automatically, re-indexing on save (debounced).
 - **Honest edges.** A `calls` edge is created only when the callee name resolves to exactly one
@@ -884,31 +888,51 @@ mcpmem --enable-code --transport stdio
 
 ## Semantic & hybrid search (`--enable-vectors`)
 
-Layer a vector store on top of the knowledge graph. Each embedding attaches to an existing entity
-by name, is indexed in an in-memory ANN index, and persists as a blob in SQLite — rebuilt on
-startup.
+The store serves one thing: a snapshot of chunk embeddings, republished by the
+indexer worker. Every vector search is an exact scan of that snapshot; there is
+no approximate index.
 
-- **Bring your own embeddings.** `vector_search_entities`, `vector_mmr_search` and the vector half
-  of `hybrid_search` never call an embedding model. Compute the vector on the client and pass it
-  in, at `--embedding-dims` length. No tool turns query text into a vector.
-- **One tool embeds on the server.** `semantic_search` takes query text alone and embeds it with
-  the model named by the serving index profile — the same model that embedded the stored
-  entities — then returns the nearest entities. It exists only when the process was built with
-  the `indexer` feature **and** the store serves an index profile (`[indexer]` with `provider`,
-  `model`, `dimensions`) **and** a provider of that kind is configured. Missing any of those,
-  the tool is hidden from `tools/list` while the other vector tools remain visible.
-- **Two tools need no vector from you.** `vector_search_by_entity` and `vector_recommend` build
-  the query from vectors already in the store, so a chat client can call them directly.
-- **Semantic search** — `vector_search_entities` returns nearest entities by cosine similarity
-  (configurable), optionally filtered by type.
-- **More-like-this & recommendations** — `vector_search_by_entity` finds entities similar to a
-  given one; `vector_recommend` builds a query from positive (minus negative) examples.
-- **MMR diversification** — `vector_mmr_search` balances relevance against novelty (Maximal
-  Marginal Relevance), suppressing near-duplicate hits during RAG context selection.
-- **Batch ingestion** — `vector_batch_upsert` upserts up to 1,024 embeddings per call with
-  per-item error reporting.
-- **Hybrid search** — `hybrid_search` runs vector and FTS5 search in parallel, fuses them with
-  Reciprocal Rank Fusion, and optionally boosts by graph centrality.
+### Chunked embeddings
+
+The indexer splits each owner into chunks: an **identity chunk** per entity
+(its name and type), one chunk per **observation**, and one chunk per live
+**relation** (the triple `from -> TYPE -> to`). Chunk rows live in the
+`chunk_vector` table, keyed by serving profile and owner. Search ranks owners
+by their best matching chunk, so a hit says exactly which text matched.
+
+- **Kind-marked rows and `filter`.** Every result row carries `kind` —
+  `"entity"` or `"relation"`. `vector_search_entities`, `hybrid_search`,
+  `semantic_search` and `vector_search_by_entity` accept a
+  `filter: { "kind": "…", "type": "…" }` object: `kind` limits the owner kind
+  and `type` matches the chunk's type name exactly, both applied before
+  ranking.
+- **`includeChunks`.** The same four tools accept `includeChunks: true`; each
+  result row then carries its best matching chunk — `kind`, the reassembled
+  `text`, and `score`.
+- **Exact snapshot search.** The query is compared against every chunk in the
+  serving snapshot, ranked by the profile's metric. The 1.x ANN backends and
+  their `--vec-*`, `--ivf-*` and `--tq-*` knobs are gone.
+
+- **The server embeds.** With a build that has the `indexer` feature and a
+  serving `[indexer]` profile, the indexer worker embeds every chunk on write,
+  and `semantic_search` embeds the query text with the same model — no embedding
+  service on the client. `semantic_search` is hidden from `tools/list` when the
+  feature or a serving profile is missing, while the other vector tools remain
+  visible.
+- **One tool needs no vector from you.** `vector_search_by_entity` uses the
+  named entity's identity chunk as its query (`excludeSelf` drops the entity
+  itself, default `true`), so more-like-this works from chat directly.
+- **Semantic search** — `vector_search_entities` takes a client-computed
+  `embedding` (at the serving profile's dimension) and returns the nearest
+  owners, optionally narrowed by `filter`.
+- **MMR diversification** — `vector_mmr_search` balances relevance against
+  novelty (Maximal Marginal Relevance), suppressing near-duplicate hits during
+  RAG context selection. It also takes a client `embedding`.
+- **Hybrid search** — `hybrid_search` takes `queryText` **and**
+  `queryEmbedding`: the FTS5 half matches the text, the vector half scans the
+  snapshot, and Reciprocal Rank Fusion fuses the two rankings. Entity rows get a
+  graph-centrality boost whenever the mirror holds nodes; there is no flag to
+  disable it.
 
 ### The vector tools are missing from `tools/list`
 
@@ -925,49 +949,19 @@ connector must authorize again. `semantic_search` needs a serving profile on
 top of the other gates (above). The deployed-connector case, with the checks:
 [`docs/runbooks/oauth-deployment.md`](docs/runbooks/oauth-deployment.md#8-the-connector-sees-fewer-tools-than-the-server-enables).
 
-### HNSW vs IVF-Flat vs TurboQuant
-
-| Backend | When to use | Notes |
-|---|---|---|
-| `hnsw` *(default)* | Best recall/latency for most workloads | usearch graph index; `f16`/`bf16`/`i8` quantization |
-| `ivf` | Large, batch-ingested, periodically-rebuilt corpora | k-means partitioned; cheaper to build, lighter memory. **Exact until trained**, so results are always correct |
-| `turbo` | Memory-bound corpora; online ingestion | [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research): data-oblivious quantization to `--tq-bits` bits/coordinate (~8× smaller than `f32` at 4 bits) with **unbiased** inner-product estimates and near-optimal distortion. Zero training/indexing time; brute-force scan over compact codes. Requires `--embedding-dims` 384–1536 |
-
-The IVF index trains automatically when a populated database is opened; after a large batch
-ingestion into a fresh database, call `vector_reindex` to keep recall high (no-op for HNSW and
-TurboQuant — the latter is data-oblivious, so there is never anything to train).
-
 ### Tuning
 
 All require `--enable-vectors`:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--embedding-dims` | `384` | Vector dimension; all embeddings must match |
-| `--vec-index` | `hnsw` | ANN backend: `hnsw`, `ivf`, or `turbo` |
-| `--vec-metric` | `cos` | Distance metric: `cos`, `ip` (dot product), or `l2sq` |
-| `--vec-quantization` | `f32` | HNSW scalar storage: `f32`, `f16`, `bf16`, or `i8` |
-| `--vec-connectivity` | `16` | HNSW graph degree `M` (higher = better recall, more memory) |
-| `--vec-expansion-add` | `200` | HNSW `efConstruction` (higher = better quality, slower inserts) |
-| `--vec-expansion-search` | `50` | HNSW `efSearch` (higher = better recall, slower queries) |
-| `--ivf-nlist` | `256` | IVF number of Voronoi cells / centroids |
-| `--ivf-nprobe` | `8` | IVF cells probed per query (higher = better recall, slower) |
-| `--tq-bits` | `4` | TurboQuant bits per coordinate, 1–8 (higher = better recall, more memory). TurboQuant requires `--embedding-dims` in 384–1536 |
+| `--embedding-dims` | `384` | Startup dimension default for the main store. The serving profile owns the dimension that actually validates chunk rows |
+| `--code-embedding-dims` | `768` | Code vector length, for `code_embed` and `code_semantic_search` |
 
-```sh
-# HNSW with half-precision storage
-mcpmem --enable-vectors --transport http --bind 0.0.0.0:8080 \
-  --embedding-dims 768 --vec-metric cos --vec-quantization f16 \
-  --vec-connectivity 32 --vec-expansion-search 128
-
-# IVF-Flat for a large corpus
-mcpmem --enable-vectors --embedding-dims 768 \
-  --vec-index ivf --ivf-nlist 1024 --ivf-nprobe 16
-
-# TurboQuant: ~8x memory reduction with unbiased inner-product scoring
-mcpmem --enable-vectors --embedding-dims 768 \
-  --vec-index turbo --tq-bits 4
-```
+The 1.x ANN knobs are gone with the ANN backends: `--vec-index`, `--vec-metric`,
+`--vec-quantization`, `--vec-connectivity`, `--vec-expansion-add`,
+`--vec-expansion-search`, `--ivf-nlist`, `--ivf-nprobe` and `--tq-bits`.
+The distance metric comes from the serving `[indexer]` profile, not a flag.
 
 ## Configuration reference
 
@@ -998,9 +992,9 @@ the file and uncomment what you need.
   `client-secret-file`, `openai-api-key-file` — so the config stays safe to commit.
 - **Sections map to the tables below:** `[server]`, `[storage]`, `[tools]`, `[vectors]`,
   `[security]`, `[oauth]`, `[indexer]`. A key drops the prefix that its section already implies.
-  The four prefixes are `--enable-`, `--vec-`, `--oidc-` and `--oauth-`. A repeatable flag becomes
-  a plural key. So `--enable-graph-read` is `[tools] graph-read`, `--vec-index` is
-  `[vectors] index`, `--role` is `[server] roles`, and `--cimd-allowed-domain` is
+  The three prefixes are `--enable-`, `--oidc-` and `--oauth-`. A repeatable flag becomes
+  a plural key. So `--enable-graph-read` is `[tools] graph-read`, `--embedding-dims` is
+  `[vectors] embedding-dims`, `--role` is `[server] roles`, and `--cimd-allowed-domain` is
   `[oauth] cimd-allowed-domains`.
 
 ```toml
@@ -1017,7 +1011,6 @@ vectors = true
 
 [vectors]
 embedding-dims = 768
-index = "hnsw"
 
 [indexer]
 ollama-url = "http://127.0.0.1:11434"
@@ -1054,24 +1047,19 @@ rather than an error, so one file can serve several deployments.
 | `--enable-all` | off | Every category. Overrides the four flags below |
 | `--enable-graph-read` | off | Read-only graph tools |
 | `--enable-graph-write` | off | Graph mutation tools |
-| `--enable-vectors` | off | `vector_*` and `hybrid_search`. The `--vec-*` flags need this |
+| `--enable-vectors` | off | `vector_*` and `hybrid_search` |
 | `--enable-code` | off | The `code_*` tools. Needs the `code` build feature |
 
-### Vector index
+### Embedding dimensions
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--embedding-dims` | `384` | Entity vector length. `turbo` accepts 384 to 1536 only |
+| `--embedding-dims` | `384` | Startup dimension default for the main store. The serving `[indexer]` profile owns the dimension that actually validates chunk rows |
 | `--code-embedding-dims` | `768` | Code vector length, for `code_embed` and `code_semantic_search` |
-| `--vec-index` | `hnsw` | `hnsw`, `ivf` or `turbo` |
-| `--vec-metric` | `cos` | `cos`, `ip` or `l2sq` |
-| `--vec-quantization` | `f32` | Scalar quantization of the stored vectors |
-| `--vec-connectivity` | `16` | HNSW graph degree `M` |
-| `--vec-expansion-add` | `200` | HNSW `efConstruction` |
-| `--vec-expansion-search` | `50` | HNSW `efSearch` |
-| `--ivf-nlist` | `256` | IVF centroids. Needs `--vec-index ivf` |
-| `--ivf-nprobe` | `8` | IVF cells probed per query. Needs `--vec-index ivf` |
-| `--tq-bits` | `4` | TurboQuant bits per coordinate, 1 to 8. Needs `--vec-index turbo` |
+
+The ANN knobs of 1.x (`--vec-index`, `--vec-metric`, `--vec-quantization`,
+`--vec-connectivity`, `--vec-expansion-add`, `--vec-expansion-search`,
+`--ivf-nlist`, `--ivf-nprobe`, `--tq-bits`) were removed in 2.0.0.
 
 ### Transport security and OAuth
 
@@ -1153,7 +1141,7 @@ live in separate external-content FTS5 tables (`name_fts`, `obs_fts`).
 | `name_fts` / `obs_fts` | `content_rowid` | External-content FTS5 over names / observation bodies |
 | `type_dict` | name | Interned entity/relation types with live counts (RAM-loaded) |
 | `graph_stat` | key | `WITHOUT ROWID` counters: entities, relations, observations, sequences |
-| `vector_embedding` | `entity_id` | *(`--enable-vectors`)* `dims`, `blob`, `model`, `created_us` |
+| `chunk_vector` | `(profile_id, kind, owner_kind, owner_id, chunk_index)` | *(`--enable-vectors`)* chunked embeddings: identity, per-observation and relation chunks |
 
 Key pragmas (defaults, all tunable): `page_size=4096`, `journal_mode=WAL`,
 `auto_vacuum=INCREMENTAL`, `synchronous=NORMAL`, `cache_size=-50000` (~50 MB), `mmap_size=256 MB`,
@@ -1167,7 +1155,7 @@ Key pragmas (defaults, all tunable): `page_size=4096`, `journal_mode=WAL`,
 | Entity LRU (10,000) | Avoids deserializing hot entities (`EntityMeta`) |
 | Name-hash map | O(1) name→ID resolution via 64-bit hash |
 | Prepared-statement cache | Reuses compiled SQLite queries |
-| ANN index *(vectors)* | In-memory HNSW or IVF-Flat, rebuilt from `vector_embedding` on startup |
+| Chunk snapshot *(vectors)* | The serving chunk snapshot, exactly scanned per query; republished by the indexer |
 | petgraph adjacency *(vectors)* | Directed graph cache for the hybrid-search centrality boost |
 
 ### Write batching
@@ -1260,9 +1248,8 @@ pre-populated, on a **MacBook Pro (Apple M1 Pro, 32 GB)**. Averages; run
 
 ### Vector (`--enable-vectors`)
 
-`vector_upsert_embedding`, `vector_batch_upsert`, `vector_get_embedding`, `vector_search_entities`,
-`vector_search_by_entity`, `vector_recommend`, `vector_mmr_search`, `hybrid_search`,
-`vector_delete_embedding`, `vector_reindex`, `vector_refresh_graph_cache`, `vector_store_stats`.
+`vector_search_entities`, `vector_search_by_entity`, `vector_mmr_search`, `hybrid_search`,
+`semantic_search`, `vector_refresh_graph_cache`, `vector_store_stats`.
 
 ### Code (`--enable-code`)
 
@@ -1301,7 +1288,8 @@ All transports share one transport-agnostic dispatch core (`dispatch_line()` /
 
 - **Concurrency.** `GraphHandle` uses a `parking_lot::Mutex` writer connection plus a read-only
   connection pool for concurrent reads under WAL. `VectorStore` uses `DashMap` for name↔ID and an
-  `RwLock` over the petgraph cache; HNSW/IVF indexes are internally synchronized. Heavy dispatch
+  `RwLock` over the petgraph cache; the managed snapshot is immutable once
+  published. Heavy dispatch
   (graph lock + optional fsync) is offloaded to `tokio::task::spawn_blocking` to keep the reactor
   responsive.
 - **Authorization.** `--oidc-issuer` makes this process its own OAuth 2.1 authorization server.
@@ -1344,7 +1332,6 @@ Each library crate has its own README with the detail for that layer.
 | Max `find_all_paths` depth / results | 10 / 100 |
 | Max embedding dimensions *(vectors)* | 4,096 |
 | Max `topK` *(vectors)* | 100 |
-| Max items per `vector_batch_upsert` | 1,024 |
 | Max `POST /oauth/register` per minute per peer *(oauth)* | 20 |
 | Max requests per minute per peer on the other five OAuth endpoints *(oauth)* | 60 |
 | Client name / redirect URIs / URL bytes *(oauth)* | 256 / 8 / 2,048 |
@@ -1359,10 +1346,11 @@ cargo run --release --bin bench  # standalone benchmark
 ```
 
 The suite covers protocol handling, every tool handler, CRUD/search/path persistence,
-concurrency, fuzzy invariant checks, both ANN backends end-to-end, the retrieval tools (batch
-upsert, more-like-this, recommend, MMR), category gating, code indexing across all 11 languages,
-HTTP bearer-token authentication, and the OAuth 2.1 server end to end — discovery, registration,
-the upstream login, consent, the token grants, revocation and the startup refusals.
+concurrency, fuzzy invariant checks, the chunked vector store and its search tools (vector,
+by-entity, MMR, hybrid, semantic), category gating, code indexing across all 11 languages,
+HTTP bearer-token authentication, and the OAuth 2.1 server end to end — discovery,
+registration, the upstream login, consent, the token grants, revocation and the startup
+refusals.
 
 ### Releases
 
@@ -1374,8 +1362,8 @@ version is strict semver 2.0.0. `scripts/check-release-version.sh` enforces both
 runs it on every push.
 
 ```sh
-scripts/check-release-version.sh --registry v1.1.0   # tag, versions, crates.io
-gh release create v1.1.0 --target main --notes-file CHANGES.md
+scripts/check-release-version.sh --registry v2.0.0   # tag, versions, crates.io
+gh release create v2.0.0 --target main --notes-file CHANGES.md
 ```
 
 The workflow re-runs the gate, requires a prerelease tag to carry a prerelease GitHub
