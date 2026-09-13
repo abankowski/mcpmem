@@ -302,6 +302,10 @@ impl<'a> IndexProfileRegistry<'a> {
             .map_err(sql_error)?;
         self.conn.execute("INSERT INTO entity_revision SELECT id,1,0 FROM entity WHERE flags=0 ON CONFLICT(entity_id) DO NOTHING", []).map_err(sql_error)?;
         self.conn.execute("INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation) SELECT ?1,'entity',e.id,r.revision,'upsert' FROM entity e JOIN entity_revision r ON r.entity_id=e.id WHERE e.flags=0", [profile.id.to_string()]).map_err(sql_error)?;
+        // Every relation mirror joins the rebuild: live relations embed as
+        // upserts and tombstoned mirrors re-run as deletes, so a rebuild
+        // also purges orphan chunk rows for relations that no longer exist.
+        self.conn.execute("INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation) SELECT ?1,'relation',m.id,m.revision,CASE WHEN m.deleted=0 THEN 'upsert' ELSE 'delete' END FROM taxonomy_relation m", [profile.id.to_string()]).map_err(sql_error)?;
         tx.commit()
     }
 
@@ -694,12 +698,50 @@ fn profile_writable(conn: &Connection, profile: Uuid) -> Result<bool> {
 }
 
 fn verify_vectors_current(conn: &Connection, profile: Uuid) -> Result<()> {
-    // A dead-lettered job declares its owner unindexable: the gate must not
-    // block the whole store on it. The worker deletes the owner's chunk rows
-    // when it dead-letters, so no stale chunk sneaks into the snapshot. The
-    // entity half of the gate reads the identity chunk as the owner row; the
-    // relation half joins in the task that makes rebuild cover relations.
-    let invalid: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM entity e LEFT JOIN entity_revision r ON r.entity_id=e.id LEFT JOIN chunk_vector v ON v.profile_id=?1 AND v.owner_kind='entity' AND v.owner_id=e.id AND v.kind='identity' WHERE e.flags=0 AND NOT EXISTS(SELECT 1 FROM chunk_index_job d WHERE d.owner_kind='entity' AND d.owner_id=e.id AND d.profile_id=?1 AND d.state='dead') AND (v.owner_id IS NULL OR r.revision IS NULL OR v.owner_revision!=r.revision)) OR EXISTS(SELECT 1 FROM chunk_vector v LEFT JOIN entity e ON e.id=v.owner_id WHERE v.profile_id=?1 AND v.owner_kind='entity' AND (e.id IS NULL OR e.flags!=0)) OR EXISTS(SELECT 1 FROM chunk_index_job WHERE profile_id=?1 AND owner_kind='entity' AND state NOT IN ('done','dead'))", [profile.to_string()], |r| r.get(0)).map_err(sql_error)?;
+    // The full-scan gate accepts only a fully current chunk set across both
+    // owner kinds. A dead-lettered job declares its owner unindexable: the
+    // worker deletes the owner's chunk rows when it dead-letters, so no
+    // stale chunk sneaks into the snapshot, and the gate must not block the
+    // whole store on it. Any unfinished job also fails the scan: a pending
+    // owner is exactly a chunk the worker has not written yet. Rebuild
+    // enqueues every relation mirror, so a relation without its chunk can
+    // only mean the worker has not caught up.
+    let invalid: bool = conn.query_row("SELECT EXISTS(
+  SELECT 1 FROM entity e
+  JOIN entity_revision r ON r.entity_id = e.id
+  LEFT JOIN chunk_vector v ON v.profile_id=?1 AND v.owner_kind='entity'
+      AND v.owner_id=e.id AND v.kind='identity'
+  WHERE e.flags=0
+    AND NOT EXISTS(SELECT 1 FROM chunk_index_job d
+      WHERE d.profile_id=?1 AND d.owner_kind='entity' AND d.owner_id=e.id
+      AND d.state='dead')
+    AND (v.owner_id IS NULL OR v.owner_revision != r.revision)
+)
+OR EXISTS(
+  SELECT 1 FROM chunk_vector v
+  LEFT JOIN entity e ON e.id=v.owner_id
+  WHERE v.profile_id=?1 AND v.owner_kind='entity'
+    AND (e.id IS NULL OR e.flags!=0)
+)
+OR EXISTS(
+  SELECT 1 FROM taxonomy_relation m
+  LEFT JOIN chunk_vector v ON v.profile_id=?1 AND v.owner_kind='relation'
+      AND v.owner_id=m.id AND v.kind='relation'
+  WHERE m.deleted=0
+    AND NOT EXISTS(SELECT 1 FROM chunk_index_job d
+      WHERE d.profile_id=?1 AND d.owner_kind='relation' AND d.owner_id=m.id
+      AND d.state='dead')
+    AND (v.owner_id IS NULL OR v.owner_revision != m.revision)
+)
+OR EXISTS(
+  SELECT 1 FROM chunk_vector v
+  LEFT JOIN taxonomy_relation m ON m.id=v.owner_id
+  WHERE v.profile_id=?1 AND v.owner_kind='relation'
+    AND (m.id IS NULL OR m.deleted!=0)
+)
+OR EXISTS(
+  SELECT 1 FROM chunk_index_job WHERE profile_id=?1 AND state NOT IN ('done','dead')
+)", [profile.to_string()], |r| r.get(0)).map_err(sql_error)?;
     if invalid {
         return Err(MCSError::InvalidParams(
             "candidate Full scan has missing or stale vectors/jobs".into(),

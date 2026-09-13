@@ -531,6 +531,14 @@ fn profile() -> mcpmem_core::jobs::IndexProfile {
     }
 }
 
+fn relation(from: &str, to: &str, relation_type: &str) -> Relation {
+    Relation {
+        from: from.into(),
+        to: to.into(),
+        relation_type: relation_type.into(),
+    }
+}
+
 #[test]
 fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
     use mcpmem_core::jobs::{
@@ -625,6 +633,202 @@ fn empty_candidate_still_requires_an_explicit_reader_publication() {
     assert!(registry.activate(candidate.id).is_err());
     assert!(ann.mark_published(candidate.id, 0).unwrap());
     registry.activate(candidate.id).unwrap();
+}
+
+#[test]
+fn rebuilt_profile_requires_every_relation_chunk() {
+    use mcpmem_core::jobs::{
+        AnnGenerationRepository, ChunkKind, IndexJobRepository, IndexProfileRegistry, OwnerKind,
+    };
+    // Seed one entity and one relation, begin rebuild, commit chunks for the
+    // entity job only, then assert the scan fails until the relation chunk
+    // exists: the rebuild enqueues the relation job, and the gate rejects
+    // both the pending job and the unchunked live mirror.
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = graph(&database);
+    graph.create_entities(&[entity("ada")]).unwrap();
+    graph.create_relations(&[relation("ada", "ada", "knows")]).unwrap();
+    let conn = Connection::open(&database).unwrap();
+    let registry = IndexProfileRegistry::new(&conn);
+    let jobs = IndexJobRepository::new(&conn);
+    let ann = AnnGenerationRepository::new(&conn);
+    let candidate = profile();
+    registry.begin_rebuild(&candidate).unwrap();
+    // The rebuild itself enqueues the relation job: a live mirror as an
+    // upsert at its current revision. The gate alone would also catch a
+    // chunkless mirror, so this pins the enqueue that lets the worker serve
+    // it and later purge orphan rows from the rebuilt candidate.
+    let (operation, mirror_revision): (String, i64) = conn
+        .query_row(
+            "SELECT operation, owner_revision FROM chunk_index_job
+             WHERE profile_id=?1 AND owner_kind='relation'
+               AND owner_id=(SELECT id FROM taxonomy_relation)",
+            [candidate.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(operation, "upsert");
+    assert_eq!(mirror_revision, 1);
+    // Claim order is owner_kind first, so the first due job is the entity.
+    // Commit only it: the relation job stays pending, as does the mirror.
+    let claimed = jobs.claim_due(200, 10).unwrap().unwrap();
+    assert_eq!(claimed.owner_kind, OwnerKind::Entity);
+    assert!(
+        jobs
+            .commit_chunks(
+                &claimed,
+                201,
+                Some(&[&(ChunkKind::Identity, &[1.0f32, 0.0])]),
+                "test",
+            )
+            .unwrap()
+    );
+    let err = ann.verify_full_scan(candidate.id).err().unwrap();
+    assert!(
+        err.to_string().contains("missing or stale"),
+        "relation chunk is missing: {err}"
+    );
+    drop(conn);
+}
+
+#[test]
+fn rebuilt_profile_enqueues_tombstoned_relation_as_delete() {
+    use mcpmem_core::jobs::IndexProfileRegistry;
+    // A rebuild joins every relation mirror through begin_rebuild: tombstoned
+    // mirrors enqueue as deletes at their current revision, so the worker can
+    // purge orphan chunk rows from the rebuilt candidate. A recreated triple
+    // keeps its mirror id, so the delete also covers a later live mirror.
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = graph(&database);
+    graph.create_entities(&[entity("ada")]).unwrap();
+    graph.create_relations(&[relation("ada", "ada", "knows")]).unwrap();
+    graph.delete_relations(&[relation("ada", "ada", "knows")]).unwrap();
+    let conn = Connection::open(&database).unwrap();
+    let candidate = profile();
+    IndexProfileRegistry::new(&conn).begin_rebuild(&candidate).unwrap();
+    let (operation, mirror_revision): (String, i64) = conn
+        .query_row(
+            "SELECT operation, owner_revision FROM chunk_index_job
+             WHERE profile_id=?1 AND owner_kind='relation'
+               AND owner_id=(SELECT id FROM taxonomy_relation)",
+            [candidate.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(operation, "delete");
+    assert_eq!(mirror_revision, 2);
+    drop(conn);
+}
+
+#[test]
+fn completed_relation_rebuild_passes_the_full_scan() {
+    use mcpmem_core::jobs::{
+        AnnGenerationRepository, ChunkKind, IndexJobRepository, IndexProfileRegistry, OwnerKind,
+        StoreState,
+    };
+    // Commit both owners' chunks and assert the scan passes: a current
+    // relation chunk must not fail branch 3's revision comparison. The
+    // lifecycle (verify, publish, activate) mirrors the entity-only gate
+    // tests, with the relation side present.
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = graph(&database);
+    graph.create_entities(&[entity("ada")]).unwrap();
+    graph.create_relations(&[relation("ada", "ada", "knows")]).unwrap();
+    let conn = Connection::open(&database).unwrap();
+    let registry = IndexProfileRegistry::new(&conn);
+    let jobs = IndexJobRepository::new(&conn);
+    let ann = AnnGenerationRepository::new(&conn);
+    let candidate = profile();
+    registry.begin_rebuild(&candidate).unwrap();
+    // Claim order is owner_kind first: the entity job, then the relation.
+    let mut committed = 0;
+    for attempt in 0..2 {
+        let claimed = jobs.claim_due(400 + attempt, 10).unwrap().unwrap();
+        let kind = if claimed.owner_kind == OwnerKind::Entity {
+            ChunkKind::Identity
+        } else {
+            assert_eq!(claimed.owner_kind, OwnerKind::Relation);
+            ChunkKind::Relation
+        };
+        assert!(
+            jobs
+                .commit_chunks(
+                    &claimed,
+                    401 + attempt,
+                    Some(&[&(kind, &[1.0f32, 0.0])]),
+                    "test",
+                )
+                .unwrap()
+        );
+        committed += 1;
+    }
+    assert_eq!(committed, 2);
+    ann.verify_full_scan(candidate.id).unwrap();
+    assert!(registry.activate(candidate.id).is_err());
+    let generation = ann.get(candidate.id).unwrap();
+    assert_eq!(generation.durable_generation, 2);
+    assert!(
+        ann.mark_published(candidate.id, generation.durable_generation)
+            .unwrap()
+    );
+    registry.activate(candidate.id).unwrap();
+    assert_eq!(
+        registry.state("default").unwrap(),
+        StoreState::Active(candidate.id)
+    );
+    drop(conn);
+}
+
+#[test]
+fn stale_relation_chunk_fails_the_full_scan() {
+    use mcpmem_core::jobs::{
+        AnnGenerationRepository, ChunkKind, IndexJobRepository, IndexProfileRegistry, OwnerKind,
+    };
+    // A done relation job whose chunk is behind the live mirror revision
+    // must fail branch 3's revision comparison. Branch 5 cannot catch it
+    // (the job is done), so this pins the chunk-vs-mirror check itself. The
+    // mutation path would pair this bump with a fresh pending job; the
+    // out-of-band bump isolates the branch-3 case.
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = graph(&database);
+    graph.create_entities(&[entity("ada")]).unwrap();
+    graph.create_relations(&[relation("ada", "ada", "knows")]).unwrap();
+    let conn = Connection::open(&database).unwrap();
+    let registry = IndexProfileRegistry::new(&conn);
+    let jobs = IndexJobRepository::new(&conn);
+    let ann = AnnGenerationRepository::new(&conn);
+    let candidate = profile();
+    registry.begin_rebuild(&candidate).unwrap();
+    for attempt in 0..2 {
+        let claimed = jobs.claim_due(500 + attempt, 10).unwrap().unwrap();
+        let kind = if claimed.owner_kind == OwnerKind::Entity {
+            ChunkKind::Identity
+        } else {
+            ChunkKind::Relation
+        };
+        assert!(
+            jobs
+                .commit_chunks(
+                    &claimed,
+                    501 + attempt,
+                    Some(&[&(kind, &[1.0f32, 0.0])]),
+                    "test",
+                )
+                .unwrap()
+        );
+    }
+    conn.execute("UPDATE taxonomy_relation SET revision=revision+1", [])
+        .unwrap();
+    let err = ann.verify_full_scan(candidate.id).err().unwrap();
+    assert!(
+        err.to_string().contains("missing or stale"),
+        "stale relation chunk is accepted: {err}"
+    );
+    drop(conn);
 }
 
 #[test]
