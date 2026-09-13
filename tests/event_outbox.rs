@@ -316,7 +316,7 @@ fn effective_changes_commit_events_and_coalesce_tombstones_without_deliveries() 
     graph.create_entities(&[entity("a")]).unwrap();
     assert_eq!(count(&conn, "change_event"), 1);
     assert_eq!(count(&conn, "event_outbox"), 0);
-    assert_eq!(count(&conn, "index_job"), 1);
+    assert_eq!(count(&conn, "chunk_index_job"), 1);
     graph.upsert_entities(&[entity("a")]).unwrap();
     assert_eq!(count(&conn, "change_event"), 1);
     graph
@@ -327,15 +327,15 @@ fn effective_changes_commit_events_and_coalesce_tombstones_without_deliveries() 
         .unwrap();
     graph.delete_entities(&["a".into()]).unwrap();
     assert_eq!(count(&conn, "change_event"), 3);
-    assert_eq!(count(&conn, "index_job"), 1);
-    let row: (i64, String) = conn
+    assert_eq!(count(&conn, "chunk_index_job"), 1);
+    let row: (i64, String, String) = conn
         .query_row(
-            "SELECT entity_revision, operation FROM index_job",
+            "SELECT owner_revision, operation, owner_kind FROM chunk_index_job",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!(row, (3, "delete".into()));
+    assert_eq!(row, (3, "delete".into(), "entity".into()));
     assert!(
         conn.execute("UPDATE change_event SET entity_revision=99", [])
             .is_err()
@@ -378,7 +378,7 @@ fn failed_mutation_rolls_back_graph_events_and_jobs() {
         ["original"]
     );
     assert_eq!(count(&conn, "change_event"), 1);
-    assert_eq!(count(&conn, "index_job"), 1);
+    assert_eq!(count(&conn, "chunk_index_job"), 1);
 }
 
 #[test]
@@ -561,7 +561,7 @@ fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
     assert!(recovered.lease.epoch > expired.lease.epoch);
     assert!(
         !jobs
-            .commit_vector(&expired, 112, Some(&[1.0, 0.0]), "worker")
+            .commit_chunks(&expired, 112, Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]), "worker")
             .unwrap()
     );
     graph
@@ -572,18 +572,20 @@ fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
         .unwrap();
     assert!(
         !jobs
-            .commit_vector(&recovered, 112, Some(&[1.0, 0.0]), "worker")
+            .commit_chunks(&recovered, 112, Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]), "worker")
             .unwrap()
     );
     let current = jobs.claim_due(113, 20).unwrap().unwrap();
-    assert_eq!(current.entity_revision, 2);
+    assert_eq!(current.owner_revision, 2);
     assert!(
-        jobs.commit_vector(&current, 114, Some(&[1.0, 0.0]), "worker")
+        jobs.commit_chunks(&current, 114, Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]), "worker")
             .unwrap()
     );
     assert!(
-        jobs.commit_vector(&current, 115, Some(&[1.0, 0.0]), "worker")
-            .unwrap()
+        !jobs
+            .commit_chunks(&current, 115, Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]), "worker")
+            .unwrap(),
+        "a completed job cannot commit again"
     );
     ann.verify_full_scan(candidate.id).unwrap();
     assert!(registry.activate(candidate.id).is_err());
@@ -700,9 +702,10 @@ fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
         .unwrap();
     let neighbour_jobs: Vec<(i64, i64, String)> = conn
         .prepare(
-            "SELECT entity_id, entity_revision, operation FROM index_job
-             WHERE entity_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
-             ORDER BY entity_id",
+            "SELECT owner_id, owner_revision, operation FROM chunk_index_job
+             WHERE owner_kind='entity'
+               AND owner_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
+             ORDER BY owner_id",
         )
         .unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
@@ -736,7 +739,7 @@ fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
         "operation filters accept exactly the rename value"
     );
     let before_events = count(&conn, "change_event");
-    let before_jobs = count(&conn, "index_job");
+    let before_jobs = count(&conn, "chunk_index_job");
 
     let committed = MutationService::new(&graph)
         .apply(
@@ -805,9 +808,10 @@ fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
     }
     let neighbour_jobs_after: Vec<(i64, i64, String)> = conn
         .prepare(
-            "SELECT entity_id, entity_revision, operation FROM index_job
-             WHERE entity_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
-             ORDER BY entity_id",
+            "SELECT owner_id, owner_revision, operation FROM chunk_index_job
+             WHERE owner_kind='entity'
+               AND owner_id IN (SELECT id FROM entity WHERE name IN ('incoming','outgoing'))
+             ORDER BY owner_id",
         )
         .unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
@@ -816,13 +820,13 @@ fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
         .unwrap();
     assert_eq!(neighbour_jobs_after, neighbour_jobs);
     assert_eq!(
-        conn.query_row("SELECT operation FROM index_job", [], |row| row
+        conn.query_row("SELECT operation FROM chunk_index_job", [], |row| row
             .get::<_, String>(0))
             .unwrap(),
         "upsert",
-        "the coalesced current job remains an upsert"
+        "every chunk job here is an upsert: entities and created relations"
     );
-    assert_eq!(count(&conn, "index_job"), before_jobs);
+    assert_eq!(count(&conn, "chunk_index_job"), before_jobs);
 }
 
 #[test]
@@ -844,19 +848,34 @@ fn worker_retries_renewal_validation_and_restart_keep_durable_fences() {
     let first = jobs.claim_due(100, 10).unwrap().unwrap();
     assert!(jobs.renew(&first, 105, 20).unwrap());
     assert!(jobs.claim_due(111, 10).unwrap().is_none());
-    assert!(
-        jobs.commit_vector(&first, 112, Some(&[f32::NAN, 0.0]), "worker")
-            .is_err()
-    );
-    assert!(
-        jobs.commit_vector(&first, 112, Some(&[1.0]), "worker")
-            .is_err()
-    );
-    assert!(
-        jobs.commit_vector(&first, 112, Some(&[2.0, 0.0]), "worker")
-            .is_err()
-    );
-    assert_eq!(count(&conn, "profile_vector"), 0);
+    {
+        let vector = [f32::NAN, 0.0];
+        let owned = [(mcpmem_core::jobs::ChunkKind::Identity, vector.as_slice())];
+        let refs: Vec<_> = owned.iter().collect();
+        assert!(
+            jobs.commit_chunks(&first, 112, Some(&refs), "worker").is_err(),
+            "a NaN vector fails the stored-vector validation"
+        );
+    }
+    {
+        let vector = [1.0f32];
+        let owned = [(mcpmem_core::jobs::ChunkKind::Identity, vector.as_slice())];
+        let refs: Vec<_> = owned.iter().collect();
+        assert!(
+            jobs.commit_chunks(&first, 112, Some(&refs), "worker").is_err(),
+            "a short vector fails the dimension validation"
+        );
+    }
+    {
+        let vector = [2.0f32, 0.0];
+        let owned = [(mcpmem_core::jobs::ChunkKind::Identity, vector.as_slice())];
+        let refs: Vec<_> = owned.iter().collect();
+        assert!(
+            jobs.commit_chunks(&first, 112, Some(&refs), "worker").is_err(),
+            "a non-unit vector fails the L2 validation"
+        );
+    }
+    assert_eq!(count(&conn, "chunk_vector"), 0);
     assert!(jobs.retry(&first, 113, 200, "temporary", false).unwrap());
     assert!(jobs.claim_due(199, 10).unwrap().is_none());
     drop(conn);
@@ -867,12 +886,20 @@ fn worker_retries_renewal_validation_and_restart_keep_durable_fences() {
     let second = jobs.claim_due(200, 20).unwrap().unwrap();
     assert!(second.lease.epoch > first.lease.epoch);
     assert!(!jobs.renew(&first, 201, 10).unwrap());
-    assert!(
-        jobs.commit_vector(&second, 201, Some(&[1.0, 0.0]), "worker")
-            .unwrap()
-    );
+    {
+        let vector = [1.0f32, 0.0];
+        let owned = [(mcpmem_core::jobs::ChunkKind::Identity, vector.as_slice())];
+        let refs: Vec<_> = owned.iter().collect();
+        assert!(
+            jobs.commit_chunks(&second, 201, Some(&refs), "worker").unwrap()
+        );
+    }
     let blob: Vec<u8> = conn
-        .query_row("SELECT blob FROM profile_vector", [], |r| r.get(0))
+        .query_row(
+            "SELECT blob FROM chunk_vector WHERE profile_id=?1 AND kind='identity'",
+            [candidate.id.to_string()],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(blob, [0, 0, 128, 63, 0, 0, 0, 0]);
     let ann = AnnGenerationRepository::new(&conn);
@@ -880,8 +907,8 @@ fn worker_retries_renewal_validation_and_restart_keep_durable_fences() {
     assert!(!ann.mark_published(candidate.id, 0).unwrap());
     reopened.delete_entities(&["a".into()]).unwrap();
     let deletion = jobs.claim_due(202, 10).unwrap().unwrap();
-    assert!(jobs.commit_vector(&deletion, 203, None, "worker").unwrap());
-    assert_eq!(count(&conn, "profile_vector"), 0);
+    assert!(jobs.commit_chunks(&deletion, 203, None, "worker").unwrap());
+    assert_eq!(count(&conn, "chunk_vector"), 0);
     assert_eq!(ann.get(candidate.id).unwrap().durable_generation, 2);
 }
 
@@ -958,5 +985,5 @@ fn concurrent_process_writers_keep_all_events() {
     let conn = Connection::open(path).unwrap();
     assert_eq!(count(&conn, "entity"), 80);
     assert_eq!(count(&conn, "change_event"), 80);
-    assert_eq!(count(&conn, "index_job"), 80);
+    assert_eq!(count(&conn, "chunk_index_job"), 80);
 }
