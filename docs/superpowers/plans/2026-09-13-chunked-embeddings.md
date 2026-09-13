@@ -56,7 +56,7 @@ The chain is serial because `src/vector_store.rs` and `crates/mcpmem-core/src/jo
 **Depends on:** None
 
 **Files:**
-- Create: `crates/mcpmem-core/migrations/0008_chunked_embeddings.sql`
+- Create: `crates/mcpmem-core/migrations/0009_chunked_embeddings.sql`
 - Modify: `crates/mcpmem-core/src/events.rs` (register the migration, extend `MIGRATIONS`, extend the checksum inventory test)
 - Modify: `crates/mcpmem-core/src/jobs.rs` (add `ChunkKind`, `OwnerKind`)
 - Modify: `src/config_file.rs:700-712` (mint the v2 `representation_version`)
@@ -76,7 +76,7 @@ In `crates/mcpmem-core/src/events.rs`, change `pub const MIGRATIONS: [(i64, &str
 ```rust
     (
         8,
-        include_str!("../migrations/0008_chunked_embeddings.sql"),
+        include_str!("../migrations/0009_chunked_embeddings.sql"),
     ),
 ```
 
@@ -84,7 +84,7 @@ In the `migration_inventory` module, extend the expected vector in `every_migrat
 
 - [ ] **Step 2: Create the migration file**
 
-Create `crates/mcpmem-core/migrations/0008_chunked_embeddings.sql`:
+Create `crates/mcpmem-core/migrations/0009_chunked_embeddings.sql`:
 
 ```sql
 CREATE TABLE chunk_vector (
@@ -129,7 +129,7 @@ CREATE INDEX chunk_index_job_owner ON chunk_index_job(owner_kind, owner_id);
 Run:
 
 ```bash
-python3 -c "import hashlib;print(hashlib.sha256(open('crates/mcpmem-core/migrations/0008_chunked_embeddings.sql','rb').read()).hexdigest())"
+python3 -c "import hashlib;print(hashlib.sha256(open('crates/mcpmem-core/migrations/0009_chunked_embeddings.sql','rb').read()).hexdigest())"
 ```
 
 Replace the `"CHANGEME"` placeholder in the inventory test with the printed hex string.
@@ -212,8 +212,8 @@ Expected: the checksum inventory test passes; any config test that pinned `name+
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/mcpmem-core/migrations/0008_chunked_embeddings.sql crates/mcpmem-core/src/events.rs crates/mcpmem-core/src/jobs.rs src/config_file.rs tests/event_outbox.rs
-git commit -m "feat: schema 0008 for chunked embeddings
+git add crates/mcpmem-core/migrations/0009_chunked_embeddings.sql crates/mcpmem-core/src/events.rs crates/mcpmem-core/src/jobs.rs src/config_file.rs tests/event_outbox.rs
+git commit -m "feat: schema 0009 for chunked embeddings
 
 Adds chunk_vector and chunk_index_job and the ChunkKind/OwnerKind
 types. Nothing consumes the tables yet.
@@ -1365,8 +1365,8 @@ Cost: ~25k tokens, est. $0.4."
 **Depends on:** 3, 4, 5
 
 **Files:**
-- Create: `crates/mcpmem-core/migrations/0009_embedding_cleanup.sql`
-- Modify: `crates/mcpmem-core/src/events.rs` (register 0009, inventory)
+- Create: `crates/mcpmem-core/migrations/0010_embedding_cleanup.sql`
+- Modify: `crates/mcpmem-core/src/events.rs` (register 0010, inventory)
 - Modify: `src/vector_actions.rs` (remove the six handlers)
 - Modify: `src/tools.rs` (remove names from `VECTOR_TOOL_NAMES`, `ToolMeta` entries)
 - Modify: `src/server.rs` (remove dispatch arms)
@@ -1382,9 +1382,9 @@ Cost: ~25k tokens, est. $0.4."
 - Consumes: `search_chunks`/`aggregate_owners`/`resolve_owner` (Task 3-4) as the only serving path.
 - Produces: the final 2.0.0 tool surface per spec §8; `vector_store_stats` reports `embeddingCount` as chunk rows and drops `indexKind`/`indexCapacity`/`indexMemoryBytes`.
 
-- [ ] **Step 1: Create and register migration 0009**
+- [ ] **Step 1: Create and register migration 0010**
 
-Create `crates/mcpmem-core/migrations/0009_embedding_cleanup.sql`:
+Create `crates/mcpmem-core/migrations/0010_embedding_cleanup.sql`:
 
 ```sql
 DROP TABLE IF EXISTS vector_embedding;

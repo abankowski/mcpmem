@@ -54,7 +54,7 @@ vector cannot find a relation.
 
 ## 5. Data model
 
-Migration `0008_chunked_embeddings.sql`:
+Migration `0009_chunked_embeddings.sql`:
 
 1. `profile_vector` becomes `chunk_vector`:
    - Primary key `(profile_id, kind, owner_kind, owner_id, chunk_index)`.
@@ -79,7 +79,7 @@ Migration `0008_chunked_embeddings.sql`:
    Kind 2 rows (relation instances) are dropped in `0009`. The taxonomy
    kind-2 snapshot derives from `chunk_vector` rows with
    `kind = 'relation'`.
-4. Migration `0009_embedding_cleanup.sql` drops `vector_embedding`,
+4. Migration `0010_embedding_cleanup.sql` drops `vector_embedding`,
    including its rows, and drops the taxonomy kind-2 rows and jobs.
 5. `profile.representation_version` becomes
    `chunks-identity+obs+relation-v2`.
