@@ -90,6 +90,35 @@ fn select_all_types(conn: &Connection, kind: i64) -> Result<Vec<(String, usize)>
     Ok(rows)
 }
 
+/// `(name, count, desc)` for every registered type of `kind`: one that has
+/// members (`count > 0`), or one that a description marks as intentional even
+/// before its first member exists. The list tools expose this registry view;
+/// suggestions keep the stricter count-only source above.
+fn select_type_catalog(
+    conn: &Connection,
+    kind: i64,
+) -> Result<Vec<(String, usize, Option<String>)>> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT name, count, desc FROM type_dict
+             WHERE kind = ?1 AND (count > 0 OR desc IS NOT NULL)
+             ORDER BY count DESC",
+        )
+        .map_err(sqlite_err)?;
+    let rows = stmt
+        .query_map(params![kind], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(sqlite_err)?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 /// Comma-separated decimal list of ids for an inline `IN (...)` / `VALUES`
 /// clause. The ids are `i64` row ids read straight from the database — never
 /// user text — so inlining them as SQL literals is injection-safe and, unlike
@@ -1525,6 +1554,13 @@ impl GraphHandle {
         select_all_types(&conn, 0).unwrap_or_default()
     }
 
+    /// `(name, count, desc)` for every registered entity type: one with
+    /// members, or one whose description registers it before first use.
+    pub fn entity_type_catalog(&self) -> Vec<(String, usize, Option<String>)> {
+        let conn = self.readers.get();
+        select_type_catalog(&conn, 0).unwrap_or_default()
+    }
+
     /// The viewer's shared page metadata — entity-type legend and the graph-wide
     /// entity/relation totals — gathered on a *single* reader connection. The
     /// `/ui/graph` and `/ui/search` handlers used to take three or four separate
@@ -1543,6 +1579,49 @@ impl GraphHandle {
     pub fn relation_type_counts(&self) -> Vec<(String, usize)> {
         let conn = self.readers.get();
         select_all_types(&conn, 1).unwrap_or_default()
+    }
+
+    /// `(name, count, desc)` for every registered relation type: one with
+    /// members, or one whose description registers it before first use.
+    pub fn relation_type_catalog(&self) -> Vec<(String, usize, Option<String>)> {
+        let conn = self.readers.get();
+        select_type_catalog(&conn, 1).unwrap_or_default()
+    }
+
+    /// Set or clear the description of one entity type (`kind` 0) or relation
+    /// type (`kind` 1) by exact name. The type row is created when it does
+    /// not exist yet — a description can thus register a type before its
+    /// first member (`count` stays 0). `None` clears the stored description.
+    /// This is registry metadata, not a graph mutation: no change event is
+    /// emitted and the taxonomy index revision is untouched.
+    pub fn set_type_description(
+        &self,
+        kind: i64,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.writer.lock();
+        // The writer lock serializes, so select-then-insert is race-free —
+        // the same pattern `mutation::type_id` uses for the insert path.
+        let existing = lookup_type_id(&conn, name, kind);
+        let description: Option<String> = description.map(|d| d.into());
+        match existing {
+            Some(id) => {
+                conn.execute(
+                    "UPDATE type_dict SET desc = ?1 WHERE id = ?2",
+                    params![description, id],
+                )
+                .map_err(sqlite_err)?;
+            }
+            None => {
+                conn.execute(
+                    "INSERT INTO type_dict(kind, name, count, desc) VALUES(?1, ?2, 0, ?3)",
+                    params![kind, name, description],
+                )
+                .map_err(sqlite_err)?;
+            }
+        }
+        Ok(())
     }
 
     /// Whether an entity type with the given name exists. Read-only: a missing
@@ -3428,6 +3507,80 @@ mod tests {
         // The negative read must not have inserted a phantom type row.
         let types = kg.entity_type_counts();
         assert!(types.iter().all(|(t, _)| t != "persn"));
+    }
+
+    #[test]
+    fn test_type_descriptions_registry_and_catalog() {
+        let kg = new_kg_with_pool(2);
+        // A description registers a type before any member exists.
+        kg.set_type_description(0, "person", Some("A human being or persona"))
+            .unwrap();
+        let catalog = kg.entity_type_catalog();
+        assert_eq!(
+            catalog,
+            vec![(
+                "person".into(),
+                0usize,
+                Some("A human being or persona".into())
+            )]
+        );
+        // The count-only view and existence follow the same row.
+        assert!(kg.entity_type_exists("person"));
+        assert!(
+            kg.entity_type_counts().is_empty(),
+            "count 0 types stay out of counts"
+        );
+
+        // Setting again updates in place, keeps count 0 while unused.
+        kg.set_type_description(0, "person", Some("A living human"))
+            .unwrap();
+        let catalog = kg.entity_type_catalog();
+        assert_eq!(
+            catalog,
+            vec![("person".into(), 0usize, Some("A living human".into()))]
+        );
+
+        // Clearing removes the description. The described row loses its desc,
+        // and with count still 0 it leaves the catalog (no member, no desc).
+        kg.set_type_description(0, "person", None).unwrap();
+        assert!(kg.entity_type_catalog().is_empty());
+        assert!(
+            kg.entity_type_exists("person"),
+            "the row stays; only the desc clears"
+        );
+
+        // A member makes the type count 1; the desc rides along and the type
+        // stays in the catalog even with the desc cleared.
+        kg.create_entities(&[Entity {
+            name: "alice".into(),
+            entity_type: "person".into(),
+            observations: vec![],
+        }])
+        .unwrap();
+        assert_eq!(
+            kg.entity_type_catalog(),
+            vec![("person".into(), 1usize, None)]
+        );
+        assert_eq!(kg.entity_type_counts(), vec![("person".into(), 1usize)]);
+
+        // Relation kinds take the same path.
+        kg.set_type_description(1, "works_at", Some("Employment link"))
+            .unwrap();
+        assert_eq!(
+            kg.relation_type_catalog(),
+            vec![("works_at".into(), 0usize, Some("Employment link".into()))]
+        );
+        assert!(kg.relation_type_exists("works_at"));
+    }
+
+    #[test]
+    fn test_type_description_length_not_capped_at_core() {
+        // The server layer enforces the byte cap; the core accepts any text.
+        let kg = new_kg_with_pool(2);
+        let long = "x".repeat(20_000);
+        kg.set_type_description(0, "person", Some(long.as_str()))
+            .unwrap();
+        assert_eq!(kg.entity_type_catalog().len(), 1);
     }
 
     #[test]
