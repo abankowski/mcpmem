@@ -13,6 +13,10 @@ use crate::vector_store::VectorStore;
 
 const MAX_NAME_BYTES: usize = 1024;
 const MAX_OBSERVATION_BYTES: usize = 65536;
+/// Upper bound on one taxonomy type description. Prose, not facts — a few
+/// paragraphs name the type's meaning without turning the registry into a
+/// document store.
+const MAX_TYPE_DESCRIPTION_BYTES: usize = 4096;
 const MAX_ENTITIES_PER_REQUEST: usize = 1000;
 const MAX_RELATIONS_PER_REQUEST: usize = 1000;
 const MAX_OBSERVATIONS_PER_ENTITY: usize = 1000;
@@ -835,22 +839,81 @@ pub fn handle_describe_entity(kg: &GraphHandle, args: Option<&Value>) -> Result<
 }
 
 pub fn handle_list_entity_types(kg: &GraphHandle) -> Result<Value> {
-    let counts = kg.entity_type_counts();
-    let arr: Vec<Value> = counts
+    let catalog = kg.entity_type_catalog();
+    let arr: Vec<Value> = catalog
         .into_iter()
-        .map(|(t, c)| json!({ "type": t, "count": c }))
+        .map(|(t, c, d)| match d {
+            Some(desc) => json!({ "type": t, "count": c, "desc": desc }),
+            None => json!({ "type": t, "count": c }),
+        })
         .collect();
     let text = serde_json::to_string(&arr).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }
 
 pub fn handle_list_relation_types(kg: &GraphHandle) -> Result<Value> {
-    let counts = kg.relation_type_counts();
-    let arr: Vec<Value> = counts
+    let catalog = kg.relation_type_catalog();
+    let arr: Vec<Value> = catalog
         .into_iter()
-        .map(|(t, c)| json!({ "type": t, "count": c }))
+        .map(|(t, c, d)| match d {
+            Some(desc) => json!({ "type": t, "count": c, "desc": desc }),
+            None => json!({ "type": t, "count": c }),
+        })
         .collect();
     let text = serde_json::to_string(&arr).map_err(MCSError::JsonError)?;
+    Ok(text_content!(text))
+}
+
+/// Handles `set_type_description`. `kind` is `entityType` (default) or
+/// `relationType`; `name` is the exact type name, validated like every other
+/// name. `description` is required; an empty string clears the stored
+/// description. The write registers the type when no member exists yet, so a
+/// description can document a type before its first use. Returns the applied
+/// state.
+pub fn handle_set_type_description(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+    let kind: i64 = match params.get("kind") {
+        None | Some(Value::Null) => 0,
+        Some(v) => match v.as_str() {
+            Some("entityType") => 0,
+            Some("relationType") => 1,
+            _ => {
+                return Err(MCSError::InvalidParams(
+                    "'kind' must be one of entityType, relationType".into(),
+                ));
+            }
+        },
+    };
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| MCSError::InvalidParams("Missing 'name' parameter".into()))?;
+    validate_name(name)?;
+    let description = params.get("description").and_then(|v| v.as_str());
+    let stored: Option<String> = match description {
+        None => {
+            return Err(MCSError::InvalidParams(
+                "Missing 'description' parameter".into(),
+            ));
+        }
+        Some("") => None,
+        Some(d) if d.len() > MAX_TYPE_DESCRIPTION_BYTES => {
+            return Err(MCSError::InvalidParams(format!(
+                "Description too long (max {MAX_TYPE_DESCRIPTION_BYTES} bytes)"
+            )));
+        }
+        Some(d) => Some(d.into()),
+    };
+    kg.set_type_description(kind, name, stored.as_deref())?;
+    let text = serde_json::to_string(&json!({
+        "kind": match kind {
+            0 => "entityType",
+            _ => "relationType",
+        },
+        "name": name,
+        "desc": stored,
+    }))
+    .map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
 }
 

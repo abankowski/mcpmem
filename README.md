@@ -408,7 +408,7 @@ and rejected from `tools/call` as if they never existed — least privilege by d
 | Flag | Category | Tools |
 |------|----------|-------|
 | `--enable-graph-read` | **graph-read** | `read_graph`, `search_nodes`, `open_nodes`, `get_entity`, `graph_stats`, `search_relations`, `find_path`/`find_all_paths`, `get_neighbors`, `describe_entity`, `list_entity_types`, `list_relation_types`, `suggest_taxonomy`, `export_graph`, `extract_subgraph`, `batch_get_entities`, `entity_exists`, `degree` |
-| `--enable-graph-write` | **graph-write** | `create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `upsert_entities`, `merge_entities`, `rename_entity`, `compact` |
+| `--enable-graph-write` | **graph-write** | `create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `upsert_entities`, `merge_entities`, `rename_entity`, `set_type_description`, `compact` |
 | `--enable-vectors` | **vectors** | `vector_*` + `hybrid_search` (usearch HNSW or IVF-Flat) |
 | `--enable-code` | **code** | `code_index`, `code_outline`, `code_search`, `code_get_symbol`, `code_watch`, `code_embed`, `code_semantic_search` |
 | `--enable-all` | *(all)* | Every category. Overrides the individual flags. |
@@ -465,6 +465,17 @@ serving snapshot.
 (`entityType`, `relationType`, `entity` or `relation`; default
 `entityType`), and an optional `topK` (1..100; default 10). The response
 shape matches `taxonomySuggestions` above.
+
+### Type descriptions
+
+An entity type or relation type can carry an optional description that says
+what the type means and what members are expected. `set_type_description`
+(category `graph-write`) writes it: `kind` is `entityType` (default) or
+`relationType`, `name` is the exact type name, and `description` is the text
+(an empty string clears it). The type row is created when no member exists
+yet, so a description can register a type before its first use.
+`list_entity_types` and `list_relation_types` return the `desc` field on
+every described type, alongside `type` and `count`.
 
 ### Observation format (1.0)
 
@@ -1240,7 +1251,7 @@ pre-populated, on a **MacBook Pro (Apple M1 Pro, 32 GB)**. Averages; run
 
 **Write:** `create_entities`, `create_relations`, `add_observations`, `delete_entities`,
 `delete_observations`, `delete_relations`, `upsert_entities`, `merge_entities`, `rename_entity`,
-`compact`.
+`set_type_description`, `compact`.
 
 **Read:** `read_graph`, `search_nodes`, `open_nodes`, `batch_get_entities`, `get_entity`,
 `entity_exists`, `graph_stats`, `search_relations`, `describe_entity`, `degree`, `find_path`,

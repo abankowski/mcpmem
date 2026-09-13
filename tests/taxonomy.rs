@@ -8,7 +8,8 @@
 //! fails for an unknown type.
 
 use mcpmem::actions::memory::{
-    handle_create_entities, handle_create_relations, handle_upsert_entities,
+    handle_create_entities, handle_create_relations, handle_list_entity_types,
+    handle_list_relation_types, handle_set_type_description, handle_upsert_entities,
 };
 use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::kg::GraphHandle;
@@ -80,6 +81,94 @@ fn unknown_entity_type_gets_suggestions_known_type_gets_none() {
     let entities = body(response);
     assert_eq!(entities[0]["name"], "Bob");
     assert!(entities[0].get("taxonomySuggestions").is_none());
+}
+
+#[test]
+fn type_descriptions_roundtrip_through_set_and_list() {
+    let (_dir, graph) = graph();
+    handle_create_entities(
+        &graph,
+        None,
+        Some(&json!({"entities":[{"name":"Ada","entityType":"person","observations":[]}]})),
+    )
+    .unwrap();
+
+    // A described type that no entity uses yet still appears in the list.
+    let response = handle_set_type_description(
+        &graph,
+        Some(&json!({"name":"project","description":"A planned effort with goals"})),
+    )
+    .unwrap();
+    let stored = body(response);
+    assert_eq!(stored["name"], "project");
+    assert_eq!(stored["desc"], "A planned effort with goals");
+    assert_eq!(stored["kind"], "entityType");
+
+    let listed = body(handle_list_entity_types(&graph).unwrap());
+    assert!(listed.as_array().unwrap().iter().any(|entry| {
+        entry["type"] == "project"
+            && entry["count"].as_u64() == Some(0)
+            && entry["desc"] == "A planned effort with goals"
+    }));
+
+    // An established member type can carry a description too.
+    let response = handle_set_type_description(
+        &graph,
+        Some(&json!({"kind":"entityType","name":"person","description":"A human being"})),
+    )
+    .unwrap();
+    assert_eq!(body(response)["desc"], "A human being");
+    let listed = body(handle_list_entity_types(&graph).unwrap());
+    assert!(listed.as_array().unwrap().iter().any(|entry| {
+        entry["type"] == "person"
+            && entry["count"].as_u64() == Some(1)
+            && entry["desc"] == "A human being"
+    }));
+
+    // Relation kinds take the same path.
+    handle_set_type_description(
+        &graph,
+        Some(&json!({"kind":"relationType","name":"works_at","description":"Employer link"})),
+    )
+    .unwrap();
+    let listed = body(handle_list_relation_types(&graph).unwrap());
+    assert_eq!(
+        listed,
+        json!([{"type":"works_at","count":0,"desc":"Employer link"}]),
+    );
+
+    // An empty description clears the stored one; count-0 types drop out.
+    handle_set_type_description(
+        &graph,
+        Some(&json!({"kind":"relationType","name":"works_at","description":""})),
+    )
+    .unwrap();
+    let listed = body(handle_list_relation_types(&graph).unwrap());
+    assert_eq!(listed, json!([]), "no members and no desc means not listed");
+}
+
+#[test]
+fn type_description_rejects_bad_kind_and_oversized_text() {
+    let (_dir, graph) = graph();
+    let Err(err) = handle_set_type_description(
+        &graph,
+        Some(&json!({"kind":"entity","name":"project","description":"x"})),
+    ) else {
+        panic!("expected an unknown-kind error");
+    };
+    assert!(
+        err.to_string()
+            .contains("'kind' must be one of entityType, relationType")
+    );
+
+    let long: String = "x".repeat(5000);
+    let Err(err) = handle_set_type_description(
+        &graph,
+        Some(&json!({"kind":"entityType","name":"project","description": long})),
+    ) else {
+        panic!("expected an oversized-description error");
+    };
+    assert!(err.to_string().contains("Description too long"));
 }
 
 #[test]

@@ -1193,6 +1193,9 @@ fn handle_tools_call(
         "suggest_taxonomy" => {
             taxonomy::handle_suggest_taxonomy(vs, kg, tool_args).map(HandlerResult::Value)
         }
+        "set_type_description" => {
+            memory::handle_set_type_description(kg, tool_args).map(HandlerResult::Value)
+        }
         "upsert_entities" => {
             memory::handle_upsert_entities(kg, vs, tool_args).map(HandlerResult::Value)
         }

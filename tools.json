@@ -300,6 +300,30 @@
     "annotations": { "readOnlyHint": true }
   },
   {
+    "name": "set_type_description",
+    "description": "Set or clear the description of one taxonomy type — an entity type (`kind: entityType`) or a relation type (`kind: relationType`). The type row is registered when it does not exist yet, so a description can document a type before its first member. Pass an empty string to clear the description. The description is registry metadata: it tags the type's meaning so later callers see what each type is for. Read it back with `list_entity_types` / `list_relation_types`, which return the `desc` field on each described type.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["entityType", "relationType"],
+          "description": "What kind of taxonomy type to describe (optional, default entityType)"
+        },
+        "name": {
+          "type": "string",
+          "description": "The exact type name, e.g. `person` or `works_at`"
+        },
+        "description": {
+          "type": "string",
+          "description": "The description to store; an empty string clears it (required, max 4096 bytes)"
+        }
+      },
+      "required": ["name", "description"]
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
+  },
+  {
     "name": "upsert_entities",
     "description": "Create-or-merge entities idempotently. Entities that do not exist are created; existing exact-name entities are retyped when `entityType` differs; observations are added only when new. Use this to safely re-assert facts without losing new observations.",
     "inputSchema": {
