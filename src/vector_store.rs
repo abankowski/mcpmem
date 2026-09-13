@@ -16,8 +16,8 @@ use crate::ivf::{IvfFlatIndex, Metric as IvfMetric};
 use crate::kg::push_json_str;
 use crate::turboquant::TurboQuantIndex;
 use mcpmem_core::jobs::{
-    AnnGenerationRepository, DistanceMetric, IndexProfileRegistry, StoreState,
-    taxonomy_scan_invalid,
+    AnnGenerationRepository, ChunkKind, DistanceMetric, IndexProfileRegistry, OwnerKind,
+    StoreState, taxonomy_scan_invalid,
 };
 
 /// The taxonomy subject kinds a snapshot can serve. The discriminant matches
@@ -331,11 +331,44 @@ pub struct VectorStore {
     taxonomy_snapshots: RwLock<[Option<Arc<TaxonomySnapshot>>; 3]>,
 }
 
+/// One chunk row of the managed snapshot: the owner, its kind and type, and
+/// the raw vector the profile validated when the snapshot was built.
+struct SnapshotVector {
+    owner_kind: OwnerKind,
+    owner_id: i64,
+    chunk_kind: ChunkKind,
+    chunk_index: i64,
+    type_id: i64,
+    vector: Vec<f32>,
+}
+
+#[cfg(test)]
+struct SeedChunk<'a> {
+    owner_kind: OwnerKind,
+    owner_id: i64,
+    chunk_kind: ChunkKind,
+    chunk_index: i64,
+    type_id: i64,
+    vector: &'a [f32],
+}
+
 struct ManagedSnapshot {
     profile: uuid::Uuid,
     durable_generation: i64,
     metric: DistanceMetric,
-    vectors: Vec<(EntityId, Vec<f32>)>,
+    vectors: Vec<SnapshotVector>,
+}
+
+/// One match of [`VectorStore::search_chunks`], with the frame that makes the
+/// row actionable: whose chunk it is, which chunk, and how far from `query`.
+#[derive(Clone, Copy, Debug)]
+pub struct ChunkHit {
+    pub owner_kind: OwnerKind,
+    pub owner_id: i64,
+    pub chunk_kind: ChunkKind,
+    pub chunk_index: i64,
+    pub type_id: i64,
+    pub dist: f32,
 }
 
 /// One kind's adopted taxonomy snapshot: immutable vectors at one durable
@@ -891,26 +924,118 @@ impl VectorStore {
         Ok(true)
     }
 
-    pub fn search_embeddings(&self, query: &[f32], top_k: usize) -> Result<Vec<(EntityId, f32)>> {
-        if let Some(snapshot) = self.managed_snapshot.read().clone() {
-            if query.len()
-                != snapshot
-                    .vectors
-                    .first()
-                    .map_or(query.len(), |(_, vector)| vector.len())
-            {
-                return Err(MCSError::InvalidParams(
-                    "query dimensions do not match active index profile".into(),
-                ));
-            }
-            let mut matches: Vec<_> = snapshot
+    /// Chunk hits over the managed snapshot, ascending by distance. `fetch_k`
+    /// bounds the chunk rows scanned; `filter_kind` restricts the owner kind
+    /// ("entity" or "relation") and `filter_type` the owner's type name in
+    /// `type_dict`, both exactly. An absent snapshot is an empty result, not
+    /// an error, mirroring the empty legacy store.
+    pub fn search_chunks(
+        &self,
+        query: &[f32],
+        fetch_k: usize,
+        filter_kind: Option<&str>,
+        filter_type: Option<&str>,
+    ) -> Result<Vec<ChunkHit>> {
+        let Some(snapshot) = self.managed_snapshot.read().clone() else {
+            return Ok(Vec::new());
+        };
+        if query.len()
+            != snapshot
                 .vectors
+                .first()
+                .map_or(query.len(), |sv| sv.vector.len())
+        {
+            return Err(MCSError::InvalidParams(
+                "query dimensions do not match active index profile".into(),
+            ));
+        }
+        let mut matches: Vec<ChunkHit> = Vec::new();
+        for sv in &snapshot.vectors {
+            if let Some(kind) = filter_kind && sv.owner_kind.as_str() != kind {
+                continue;
+            }
+            if let Some(ftype) = filter_type {
+                if !self.chunk_type_matches(sv.type_id, ftype)? {
+                    continue;
+                }
+            }
+            matches.push(ChunkHit {
+                owner_kind: sv.owner_kind,
+                owner_id: sv.owner_id,
+                chunk_kind: sv.chunk_kind,
+                chunk_index: sv.chunk_index,
+                type_id: sv.type_id,
+                dist: managed_distance(snapshot.metric, query, &sv.vector),
+            });
+        }
+        matches.sort_by(|a, b| a.dist.total_cmp(&b.dist));
+        matches.truncate(fetch_k.clamp(1, 1000));
+        Ok(matches)
+    }
+
+    /// Whether the type name of `type_id` equals `ftype` in either dict kind.
+    /// A lookup error propagates: silently dropping chunks from a
+    /// type-filtered search would serve a wrong result as if it were correct.
+    fn chunk_type_matches(&self, type_id: i64, ftype: &str) -> Result<bool> {
+        let conn = self.db.lock();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM type_dict WHERE id=?1 AND name=?2)",
+            params![type_id, ftype],
+            |r| r.get::<_, bool>(0),
+        )
+        .map_err(sqlite_err)
+    }
+
+    /// Reduce chunk hits to one `(owner_kind, owner_id, best_dist,
+    /// best_chunk_index)` per owner. Hits arrive distance-ascending, so the
+    /// first hit per owner is its best chunk; `best_chunk_index` is `Some`
+    /// only when that chunk is an observation (identity and relation chunks
+    /// have no index worth returning). The output is sorted ascending by
+    /// distance and truncated to `top_k` owners.
+    pub fn aggregate_owners(
+        &self,
+        hits: &[ChunkHit],
+        top_k: usize,
+    ) -> Vec<(OwnerKind, i64, f32, Option<usize>)> {
+        // A hash map cannot key on the owner pair (`OwnerKind` implements no
+        // `Hash`), and hits arrive distance-ascending, so a single pass that
+        // keeps the first row per owner is the same computation.
+        let mut out: Vec<(OwnerKind, i64, f32, Option<usize>)> = Vec::new();
+        for hit in hits {
+            if out
                 .iter()
-                .map(|(id, vector)| (*id, managed_distance(snapshot.metric, query, vector)))
-                .collect();
-            matches.sort_by(|left, right| left.1.total_cmp(&right.1));
-            matches.truncate(top_k.clamp(1, 100));
-            return Ok(matches);
+                .any(|(kind, id, _, _)| *kind == hit.owner_kind && *id == hit.owner_id)
+            {
+                continue;
+            }
+            let best_chunk: Option<usize> = match hit.chunk_kind {
+                ChunkKind::Observation => Some(hit.chunk_index as usize),
+                _ => None,
+            };
+            out.push((hit.owner_kind, hit.owner_id, hit.dist, best_chunk));
+        }
+        out.sort_by(|a, b| a.2.total_cmp(&b.2));
+        out.truncate(top_k);
+        out
+    }
+
+    /// Entity-only search. Managed profiles route through the chunk snapshot,
+    /// aggregating the best identity-or-observation chunk per entity; a store
+    /// still in legacy compatibility serves the in-memory ANN index. Relation
+    /// hits never surface here.
+    pub fn search_embeddings(&self, query: &[f32], top_k: usize) -> Result<Vec<(EntityId, f32)>> {
+        if self.managed_snapshot.read().as_ref().is_some() {
+            let top_k = top_k.clamp(1, 100);
+            // Over-fetch chunks before aggregating, mirroring search_resolved:
+            // truncating at the chunk level first would let one owner's many
+            // near chunks crowd out the other owners and under-fill top_k.
+            let fetch = top_k.saturating_mul(3);
+            let hits = self.search_chunks(query, fetch, Some("entity"), None)?;
+            return Ok(self
+                .aggregate_owners(&hits, top_k)
+                .iter()
+                .map(|(_, id, dist, _)| (*id, *dist))
+                .collect());
         }
         if self.count.load(Ordering::Relaxed) == 0 {
             return Ok(Vec::new());
@@ -921,6 +1046,73 @@ impl VectorStore {
             .into_iter()
             .map(|(id, dist)| (id as EntityId, dist))
             .collect())
+    }
+
+    /// The identity chunk of one entity by name, from the profile serving
+    /// chunk reads. `None` when the entity is missing or has no identity row.
+    pub fn identity_vector(&self, entity_name: &str) -> Result<Option<Vec<f32>>> {
+        let conn = self.db.lock();
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM entity WHERE name_hash=?1 AND name=?2 AND flags=0",
+                params![crate::kg::name_hash(entity_name), entity_name],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sqlite_err)?;
+        drop(conn);
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        self.owner_identity_vector(OwnerKind::Entity, id)
+    }
+
+    /// The identity chunk of one owner in the profile serving chunk reads.
+    pub fn owner_identity_vector(
+        &self,
+        owner_kind: OwnerKind,
+        owner_id: i64,
+    ) -> Result<Option<Vec<f32>>> {
+        let conn = self.db.lock();
+        let Some(profile) = self.serving_profile_id(&conn)? else {
+            return Ok(None);
+        };
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT blob FROM chunk_vector
+                 WHERE profile_id=?1 AND kind='identity' AND owner_kind=?2 AND owner_id=?3",
+                params![profile.to_string(), owner_kind.as_str(), owner_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sqlite_err)?;
+        let Some(bytes) = blob else {
+            return Ok(None);
+        };
+        if bytes.len() != self.dims as usize * std::mem::size_of::<f32>() {
+            return Ok(None);
+        }
+        let (chunks, _) = bytes.as_chunks::<4>();
+        Ok(Some(chunks.iter().map(|b| f32::from_le_bytes(*b)).collect::<Vec<_>>()))
+    }
+
+    /// The profile id `search_chunks` and the identity helpers read, mirroring
+    /// `reconcile_managed_snapshot`: an active profile serves itself, a
+    /// rebuilding profile serves its candidate, and a failed profile keeps
+    /// serving whatever the snapshot already published. Legacy compatibility
+    /// serves nothing.
+    fn serving_profile_id(&self, conn: &Connection) -> Result<Option<uuid::Uuid>> {
+        let registry = IndexProfileRegistry::new(conn);
+        Ok(match registry.state("default")? {
+            StoreState::LegacyCompat => None,
+            StoreState::Active(profile) => Some(profile),
+            StoreState::Rebuilding { candidate, .. } => Some(candidate),
+            StoreState::Failed { .. } => self
+                .managed_snapshot
+                .read()
+                .as_ref()
+                .map(|snapshot| snapshot.profile),
+        })
     }
 
     /// Rebuild and atomically publish a managed reader from a durable profile
@@ -978,16 +1170,25 @@ impl VectorStore {
         let profile = registry.get(profile_id)?;
         let mut statement = conn
             .prepare(
-                "SELECT entity_id,blob FROM profile_vector WHERE profile_id=?1 ORDER BY entity_id",
+                "SELECT kind, owner_kind, owner_id, chunk_index, type_id, blob
+                 FROM chunk_vector WHERE profile_id=?1 ORDER BY owner_kind, owner_id, chunk_index",
             )
             .map_err(sqlite_err)?;
         let vectors = statement
             .query_map([profile_id.to_string()], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
             })
             .map_err(sqlite_err)?
             .map(|row| {
-                let (id, blob) = row.map_err(sqlite_err)?;
+                let (kind, owner_kind, owner_id, chunk_index, type_id, blob) =
+                    row.map_err(sqlite_err)?;
                 if blob.len() != profile.dimensions as usize * std::mem::size_of::<f32>() {
                     return Err(MCSError::MemoryError(
                         "managed profile vector has invalid byte length".into(),
@@ -999,7 +1200,25 @@ impl VectorStore {
                     .map(|bytes| f32::from_le_bytes(*bytes))
                     .collect::<Vec<_>>();
                 profile.validate_vector(&vector)?;
-                Ok((id, vector))
+                Ok(SnapshotVector {
+                    owner_kind: match owner_kind.as_str() {
+                        "entity" => OwnerKind::Entity,
+                        "relation" => OwnerKind::Relation,
+                        _ => return Err(MCSError::MemoryError(
+                            "invalid chunk owner kind".into()
+                        )),
+                    },
+                    owner_id,
+                    chunk_kind: match kind.as_str() {
+                        "identity" => ChunkKind::Identity,
+                        "observation" => ChunkKind::Observation,
+                        "relation" => ChunkKind::Relation,
+                        _ => return Err(MCSError::MemoryError("invalid chunk kind".into())),
+                    },
+                    chunk_index,
+                    type_id,
+                    vector,
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         if !AnnGenerationRepository::new(&conn).mark_published(profile_id, durable_generation)? {
@@ -1574,6 +1793,43 @@ impl VectorStore {
     pub fn id_to_name(&self) -> &DashMap<EntityId, String> {
         &self.id_to_name
     }
+
+    /// Insert `chunk_vector` rows for the profile serving chunk reads, the
+    /// worker-shaped payload a store test cannot easily produce. Test-only:
+    /// the worker's own path is covered in `tests/indexer_worker.rs`.
+    #[cfg(test)]
+    pub fn seed_test_chunks(&self, chunks: &[SeedChunk]) -> Result<()> {
+        let conn = self.db.lock();
+        let Some(profile) = self.serving_profile_id(&conn)? else {
+            return Err(MCSError::InvalidParams(
+                "no serving profile to seed chunk rows into".into(),
+            ));
+        };
+        for chunk in chunks {
+            let bytes: Vec<u8> = chunk.vector
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            conn.execute(
+                "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    profile.to_string(),
+                    chunk.chunk_kind.as_str(),
+                    chunk.owner_kind.as_str(),
+                    chunk.owner_id,
+                    chunk.chunk_index,
+                    chunk.type_id,
+                    1i64,
+                    bytes,
+                    now_micros(),
+                    "test",
+                ],
+            )
+            .map_err(sqlite_err)?;
+        }
+        Ok(())
+    }
 }
 
 fn write_f32(buf: &mut String, val: f32) {
@@ -1643,6 +1899,24 @@ mod tests {
 
     fn make_embedding(dims: u32, value: f32) -> Vec<f32> {
         vec![value; dims as usize]
+    }
+
+    /// Resolve one entity's id by name in the KG. GraphHandle exposes no ids,
+    /// so the test reads them through the store's own resolver.
+    fn entity_id_of(env: &TestEnv, name: &str) -> i64 {
+        env.vs.entity_id_of(name).unwrap().unwrap()
+    }
+
+    /// Resolve the `type_dict` id for an entity type name (kind 0), the id
+    /// the worker stamps on that entity's chunk rows.
+    fn type_id_of(env: &TestEnv, type_name: &str) -> i64 {
+        let conn = env.vs.db.lock();
+        conn.query_row(
+            "SELECT id FROM type_dict WHERE kind=0 AND name=?1",
+            [type_name],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
     }
 
     /// Register one serving profile in the store. The taxonomy tables carry
@@ -2032,6 +2306,286 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn snapshot_serves_filtered_chunk_hits() {
+        let env = setup(4);
+        // Reconcile reads the durable generation of the serving profile, the
+        // same shape the taxonomy tests use to drive a managed snapshot.
+        let profile = seed_taxonomy_profile(&env, 4);
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO ann_generation(profile_id) VALUES(?1)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        create_test_entity(&env.kg, "ada", "Person");
+        env.kg.add_observations("ada", &["writes rust".into()]).unwrap();
+        create_test_entity(&env.kg, "acme", "Company");
+        // Seed chunk rows directly (worker path is covered in indexer_worker):
+        env.vs
+            .seed_test_chunks(&[
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: entity_id_of(&env, "ada"),
+                    chunk_kind: ChunkKind::Identity,
+                    chunk_index: 0,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[1.0, 0.0, 0.0, 0.0],
+                },
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: entity_id_of(&env, "ada"),
+                    chunk_kind: ChunkKind::Observation,
+                    chunk_index: 1,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[0.9, 0.1, 0.0, 0.0],
+                },
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: entity_id_of(&env, "acme"),
+                    chunk_kind: ChunkKind::Identity,
+                    chunk_index: 0,
+                    type_id: type_id_of(&env, "Company"),
+                    vector: &[0.0, 0.0, 0.0, 1.0],
+                },
+            ])
+            .expect("seed chunk rows into the serving profile");
+        env.vs.reconcile_managed_snapshot().unwrap();
+        let hits = env
+            .vs
+            .search_chunks(&[1.0, 0.0, 0.0, 0.0], 10, Some("entity"), Some("Person"))
+            .unwrap();
+        assert_eq!(hits.len(), 2, "Person chunks only");
+        for hit in &hits {
+            assert_eq!(hit.owner_kind, OwnerKind::Entity);
+        }
+        let owners = env.vs.aggregate_owners(&hits, 10);
+        assert_eq!(owners.len(), 1, "one owner, best chunk wins");
+        let ada = entity_id_of(&env, "ada");
+        assert_eq!(owners[0].1, ada);
+        // Best-chunk discrimination: ada's identity chunk sits at distance 0
+        // and wins, so the aggregated distance is the identity distance and no
+        // observation index is reported.
+        assert_eq!(owners[0].2, 0.0, "the winning chunk is the identity chunk");
+        assert_eq!(owners[0].3, None, "an identity win carries no chunk index");
+        // An owner whose observation is its best chunk must win with that
+        // chunk: bob's observation (distance ~0.0002) beats his identity
+        // (0.08), so the aggregate reports the observation index.
+        create_test_entity(&env.kg, "bob", "Person");
+        let bob = entity_id_of(&env, "bob");
+        env.vs
+            .seed_test_chunks(&[
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: bob,
+                    chunk_kind: ChunkKind::Identity,
+                    chunk_index: 0,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[0.8, 0.2, 0.0, 0.0],
+                },
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: bob,
+                    chunk_kind: ChunkKind::Observation,
+                    chunk_index: 1,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[0.99, 0.01, 0.0, 0.0],
+                },
+            ])
+            .expect("seed bob's chunks");
+        {
+            // The snapshot is immutable per generation: a durable advance is
+            // what the worker's commit produces before the next reconcile.
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "UPDATE ann_generation SET durable_generation=durable_generation+1 WHERE profile_id=?1",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        env.vs.reconcile_managed_snapshot().unwrap();
+        let hits = env
+            .vs
+            .search_chunks(&[1.0, 0.0, 0.0, 0.0], 10, Some("entity"), Some("Person"))
+            .unwrap();
+        let owners = env.vs.aggregate_owners(&hits, 10);
+        assert_eq!(owners.len(), 2, "ada and bob now both match Person");
+        assert_eq!(owners[0].1, ada, "ada's identity chunk is the nearest of all");
+        assert_eq!(owners[0].2, 0.0);
+        assert_eq!(owners[0].3, None);
+        // Bob's best chunk is his observation (0.0002), not his identity
+        // (0.08): the aggregate must report the observation's index.
+        assert_eq!(owners[1].1, bob);
+        assert!(owners[1].2 > 0.0 && owners[1].2 < 0.01, "observation distance, not identity");
+        assert_eq!(owners[1].3, Some(1), "the winning chunk is bob's observation");
+    }
+
+    #[test]
+    fn identity_vector_serves_the_identity_chunk_of_an_entity() {
+        let env = setup(4);
+        let profile = seed_taxonomy_profile(&env, 4);
+        create_test_entity(&env.kg, "ada", "Person");
+        let ada = entity_id_of(&env, "ada");
+        env.vs
+            .seed_test_chunks(&[
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: ada,
+                    chunk_kind: ChunkKind::Identity,
+                    chunk_index: 0,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[1.0, 0.0, 0.0, 0.0],
+                },
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: ada,
+                    chunk_kind: ChunkKind::Observation,
+                    chunk_index: 1,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[0.9, 0.1, 0.0, 0.0],
+                },
+            ])
+            .expect("seed identity and observation chunks");
+        // Publish a managed snapshot: the failed-state arm mirrors reconcile,
+        // which keeps serving whatever snapshot was already published.
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO ann_generation(profile_id) VALUES(?1)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        env.vs.reconcile_managed_snapshot().unwrap();
+        assert_eq!(
+            env.vs.identity_vector("ada").unwrap(),
+            Some(vec![1.0, 0.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            env.vs.owner_identity_vector(OwnerKind::Entity, ada).unwrap(),
+            Some(vec![1.0, 0.0, 0.0, 0.0])
+        );
+        // Missing entities and owners have no identity chunk.
+        assert!(env.vs.identity_vector("nobody").unwrap().is_none());
+        assert!(
+            env.vs.owner_identity_vector(OwnerKind::Entity, ada + 1000).unwrap().is_none()
+        );
+        // While a rebuild runs, the candidate profile serves chunk reads.
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "UPDATE index_profile_registry SET state='Rebuilding',serving_profile=NULL,candidate_profile=?1 WHERE store_key='default'",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            env.vs.owner_identity_vector(OwnerKind::Entity, ada).unwrap(),
+            Some(vec![1.0, 0.0, 0.0, 0.0])
+        );
+        // A failed rebuild keeps serving what the snapshot already published,
+        // exactly like reconcile: identity reads still work even though the
+        // registry no longer points at a serving profile.
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "UPDATE index_profile_registry SET state='Failed',serving_profile=NULL,candidate_profile=?1,failure_reason='boom' WHERE store_key='default'",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            env.vs.owner_identity_vector(OwnerKind::Entity, ada).unwrap(),
+            Some(vec![1.0, 0.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn search_embeddings_over_chunks_aggregates_entities_and_hides_relations() {
+        let env = setup(4);
+        let profile = seed_taxonomy_profile(&env, 4);
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO ann_generation(profile_id) VALUES(?1)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        create_test_entity(&env.kg, "ada", "Person");
+        create_test_entity(&env.kg, "bob", "Person");
+        env.vs
+            .seed_test_chunks(&[
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: entity_id_of(&env, "ada"),
+                    chunk_kind: ChunkKind::Identity,
+                    chunk_index: 0,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[1.0, 0.0, 0.0, 0.0],
+                },
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: entity_id_of(&env, "ada"),
+                    chunk_kind: ChunkKind::Observation,
+                    chunk_index: 1,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[0.9, 0.1, 0.0, 0.0],
+                },
+                SeedChunk {
+                    owner_kind: OwnerKind::Entity,
+                    owner_id: entity_id_of(&env, "bob"),
+                    chunk_kind: ChunkKind::Identity,
+                    chunk_index: 0,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[0.8, 0.2, 0.0, 0.0],
+                },
+                // The nearest possible chunk: it must appear in an unfiltered
+                // scan but never surface through the entity-only shim.
+                SeedChunk {
+                    owner_kind: OwnerKind::Relation,
+                    owner_id: entity_id_of(&env, "ada"),
+                    chunk_kind: ChunkKind::Relation,
+                    chunk_index: 0,
+                    type_id: type_id_of(&env, "Person"),
+                    vector: &[1.0, 0.0, 0.0, 0.0],
+                },
+            ])
+            .expect("seed entity and relation chunks");
+        env.vs.reconcile_managed_snapshot().unwrap();
+        // The unfiltered scan proves the relation chunk is in the snapshot;
+        // only the shim must filter it out.
+        let all = env
+            .vs
+            .search_chunks(&[1.0, 0.0, 0.0, 0.0], 10, None, None)
+            .unwrap();
+        assert!(
+            all.iter().any(|hit| hit.owner_kind == OwnerKind::Relation),
+            "the relation chunk must be present in the data"
+        );
+        // top_k=2 with ada owning two of the three nearest chunks: the shim
+        // must over-fetch before aggregating, or bob would be crowded out.
+        let results = env.vs.search_embeddings(&[1.0, 0.0, 0.0, 0.0], 2).unwrap();
+        assert_eq!(
+            results.len(),
+            2,
+            "one row per entity, no relation owner, chunk-level over-fetch keeps bob"
+        );
+        let ada = entity_id_of(&env, "ada");
+        let bob = entity_id_of(&env, "bob");
+        assert_eq!(results[0].0, ada, "ada's identity chunk is nearest");
+        assert_eq!(results[0].1, 0.0, "the identity chunk distance wins over observations");
+        assert_eq!(results[1].0, bob);
+        for (id, _) in results {
+            assert!(
+                id == ada || id == bob,
+                "no relation owner may surface: {id}"
+            );
+        }
     }
 
     fn renamed_vector_fixture() -> (TestEnv, EntityId) {
