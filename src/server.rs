@@ -728,9 +728,9 @@ idempotent writes and `merge_entities` to collapse duplicates. Tool failures are
 `isError: true` rather than as protocol errors — read the message and retry.";
 
 /// Extra guidance appended to [`SERVER_INSTRUCTIONS`] when vector support is on.
-const VECTOR_INSTRUCTIONS: &str = " Vector search is enabled: use `vector_upsert_embedding` to \
-attach embeddings to entities, `vector_search_entities` for semantic search, and `hybrid_search` to \
-combine text + vector relevance.";
+const VECTOR_INSTRUCTIONS: &str = " Vector search is enabled over the serving chunk index: \
+use `vector_search_entities` or `hybrid_search` with an embedding, `vector_search_by_entity` for \
+'more like this', and `semantic_search` when a server-side embedding service is configured.";
 
 fn handle_initialize(req: &JsonRpcRequest, vectors_enabled: bool) -> Value {
     // Version negotiation: echo a supported requested revision, else offer latest.
@@ -980,17 +980,9 @@ fn handle_tools_call(
             )));
         };
         let result = match tool_name {
-            "vector_upsert_embedding" => {
-                vector_actions::handle_vector_upsert_embedding(vs, kg, tool_args)
-                    .map(HandlerResult::Value)
-            }
             "vector_search_entities" => {
                 vector_actions::handle_vector_search_entities(vs, kg, tool_args)
                     .map(HandlerResult::RawResult)
-            }
-            "vector_delete_embedding" => {
-                vector_actions::handle_vector_delete_embedding(vs, kg, tool_args)
-                    .map(HandlerResult::Value)
             }
             "hybrid_search" => vector_actions::handle_hybrid_search(vs, kg, tool_args)
                 .map(HandlerResult::RawResult),
@@ -1000,23 +992,12 @@ fn handle_tools_call(
             }
             "vector_store_stats" => vector_actions::handle_vector_store_stats(vs, kg, tool_args)
                 .map(HandlerResult::Value),
-            "vector_batch_upsert" => vector_actions::handle_vector_batch_upsert(vs, kg, tool_args)
-                .map(HandlerResult::Value),
-            "vector_get_embedding" => {
-                vector_actions::handle_vector_get_embedding(vs, kg, tool_args)
-                    .map(HandlerResult::Value)
-            }
             "vector_search_by_entity" => {
                 vector_actions::handle_vector_search_by_entity(vs, kg, tool_args)
                     .map(HandlerResult::RawResult)
             }
-            "vector_recommend" => vector_actions::handle_vector_recommend(vs, kg, tool_args)
-                .map(HandlerResult::RawResult),
             "vector_mmr_search" => vector_actions::handle_vector_mmr_search(vs, kg, tool_args)
                 .map(HandlerResult::RawResult),
-            "vector_reindex" => {
-                vector_actions::handle_vector_reindex(vs, kg, tool_args).map(HandlerResult::Value)
-            }
             #[cfg(feature = "indexer")]
             tools::SEMANTIC_SEARCH => vector_actions::handle_semantic_search(vs, kg, tool_args)
                 .map(HandlerResult::RawResult),

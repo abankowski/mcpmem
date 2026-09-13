@@ -418,7 +418,11 @@ fn entity_suggestions(vs: Option<&VectorStore>, query: &str, top_k: usize) -> Ve
 
 /// Without the `indexer` feature there is no entity ANN to query.
 #[cfg(not(feature = "indexer"))]
-fn entity_suggestions(_vs: Option<&VectorStore>, _query: &str, _top_k: usize) -> Vec<Suggestion> {
+const fn entity_suggestions(
+    _vs: Option<&VectorStore>,
+    _query: &str,
+    _top_k: usize,
+) -> Vec<Suggestion> {
     Vec::new()
 }
 
@@ -1009,7 +1013,13 @@ mod tests {
         /// Seeds the relation chunk the kind-2 snapshot reads (Task 5).
         /// `type_id` mirrors the relation row's type; the owner id is the
         /// `taxonomy_relation` id the resolution path resolves by.
-        fn seed_chunk_vector(env: &Env, profile: uuid::Uuid, id: i64, type_id: i64, embedding: &[f32]) {
+        fn seed_chunk_vector(
+            env: &Env,
+            profile: uuid::Uuid,
+            id: i64,
+            type_id: i64,
+            embedding: &[f32],
+        ) {
             let bytes: Vec<u8> = embedding
                 .iter()
                 .flat_map(|value| value.to_le_bytes())
@@ -1323,15 +1333,53 @@ mod tests {
         #[test]
         fn suggest_taxonomy_entity_kind_queries_the_entity_ann() {
             let env = env(4);
-            // The entity ANN is populated before the profile exists, because
-            // a serving profile turns off direct vector writes.
             create_test_entity(&env.kg, "alice", "person");
             create_test_entity(&env.kg, "acme", "organization");
-            env.vs.upsert_embedding("alice", &[1.0; 4], "test").unwrap();
-            env.vs
-                .upsert_embedding("acme", &[1.0, 0.0, 0.0, 0.0], "test")
-                .unwrap();
             let _ = seed_profile(&env, 4, Normalization::None);
+            // Seed identity chunks the way the worker would, then publish the
+            // managed snapshot (the 2.0.0 surface has no client ingestion).
+            let seed_identity = |name: &str, embedding: &[f32]| {
+                let conn = env.vs.db.lock();
+                let owner_id: i64 = conn
+                    .query_row(
+                        "SELECT e.id FROM entity e WHERE e.name=?1 AND e.flags=0",
+                        [name],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap();
+                let type_id: i64 = conn
+                    .query_row(
+                        "SELECT t.id FROM entity e JOIN type_dict t ON t.id=e.type_id WHERE e.id=?1",
+                        [owner_id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap();
+                let bytes: Vec<u8> = embedding
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect();
+                conn.execute(
+                    "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source) VALUES(?1,'identity','entity',?2,0,?3,1,?4,1,'test')",
+                    params![
+                        env.vs.serving_profile().unwrap().unwrap().id.to_string(),
+                        owner_id,
+                        type_id,
+                        bytes
+                    ],
+                )
+                .unwrap();
+            };
+            seed_identity("alice", &[1.0; 4]);
+            seed_identity("acme", &[1.0, 0.0, 0.0, 0.0]);
+            {
+                let conn = env.vs.db.lock();
+                conn.execute(
+                    "INSERT INTO ann_generation(profile_id) VALUES(?1)",
+                    [env.vs.serving_profile().unwrap().unwrap().id.to_string()],
+                )
+                .unwrap();
+            }
+            env.vs.reconcile_managed_snapshot().unwrap();
 
             // The provider returns all-ones, so alice sits at distance 0
             // (score 1.0) and acme, which points elsewhere than the query,

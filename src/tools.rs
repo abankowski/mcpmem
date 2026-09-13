@@ -211,18 +211,12 @@ pub const SEMANTIC_SEARCH: &str = "semantic_search";
 
 /// Names of the vector-search tools (manifest: `vector_tools.json`).
 pub const VECTOR_TOOL_NAMES: &[&str] = &[
-    "vector_upsert_embedding",
     "vector_search_entities",
-    "vector_delete_embedding",
     "hybrid_search",
     "vector_refresh_graph_cache",
     "vector_store_stats",
-    "vector_batch_upsert",
-    "vector_get_embedding",
     "vector_search_by_entity",
-    "vector_recommend",
     "vector_mmr_search",
-    "vector_reindex",
     // The name stays in this list on every build, feature or no feature.
     // [`category_of`] is the scope gate, and a name it does not know is an
     // unknown tool rather than a refused one. The feature gate belongs in
