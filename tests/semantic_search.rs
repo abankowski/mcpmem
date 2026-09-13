@@ -694,7 +694,7 @@ fn identity_and_stats_follow_the_serving_profile_dimension() {
                 |r| r.get::<_, i64>(0),
             )
             .unwrap();
-        let blob: Vec<u8> = vec![value; 4]
+        let blob: Vec<u8> = [value; 4]
             .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
