@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mcpmem_core::jobs::{
-    IndexJobRepository, IndexOperation, IndexProfile, IndexProfileRegistry, Normalization,
-    TaxonomyJobRepository,
+    ChunkKind, IndexJobRepository, IndexOperation, IndexProfile, IndexProfileRegistry,
+    Normalization, OwnerKind, TaxonomyJobRepository,
 };
 use rusqlite::{Connection, OptionalExtension};
 use thiserror::Error;
@@ -295,29 +295,36 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
         }
         let outcome: Result<bool, String> = match job.operation {
             IndexOperation::Delete => jobs
-                .commit_vector(&job, current_us(), None, "indexer")
+                .commit_chunks(&job, current_us(), None, "indexer")
                 .map_err(|error| error.to_string()),
             IndexOperation::Upsert => {
-                let document = canonical_document(&conn, job.entity_id, job.entity_revision)?;
-                match document {
-                    Some(document) => self.embed_and_commit(
+                let chunks: Option<Vec<(ChunkKind, String)>> = match job.owner_kind {
+                    OwnerKind::Entity => canonical_document(&conn, job.owner_id, job.owner_revision)?
+                        .map(|document| document.chunks()),
+                    OwnerKind::Relation => {
+                        relation_chunk_text(&conn, job.owner_id, job.owner_revision)?
+                            .map(|text| vec![(ChunkKind::Relation, text)])
+                    }
+                };
+                match chunks {
+                    Some(chunks) => self.embed_chunks_and_commit(
                         &profile,
-                        document,
+                        chunks,
                         || {
                             jobs.renew(&job, current_us(), self.lease_us)
                                 .map_err(|error| error.to_string())
                         },
-                        |vector| {
-                            jobs.commit_vector(&job, current_us(), Some(&vector), "indexer")
+                        |vectors| {
+                            jobs.commit_chunks(&job, current_us(), Some(&vectors), "indexer")
                                 .map_err(|error| error.to_string())
                         },
                     ),
-                    // The entity vanished or was superseded before this claim
-                    // ran. Retrying the same text can never succeed, so it must
-                    // not loop as a leased job forever: route it through the
-                    // retry path, which bounds it and dead-letters.
+                    // The owner vanished or was superseded before this claim
+                    // ran. Retrying the same text can never succeed, so it
+                    // must not loop as a leased job forever: route it through
+                    // the retry path, which bounds it and dead-letters.
                     None => Err(
-                        "entity vanished or was superseded before embedding; nothing to index"
+                        "owner vanished or was superseded before embedding; nothing to index"
                             .into(),
                     ),
                 }
@@ -334,7 +341,8 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                     if dead {
                         report.dead = 1;
                         tracing::error!(
-                            entity_id = job.entity_id,
+                            owner_kind = job.owner_kind.as_str(),
+                            owner_id = job.owner_id,
                             profile_id = %job.profile_id,
                             attempts = job.attempts,
                             %error,
@@ -343,7 +351,8 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                     } else {
                         report.retried = 1;
                         tracing::warn!(
-                            entity_id = job.entity_id,
+                            owner_kind = job.owner_kind.as_str(),
+                            owner_id = job.owner_id,
                             profile_id = %job.profile_id,
                             attempts = job.attempts,
                             %error,
@@ -354,6 +363,63 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
             }
         }
         Ok(report)
+    }
+
+    /// Embed one owner's chunk texts, then commit them under one lease
+    /// renewal, mirroring the pre-embed and pre-commit renewals of the
+    /// document flow. Both owner kinds share this code so the lease and
+    /// normalization gates cannot diverge.
+    fn embed_chunks_and_commit<Renew, Commit>(
+        &self,
+        profile: &IndexProfile,
+        chunks: Vec<(ChunkKind, String)>,
+        mut renew: Renew,
+        commit: Commit,
+    ) -> Result<bool, String>
+    where
+        Renew: FnMut() -> Result<bool, String>,
+        Commit: FnOnce(&[&(ChunkKind, &[f32])]) -> Result<bool, String>,
+    {
+        let texts: Vec<String> = chunks.iter().map(|(_, text)| text.clone()).collect();
+        let mut vectors = self
+            .provider
+            .embed_texts(profile, &texts)
+            .map_err(|error| error.to_string())?;
+        if vectors.len() != texts.len() {
+            return Err("provider returned wrong embedding count".into());
+        }
+        // The profile's L2 contract is a promise the worker
+        // makes before storing: OpenAI returns vectors that
+        // are only *roughly* unit-norm (measured off by up
+        // to 5e-4), and the stored-vector validation demands
+        // |norm-1| < 1e-4. Normalize here so a provider's
+        // approximation cannot fail the gate. A zero vector
+        // cannot be normalized and will be rejected by the
+        // stored-vector validation.
+        if profile.normalization == Normalization::L2 {
+            for vector in &mut vectors {
+                let norm: f64 = vector
+                    .iter()
+                    .map(|value| f64::from(*value).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                if norm > 0.0 {
+                    for value in vector {
+                        *value = (f64::from(*value) / norm) as f32;
+                    }
+                }
+            }
+        }
+        if !renew()? {
+            return Ok(false);
+        }
+        let owned: Vec<(ChunkKind, &[f32])> = chunks
+            .iter()
+            .map(|(kind, _)| *kind)
+            .zip(vectors.iter().map(Vec::as_slice))
+            .collect();
+        let refs: Vec<&(ChunkKind, &[f32])> = owned.iter().collect();
+        commit(&refs)
     }
 
     /// Embed one document, then commit its vector under one lease renewal,
@@ -523,6 +589,44 @@ fn canonical_document(
             observations: serde_json::from_str(&observations).unwrap_or_default(),
         })
     }))
+}
+
+/// Test-only wrapper around the private [`canonical_document`]. Public so
+/// integration tests can exercise the document fence without reaching into
+/// the crate internals; callers outside the test suite have no reason to use
+/// it.
+#[doc(hidden)]
+pub fn canonical_document_for_tests(
+    conn: &Connection,
+    entity_id: i64,
+    expected_revision: i64,
+) -> Result<Option<CanonicalDocument>, rusqlite::Error> {
+    canonical_document(conn, entity_id, expected_revision)
+}
+
+/// The text of one relation chunk: the formatted triple. Fenced on the
+/// taxonomy_relation mirror revision and the liveness of both endpoints.
+pub fn relation_chunk_text(
+    conn: &Connection,
+    mirror_id: i64,
+    expected_revision: i64,
+) -> Result<Option<String>, rusqlite::Error> {
+    let row: Option<(String, String, String, i64)> = conn.query_row(
+        "SELECT f.name, d.name, t.name, m.revision FROM taxonomy_relation m
+         JOIN entity f ON f.id=m.from_id
+         JOIN entity t ON t.id=m.to_id
+         JOIN type_dict d ON d.id=m.type_id
+         WHERE m.id=?1 AND m.deleted=0 AND f.flags=0 AND t.flags=0",
+        [mirror_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+    .optional()?;
+    Ok(match row {
+        Some((from_name, rtype, to_name, revision)) if revision == expected_revision => {
+            Some(format!("{from_name}\n{rtype}\n{to_name}"))
+        }
+        _ => None,
+    })
 }
 
 /// Build the canonical document for a taxonomy subject, in the fencing style

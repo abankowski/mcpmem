@@ -592,7 +592,7 @@ fn tombstone_relation_mirror(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(sql_error)?;
-    enqueue_taxonomy_jobs(conn, 2, id, revision, crate::jobs::IndexOperation::Delete)
+    crate::jobs::enqueue_chunk_change(conn, crate::jobs::OwnerKind::Relation, id, revision, true)
 }
 
 fn insert_observations(
@@ -666,7 +666,7 @@ fn create_relation(conn: &Connection, relation: &Relation) -> Result<bool> {
     let kind = type_id(conn, &relation.relation_type, 1)?;
     let changed = conn.execute("INSERT INTO relation(from_id,to_id,type_id,created_us) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM relation WHERE from_id=?1 AND to_id=?2 AND type_id=?3)", params![from.entity_id,to.entity_id,kind,now_us()]).map_err(sql_error)?;
     if changed > 0 {
-        // Mirror the triple for the taxonomy worker. The mirror id is its own
+        // Mirror the triple for the chunk worker. The mirror id is its own
         // autoincrement, never the source rowid: SQLite reuses a freed rowid
         // for a later row, and an explicit-id insert would collide with the
         // tombstoned mirror of a different triple. A recreated triple keeps
@@ -680,7 +680,7 @@ fn create_relation(conn: &Connection, relation: &Relation) -> Result<bool> {
                 |row| row.get(0),
             )
             .map_err(sql_error)?;
-        enqueue_taxonomy_jobs(conn, 2, mirror_id, 1, crate::jobs::IndexOperation::Upsert)?;
+        crate::jobs::enqueue_chunk_change(conn, crate::jobs::OwnerKind::Relation, mirror_id, 1, false)?;
     }
     Ok(changed > 0)
 }
@@ -1128,6 +1128,30 @@ mod tests {
         }
     }
 
+    /// (owner_id, owner_revision, operation, state) of the chunk jobs for
+    /// relation owners. The relation funnels enqueue these instead of the
+    /// retired taxonomy kind-2 rows.
+    fn relation_chunk_jobs(kg: &GraphHandle) -> Vec<(i64, i64, String, String)> {
+        let conn = kg.writer.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT owner_id, owner_revision, operation, state FROM chunk_index_job
+                 WHERE owner_kind='relation' ORDER BY owner_id",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    }
+
     /// (subject_kind, subject_id, subject_revision, operation, state)
     fn taxonomy_jobs(kg: &GraphHandle) -> Vec<(i64, i64, i64, String, String)> {
         let conn = kg.writer.lock();
@@ -1231,12 +1255,11 @@ mod tests {
         let (mirror_id, mirror_revision, deleted) = mirror_row(&kg, "ada", "bob", "knows");
         assert_eq!((mirror_revision, deleted), (1, 0), "fresh mirror expected");
 
-        let jobs = taxonomy_jobs(&kg);
-        let kind2: Vec<_> = jobs.iter().filter(|job| job.0 == 2).collect();
-        assert_eq!(kind2.len(), 1, "one kind-2 job expected");
+        let jobs = relation_chunk_jobs(&kg);
+        assert_eq!(jobs.len(), 1, "the mirror enqueues one relation chunk job");
         assert_eq!(
-            (kind2[0].1, kind2[0].2, kind2[0].3.as_str()),
-            (mirror_id, 1, "upsert")
+            (jobs[0].0, jobs[0].1, jobs[0].2.as_str(), jobs[0].3.as_str()),
+            (mirror_id, 1, "upsert", "pending")
         );
         let (count, revision) = type_row(&kg, 1, "knows");
         assert_eq!((count, revision), (1, 1));
@@ -1267,11 +1290,10 @@ mod tests {
             .unwrap();
         drop(conn);
         assert_eq!(remaining, 0, "physical triple deleted");
-        let jobs = taxonomy_jobs(&kg);
-        let kind2: Vec<_> = jobs.iter().filter(|job| job.0 == 2).collect();
-        assert_eq!(kind2.len(), 1);
+        let jobs = relation_chunk_jobs(&kg);
+        assert_eq!(jobs.len(), 1);
         assert_eq!(
-            (kind2[0].1, kind2[0].2, kind2[0].3.as_str()),
+            (jobs[0].0, jobs[0].1, jobs[0].2.as_str()),
             (mirror_id, 2, "delete")
         );
     }
@@ -1301,11 +1323,10 @@ mod tests {
         let (second_id, revision, deleted) = mirror_row(&kg, "ada", "carol", "knows");
         assert_ne!(first_id, second_id);
         assert_eq!((revision, deleted), (1, 0));
-        let jobs = taxonomy_jobs(&kg);
-        let kind2: Vec<_> = jobs.iter().filter(|job| job.0 == 2).collect();
-        assert_eq!(kind2.len(), 2);
+        let jobs = relation_chunk_jobs(&kg);
+        assert_eq!(jobs.len(), 2);
         assert_eq!(
-            (kind2[1].1, kind2[1].2, kind2[1].3.as_str()),
+            (jobs[1].0, jobs[1].1, jobs[1].2.as_str()),
             (second_id, 1, "upsert")
         );
     }
@@ -1348,10 +1369,9 @@ mod tests {
             .unwrap();
         drop(conn);
         assert_eq!((revision, deleted), (2, 1), "cascade tombstone expected");
-        let jobs = taxonomy_jobs(&kg);
-        let kind2: Vec<_> = jobs.iter().filter(|job| job.0 == 2).collect();
-        assert_eq!(kind2.len(), 1);
-        assert_eq!((kind2[0].2, kind2[0].3.as_str()), (2, "delete"));
+        let jobs = relation_chunk_jobs(&kg);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!((jobs[0].1, jobs[0].2.as_str()), (2, "delete"));
         let (count, revision) = type_row(&kg, 0, "person");
         // Bump once at entity creation, once at relation creation (the
         // relation delta makes an entity change for each endpoint), once at

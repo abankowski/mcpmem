@@ -21,18 +21,37 @@ pub(crate) fn serving_profile_ids(conn: &Connection) -> Result<Vec<Uuid>> {
     profiles.iter().map(|profile| parse_uuid(profile)).collect()
 }
 
-pub(crate) fn enqueue_change(
+/// Queue one owner for every serving profile, keyed on `chunk_index_job`
+/// `(profile_id, owner_kind, owner_id)`. A nil profile is an explicitly held
+/// job, never a claimable provider profile; managed serving and candidate
+/// profiles receive pending rows. One row per owner and profile.
+pub(crate) fn enqueue_chunk_change(
     conn: &Connection,
-    entity_id: i64,
+    owner_kind: OwnerKind,
+    owner_id: i64,
     revision: i64,
     deleted: bool,
 ) -> Result<()> {
-    // A nil profile is an explicitly held LegacyCompat job, never a claimable
-    // provider profile. Managed serving and candidate profiles receive updates.
     let profiles = serving_profile_ids(conn)?;
     for profile in profiles {
         let state = if profile.is_nil() { "held" } else { "pending" };
-        conn.execute("INSERT INTO index_job(entity_id,profile_id,entity_revision,operation,state) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(entity_id,profile_id) DO UPDATE SET entity_revision=excluded.entity_revision,operation=excluded.operation,state=excluded.state,lease_token=NULL,lease_epoch=lease_epoch+1,lease_until_us=0,attempts=0,next_attempt_us=0,last_error=NULL", params![entity_id,profile.to_string(),revision,if deleted {"delete"} else {"upsert"},state]).map_err(sql_error)?;
+        conn.execute(
+            "INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation,state)
+             VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(profile_id,owner_kind,owner_id) DO UPDATE SET
+             owner_revision=excluded.owner_revision,operation=excluded.operation,state=excluded.state,
+             lease_token=NULL,lease_epoch=lease_epoch+1,lease_until_us=0,attempts=0,
+             next_attempt_us=0,last_error=NULL",
+            params![
+                profile.to_string(),
+                owner_kind.as_str(),
+                owner_id,
+                revision,
+                if deleted { "delete" } else { "upsert" },
+                state
+            ],
+        )
+        .map_err(sql_error)?;
         conn.execute(
             "UPDATE ann_generation SET full_scan_generation=NULL WHERE profile_id=?1",
             [profile.to_string()],
@@ -40,6 +59,18 @@ pub(crate) fn enqueue_change(
         .map_err(sql_error)?;
     }
     Ok(())
+}
+
+/// The entity path of [`enqueue_chunk_change`], kept as the narrow wrapper so
+/// the change-event hook in `events.rs` keeps its entity-only signature. The
+/// legacy `index_job` table stops receiving rows here.
+pub(crate) fn enqueue_change(
+    conn: &Connection,
+    entity_id: i64,
+    revision: i64,
+    deleted: bool,
+) -> Result<()> {
+    enqueue_chunk_change(conn, OwnerKind::Entity, entity_id, revision, deleted)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -270,7 +301,7 @@ impl<'a> IndexProfileRegistry<'a> {
             )
             .map_err(sql_error)?;
         self.conn.execute("INSERT INTO entity_revision SELECT id,1,0 FROM entity WHERE flags=0 ON CONFLICT(entity_id) DO NOTHING", []).map_err(sql_error)?;
-        self.conn.execute("INSERT INTO index_job(entity_id,profile_id,entity_revision,operation) SELECT e.id,?1,r.revision,'upsert' FROM entity e JOIN entity_revision r ON r.entity_id=e.id WHERE e.flags=0", [profile.id.to_string()]).map_err(sql_error)?;
+        self.conn.execute("INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation) SELECT ?1,'entity',e.id,r.revision,'upsert' FROM entity e JOIN entity_revision r ON r.entity_id=e.id WHERE e.flags=0", [profile.id.to_string()]).map_err(sql_error)?;
         tx.commit()
     }
 
@@ -282,7 +313,7 @@ impl<'a> IndexProfileRegistry<'a> {
                 "candidate is not rebuilding".into(),
             ));
         }
-        self.conn.execute("UPDATE index_job SET state='held',lease_token=NULL,lease_epoch=lease_epoch+1 WHERE profile_id=?1 AND state!='done'", [candidate.to_string()]).map_err(sql_error)?;
+        self.conn.execute("UPDATE chunk_index_job SET state='held',lease_token=NULL,lease_epoch=lease_epoch+1 WHERE profile_id=?1 AND state!='done'", [candidate.to_string()]).map_err(sql_error)?;
         tx.commit()
     }
 
@@ -318,7 +349,7 @@ impl<'a> IndexProfileRegistry<'a> {
             )
             .map_err(sql_error)?;
         self.conn.execute("UPDATE index_profile_registry SET state='Active',serving_profile=?2,candidate_profile=NULL,failure_reason=NULL WHERE store_key=?1", params![profile.store_key,candidate.to_string()]).map_err(sql_error)?;
-        self.conn.execute("UPDATE index_job SET state='held',lease_token=NULL,lease_epoch=lease_epoch+1 WHERE profile_id!=?1 AND state!='done'", [candidate.to_string()]).map_err(sql_error)?;
+        self.conn.execute("UPDATE chunk_index_job SET state='held',lease_token=NULL,lease_epoch=lease_epoch+1 WHERE profile_id!=?1 AND state!='done'", [candidate.to_string()]).map_err(sql_error)?;
         tx.commit()
     }
 }
@@ -331,10 +362,17 @@ pub enum IndexOperation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IndexJob {
+    /// Kept for the legacy `index_job` path until Task 7 removes it. The
+    /// chunk world keys on `owner_kind`/`owner_id`; for an entity job this
+    /// mirrors `owner_id`, for a relation job it has no meaning.
     pub entity_id: i64,
+    /// Legacy counterpart of `owner_revision`, kept for the same reason.
     pub entity_revision: i64,
     pub profile_id: Uuid,
     pub operation: IndexOperation,
+    pub owner_kind: OwnerKind,
+    pub owner_id: i64,
+    pub owner_revision: i64,
     pub lease: Lease,
     pub attempts: i64,
 }
@@ -351,11 +389,11 @@ impl<'a> IndexJobRepository<'a> {
     pub fn claim_due(&self, now: i64, duration_us: i64) -> Result<Option<IndexJob>> {
         let until = lease_until(now, duration_us)?;
         let tx = TxGuard::begin(self.conn)?;
-        let row: Option<(i64,String,i64,String,i64,i64)> = self.conn.query_row("SELECT entity_id,profile_id,entity_revision,operation,lease_epoch,attempts FROM index_job j WHERE ((state='pending' AND next_attempt_us<=?1) OR (state='leased' AND lease_until_us<=?1)) AND EXISTS(SELECT 1 FROM index_profile_registry r WHERE r.serving_profile=j.profile_id OR (r.state='Rebuilding' AND r.candidate_profile=j.profile_id)) ORDER BY next_attempt_us,entity_id,profile_id LIMIT 1", [now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(sql_error)?;
-        let job = row.map(|(entity_id,profile,revision,operation,epoch,attempts)| -> Result<IndexJob> {
+        let row: Option<(String,i64,String,i64,String,i64,i64)> = self.conn.query_row("SELECT owner_kind,owner_id,profile_id,owner_revision,operation,lease_epoch,attempts FROM chunk_index_job j WHERE ((state='pending' AND next_attempt_us<=?1) OR (state='leased' AND lease_until_us<=?1)) AND EXISTS(SELECT 1 FROM index_profile_registry r WHERE r.serving_profile=j.profile_id OR (r.state='Rebuilding' AND r.candidate_profile=j.profile_id)) ORDER BY next_attempt_us,owner_kind,owner_id,profile_id LIMIT 1", [now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
+        let job = row.map(|(owner_kind,owner_id,profile,revision,operation,epoch,attempts)| -> Result<IndexJob> {
             let token = Uuid::new_v4();
-            self.conn.execute("UPDATE index_job SET state='leased',lease_token=?3,lease_epoch=lease_epoch+1,lease_until_us=?4,attempts=attempts+1 WHERE entity_id=?1 AND profile_id=?2", params![entity_id,profile,token.to_string(),until]).map_err(sql_error)?;
-            Ok(IndexJob { entity_id,entity_revision:revision,profile_id:parse_uuid(&profile)?,operation:match operation.as_str() { "upsert"=>IndexOperation::Upsert,"delete"=>IndexOperation::Delete,_=>return Err(MCSError::MemoryError("invalid index operation".into())) },lease:Lease {token,epoch:epoch+1,until_us:until},attempts:attempts+1 })
+            self.conn.execute("UPDATE chunk_index_job SET state='leased',lease_token=?4,lease_epoch=lease_epoch+1,lease_until_us=?5,attempts=attempts+1 WHERE profile_id=?1 AND owner_kind=?2 AND owner_id=?3", params![profile,owner_kind,owner_id,token.to_string(),until]).map_err(sql_error)?;
+            Ok(IndexJob { entity_id:owner_id,entity_revision:revision,profile_id:parse_uuid(&profile)?,operation:match operation.as_str() { "upsert"=>IndexOperation::Upsert,"delete"=>IndexOperation::Delete,_=>return Err(MCSError::MemoryError("invalid index operation".into())) },owner_kind:match owner_kind.as_str() { "entity"=>OwnerKind::Entity,"relation"=>OwnerKind::Relation,_=>return Err(MCSError::MemoryError("invalid owner kind".into())) },owner_id,owner_revision:revision,lease:Lease {token,epoch:epoch+1,until_us:until},attempts:attempts+1 })
         }).transpose()?;
         tx.commit()?;
         Ok(job)
@@ -364,7 +402,7 @@ impl<'a> IndexJobRepository<'a> {
     pub fn renew(&self, job: &IndexJob, now: i64, duration_us: i64) -> Result<bool> {
         let until = lease_until(now, duration_us)?;
         let tx = TxGuard::begin(self.conn)?;
-        let changed = self.conn.execute("UPDATE index_job SET lease_until_us=?6 WHERE entity_id=?1 AND profile_id=?2 AND lease_token=?3 AND lease_epoch=?4 AND state='leased' AND lease_until_us>?5", params![job.entity_id,job.profile_id.to_string(),job.lease.token.to_string(),job.lease.epoch,now,until]).map_err(sql_error)?;
+        let changed = self.conn.execute("UPDATE chunk_index_job SET lease_until_us=?7 WHERE profile_id=?1 AND owner_kind=?2 AND owner_id=?3 AND lease_token=?4 AND lease_epoch=?5 AND state='leased' AND lease_until_us>?6", params![job.profile_id.to_string(),job.owner_kind.as_str(),job.owner_id,job.lease.token.to_string(),job.lease.epoch,now,until]).map_err(sql_error)?;
         tx.commit()?;
         Ok(changed == 1)
     }
@@ -378,16 +416,16 @@ impl<'a> IndexJobRepository<'a> {
         dead: bool,
     ) -> Result<bool> {
         let tx = TxGuard::begin(self.conn)?;
-        let changed = self.conn.execute("UPDATE index_job SET state=?6,next_attempt_us=?7,last_error=?8 WHERE entity_id=?1 AND profile_id=?2 AND lease_token=?3 AND lease_epoch=?4 AND state='leased' AND lease_until_us>?5", params![job.entity_id,job.profile_id.to_string(),job.lease.token.to_string(),job.lease.epoch,now,if dead {"dead"} else {"pending"},next_attempt_us,error.chars().take(2048).collect::<String>()]).map_err(sql_error)?;
-        // A dead-lettered entity must not keep a stale vector in the
+        let changed = self.conn.execute("UPDATE chunk_index_job SET state=?7,next_attempt_us=?8,last_error=?9 WHERE profile_id=?1 AND owner_kind=?2 AND owner_id=?3 AND lease_token=?4 AND lease_epoch=?5 AND state='leased' AND lease_until_us>?6", params![job.profile_id.to_string(),job.owner_kind.as_str(),job.owner_id,job.lease.token.to_string(),job.lease.epoch,now,if dead {"dead"} else {"pending"},next_attempt_us,error.chars().take(2048).collect::<String>()]).map_err(sql_error)?;
+        // A dead-lettered owner must not keep a stale chunk set in the
         // candidate: the verified full-scan gate would otherwise publish a
         // snapshot serving an outdated embedding. Its next write re-enqueues
-        // the entity from scratch.
+        // the owner from scratch.
         if changed == 1 && dead {
             self.conn
                 .execute(
-                    "DELETE FROM profile_vector WHERE profile_id=?1 AND entity_id=?2",
-                    params![job.profile_id.to_string(), job.entity_id],
+                    "DELETE FROM chunk_vector WHERE profile_id=?1 AND owner_kind=?2 AND owner_id=?3",
+                    params![job.profile_id.to_string(), job.owner_kind.as_str(), job.owner_id],
                 )
                 .map_err(sql_error)?;
         }
@@ -460,6 +498,195 @@ impl<'a> IndexJobRepository<'a> {
         tx.commit()?;
         Ok(true)
     }
+
+    /// Fenced chunk commit: delete the owner's old chunk rows, insert the new
+    /// ones, and advance the durable generation in one transaction. A delete
+    /// operation passes `None` as the chunks and removes the rows. Every
+    /// vector is validated against the profile before it is stored, so a
+    /// wrong dimension, a NaN, or a non-unit L2 vector fails the job instead
+    /// of poisoning the snapshot.
+    pub fn commit_chunks(
+        &self,
+        job: &IndexJob,
+        now_us: i64,
+        chunks: Option<&[&(ChunkKind, &[f32])]>,
+        source: &str,
+    ) -> Result<bool> {
+        let tx = TxGuard::begin(self.conn)?;
+        let current = self.conn.query_row(
+            "SELECT owner_revision, state, lease_token, lease_epoch, lease_until_us
+             FROM chunk_index_job WHERE profile_id=?1 AND owner_kind=?2 AND owner_id=?3",
+            params![job.profile_id.to_string(), job.owner_kind.as_str(), job.owner_id],
+            |r| Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            )),
+        ).optional().map_err(sql_error)?;
+        let Some((revision, state, token, epoch, until)) = current else {
+            return Ok(false);
+        };
+        if revision != job.owner_revision
+            || state != "leased"
+            || token != Some(job.lease.token.to_string())
+            || epoch != job.lease.epoch
+            || until <= now_us
+        {
+            return Ok(false);
+        }
+        // The fence compares the job revision against the LIVE owner revision
+        // (entity_revision or taxonomy_relation), so a stale job never lands.
+        let Some((live_revision, live_deleted)) =
+            self.owner_revision(self.conn, job.owner_kind, job.owner_id)?
+        else {
+            return Ok(false);
+        };
+        if live_revision != job.owner_revision {
+            return Ok(false);
+        }
+        match job.operation {
+            IndexOperation::Delete => {
+                if !live_deleted {
+                    return Ok(false);
+                }
+            }
+            IndexOperation::Upsert => {
+                if live_deleted {
+                    return Ok(false);
+                }
+            }
+        }
+        // The payload must match the operation, before any row is touched:
+        // an upsert without chunks would otherwise wipe the owner's rows and
+        // a delete with chunks would write for a tombstoned owner.
+        match (job.operation, chunks.is_some()) {
+            (IndexOperation::Upsert, true) | (IndexOperation::Delete, false) => {}
+            _ => {
+                return Err(MCSError::InvalidParams(
+                    "chunk payload does not match job operation".into(),
+                ));
+            }
+        }
+        self.conn
+            .execute(
+                "DELETE FROM chunk_vector WHERE profile_id=?1 AND owner_kind=?2 AND owner_id=?3",
+                params![
+                    job.profile_id.to_string(),
+                    job.owner_kind.as_str(),
+                    job.owner_id
+                ],
+            )
+            .map_err(sql_error)?;
+        if let Some(chunk_list) = chunks {
+            let profile = IndexProfileRegistry::new(self.conn).get(job.profile_id)?;
+            let type_id = owner_type_id(self.conn, job.owner_kind, job.owner_id)?;
+            for (idx, (chunk_kind, vector)) in chunk_list.iter().enumerate() {
+                profile.validate_vector(vector)?;
+                self.conn
+                    .execute(
+                        "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                        params![
+                            job.profile_id.to_string(),
+                            chunk_kind.as_str(),
+                            job.owner_kind.as_str(),
+                            job.owner_id,
+                            idx as i64,
+                            type_id,
+                            job.owner_revision,
+                            vector.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>(),
+                            now_us,
+                            source,
+                        ],
+                    )
+                    .map_err(sql_error)?;
+            }
+        }
+        self.conn
+            .execute(
+                "UPDATE chunk_index_job SET state='done' WHERE profile_id=?1 AND owner_kind=?2 AND owner_id=?3",
+                params![
+                    job.profile_id.to_string(),
+                    job.owner_kind.as_str(),
+                    job.owner_id
+                ],
+            )
+            .map_err(sql_error)?;
+        self.conn
+            .execute(
+                "UPDATE ann_generation SET durable_generation=durable_generation+1,full_scan_generation=NULL WHERE profile_id=?1",
+                [job.profile_id.to_string()],
+            )
+            .map_err(sql_error)?;
+        if job.owner_kind == OwnerKind::Relation {
+            // Relation commits also advance the taxonomy kind-2 generation so
+            // the derived snapshot refreshes (Task 5 reads it). The first
+            // relation commit for a profile creates the kind's generation
+            // marker, mirroring what enqueue_taxonomy did for kinds 0/1; the
+            // old kind-2 funnel that created the row is retired.
+            self.conn
+                .execute(
+                    "INSERT INTO taxonomy_ann_generation(profile_id,subject_kind) VALUES(?1,2)
+                     ON CONFLICT(profile_id,subject_kind) DO NOTHING",
+                    [job.profile_id.to_string()],
+                )
+                .map_err(sql_error)?;
+            self.conn
+                .execute(
+                    "UPDATE taxonomy_ann_generation SET durable_generation=durable_generation+1,full_scan_generation=NULL
+                     WHERE profile_id=?1 AND subject_kind=2",
+                    [job.profile_id.to_string()],
+                )
+                .map_err(sql_error)?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn owner_revision(
+        &self,
+        conn: &Connection,
+        owner_kind: OwnerKind,
+        owner_id: i64,
+    ) -> Result<Option<(i64, bool)>> {
+        match owner_kind {
+            OwnerKind::Entity => conn
+                .query_row(
+                    "SELECT revision, deleted FROM entity_revision WHERE entity_id=?1",
+                    [owner_id],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)),
+                )
+                .optional()
+                .map_err(sql_error),
+            OwnerKind::Relation => conn
+                .query_row(
+                    "SELECT revision, deleted FROM taxonomy_relation WHERE id=?1",
+                    [owner_id],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)),
+                )
+                .optional()
+                .map_err(sql_error),
+        }
+    }
+}
+
+/// The `type_id` of one owner, used to tag its chunk rows. Single-row
+/// lookups mirror the source tables the owner revision fence reads.
+fn owner_type_id(conn: &Connection, owner_kind: OwnerKind, owner_id: i64) -> Result<i64> {
+    match owner_kind {
+        OwnerKind::Entity => conn
+            .query_row("SELECT type_id FROM entity WHERE id=?1", [owner_id], |r| r.get(0))
+            .map_err(sql_error),
+        OwnerKind::Relation => conn
+            .query_row(
+                "SELECT type_id FROM taxonomy_relation WHERE id=?1",
+                [owner_id],
+                |r| r.get(0),
+            )
+            .map_err(sql_error),
+    }
 }
 
 fn profile_writable(conn: &Connection, profile: Uuid) -> Result<bool> {
@@ -467,10 +694,12 @@ fn profile_writable(conn: &Connection, profile: Uuid) -> Result<bool> {
 }
 
 fn verify_vectors_current(conn: &Connection, profile: Uuid) -> Result<()> {
-    // A dead-lettered job declares its entity unindexable: the gate must not
-    // block the whole store on it. The worker deletes the entity's vector row
-    // when it dead-letters, so no stale vector sneaks into the snapshot.
-    let invalid: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM entity e LEFT JOIN entity_revision r ON r.entity_id=e.id LEFT JOIN profile_vector v ON v.entity_id=e.id AND v.profile_id=?1 WHERE e.flags=0 AND NOT EXISTS(SELECT 1 FROM index_job d WHERE d.entity_id=e.id AND d.profile_id=?1 AND d.state='dead') AND (v.entity_id IS NULL OR r.revision IS NULL OR v.entity_revision!=r.revision)) OR EXISTS(SELECT 1 FROM profile_vector v LEFT JOIN entity e ON e.id=v.entity_id WHERE v.profile_id=?1 AND (e.id IS NULL OR e.flags!=0)) OR EXISTS(SELECT 1 FROM index_job WHERE profile_id=?1 AND state NOT IN ('done','dead'))", [profile.to_string()], |r| r.get(0)).map_err(sql_error)?;
+    // A dead-lettered job declares its owner unindexable: the gate must not
+    // block the whole store on it. The worker deletes the owner's chunk rows
+    // when it dead-letters, so no stale chunk sneaks into the snapshot. The
+    // entity half of the gate reads the identity chunk as the owner row; the
+    // relation half joins in the task that makes rebuild cover relations.
+    let invalid: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM entity e LEFT JOIN entity_revision r ON r.entity_id=e.id LEFT JOIN chunk_vector v ON v.profile_id=?1 AND v.owner_kind='entity' AND v.owner_id=e.id AND v.kind='identity' WHERE e.flags=0 AND NOT EXISTS(SELECT 1 FROM chunk_index_job d WHERE d.owner_kind='entity' AND d.owner_id=e.id AND d.profile_id=?1 AND d.state='dead') AND (v.owner_id IS NULL OR r.revision IS NULL OR v.owner_revision!=r.revision)) OR EXISTS(SELECT 1 FROM chunk_vector v LEFT JOIN entity e ON e.id=v.owner_id WHERE v.profile_id=?1 AND v.owner_kind='entity' AND (e.id IS NULL OR e.flags!=0)) OR EXISTS(SELECT 1 FROM chunk_index_job WHERE profile_id=?1 AND owner_kind='entity' AND state NOT IN ('done','dead'))", [profile.to_string()], |r| r.get(0)).map_err(sql_error)?;
     if invalid {
         return Err(MCSError::InvalidParams(
             "candidate Full scan has missing or stale vectors/jobs".into(),

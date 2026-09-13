@@ -18,6 +18,20 @@ impl CanonicalDocument {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// The chunk texts of this owner, in embedding order: identity first,
+    /// then one per observation. The identity chunk carries name and type.
+    pub fn chunks(&self) -> Vec<(mcpmem_core::jobs::ChunkKind, String)> {
+        let mut out = Vec::with_capacity(1 + self.observations.len());
+        out.push((
+            mcpmem_core::jobs::ChunkKind::Identity,
+            format!("{}\n{}", self.name, self.entity_type),
+        ));
+        for body in &self.observations {
+            out.push((mcpmem_core::jobs::ChunkKind::Observation, body.clone()));
+        }
+        out
+    }
 }
 
 #[derive(Debug, Error)]
