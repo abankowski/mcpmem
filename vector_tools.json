@@ -1,28 +1,5 @@
 [
-  {
-    "name": "vector_upsert_embedding",
-    "description": "Upsert a vector embedding for an existing entity in the knowledge graph. The entity must already exist. Embedding dimension must match the configured embedding size (default 384). Use this to store pre-computed embeddings for semantic/vector search.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "entityName": {
-          "type": "string",
-          "description": "The name of the entity to attach the embedding to (must already exist in the KG)"
-        },
-        "embedding": {
-          "type": "array",
-          "items": { "type": "number" },
-          "description": "The embedding vector as an array of f64 values"
-        },
-        "model": {
-          "type": "string",
-          "description": "Optional model identifier (e.g. 'text-embedding-3-small')"
-        }
-      },
-      "required": ["entityName", "embedding"]
-    },
-    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
-  },
+
   {
     "name": "vector_search_entities",
     "description": "Search entities and relations by vector similarity over the serving chunk index. Finds the top-K owners whose chunks are closest to the query embedding, one row per owner, ranked by the best matching chunk. Result rows carry 'kind' ('entity' or 'relation'); a relation row displays 'from -> TYPE -> to' and its relation type in 'entityType'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'.",
@@ -59,21 +36,7 @@
     },
     "annotations": { "readOnlyHint": true }
   },
-  {
-    "name": "vector_delete_embedding",
-    "description": "Delete the vector embedding for a given entity. The entity itself is NOT removed from the knowledge graph — only its embedding is deleted.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "entityName": {
-          "type": "string",
-          "description": "The name of the entity whose embedding to delete"
-        }
-      },
-      "required": ["entityName"]
-    },
-    "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true }
-  },
+
   {
     "name": "hybrid_search",
     "description": "Combined vector + full-text search with Reciprocal Rank Fusion, fused at owner level: the vector half ranks owners by their best chunk, the FTS5 half matches entities only, so relation rows enter the fusion with their vector rank only. Results are boosted by graph centrality whenever the graph mirror holds nodes, for entity rows only; there is no flag to disable the boost. Result rows carry 'kind' ('entity' or 'relation'). Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. queryText is never embedded: the vector half needs queryEmbedding.",
@@ -122,6 +85,7 @@
     },
     "annotations": { "readOnlyHint": true }
   },
+
   {
     "name": "vector_refresh_graph_cache",
     "description": "Rebuild the in-memory petgraph adjacency cache from the SQLite relation table. Use this after adding/removing relations via KG tools if you want the petgraph-based centrality boost in hybrid_search to be up-to-date.",
@@ -131,51 +95,17 @@
     },
     "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
   },
+
   {
     "name": "vector_store_stats",
-    "description": "Return statistics about the vector store: embeddingCount, dims, indexKind ('hnsw', 'ivf' or 'turboquant'), petgraphNodes/petgraphEdges, the index capacity (indexCapacity), and its resident memory in bytes (indexMemoryBytes) broken down into the graph component (indexGraphBytes; 0 for IVF) and the stored vectors (indexVectorsBytes).",
+    "description": "Return statistics about the vector store: embeddingCount (chunk rows in the serving snapshot), dims, and petgraphNodes/petgraphEdges of the in-memory graph mirror used for the hybrid-search centrality boost.",
     "inputSchema": {
       "type": "object",
       "properties": {}
     },
     "annotations": { "readOnlyHint": true }
   },
-  {
-    "name": "vector_batch_upsert",
-    "description": "Bulk-upsert many embeddings in one call — the ingestion primitive for RAG pipelines. Each item attaches an embedding to an existing entity. Items are processed independently: per-item failures (missing entity, wrong dimension) are reported in the 'errors' array rather than aborting the batch. Returns {upserted, failed, errors}. Max 1024 items per call.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "items": {
-          "type": "array",
-          "description": "Embeddings to upsert",
-          "items": {
-            "type": "object",
-            "properties": {
-              "entityName": { "type": "string", "description": "Existing entity to attach the embedding to" },
-              "embedding": { "type": "array", "items": { "type": "number" }, "description": "Embedding vector (must match configured dimension)" },
-              "model": { "type": "string", "description": "Optional model identifier" }
-            },
-            "required": ["entityName", "embedding"]
-          }
-        }
-      },
-      "required": ["items"]
-    },
-    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
-  },
-  {
-    "name": "vector_get_embedding",
-    "description": "Fetch the stored embedding vector for an entity. Returns {entityName, dims, model, embedding}, or {found:false} when the entity has no embedding. Useful for inspection, caching, or feeding an entity's vector into another search.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "entityName": { "type": "string", "description": "The entity whose embedding to fetch" }
-      },
-      "required": ["entityName"]
-    },
-    "annotations": { "readOnlyHint": true }
-  },
+
   {
     "name": "vector_search_by_entity",
     "description": "'More like this': search by the identity chunk of a given entity (its name and type), ranking owners by how close their best chunk is. The reference entity itself is excluded by default (excludeSelf). Result rows carry 'kind' ('entity' or 'relation'); a relation row displays 'from -> TYPE -> to' and its relation type in 'entityType'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'.",
@@ -204,21 +134,7 @@
     },
     "annotations": { "readOnlyHint": true }
   },
-  {
-    "name": "vector_recommend",
-    "description": "Example-based recommendation. Builds a query vector from the mean of the 'positive' example entities' embeddings, minus the mean of any 'negative' examples, then returns the nearest entities. All example entities are excluded from results. Classic 'find more like these, not like those' retrieval.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {
-        "positive": { "type": "array", "items": { "type": "string" }, "description": "Entity names whose embeddings are liked (at least one required)" },
-        "negative": { "type": "array", "items": { "type": "string" }, "description": "Optional entity names whose embeddings are disliked" },
-        "topK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results (default 10)" },
-        "entityType": { "type": "string", "description": "Optional: only return entities of this type" }
-      },
-      "required": ["positive"]
-    },
-    "annotations": { "readOnlyHint": true }
-  },
+
   {
     "name": "vector_mmr_search",
     "description": "Diversified semantic search via Maximal Marginal Relevance (MMR). Retrieves a candidate pool (fetchK) for the query embedding, then greedily selects topK results balancing relevance to the query against novelty versus already-selected results. 'lambda' in [0,1] trades relevance (1.0) for diversity (0.0); default 0.5. Reduces near-duplicate hits — a standard RAG context-selection step. 'score' is the MMR score.",
@@ -235,15 +151,7 @@
     },
     "annotations": { "readOnlyHint": true }
   },
-  {
-    "name": "vector_reindex",
-    "description": "Rebuild/retrain the ANN index over the current vectors. Only the IVF-Flat backend rebuilds anything: it re-runs k-means to refresh the Voronoi cells and improve recall after large batch ingestion. For HNSW and TurboQuant the call does no work, and 'reindexed' is true in every case. Returns {reindexed, indexKind, embeddingCount}.",
-    "inputSchema": {
-      "type": "object",
-      "properties": {}
-    },
-    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
-  },
+
   {
     "name": "semantic_search",
     "description": "Search entities and relations by meaning, with text only. Send 'queryText' and the server embeds it; the client needs no embedding service and sends no vector. The server embeds the query with the model named by the serving index profile — the same model that embedded the stored owners — so the query and the index agree. That model comes from the [indexer] section of the server configuration file, never from this call. Returns the topK owners whose best chunks are closest to the query, one row per owner; result rows carry 'kind' ('entity' or 'relation') and a relation row displays 'from -> TYPE -> to' with its relation type in 'entityType'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. Set 'textWeight' or 'vecWeight' to fuse the vector result with the FTS5 text result, exactly as 'hybrid_search' does; leave both unset for a pure vector search. The server must be built with the 'indexer' feature and must have a configured embedding provider. Without either one the tool is absent from tools/list and a call to it is refused.",

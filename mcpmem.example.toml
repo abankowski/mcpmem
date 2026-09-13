@@ -71,32 +71,17 @@
 
 
 [vectors]
-# Entity vector length. The "turbo" backend accepts 384 to 1536 only.
+# Entity vector length for the main memory store. The serving index profile
+# owns the dimension that actually validates chunk rows; this key is the
+# startup default for the vector subsystem.
 # embedding-dims = 384
 
 # Code vector length, for code_embed and code_semantic_search.
 # code-embedding-dims = 768
 
-# "hnsw", "ivf" or "turbo".
-# index = "hnsw"
-
-# "cos", "ip" or "l2sq".
-# metric = "cos"
-
-# "f32", "f16", "bf16" or "i8".
-# quantization = "f32"
-
-# HNSW graph degree M, efConstruction and efSearch.
-# connectivity = 16
-# expansion-add = 200
-# expansion-search = 50
-
-# IVF centroids and cells probed per query. Used with index = "ivf".
-# ivf-nlist = 256
-# ivf-nprobe = 8
-
-# TurboQuant bits per coordinate, 1 to 8. Used with index = "turbo".
-# tq-bits = 4
+# The ANN knobs of 1.x (index, metric, quantization, connectivity,
+# expansion-add, expansion-search, ivf-nlist, ivf-nprobe, tq-bits) were
+# removed in 2.0.0 along with the client vector-ingestion tools.
 
 
 [security]
@@ -160,10 +145,10 @@
 # model and a dimension, and the server embeds entity text by itself: it adopts
 # an index profile, enqueues every live entity, and the worker drains the queue.
 #
-# The same act ends legacy compatibility for the vector store. The server then
-# owns every entity vector, and it refuses a direct `vector_upsert_embedding` or
-# `vector_batch_upsert` call. Leave the three keys out to keep writing your own
-# vectors from the client.
+# The act ends legacy compatibility for the vector store: the server then owns
+# every vector. The client vector-ingestion tools (`vector_upsert_embedding`,
+# `vector_batch_upsert`, `vector_delete_embedding`, `vector_get_embedding`,
+# `vector_recommend`, `vector_reindex`) were removed in 2.0.0.
 #
 # The three keys travel together. A section that names two of them is a startup
 # error, because a half-written profile would still rebuild the whole store.

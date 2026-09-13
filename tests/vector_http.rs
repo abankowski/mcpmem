@@ -163,14 +163,89 @@ fn test_http_auth_accepts_correct_token() {
 fn test_http_auth_full_tool_flow() {
     let srv = spawn_http_server(Some("s3cret"));
 
-    // Create an entity, attach an embedding, then search — all over authed HTTP.
+    // Create an entity, seed chunk rows into the serving snapshot, then
+    // search — all over authed HTTP. The 2.0.0 surface has no client
+    // ingestion tool, so the chunks are written the way the worker would.
     let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_entities","arguments":{"entities":[{"name":"alice","entityType":"person","observations":[{"body":"math"}]}]}},"id":2}"#;
     let (status, _) = post_mcp(srv.port, create, Some("s3cret"));
     assert_eq!(status, 200, "create_entities over HTTP should succeed");
 
-    let upsert = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vector_upsert_embedding","arguments":{"entityName":"alice","embedding":[1.0,1.0,1.0,1.0]}},"id":3}"#;
-    let (status, body) = post_mcp(srv.port, upsert, Some("s3cret"));
-    assert_eq!(status, 200, "upsert over HTTP should succeed: {body}");
+    let f32le = |v: f64| -> Vec<u8> {
+        let b: f32 = v as f32;
+        b.to_le_bytes().to_vec()
+    };
+    {
+        let conn = rusqlite::Connection::open(&srv.db_path).unwrap();
+        let profile = "11111111-2222-3333-4444-555555555555";
+        conn.execute(
+            "INSERT INTO index_profile VALUES(?1,'default',?2,?3,'Active')",
+            rusqlite::params![
+                profile,
+                "test-fixture",
+                serde_json::to_string(&serde_json::json!({
+                    "id": profile,
+                    "store_key": "default",
+                    "provider_kind": "test",
+                    "model": "test",
+                    "dimensions": 4,
+                    "representation_version": "v1",
+                    "normalization": "None",
+                    "distance_metric": "L2Squared",
+                    "vector_encoding_version": "f32le-v1",
+                }))
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE index_profile_registry SET state='Active',serving_profile=?1 WHERE store_key='default'",
+            [profile],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ann_generation(profile_id) VALUES(?1)",
+            [profile],
+        )
+        .unwrap();
+        let entity_id: i64 = conn
+            .query_row(
+                "SELECT id FROM entity WHERE name='alice' AND flags=0",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        let type_id: i64 = conn
+            .query_row(
+                "SELECT t.id FROM entity e JOIN type_dict t ON t.id=e.type_id WHERE e.id=?1",
+                [entity_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        let blob: Vec<u8> = (0..4).flat_map(|_| f32le(1.0)).collect::<Vec<_>>();
+        conn.execute(
+            "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+             VALUES(?1,'identity','entity',?2,0,?3,1,?4,1,'test')",
+            rusqlite::params![profile, entity_id, type_id, blob],
+        )
+        .unwrap();
+        drop(conn);
+    }
+    // Wait (polling) for the snapshot refresher to publish the chunk row.
+    let mut stats = String::new();
+    for _ in 0..30 {
+        let probe = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vector_store_stats","arguments":{}},"id":9}"#;
+        let (status, body) = post_mcp(srv.port, probe, Some("s3cret"));
+        assert_eq!(status, 200, "stats poll over HTTP: {body}");
+        stats = body;
+        if stats.contains(r#"embeddingCount\":1"#) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        stats.contains(r#"embeddingCount\":1"#),
+        "the snapshot must publish the seeded chunk: {stats}"
+    );
 
     let search = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"vector_search_entities","arguments":{"embedding":[1.0,1.0,1.0,1.0],"topK":5}},"id":4}"#;
     let (status, body) = post_mcp(srv.port, search, Some("s3cret"));

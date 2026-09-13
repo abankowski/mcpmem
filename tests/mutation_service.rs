@@ -681,7 +681,7 @@ fn rename_rejects_a_distinct_existing_target_and_same_name_is_eventless_noop() {
         .query_row("SELECT count(*) FROM change_event", [], |row| row.get(0))
         .unwrap();
     let before_jobs: i64 = probe
-        .query_row("SELECT count(*) FROM index_job", [], |row| row.get(0))
+        .query_row("SELECT count(*) FROM chunk_index_job", [], |row| row.get(0))
         .unwrap();
     let err = graph.rename_entity("old", "taken").unwrap_err();
     assert!(matches!(
@@ -710,7 +710,7 @@ fn rename_rejects_a_distinct_existing_target_and_same_name_is_eventless_noop() {
     );
     assert_eq!(
         probe
-            .query_row("SELECT count(*) FROM index_job", [], |row| row
+            .query_row("SELECT count(*) FROM chunk_index_job", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
         before_jobs
@@ -738,7 +738,7 @@ fn rename_rejects_a_distinct_existing_target_and_same_name_is_eventless_noop() {
     );
     assert_eq!(
         probe
-            .query_row("SELECT count(*) FROM index_job", [], |row| row
+            .query_row("SELECT count(*) FROM chunk_index_job", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
         before_jobs

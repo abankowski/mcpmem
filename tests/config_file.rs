@@ -58,14 +58,12 @@ transport = "http"
 
 [vectors]
 embedding-dims = 1024
-index = "ivf"
 "#,
     );
 
     assert_eq!(args.bind, "0.0.0.0:9999");
     assert!(matches!(args.transport, mcpmem::Transport::Http));
     assert_eq!(args.embedding_dims, 1024);
-    assert!(matches!(args.vec_index, mcpmem::VecIndex::Ivf));
 }
 
 #[test]

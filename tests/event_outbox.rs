@@ -382,29 +382,118 @@ fn failed_mutation_rolls_back_graph_events_and_jobs() {
 }
 
 #[test]
-fn startup_rejects_changed_migration_and_preserves_legacy_vector_rows() {
+fn migration_0009_drops_legacy_tables() {
+    // A database that carries legacy vector rows (`vector_embedding`,
+    // `profile_vector`, `index_job`) and retired kind-2 taxonomy rows must
+    // have the tables dropped and the kind-2 rows deleted by migration 0009.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch("CREATE TABLE vector_embedding(entity_id INTEGER PRIMARY KEY, dims INTEGER, blob BLOB, model TEXT, created_us INTEGER); INSERT INTO vector_embedding VALUES(7,1,X'0000803F','old',1);").unwrap();
-    drop(graph(&path));
+    // Bootstrap + full migration set (0009 included) on an empty database.
+    graph(&path);
+    // Reseed the legacy world the way a 1.x database held it: the tables
+    // 0009 drops, with live rows.
+    conn.execute_batch(
+        "CREATE TABLE vector_embedding(entity_id INTEGER PRIMARY KEY, dims INTEGER, blob BLOB, model TEXT, created_us INTEGER);
+         INSERT INTO vector_embedding VALUES(7,1,X'0000803F','old',1);
+         CREATE TABLE profile_vector (
+             profile_id TEXT NOT NULL,
+             entity_id INTEGER NOT NULL,
+             entity_revision INTEGER NOT NULL,
+             blob BLOB NOT NULL,
+             created_at_us INTEGER NOT NULL,
+             source TEXT NOT NULL,
+             PRIMARY KEY(profile_id, entity_id)
+         ) STRICT;
+         INSERT INTO profile_vector VALUES('11111111-2222-3333-4444-555555555555',7,1,X'0000803F',1,'old');
+         CREATE TABLE index_job (
+             entity_id INTEGER NOT NULL,
+             profile_id TEXT NOT NULL,
+             entity_revision INTEGER NOT NULL,
+             operation TEXT NOT NULL CHECK (operation IN ('upsert','delete')),
+             state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','leased','held','done','dead')),
+             lease_token TEXT,
+             lease_epoch INTEGER NOT NULL DEFAULT 0,
+             lease_until_us INTEGER NOT NULL DEFAULT 0,
+             next_attempt_us INTEGER NOT NULL DEFAULT 0,
+             attempts INTEGER NOT NULL DEFAULT 0,
+             last_error TEXT CHECK (length(last_error) <= 2048),
+             PRIMARY KEY(entity_id, profile_id, entity_revision)
+         ) STRICT;
+         INSERT INTO index_job(entity_id,profile_id,entity_revision,operation,state) VALUES(7,'11111111-2222-3333-4444-555555555555',1,'upsert','done');
+         INSERT INTO taxonomy_vector VALUES('11111111-2222-3333-4444-555555555555',2,10,5,X'000000000000803F',1,'old');
+         INSERT INTO taxonomy_job(subject_kind,subject_id,profile_id,subject_revision,operation,state) VALUES(2,10,'11111111-2222-3333-4444-555555555555',5,'upsert','done');",
+    )
+    .unwrap();
     assert_eq!(count(&conn, "vector_embedding"), 1);
-    assert_eq!(count(&conn, "profile_vector"), 0);
-    let versions: Vec<i64> = conn
-        .prepare("SELECT version FROM schema_migration ORDER BY version")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
+    assert_eq!(count(&conn, "profile_vector"), 1);
+    assert_eq!(count(&conn, "index_job"), 1);
+    assert_eq!(
+        count(&conn, "taxonomy_vector"),
+        1,
+        "the kind-2 taxonomy vector fixture is present"
+    );
+    assert_eq!(
+        count(&conn, "taxonomy_job"),
+        1,
+        "the kind-2 taxonomy job fixture is present"
+    );
+    // Drop 0009's ledger row, then reopen: the normal startup path applies
+    // exactly the pending migration, over the reseeded legacy rows.
+    conn.execute("DELETE FROM schema_migration WHERE version=9", [])
         .unwrap();
-    let registered: Vec<i64> = mcpmem_core::events::MIGRATIONS
-        .iter()
-        .map(|(version, _)| *version)
-        .collect();
-    assert_eq!(versions, registered);
+    assert_eq!(count(&conn, "schema_migration"), migration_count() - 1);
+    drop(conn);
     drop(graph(&path));
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(count(&conn, "schema_migration"), migration_count());
+    for table in ["vector_embedding", "profile_vector", "index_job"] {
+        let leftover: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover, 0, "table {table} must be dropped by 0009");
+    }
+    // The taxonomy tables survive 0009 (kinds 0/1 still use them) and hold
+    // no kind-2 rows: the migration's DELETE cleared the retired funnel.
+    let kind2_vectors: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM taxonomy_vector WHERE subject_kind=2",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind2_vectors, 0, "no kind-2 taxonomy vectors remain");
+    let kind2_jobs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM taxonomy_job WHERE subject_kind=2",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind2_jobs, 0, "no kind-2 taxonomy jobs remain");
+}
+
+#[test]
+fn startup_rejects_a_tampered_migration_checksum() {
+    // The runtime guard: a ledger checksum that no longer matches the embedded
+    // migration SQL must refuse startup, so an edited migration file can never
+    // silently ride along on the same ledger row.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = graph(&path);
+    drop(graph);
+    let conn = Connection::open(&path).unwrap();
     conn.execute("UPDATE schema_migration SET checksum='tampered'", [])
         .unwrap();
+    drop(conn);
+    assert_eq!(
+        count(&Connection::open(&path).unwrap(), "schema_migration"),
+        migration_count()
+    );
     assert!(
         GraphHandle::new(
             &path,
@@ -413,7 +502,8 @@ fn startup_rejects_changed_migration_and_preserves_legacy_vector_rows() {
             NonZeroUsize::new(32).unwrap(),
             1
         )
-        .is_err()
+        .is_err(),
+        "a tampered checksum must refuse startup"
     );
 }
 
@@ -425,7 +515,11 @@ fn migration_0008_creates_chunk_tables() {
     let conn = Connection::open(&path).unwrap();
     for table in ["chunk_vector", "chunk_index_job"] {
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1, "table {table} must exist after migrate");
     }
@@ -569,7 +663,12 @@ fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
     assert!(recovered.lease.epoch > expired.lease.epoch);
     assert!(
         !jobs
-            .commit_chunks(&expired, 112, Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]), "worker")
+            .commit_chunks(
+                &expired,
+                112,
+                Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]),
+                "worker"
+            )
             .unwrap()
     );
     graph
@@ -580,18 +679,33 @@ fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
         .unwrap();
     assert!(
         !jobs
-            .commit_chunks(&recovered, 112, Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]), "worker")
+            .commit_chunks(
+                &recovered,
+                112,
+                Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]),
+                "worker"
+            )
             .unwrap()
     );
     let current = jobs.claim_due(113, 20).unwrap().unwrap();
     assert_eq!(current.owner_revision, 2);
     assert!(
-        jobs.commit_chunks(&current, 114, Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]), "worker")
-            .unwrap()
+        jobs.commit_chunks(
+            &current,
+            114,
+            Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]),
+            "worker"
+        )
+        .unwrap()
     );
     assert!(
         !jobs
-            .commit_chunks(&current, 115, Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]), "worker")
+            .commit_chunks(
+                &current,
+                115,
+                Some(&[&(mcpmem_core::jobs::ChunkKind::Identity, &[1.0f32, 0.0])]),
+                "worker"
+            )
             .unwrap(),
         "a completed job cannot commit again"
     );
@@ -648,7 +762,9 @@ fn rebuilt_profile_requires_every_relation_chunk() {
     let database = dir.path().join("memory.db");
     let graph = graph(&database);
     graph.create_entities(&[entity("ada")]).unwrap();
-    graph.create_relations(&[relation("ada", "ada", "knows")]).unwrap();
+    graph
+        .create_relations(&[relation("ada", "ada", "knows")])
+        .unwrap();
     let conn = Connection::open(&database).unwrap();
     let registry = IndexProfileRegistry::new(&conn);
     let jobs = IndexJobRepository::new(&conn);
@@ -675,14 +791,13 @@ fn rebuilt_profile_requires_every_relation_chunk() {
     let claimed = jobs.claim_due(200, 10).unwrap().unwrap();
     assert_eq!(claimed.owner_kind, OwnerKind::Entity);
     assert!(
-        jobs
-            .commit_chunks(
-                &claimed,
-                201,
-                Some(&[&(ChunkKind::Identity, &[1.0f32, 0.0])]),
-                "test",
-            )
-            .unwrap()
+        jobs.commit_chunks(
+            &claimed,
+            201,
+            Some(&[&(ChunkKind::Identity, &[1.0f32, 0.0])]),
+            "test",
+        )
+        .unwrap()
     );
     let err = ann.verify_full_scan(candidate.id).err().unwrap();
     assert!(
@@ -703,11 +818,17 @@ fn rebuilt_profile_enqueues_tombstoned_relation_as_delete() {
     let database = dir.path().join("memory.db");
     let graph = graph(&database);
     graph.create_entities(&[entity("ada")]).unwrap();
-    graph.create_relations(&[relation("ada", "ada", "knows")]).unwrap();
-    graph.delete_relations(&[relation("ada", "ada", "knows")]).unwrap();
+    graph
+        .create_relations(&[relation("ada", "ada", "knows")])
+        .unwrap();
+    graph
+        .delete_relations(&[relation("ada", "ada", "knows")])
+        .unwrap();
     let conn = Connection::open(&database).unwrap();
     let candidate = profile();
-    IndexProfileRegistry::new(&conn).begin_rebuild(&candidate).unwrap();
+    IndexProfileRegistry::new(&conn)
+        .begin_rebuild(&candidate)
+        .unwrap();
     let (operation, mirror_revision): (String, i64) = conn
         .query_row(
             "SELECT operation, owner_revision FROM chunk_index_job
@@ -736,7 +857,9 @@ fn completed_relation_rebuild_passes_the_full_scan() {
     let database = dir.path().join("memory.db");
     let graph = graph(&database);
     graph.create_entities(&[entity("ada")]).unwrap();
-    graph.create_relations(&[relation("ada", "ada", "knows")]).unwrap();
+    graph
+        .create_relations(&[relation("ada", "ada", "knows")])
+        .unwrap();
     let conn = Connection::open(&database).unwrap();
     let registry = IndexProfileRegistry::new(&conn);
     let jobs = IndexJobRepository::new(&conn);
@@ -754,14 +877,13 @@ fn completed_relation_rebuild_passes_the_full_scan() {
             ChunkKind::Relation
         };
         assert!(
-            jobs
-                .commit_chunks(
-                    &claimed,
-                    401 + attempt,
-                    Some(&[&(kind, &[1.0f32, 0.0])]),
-                    "test",
-                )
-                .unwrap()
+            jobs.commit_chunks(
+                &claimed,
+                401 + attempt,
+                Some(&[&(kind, &[1.0f32, 0.0])]),
+                "test",
+            )
+            .unwrap()
         );
         committed += 1;
     }
@@ -796,7 +918,9 @@ fn stale_relation_chunk_fails_the_full_scan() {
     let database = dir.path().join("memory.db");
     let graph = graph(&database);
     graph.create_entities(&[entity("ada")]).unwrap();
-    graph.create_relations(&[relation("ada", "ada", "knows")]).unwrap();
+    graph
+        .create_relations(&[relation("ada", "ada", "knows")])
+        .unwrap();
     let conn = Connection::open(&database).unwrap();
     let registry = IndexProfileRegistry::new(&conn);
     let jobs = IndexJobRepository::new(&conn);
@@ -811,14 +935,13 @@ fn stale_relation_chunk_fails_the_full_scan() {
             ChunkKind::Relation
         };
         assert!(
-            jobs
-                .commit_chunks(
-                    &claimed,
-                    501 + attempt,
-                    Some(&[&(kind, &[1.0f32, 0.0])]),
-                    "test",
-                )
-                .unwrap()
+            jobs.commit_chunks(
+                &claimed,
+                501 + attempt,
+                Some(&[&(kind, &[1.0f32, 0.0])]),
+                "test",
+            )
+            .unwrap()
         );
     }
     conn.execute("UPDATE taxonomy_relation SET revision=revision+1", [])
@@ -1057,7 +1180,8 @@ fn worker_retries_renewal_validation_and_restart_keep_durable_fences() {
         let owned = [(mcpmem_core::jobs::ChunkKind::Identity, vector.as_slice())];
         let refs: Vec<_> = owned.iter().collect();
         assert!(
-            jobs.commit_chunks(&first, 112, Some(&refs), "worker").is_err(),
+            jobs.commit_chunks(&first, 112, Some(&refs), "worker")
+                .is_err(),
             "a NaN vector fails the stored-vector validation"
         );
     }
@@ -1066,7 +1190,8 @@ fn worker_retries_renewal_validation_and_restart_keep_durable_fences() {
         let owned = [(mcpmem_core::jobs::ChunkKind::Identity, vector.as_slice())];
         let refs: Vec<_> = owned.iter().collect();
         assert!(
-            jobs.commit_chunks(&first, 112, Some(&refs), "worker").is_err(),
+            jobs.commit_chunks(&first, 112, Some(&refs), "worker")
+                .is_err(),
             "a short vector fails the dimension validation"
         );
     }
@@ -1075,7 +1200,8 @@ fn worker_retries_renewal_validation_and_restart_keep_durable_fences() {
         let owned = [(mcpmem_core::jobs::ChunkKind::Identity, vector.as_slice())];
         let refs: Vec<_> = owned.iter().collect();
         assert!(
-            jobs.commit_chunks(&first, 112, Some(&refs), "worker").is_err(),
+            jobs.commit_chunks(&first, 112, Some(&refs), "worker")
+                .is_err(),
             "a non-unit vector fails the L2 validation"
         );
     }
@@ -1095,7 +1221,8 @@ fn worker_retries_renewal_validation_and_restart_keep_durable_fences() {
         let owned = [(mcpmem_core::jobs::ChunkKind::Identity, vector.as_slice())];
         let refs: Vec<_> = owned.iter().collect();
         assert!(
-            jobs.commit_chunks(&second, 201, Some(&refs), "worker").unwrap()
+            jobs.commit_chunks(&second, 201, Some(&refs), "worker")
+                .unwrap()
         );
     }
     let blob: Vec<u8> = conn

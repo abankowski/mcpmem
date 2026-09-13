@@ -680,7 +680,13 @@ fn create_relation(conn: &Connection, relation: &Relation) -> Result<bool> {
                 |row| row.get(0),
             )
             .map_err(sql_error)?;
-        crate::jobs::enqueue_chunk_change(conn, crate::jobs::OwnerKind::Relation, mirror_id, 1, false)?;
+        crate::jobs::enqueue_chunk_change(
+            conn,
+            crate::jobs::OwnerKind::Relation,
+            mirror_id,
+            1,
+            false,
+        )?;
     }
     Ok(changed > 0)
 }
@@ -1140,12 +1146,7 @@ mod tests {
             )
             .unwrap();
         stmt.query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-            ))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .unwrap()
         .collect::<rusqlite::Result<_>>()
