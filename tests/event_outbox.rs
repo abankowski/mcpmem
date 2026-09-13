@@ -382,10 +382,10 @@ fn failed_mutation_rolls_back_graph_events_and_jobs() {
 }
 
 #[test]
-fn migration_0009_drops_legacy_tables() {
+fn migration_0010_drops_legacy_tables() {
     // A database that carries legacy vector rows (`vector_embedding`,
     // `profile_vector`, `index_job`) and retired kind-2 taxonomy rows must
-    // have the tables dropped and the kind-2 rows deleted by migration 0009.
+    // have the tables dropped and the kind-2 rows deleted by migration 0010.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let conn = Connection::open(&path).unwrap();
@@ -440,7 +440,7 @@ fn migration_0009_drops_legacy_tables() {
     );
     // Drop 0009's ledger row, then reopen: the normal startup path applies
     // exactly the pending migration, over the reseeded legacy rows.
-    conn.execute("DELETE FROM schema_migration WHERE version=9", [])
+    conn.execute("DELETE FROM schema_migration WHERE version=10", [])
         .unwrap();
     assert_eq!(count(&conn, "schema_migration"), migration_count() - 1);
     drop(conn);
@@ -508,7 +508,7 @@ fn startup_rejects_a_tampered_migration_checksum() {
 }
 
 #[test]
-fn migration_0008_creates_chunk_tables() {
+fn migration_0009_creates_chunk_tables() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let graph = graph(&path);
