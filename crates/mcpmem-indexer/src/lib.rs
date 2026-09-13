@@ -479,6 +479,13 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
         let Some(tax_job) = tax_jobs.claim_due(now_us, self.lease_us)? else {
             return Ok(RunReport::default());
         };
+        // Task 5 retires the kind-2 taxonomy funnel: relation vectors live in
+        // `chunk_vector` and the kind-2 snapshot derives from them.
+        // `claim_due` never returns a kind-2 row; this guard keeps such a row
+        // from running even if older code claims it.
+        if tax_job.subject_kind == 2 {
+            return Ok(RunReport::default());
+        }
         let mut report = RunReport {
             claimed: 1,
             ..RunReport::default()

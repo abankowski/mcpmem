@@ -811,7 +811,10 @@ impl<'a> TaxonomyJobRepository<'a> {
     pub fn claim_due(&self, now: i64, duration_us: i64) -> Result<Option<TaxonomyJob>> {
         let until = lease_until(now, duration_us)?;
         let tx = TxGuard::begin(self.conn)?;
-        let row: Option<(i64,i64,String,i64,String,i64,i64)> = self.conn.query_row("SELECT subject_kind,subject_id,profile_id,subject_revision,operation,lease_epoch,attempts FROM taxonomy_job j WHERE ((state='pending' AND next_attempt_us<=?1) OR (state='leased' AND lease_until_us<=?1)) AND EXISTS(SELECT 1 FROM index_profile_registry r WHERE r.serving_profile=j.profile_id OR (r.state='Rebuilding' AND r.candidate_profile=j.profile_id)) ORDER BY next_attempt_us,subject_kind,subject_id,profile_id LIMIT 1", [now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
+        // Task 5 retires the kind-2 funnel: relation vectors live in
+        // `chunk_vector` and the snapshot derives from them, so a held
+        // kind-2 row must never claim (migration 0009 drops the rows).
+        let row: Option<(i64,i64,String,i64,String,i64,i64)> = self.conn.query_row("SELECT subject_kind,subject_id,profile_id,subject_revision,operation,lease_epoch,attempts FROM taxonomy_job j WHERE j.subject_kind!=2 AND ((state='pending' AND next_attempt_us<=?1) OR (state='leased' AND lease_until_us<=?1)) AND EXISTS(SELECT 1 FROM index_profile_registry r WHERE r.serving_profile=j.profile_id OR (r.state='Rebuilding' AND r.candidate_profile=j.profile_id)) ORDER BY next_attempt_us,subject_kind,subject_id,profile_id LIMIT 1", [now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
         let job = row.map(|(kind,id,profile,revision,operation,epoch,attempts)| -> Result<TaxonomyJob> {
             let token = Uuid::new_v4();
             self.conn.execute("UPDATE taxonomy_job SET state='leased',lease_token=?4,lease_epoch=lease_epoch+1,lease_until_us=?5,attempts=attempts+1 WHERE subject_kind=?1 AND subject_id=?2 AND profile_id=?3", params![kind,id,profile,token.to_string(),until]).map_err(sql_error)?;
@@ -1059,9 +1062,10 @@ mod tests {
         enqueue_taxonomy(&conn, 1, 3, 1, IndexOperation::Upsert, Uuid::nil()).unwrap();
         seed_type(&conn, 1, 0, 1);
         enqueue_taxonomy(&conn, 0, 1, 1, IndexOperation::Upsert, profile).unwrap();
-        enqueue_taxonomy(&conn, 2, 10, 9, IndexOperation::Upsert, profile).unwrap();
+        seed_type(&conn, 3, 1, 9);
+        enqueue_taxonomy(&conn, 1, 3, 9, IndexOperation::Upsert, profile).unwrap();
         conn.execute(
-            "UPDATE taxonomy_job SET next_attempt_us=500 WHERE subject_kind=2 AND subject_id=10",
+            "UPDATE taxonomy_job SET next_attempt_us=500 WHERE subject_kind=1 AND subject_id=3",
             [],
         )
         .unwrap();
@@ -1092,7 +1096,7 @@ mod tests {
                 second.subject_id,
                 second.subject_revision
             ),
-            (2, 10, 9)
+            (1, 3, 9)
         );
         assert_eq!(second.lease.until_us, 510);
         assert_eq!(count(&conn, "taxonomy_job"), 3);
@@ -1122,13 +1126,14 @@ mod tests {
     }
 
     #[test]
-    fn commit_refuses_on_revision_mismatch_for_every_kind() {
+    fn commit_refuses_on_revision_mismatch_for_claimable_kinds() {
+        // Kind 2 is retired (Task 5): its rows never claim, so only kinds
+        // 0 and 1 exercise the revision fence here.
         let (conn, profile) = fixture();
         seed_type(&conn, 1, 0, 7);
         seed_type(&conn, 2, 1, 4);
-        seed_relation(&conn, 10, 3, 0);
         let repo = TaxonomyJobRepository::new(&conn);
-        for (kind, id, revision) in [(0, 1, 6), (1, 2, 3), (2, 10, 2)] {
+        for (kind, id, revision) in [(0, 1, 6), (1, 2, 3)] {
             enqueue_taxonomy(&conn, kind, id, revision, IndexOperation::Upsert, profile).unwrap();
             let job = repo.claim_due(100 + id, 10).unwrap().unwrap();
             assert_eq!((job.subject_kind, job.subject_id), (kind, id));
@@ -1139,34 +1144,41 @@ mod tests {
             );
         }
         assert_eq!(count(&conn, "taxonomy_vector"), 0);
-        assert_eq!(count(&conn, "taxonomy_job"), 3);
+        assert_eq!(count(&conn, "taxonomy_job"), 2);
     }
 
     #[test]
-    fn commit_refuses_a_delete_without_the_matching_tombstone() {
+    fn kind2_taxonomy_jobs_are_never_claimed() {
+        // Task 5 retires the kind-2 funnel: relation vectors live in
+        // `chunk_vector` and the kind-2 snapshot derives from them. A held
+        // kind-2 row, whatever its operation or revision state, must never
+        // claim, so it can neither run nor block the queue. Migration 0009
+        // drops the rows.
         let (conn, profile) = fixture();
         seed_relation(&conn, 10, 3, 0);
         seed_relation(&conn, 11, 3, 1);
-        let repo = TaxonomyJobRepository::new(&conn);
-        // An active relation has no tombstone: refuse.
-        enqueue_taxonomy(&conn, 2, 10, 3, IndexOperation::Delete, profile).unwrap();
-        let job = repo.claim_due(100, 10).unwrap().unwrap();
-        assert!(!repo.commit_vector(&job, 101, None, "worker").unwrap());
-        // A tombstoned relation at a stale revision: refuse.
-        enqueue_taxonomy(&conn, 2, 11, 2, IndexOperation::Delete, profile).unwrap();
-        let job = repo.claim_due(102, 10).unwrap().unwrap();
-        assert!(!repo.commit_vector(&job, 103, None, "worker").unwrap());
-        // An upsert against a tombstoned relation: refuse.
         seed_relation(&conn, 13, 5, 1);
+        enqueue_taxonomy(&conn, 2, 10, 3, IndexOperation::Delete, profile).unwrap();
+        enqueue_taxonomy(&conn, 2, 11, 2, IndexOperation::Delete, profile).unwrap();
         enqueue_taxonomy(&conn, 2, 13, 5, IndexOperation::Upsert, profile).unwrap();
-        let job = repo.claim_due(104, 10).unwrap().unwrap();
-        assert!(
-            !repo
-                .commit_vector(&job, 105, Some(&[1.0]), "worker")
-                .unwrap()
-        );
-        assert_eq!(count(&conn, "taxonomy_vector"), 0);
+        let repo = TaxonomyJobRepository::new(&conn);
+        for due_at in [100i64, 500, 10_000] {
+            assert!(
+                repo.claim_due(due_at, 10)
+                    .unwrap()
+                    .is_none(),
+                "a retired kind-2 row never claims"
+            );
+        }
         assert_eq!(count(&conn, "taxonomy_job"), 3);
+        let (state, attempts): (String, i64) = conn
+            .query_row(
+                "SELECT state, attempts FROM taxonomy_job WHERE subject_kind=2 AND subject_id=13 AND profile_id=?1",
+                [profile.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((state.as_str(), attempts), ("pending", 0));
     }
 
     #[test]
@@ -1203,25 +1215,9 @@ mod tests {
         // A repeated completion is a no-op.
         assert!(repo.commit_vector(&job, 106, None, "worker").unwrap());
         assert_eq!(count(&conn, "taxonomy_vector"), 1);
-        // The delete path removes the matching vector row.
-        seed_relation(&conn, 10, 5, 1);
-        conn.execute(
-            "INSERT INTO taxonomy_vector VALUES(?1,2,10,5,X'000000000000803F',1,'old')",
-            [profile.to_string()],
-        )
-        .unwrap();
-        enqueue_taxonomy(&conn, 2, 10, 5, IndexOperation::Delete, profile).unwrap();
-        let job = repo.claim_due(200, 10).unwrap().unwrap();
-        assert!(repo.commit_vector(&job, 201, None, "worker").unwrap());
-        assert_eq!(count(&conn, "taxonomy_vector"), 1);
-        let state: String = conn
-            .query_row(
-                "SELECT state FROM taxonomy_job WHERE subject_kind=2 AND subject_id=10 AND profile_id=?1",
-                [profile.to_string()],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(state, "done");
+        // The kind-2 delete path that removed the matching vector row is
+        // retired: kind-2 rows never claim (see kind2_taxonomy_jobs_are_
+        // never_claimed), and migration 0009 drops the rows.
     }
 
     #[test]
@@ -1274,29 +1270,9 @@ mod tests {
             )
             .unwrap();
         assert_eq!(durable, 5);
-        // A delete commit bumps its kind too.
-        conn.execute(
-            "INSERT INTO taxonomy_ann_generation(profile_id,subject_kind,durable_generation,published_generation,full_scan_generation) VALUES(?1,2,0,-1,NULL)",
-            [profile.to_string()],
-        )
-        .unwrap();
-        seed_relation(&conn, 10, 5, 1);
-        conn.execute(
-            "INSERT INTO taxonomy_vector VALUES(?1,2,10,5,X'000000000000803F',1,'old')",
-            [profile.to_string()],
-        )
-        .unwrap();
-        enqueue_taxonomy(&conn, 2, 10, 5, IndexOperation::Delete, profile).unwrap();
-        let job = repo.claim_due(200, 10).unwrap().unwrap();
-        assert!(repo.commit_vector(&job, 201, None, "worker").unwrap());
-        let (durable, full_scan): (i64, Option<i64>) = conn
-            .query_row(
-                "SELECT durable_generation,full_scan_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=2",
-                [profile.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!((durable, full_scan), (1, None));
+        // The kind-2 delete commit that bumped its kind is retired with the
+        // funnel: the relation commit advances the kind-2 generation now
+        // (covered by the indexer commit_chunks tests).
     }
 
     #[test]
@@ -1313,12 +1289,19 @@ mod tests {
                 .unwrap()
         );
         assert!(!taxonomy_scan_invalid(&conn, profile, 0).unwrap());
-        enqueue_taxonomy(&conn, 2, 10, 5, IndexOperation::Upsert, profile).unwrap();
-        let job = repo.claim_due(200, 10).unwrap().unwrap();
-        assert!(
-            repo.commit_vector(&job, 201, Some(&[1.0, 0.0]), "worker")
-                .unwrap()
-        );
+        // Kind 2 no longer goes through the job funnel (Task 5), so its
+        // scan state is seeded directly: a done job row and the matching
+        // vector row make the source current.
+        conn.execute(
+            "INSERT INTO taxonomy_job(subject_kind,subject_id,profile_id,subject_revision,operation,state) VALUES(2,10,?1,5,'upsert','done')",
+            [profile.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO taxonomy_vector VALUES(?1,2,10,5,X'000000000000803F',1,'old')",
+            [profile.to_string()],
+        )
+        .unwrap();
         assert!(!taxonomy_scan_invalid(&conn, profile, 2).unwrap());
         // A stale vector is invalid.
         conn.execute("UPDATE type_dict SET revision=8 WHERE id=1", [])

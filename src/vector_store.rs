@@ -1302,32 +1302,54 @@ impl VectorStore {
                 snapshots[idx] = existing[idx].clone();
                 continue;
             }
-            let mut statement = conn
-                .prepare(
-                    "SELECT subject_id,blob FROM taxonomy_vector WHERE profile_id=?1 AND subject_kind=?2 ORDER BY subject_id",
-                )
-                .map_err(sqlite_err)?;
-            let vectors = statement
-                .query_map(params![profile.to_string(), kind.as_i64()], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(sqlite_err)?
-                .map(|row| {
-                    let (id, blob) = row.map_err(sqlite_err)?;
-                    if blob.len() != profile_def.dimensions as usize * std::mem::size_of::<f32>() {
-                        return Err(MCSError::MemoryError(
-                            "taxonomy vector has invalid byte length".into(),
-                        ));
-                    }
-                    let (chunks, _) = blob.as_chunks::<4>();
-                    let vector = chunks
-                        .iter()
-                        .map(|bytes| f32::from_le_bytes(*bytes))
-                        .collect::<Vec<_>>();
-                    profile_def.validate_vector(&vector)?;
-                    Ok((id, vector))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            // Kind 2 (relations) derives its snapshot from the single
+            // relation chunk owned by each mirror; kinds 0 and 1 keep their
+            // `taxonomy_vector` rows. Both read the same `(id, blob)` shape.
+            let decode_row = |row: rusqlite::Result<(i64, Vec<u8>)>| -> Result<(i64, Vec<f32>)> {
+                let (id, blob) = row.map_err(sqlite_err)?;
+                if blob.len() != profile_def.dimensions as usize * std::mem::size_of::<f32>() {
+                    return Err(MCSError::MemoryError(
+                        "taxonomy vector has invalid byte length".into(),
+                    ));
+                }
+                let (chunks, _) = blob.as_chunks::<4>();
+                let vector = chunks
+                    .iter()
+                    .map(|bytes| f32::from_le_bytes(*bytes))
+                    .collect::<Vec<_>>();
+                profile_def.validate_vector(&vector)?;
+                Ok((id, vector))
+            };
+            let vectors = if kind == TaxonomyKind::Relation {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT owner_id, blob FROM chunk_vector WHERE profile_id=?1 AND kind='relation' ORDER BY owner_id",
+                    )
+                    .map_err(sqlite_err)?;
+                statement
+                    .query_map(params![profile.to_string()], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(sqlite_err)?
+                    .map(decode_row)
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT subject_id,blob FROM taxonomy_vector WHERE profile_id=?1 AND subject_kind=?2 ORDER BY subject_id",
+                    )
+                    .map_err(sqlite_err)?;
+                statement
+                    .query_map(
+                        params![profile.to_string(), kind.as_i64()],
+                        |row| {
+                            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                        },
+                    )
+                    .map_err(sqlite_err)?
+                    .map(decode_row)
+                    .collect::<Result<Vec<_>>>()?
+            };
             // Serve only durable generations. A concurrent durable advance
             // past the generation this build read refuses the publish; the
             // caller re-adopts after the next committed batch.
@@ -2116,7 +2138,19 @@ mod tests {
         seed_taxonomy_generation(&env, profile, 1, 1);
         seed_taxonomy_vector(&env, profile, 1, 9, 1, &make_embedding(4, -3.0));
         seed_taxonomy_generation(&env, profile, 2, 1);
-        seed_taxonomy_vector(&env, profile, 2, 3, 1, &make_embedding(4, 5.0));
+        // Kind 2 derives its snapshot from the relation chunk (Task 5).
+        env.vs
+            .seed_test_chunks(&[
+                SeedChunk {
+                    owner_kind: OwnerKind::Relation,
+                    owner_id: 3,
+                    chunk_kind: ChunkKind::Relation,
+                    chunk_index: 0,
+                    type_id: 1,
+                    vector: &make_embedding(4, 5.0),
+                },
+            ])
+            .unwrap();
         adopt(&mut env, false).unwrap();
         assert_eq!(
             env.vs

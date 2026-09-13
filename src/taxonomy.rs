@@ -984,8 +984,10 @@ mod tests {
 
         fn seed_generation(env: &Env, profile: uuid::Uuid, kind: i64, durable: i64) {
             let conn = env.vs.db.lock();
+            // The mutation funnel creates the kind marker as soon as a typed
+            // subject is enqueued, so seed idempotently like `enqueue_taxonomy`.
             conn.execute(
-                "INSERT INTO taxonomy_ann_generation(profile_id,subject_kind,durable_generation) VALUES(?1,?2,?3)",
+                "INSERT INTO taxonomy_ann_generation(profile_id,subject_kind,durable_generation) VALUES(?1,?2,?3) ON CONFLICT(profile_id,subject_kind) DO UPDATE SET durable_generation=excluded.durable_generation",
                 params![profile.to_string(), kind, durable],
             )
             .unwrap();
@@ -1000,6 +1002,22 @@ mod tests {
             conn.execute(
                 "INSERT INTO taxonomy_vector VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(profile_id,subject_kind,subject_id) DO UPDATE SET subject_revision=excluded.subject_revision,blob=excluded.blob,created_at_us=excluded.created_at_us,source=excluded.source",
                 params![profile.to_string(), kind, id, 1i64, bytes, 1i64, "test"],
+            )
+            .unwrap();
+        }
+
+        /// Seeds the relation chunk the kind-2 snapshot reads (Task 5).
+        /// `type_id` mirrors the relation row's type; the owner id is the
+        /// `taxonomy_relation` id the resolution path resolves by.
+        fn seed_chunk_vector(env: &Env, profile: uuid::Uuid, id: i64, type_id: i64, embedding: &[f32]) {
+            let bytes: Vec<u8> = embedding
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source) VALUES(?1,'relation','relation',?2,0,?3,1,?4,1,'test')",
+                params![profile.to_string(), id, type_id, bytes],
             )
             .unwrap();
         }
@@ -1107,10 +1125,14 @@ mod tests {
                 )
                 .unwrap();
             }
-            for (kind, id) in [(0, 7), (1, 8), (2, 42)] {
+            for kind in [0, 1, 2] {
                 seed_generation(&env, profile, kind, 1);
-                seed_vector(&env, profile, kind, id, &[1.0; 4]);
             }
+            seed_vector(&env, profile, 0, 7, &[1.0; 4]);
+            seed_vector(&env, profile, 1, 8, &[1.0; 4]);
+            // Kind 2 derives from the relation chunk (Task 5): seed the
+            // chunk_vector row the snapshot reads, not a taxonomy_vector row.
+            seed_chunk_vector(&env, profile, 42, 8, &[1.0; 4]);
             adopt(&mut env).unwrap();
 
             let entity_types =
@@ -1137,11 +1159,11 @@ mod tests {
             seed_type(&env, 7, 0, "person");
             seed_generation(&env, profile, 0, 1);
             seed_vector(&env, profile, 0, 7, &[1.0; 4]);
-            // Subject 999 has a vector but no relation row: the snapshot
+            // Subject 999 has a relation chunk but no mirror row: the snapshot
             // keeps serving it until the next rebuild, and the engine must
             // drop it rather than surface a name that no longer resolves.
             seed_generation(&env, profile, 2, 1);
-            seed_vector(&env, profile, 2, 999, &[1.0; 4]);
+            seed_chunk_vector(&env, profile, 999, 8, &[1.0; 4]);
             adopt(&mut env).unwrap();
 
             let relations =
@@ -1355,9 +1377,10 @@ mod tests {
                 .unwrap();
             }
             // Only the kind-2 snapshot holds a vector, so the suggestion can
-            // come from nowhere else.
+            // come from nowhere else. It derives from the relation chunk
+            // (Task 5), not from a kind-2 taxonomy_vector row.
             seed_generation(&env, profile, 2, 1);
-            seed_vector(&env, profile, 2, 42, &[1.0; 4]);
+            seed_chunk_vector(&env, profile, 42, 8, &[1.0; 4]);
             adopt(&mut env).unwrap();
 
             let value = handle_suggest_taxonomy(
