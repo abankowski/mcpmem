@@ -45,6 +45,14 @@ The exact chain to run before every push/PR (identical in Bash and fish):
 The `-D warnings` clippy must use `--all-features`; the plain default-feature
 run fails on pre-existing findings unrelated to the change.
 
+## Second Brain workflow
+
+The Second-Brain MCP (brain-1) is the cross-project knowledge graph for this
+work. `rule://second-brain` (global) and `skills/second-brain-memory` define
+when to pull context and when to feed it. The assessment and event-to-action
+mapping live in `docs/second-brain-workflow.md`; this repository is the
+server that backs the brain.
+
 ## Hosts
 
 `.omp/ssh.json` maps `brain-1` to `192.168.1.54`, the deployment host that
