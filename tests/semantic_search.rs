@@ -694,10 +694,7 @@ fn identity_and_stats_follow_the_serving_profile_dimension() {
                 |r| r.get::<_, i64>(0),
             )
             .unwrap();
-        let blob: Vec<u8> = [value; 4]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let blob: Vec<u8> = [value; 4].iter().flat_map(|v| v.to_le_bytes()).collect();
         conn.execute(
             "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
              VALUES(?1,'identity','entity',?2,0,?3,1,?4,1,'test')",
