@@ -645,7 +645,7 @@ fn chunk_rows(conn: &Connection, profile: &str, kind: &str) -> usize {
 - `worker_commits_latest_canonical_revision`: assert `chunk_rows(conn, profile, "identity") == 1` and `"observation" == 1`.
 - `persistent_failure_dead_letters_and_stops_blocking_the_full_scan`: the dead-letter path deletes the owner's chunk rows. Assert `SELECT COUNT(*) FROM chunk_vector` is 0 after dead-letter.
 - `worker_normalizes_l2_vectors_before_commit`: the blob of the identity chunk is the normalized vector; the old one-blob assertion becomes a per-chunk index check.
-- In `tests/event_outbox.rs`, `profile_rebuild_preserves_serving_and_fences_stale_revision_commits` and `vetted_vector_revision_and_l2_gate`: single `profile_vector` rows become chunk rows; the byte-for-byte blob assertion moves to the identity chunk. The `index_job` count assertions become `chunk_index_job` counts.
+- In `tests/event_outbox.rs`, `profile_rebuild_preserves_serving_and_fences_stale_revision_commits`: single `profile_vector` rows become chunk rows; the `index_job` count assertions become `chunk_index_job` counts. Note: the plan's original text named `vetted_vector_revision_and_l2_gate` here; that test does not exist. Its intended coverage (blob bytes, revision fencing, L2 gate) is carried by the rewritten `worker_retries_renewal_validation_and_restart_keep_durable_fences`.
 - `startup_rejects_changed_migration_and_preserves_legacy_vector_rows` stays green: `vector_embedding` still exists (0009 drops it).
 
 - [ ] **Step 16: Run the workspace suite**
@@ -1150,7 +1150,7 @@ Cost: ~90k tokens, est. $1.5."
 - Modify: `src/taxonomy.rs` (kind-2 resolution already reads the mirror — verify; nothing changes unless noted)
 - Modify: `crates/mcpmem-core/src/mutation.rs` (kind-2 enqueue sites were removed in Task 2; confirm no `enqueue_taxonomy_jobs(conn, 2, ...)` remains)
 - Modify: `crates/mcpmem-core/src/jobs.rs` (TaxonomyJobRepository kind-2 claim path — restrict `claim_due` to kinds 0 and 1)
-- Test: `tests/mutation.rs` taxonomy tests, `tests/indexer_worker.rs` taxonomy worker tests, `src/taxonomy.rs` tests
+- Test: `tests/indexer_worker.rs` taxonomy worker tests, `src/taxonomy.rs` tests. Note: the plan's original text named `tests/mutation.rs`; that file does not exist. The real mirror tests live in the `crates/mcpmem-core/src/mutation.rs` test module, and Task 2 re-pointed them at `chunk_index_job` rows — verify only, no edit expected.
 
 **Interfaces:**
 - Consumes: `chunk_vector` relation rows (Task 2), kind-2 `taxonomy_ann_generation` bumps (Task 2).
