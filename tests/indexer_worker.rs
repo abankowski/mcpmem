@@ -1002,10 +1002,15 @@ fn stale_taxonomy_job_fails_the_fence_without_a_vector_row() {
 }
 
 #[test]
-fn worker_removes_the_vector_row_for_a_taxonomy_delete_job() {
+fn worker_never_claims_a_retired_kind2_taxonomy_job() {
+    // Task 5 retires the kind-2 taxonomy funnel: relation vectors live in
+    // chunk_vector and the kind-2 snapshot derives from them. A held kind-2
+    // taxonomy job row must never claim or run; the row stays untouched
+    // (migration 0009 drops it).
     let dir = tempfile::tempdir().unwrap();
     let (database, conn, profile) = taxonomy_fixture(dir.path());
-    // A relation tombstone at revision 5 with a vector row to remove.
+    // A relation tombstone at revision 5 with a stale kind-2 vector row.
+    // Neither the job nor the stale vector may cause any worker work.
     conn.execute(
         "INSERT INTO taxonomy_relation(id, from_id, to_id, type_id, revision, deleted) VALUES(10, 1, 2, 3, 5, 1)",
         [],
@@ -1020,14 +1025,8 @@ fn worker_removes_the_vector_row_for_a_taxonomy_delete_job() {
     let report = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5))
         .run_once(now_us())
         .unwrap();
-    assert_eq!(report.claimed, 1);
-    assert_eq!(report.committed, 1);
-    assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM taxonomy_vector", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
+    assert_eq!(report.claimed, 0, "a retired kind-2 row is never claimed");
+    assert_eq!(report.committed, 0);
     let state: String = conn
         .query_row(
             "SELECT state FROM taxonomy_job WHERE subject_kind=2 AND subject_id=10 AND profile_id=?1",
@@ -1035,7 +1034,14 @@ fn worker_removes_the_vector_row_for_a_taxonomy_delete_job() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(state, "done");
+    assert_eq!(state, "pending", "the held kind-2 row is untouched");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM taxonomy_vector", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "no kind-2 vector is touched"
+    );
 }
 
 #[test]
@@ -1084,6 +1090,64 @@ fn vanished_taxonomy_subject_retries_then_dead_letters() {
             .unwrap(),
         0
     );
+}
+
+fn entity(name: &str, entity_type: &str) -> Entity {
+    Entity {
+        name: name.into(),
+        entity_type: entity_type.into(),
+        observations: vec![],
+    }
+}
+
+fn relation(from: &str, to: &str, relation_type: &str) -> mcpmem::types::Relation {
+    mcpmem::types::Relation {
+        from: from.into(),
+        to: to.into(),
+        relation_type: relation_type.into(),
+    }
+}
+
+/// Begins a candidate rebuild for a fresh profile on the graph database, the
+/// way the reconcile test does. Mutations enqueue their chunk and taxonomy
+/// jobs against the candidate; the worker then serves them.
+fn seed_profile(database: &Path) -> IndexProfile {
+    let conn = rusqlite::Connection::open(database).unwrap();
+    let profile = profile();
+    IndexProfileRegistry::new(&conn).begin_rebuild(&profile).unwrap();
+    profile
+}
+
+fn vs_of(database: &Path) -> VectorStore {
+    VectorStore::new(database, 2).unwrap()
+}
+
+#[test]
+fn taxonomy_relation_snapshot_derives_from_chunk_vector() {
+    // Seed entities + relation through the graph, run the worker until the
+    // relation chunk job commits, then assert search_taxonomy kind=2 finds
+    // it. The kind-2 snapshot reads chunk_vector, never taxonomy_vector.
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    seed_profile(&database);
+    graph.create_entities(&[entity("ada", "Person"), entity("bob", "Person")]).unwrap();
+    graph.create_relations(&[relation("ada", "bob", "knows")]).unwrap();
+    let worker = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5));
+    // Chunk jobs claim before taxonomy jobs, and the entity jobs before the
+    // relation job. Drain the queue: ada, bob and the relation each get one
+    // chunk job, then the two type subjects get one taxonomy job each.
+    let mut claimed = 0;
+    for _ in 0..6 {
+        claimed += worker.run_once(now_us()).unwrap().claimed;
+    }
+    assert_eq!(claimed, 5, "three chunk jobs and two taxonomy jobs drain");
+    let store = vs_of(&database);
+    store.reconcile_managed_snapshot().unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    store.adopt_taxonomy(&IndexProfileRegistry::new(&conn), false).unwrap();
+    let hits = store.search_taxonomy(TaxonomyKind::Relation, &[1.0, 0.0], 5).unwrap();
+    assert_eq!(hits.len(), 1, "one relation chunk in the kind-2 snapshot");
 }
 
 #[test]
