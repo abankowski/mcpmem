@@ -403,20 +403,11 @@ fn a_missing_query_text_is_rejected() {
     assert!(text.contains("'queryText'"), "{text}");
 }
 
-/// The search tools share one filter contract: `filter.kind` limits the owner
-/// kind, `filter.type` the owner type, and result rows carry `kind`. This file
-/// cannot run a live `semantic_search` query (no provider is ever installed),
-/// so the behaviour is exercised through `vector_search_entities`, which uses
-/// the same handler core and needs no provider. A legacy store holds no
-/// relation rows, so `kind: "relation"` must match nothing, not error.
-fn seed_chunk_snapshot(dir: &tempfile::TempDir) {
-    // Build a serving profile and chunk rows exactly as the worker would, via
-    // an independent connection, then publish the snapshot on the store the
-    // test holds. The 2.0.0 surface has no client ingestion tool: chunks are
-    // the only vector source.
-    let db = dir.path().join("memory.db");
-    let conn = rusqlite::Connection::open(&db).unwrap();
-    let profile = "11111111-2222-3333-4444-555555555555";
+/// Register one serving profile at `dims` and seed its generation marker,
+/// exactly as the worker's first commit would. Shared by the filter tests
+/// (profile dims == the store's `DIMS`) and the profile-vs-default test
+/// (profile dims deliberately different from `DIMS`).
+fn activate_test_profile(conn: &rusqlite::Connection, profile: &str, dims: u32) {
     conn.execute(
         "INSERT INTO index_profile VALUES(?1,'default',?2,?3,'Active')",
         rusqlite::params![
@@ -427,7 +418,7 @@ fn seed_chunk_snapshot(dir: &tempfile::TempDir) {
                 "store_key": "default",
                 "provider_kind": "test",
                 "model": "test",
-                "dimensions": 8,
+                "dimensions": dims,
                 "representation_version": "v1",
                 "normalization": "None",
                 "distance_metric": "L2Squared",
@@ -447,6 +438,23 @@ fn seed_chunk_snapshot(dir: &tempfile::TempDir) {
         [profile],
     )
     .unwrap();
+}
+
+/// The search tools share one filter contract: `filter.kind` limits the owner
+/// kind, `filter.type` the owner type, and result rows carry `kind`. This file
+/// cannot run a live `semantic_search` query (no provider is ever installed),
+/// so the behaviour is exercised through `vector_search_entities`, which uses
+/// the same handler core and needs no provider. A legacy store holds no
+/// relation rows, so `kind: "relation"` must match nothing, not error.
+fn seed_chunk_snapshot(dir: &tempfile::TempDir) {
+    // Build a serving profile and chunk rows exactly as the worker would, via
+    // an independent connection, then publish the snapshot on the store the
+    // test holds. The 2.0.0 surface has no client ingestion tool: chunks are
+    // the only vector source.
+    let db = dir.path().join("memory.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let profile = "11111111-2222-3333-4444-555555555555";
+    activate_test_profile(&conn, profile, DIMS);
     let seed = |name: &str, _etype: &str, value: f64| {
         let entity_id: i64 = conn
             .query_row(
@@ -601,5 +609,136 @@ fn filter_rejects_unknown_kind() {
     assert!(
         text.contains("entity") && text.contains("relation"),
         "the refusal must name the allowed kinds: {text}"
+    );
+}
+
+/// A non-string `filter.kind` or `filter.type` must be refused, not silently
+/// read as "no filter": a number or array passed by a buggy client would
+/// otherwise widen the search and return a wrong result as if correct.
+#[test]
+fn filter_rejects_non_string_members() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kg, vs) = vector_server(&dir);
+    let v = call_tool(
+        &kg,
+        &vs,
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": vec![1.0f64; DIMS as usize],
+            "filter": { "kind": 7 },
+        }),
+    );
+    let text = result_text(&v);
+    assert_eq!(v["result"]["isError"], Value::Bool(true), "{v}");
+    assert!(
+        text.contains("'filter.kind'"),
+        "the refusal must name the member: {text}"
+    );
+    let v = call_tool(
+        &kg,
+        &vs,
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": vec![1.0f64; DIMS as usize],
+            "filter": { "type": ["Person"] },
+        }),
+    );
+    let text = result_text(&v);
+    assert_eq!(v["result"]["isError"], Value::Bool(true), "{v}");
+    assert!(
+        text.contains("'filter.type'"),
+        "the refusal must name the member: {text}"
+    );
+}
+
+/// The identity-chunk gate and the stats `dims` must follow the serving
+/// profile, not the CLI `--embedding-dims` default. The store here is built
+/// at `DIMS` (8) while the profile embeds at 4: `vector_search_by_entity`
+/// must still find the identity chunk, and `vector_store_stats` must report
+/// the profile's 4, or a store configured through the config file (profile
+/// 768, flag default 384) silently loses every identity-vector read.
+#[test]
+fn identity_and_stats_follow_the_serving_profile_dimension() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kg, vs) = vector_server(&dir);
+    let v = call_tool(
+        &kg,
+        &vs,
+        "create_entities",
+        &serde_json::json!({
+            "entities": [
+                {"name": "ada", "entityType": "Person", "observations": []},
+                {"name": "acme", "entityType": "Company", "observations": []}
+            ]
+        }),
+    );
+    assert!(v["error"].is_null(), "seed entities: {v}");
+
+    let db = dir.path().join("memory.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let profile = "11111111-2222-3333-4444-555555555555";
+    // Profile at 4 dims while the store's own default is DIMS (8).
+    activate_test_profile(&conn, profile, 4);
+    let seed_identity = |conn: &rusqlite::Connection, name: &str, value: f32| {
+        let entity_id: i64 = conn
+            .query_row(
+                "SELECT id FROM entity WHERE name=?1 AND flags=0",
+                [name],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        let type_id: i64 = conn
+            .query_row(
+                "SELECT t.id FROM entity e JOIN type_dict t ON t.id=e.type_id WHERE e.id=?1",
+                [entity_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        let blob: Vec<u8> = vec![value; 4]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        conn.execute(
+            "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+             VALUES(?1,'identity','entity',?2,0,?3,1,?4,1,'test')",
+            rusqlite::params![profile, entity_id, type_id, blob],
+        )
+        .unwrap();
+    };
+    seed_identity(&conn, "ada", 1.0);
+    seed_identity(&conn, "acme", 0.1);
+    drop(conn);
+    vs.reconcile_managed_snapshot().unwrap();
+
+    // The identity chunk must serve at the profile dimension, not be dropped
+    // by a gate built on the store's 8-dims default. ada's identity chunk
+    // then finds acme (the default excludes the query owner itself).
+    let text = result_text(&call_tool(
+        &kg,
+        &vs,
+        "vector_search_by_entity",
+        &serde_json::json!({ "entityName": "ada", "topK": 10 }),
+    ));
+    let rows = serde_json::from_str::<Value>(&text).expect("rows JSON")["results"]
+        .as_array()
+        .expect("results array")
+        .clone();
+    assert_eq!(rows.len(), 1, "ada finds one owner by identity: {text}");
+    assert_eq!(
+        rows[0]["name"].as_str(),
+        Some("acme"),
+        "the hit is acme: {text}"
+    );
+
+    // Stats report the dimension the store actually serves.
+    let text = result_text(&call_tool(
+        &kg,
+        &vs,
+        "vector_store_stats",
+        &serde_json::json!({}),
+    ));
+    assert!(
+        text.contains(r#""dims":4"#),
+        "stats report the profile dimension, not the CLI default: {text}"
     );
 }

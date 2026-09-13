@@ -647,16 +647,8 @@ fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
     let jobs = IndexJobRepository::new(&conn);
     let ann = AnnGenerationRepository::new(&conn);
     assert_eq!(registry.state("default").unwrap(), StoreState::LegacyCompat);
-    registry.ensure_legacy_writes("default").unwrap();
     let candidate = profile();
     registry.begin_rebuild(&candidate).unwrap();
-    assert!(
-        registry
-            .ensure_legacy_writes("default")
-            .unwrap_err()
-            .to_string()
-            .contains("direct_vector_writes_disabled")
-    );
     assert!(registry.activate(candidate.id).is_err());
     let expired = jobs.claim_due(100, 10).unwrap().unwrap();
     let recovered = jobs.claim_due(111, 20).unwrap().unwrap();

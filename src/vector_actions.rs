@@ -94,6 +94,24 @@ pub struct SearchFilter {
     pub r#type: Option<String>,
 }
 
+/// One filter member: `None` when absent or null or an empty string, an
+/// `InvalidParams` error when the value is present but not a string — a
+/// number or object silently read as "no filter" would return a wrong result
+/// as if it were correct.
+fn filter_member<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a str>> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if !s.is_empty() => Ok(Some(s)),
+        Some(Value::String(_)) => Ok(None),
+        Some(_) => Err(MCSError::InvalidParams(format!(
+            "'filter.{key}' must be a string"
+        ))),
+    }
+}
+
 /// Parse the `filter` argument. `None` when the argument is absent or null.
 /// The `kind` whitelist is exactly "entity" and "relation"; anything else is
 /// refused before any search runs.
@@ -104,19 +122,13 @@ fn parse_filter(params: &Value) -> Result<Option<SearchFilter>> {
     let object = f
         .as_object()
         .ok_or_else(|| MCSError::InvalidParams("'filter' must be an object".into()))?;
-    let kind = object
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+    let kind = filter_member(object, "kind")?;
     if kind.is_some_and(|k| k != "entity" && k != "relation") {
         return Err(MCSError::InvalidParams(
             "'filter.kind' must be \"entity\" or \"relation\"".into(),
         ));
     }
-    let ftype = object
-        .get("type")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+    let ftype = filter_member(object, "type")?;
     Ok(Some(SearchFilter {
         kind: kind.map(str::to_string),
         r#type: ftype.map(str::to_string),
@@ -538,9 +550,16 @@ pub fn handle_vector_store_stats(
     _kg: &GraphHandle,
     _args: Option<&Value>,
 ) -> Result<Value> {
+    // The dimension the store actually serves is the serving profile's, not
+    // the CLI `--embedding-dims` fallback (they differ whenever the config
+    // file mints a profile at another dimension).
+    let dims = vs
+        .serving_profile()?
+        .map(|profile| profile.dimensions)
+        .unwrap_or_else(|| vs.dims());
     let text = serde_json::to_string(&json!({
         "embeddingCount": vs.count(),
-        "dims": vs.dims(),
+        "dims": dims,
         "petgraphNodes": vs.graph_node_count(),
         "petgraphEdges": vs.graph_edge_count(),
     }))

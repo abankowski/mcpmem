@@ -28,7 +28,7 @@ cargo install mcpmem
   events and the index jobs. A guard rolls back on any later failure, so a
   partial write cannot happen.
 - **The change log and the outbox.** `change_event` is immutable and a trigger
-  protects it. `event_outbox` and `index_job` carry the durable work for the two
+  protects it. `event_outbox` and `chunk_index_job` carry the durable work for the two
   worker crates.
 - **The relation-integrity repair.** The audit and the backup-gated repair that
   the `mcpmem-maintenance` binary runs.
@@ -63,7 +63,8 @@ observation bodies live in separate external-content FTS5 tables, `name_fts` and
 | `graph_stat` | `WITHOUT ROWID` counters: entities, relations, observations, sequences |
 | `change_event` | The immutable change log |
 | `event_outbox` | Pending webhook deliveries, with leases |
-| `index_job` | Pending embedding work, one row per entity and profile |
+| `chunk_index_job` | Pending chunk embedding work, one row per owner and profile |
+| `chunk_vector` | The serving chunks (identity, observation, relation), one row per chunk, owned by the indexer worker |
 | `webhook_subscription` | The subscriptions that receive change events |
 
 ## Concurrency
