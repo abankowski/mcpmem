@@ -2,10 +2,29 @@ use serde_json::{Value, json};
 
 use crate::errors::{MCSError, Result};
 use crate::kg::{GraphHandle, push_json_str};
-use crate::vector_store::{EntityId, VectorStore, with_scratch};
+use crate::vector_store::{VectorStore, with_scratch};
+use mcpmem_core::jobs::OwnerKind;
 use rustc_hash::FxHashMap;
 
-type HybridResult = Vec<(String, String, f64, f64, f64)>;
+/// One fused result row: the display triple, the three scores, and the best
+/// vector chunk when the caller asked for chunk detail.
+struct FusedRow {
+    name: String,
+    entity_type: String,
+    kind: String,
+    score: f64,
+    text_score: f64,
+    vec_score: f64,
+    chunk: Option<ChunkDetail>,
+}
+
+/// The matched chunk of one result row for `includeChunks`: its kind, its
+/// reassembled text, and its distance.
+struct ChunkDetail {
+    kind: String,
+    text: String,
+    score: f64,
+}
 
 const MAX_EMBEDDING_DIMS: usize = 4096;
 const MAX_TOP_K: usize = 100;
@@ -68,6 +87,44 @@ fn opt_f64(params: &Value, key: &str, default: f64) -> Result<f64> {
     }
 }
 
+/// Owner-level filter shared by the four search tools. `kind` limits the owner
+/// kind ("entity" or "relation"); `type` matches the chunk type name in
+/// `type_dict` exactly. `type` without `kind` matches either dict kind.
+#[derive(Clone, Debug, Default)]
+pub struct SearchFilter {
+    pub kind: Option<String>,
+    pub r#type: Option<String>,
+}
+
+/// Parse the `filter` argument. `None` when the argument is absent or null.
+/// The `kind` whitelist is exactly "entity" and "relation"; anything else is
+/// refused before any search runs.
+fn parse_filter(params: &Value) -> Result<Option<SearchFilter>> {
+    let Some(f) = params.get("filter").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let object = f
+        .as_object()
+        .ok_or_else(|| MCSError::InvalidParams("'filter' must be an object".into()))?;
+    let kind = object
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    if kind.is_some_and(|k| k != "entity" && k != "relation") {
+        return Err(MCSError::InvalidParams(
+            "'filter.kind' must be \"entity\" or \"relation\"".into(),
+        ));
+    }
+    let ftype = object
+        .get("type")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    Ok(Some(SearchFilter {
+        kind: kind.map(str::to_string),
+        r#type: ftype.map(str::to_string),
+    }))
+}
+
 fn text_content(text: &str) -> Value {
     json!({
         "content": [{
@@ -83,6 +140,156 @@ fn build_content_response(inner_json: &str) -> String {
     push_json_str(&mut out, inner_json);
     out.push_str(r#"}]}"#);
     out
+}
+
+/// One owner-level result row of the shared search: display triple, owner
+/// score (the best chunk's distance), and the matched chunk for
+/// `includeChunks`.
+type OwnerRow = (String, String, String, f64, Option<ChunkDetail>);
+
+/// Search owners by their best chunk. The owner set, the filter, the
+/// kind-marked rows, and the chunk detail are the shared contract of the four
+/// search tools; `exclude` drops one owner from the results (the query entity
+/// itself in `vector_search_by_entity`) while still returning `top_k` rows.
+fn search_owners(
+    vs: &VectorStore,
+    query: &[f32],
+    top_k: usize,
+    exclude: Option<(OwnerKind, i64)>,
+    filter: Option<&SearchFilter>,
+    include_chunks: bool,
+) -> Result<String> {
+    Ok(build_owner_results(&search_owner_rows(
+        vs,
+        query,
+        top_k,
+        exclude,
+        filter,
+        include_chunks,
+    )?))
+}
+
+fn search_owner_rows(
+    vs: &VectorStore,
+    query: &[f32],
+    top_k: usize,
+    exclude: Option<(OwnerKind, i64)>,
+    filter: Option<&SearchFilter>,
+    include_chunks: bool,
+) -> Result<Vec<OwnerRow>> {
+    // Ask for one owner more than returned so dropping the excluded owner
+    // (which ranks first, its own identity chunk is the query) still leaves a
+    // full result set. The final truncate covers the case where the excluded
+    // owner is not in the ranked set at all.
+    let target = top_k.saturating_add(usize::from(exclude.is_some()));
+    let kind = filter.and_then(|f| f.kind.as_deref());
+    let ftype = filter.and_then(|f| f.r#type.as_deref());
+    let mut rows: Vec<OwnerRow> = Vec::with_capacity(target);
+
+    if vs.serving_profile()?.is_some() {
+        // Chunk-serving store: overfetch chunks so owners whose best chunk sits
+        // past `top_k` still rank, then reduce to one best chunk per owner.
+        // Truncating at the chunk level first would let one owner's many near
+        // chunks crowd out the other owners and under-fill the result set.
+        let fetch = (target * 8).clamp(target, 1000);
+        let hits = vs.search_chunks(query, fetch, kind, ftype)?;
+        let owners = vs.aggregate_owners(&hits, target);
+        for (owner_kind, owner_id, dist, _best_idx) in owners {
+            if exclude == Some((owner_kind, owner_id)) {
+                continue;
+            }
+            let Some((name, etype, kind_label)) = vs.resolve_owner(owner_kind, owner_id)? else {
+                continue;
+            };
+            let chunk = if include_chunks {
+                hits.iter()
+                    .find(|h| h.owner_kind == owner_kind && h.owner_id == owner_id)
+                    .and_then(|h| {
+                        vs.chunk_text(h).map(|text| ChunkDetail {
+                            kind: h.chunk_kind.as_str().to_string(),
+                            text,
+                            score: f64::from(h.dist),
+                        })
+                    })
+            } else {
+                None
+            };
+            rows.push((name, etype, kind_label, f64::from(dist), chunk));
+        }
+    } else {
+        // Legacy compatibility: the in-memory ANN serves entities only, so a
+        // relation filter matches nothing and no chunk text exists. Overfetch
+        // so the type filter does not under-fill the result set.
+        if kind != Some("relation") {
+            let fetch = (target * 8).clamp(target, 100);
+            for (id, dist) in vs.search_embeddings(query, fetch)? {
+                if exclude == Some((OwnerKind::Entity, id)) {
+                    continue;
+                }
+                let Some((name, etype, kind_label)) =
+                    vs.resolve_owner(OwnerKind::Entity, id)?
+                else {
+                    continue;
+                };
+                if let Some(want) = ftype
+                    && etype != want
+                {
+                    continue;
+                }
+                rows.push((name, etype, kind_label, f64::from(dist), None));
+            }
+        }
+    }
+    rows.truncate(top_k);
+    Ok(rows)
+}
+
+/// Append one `"chunk":{...}` member to a result row.
+fn write_chunk_detail(out: &mut String, chunk: &ChunkDetail) {
+    use std::fmt::Write;
+    out.push_str(r#","chunk":{"kind":"#);
+    push_json_str(out, &chunk.kind);
+    out.push_str(r#","text":"#);
+    push_json_str(out, &chunk.text);
+    write!(out, r#","score":{:.6}}}"#, chunk.score).unwrap();
+}
+
+/// Render owner rows `(name, entityType, kind, score, chunk?)` as the standard
+/// results JSON: `{"results":[{name, entityType, kind, score, chunk?}],
+/// "count":N}`.
+fn build_owner_results(rows: &[OwnerRow]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(128 + rows.len() * 96);
+    out.push_str(r#"{"results":["#);
+    for (i, (name, etype, kind, score, chunk)) in rows.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(r#"{"name":"#);
+        push_json_str(&mut out, name);
+        out.push_str(r#","entityType":"#);
+        push_json_str(&mut out, etype);
+        out.push_str(r#","kind":"#);
+        push_json_str(&mut out, kind);
+        write!(out, r#","score":{score:.6}"#).unwrap();
+        if let Some(chunk) = chunk {
+            write_chunk_detail(&mut out, chunk);
+        }
+        out.push('}');
+    }
+    out.push_str(r#"],"count":"#);
+    out.push_str(&rows.len().to_string());
+    out.push('}');
+    out
+}
+
+/// The `(kind, id)` fusion key. `OwnerKind` implements no `Hash`, so the key
+/// is the owner kind's discriminant.
+fn owner_key(kind: OwnerKind) -> u8 {
+    match kind {
+        OwnerKind::Entity => 0,
+        OwnerKind::Relation => 1,
+    }
 }
 
 pub fn handle_vector_upsert_embedding(
@@ -136,16 +343,16 @@ pub fn handle_vector_search_entities(
     )?;
 
     let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?.clamp(1, MAX_TOP_K);
-
-    let entity_type = params
-        .get("entityType")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+    let filter = parse_filter(params)?;
+    let include_chunks = params
+        .get("includeChunks")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let json = with_scratch(|buf| {
         buf.reserve(embedding.len());
         buf.extend(embedding.iter().map(|&v| v as f32));
-        vs.search_entities_json(buf, top_k, entity_type)
+        search_owners(vs, buf, top_k, None, filter.as_ref(), include_chunks)
     })?;
 
     Ok(build_content_response(&json))
@@ -195,36 +402,59 @@ pub fn handle_hybrid_search(
     let text_weight = opt_f64(params, "textWeight", 0.5)?;
     let vec_weight = opt_f64(params, "vecWeight", 0.5)?;
     let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?.clamp(1, MAX_TOP_K);
+    let filter = parse_filter(params)?;
+    let include_chunks = params
+        .get("includeChunks")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let results = with_scratch(|buf| {
         buf.reserve(query_embedding.len());
         buf.extend(query_embedding.iter().map(|&v| v as f32));
-        perform_hybrid_search(vs, kg, query_text, buf, text_weight, vec_weight, top_k)
+        perform_hybrid_search(
+            vs,
+            kg,
+            query_text,
+            buf,
+            text_weight,
+            vec_weight,
+            top_k,
+            filter.as_ref(),
+            include_chunks,
+        )
     })?;
 
     Ok(build_content_response(&build_fused_results(&results)))
 }
 
-/// Render fused `(name, entityType, score, textScore, vecScore)` rows as the
-/// standard results JSON. `hybrid_search` and `semantic_search` fuse the same
-/// two rankings, so a client parses one shape for both.
-fn build_fused_results(results: &HybridResult) -> String {
+/// Render fused rows as the standard results JSON. `hybrid_search` and
+/// `semantic_search` fuse the same two rankings, so a client parses one shape
+/// for both. Rows are kind-marked, and `includeChunks` attaches the best
+/// vector chunk of the owner.
+fn build_fused_results(results: &[FusedRow]) -> String {
     use std::fmt::Write;
-    let mut out = String::with_capacity(128 + results.len() * 80);
+    let mut out = String::with_capacity(128 + results.len() * 96);
     out.push_str(r#"{"results":["#);
-    for (i, (name, etype, score, txt_score, vec_score)) in results.iter().enumerate() {
+    for (i, row) in results.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
         out.push_str(r#"{"name":"#);
-        push_json_str(&mut out, name);
+        push_json_str(&mut out, &row.name);
         out.push_str(r#","entityType":"#);
-        push_json_str(&mut out, etype);
+        push_json_str(&mut out, &row.entity_type);
+        out.push_str(r#","kind":"#);
+        push_json_str(&mut out, &row.kind);
         write!(
             out,
-            r#","score":{score:.6},"textScore":{txt_score:.6},"vecScore":{vec_score:.6}}}"#
+            r#","score":{:.6},"textScore":{:.6},"vecScore":{:.6}"#,
+            row.score, row.text_score, row.vec_score
         )
         .unwrap();
+        if let Some(chunk) = &row.chunk {
+            write_chunk_detail(&mut out, chunk);
+        }
+        out.push('}');
     }
     out.push_str(r#"],"count":"#);
     out.push_str(&results.len().to_string());
@@ -240,40 +470,82 @@ fn perform_hybrid_search(
     text_weight: f64,
     vec_weight: f64,
     top_k: usize,
-) -> Result<HybridResult> {
-    let fetch_k = top_k * 3;
+    filter: Option<&SearchFilter>,
+    include_chunks: bool,
+) -> Result<Vec<FusedRow>> {
+    let fetch_k = top_k.saturating_mul(3).clamp(1, 100);
     let rrf_constant = 60.0;
+    let kind = filter.and_then(|f| f.kind.as_deref());
+    let ftype = filter.and_then(|f| f.r#type.as_deref());
 
-    let vec_matches = vs.search_embeddings(query_emb, fetch_k)?;
+    // The vector half runs at owner level: chunk hits aggregate to one best
+    // chunk per owner, so one owner's many chunks cannot crowd out the others.
+    // A legacy store (no serving profile) holds no chunk rows, so its ANN
+    // serves the pool the same way it always did; relation rows cannot exist
+    // there, so a relation-kind filter matches nothing.
+    let chunk_serving = vs.serving_profile()?.is_some();
+    let hits = if chunk_serving {
+        vs.search_chunks(query_emb, fetch_k, kind, ftype)?
+    } else {
+        Vec::new()
+    };
+    let vec_owners = if chunk_serving {
+        vs.aggregate_owners(&hits, fetch_k)
+    } else if kind != Some("relation") {
+        let mut owners = Vec::new();
+        for (id, dist) in vs.search_embeddings(query_emb, fetch_k)? {
+            if let Some(want) = ftype
+                && vs.get_entity_type(id)?.as_deref() != Some(want)
+            {
+                continue;
+            }
+            owners.push((OwnerKind::Entity, id, dist, None));
+        }
+        owners
+    } else {
+        Vec::new()
+    };
 
-    let kg_results = kg.search_nodes_filtered(query_text, None, 0, fetch_k);
-    let mut text_matches: Vec<EntityIdAndName> = Vec::with_capacity(kg_results.len());
-    for entity in &kg_results {
-        if let Some(id) = vs.entity_id_of(&entity.name)? {
-            text_matches.push(EntityIdAndName { id });
+    // The FTS half matches entities only. A relation-kind filter excludes it
+    // (relation rows enter the fusion with their vector rank only), and a type
+    // filter applies to the entity type, mirroring the chunk-level predicate.
+    let mut text_matches: Vec<(u8, i64)> = Vec::new();
+    if kind != Some("relation") {
+        let kg_results = kg.search_nodes_filtered(query_text, None, 0, fetch_k);
+        for entity in &kg_results {
+            let Some(id) = vs.entity_id_of(&entity.name)? else { continue };
+            if let Some(want) = ftype
+                && vs.get_entity_type(id)?.as_deref() != Some(want)
+            {
+                continue;
+            }
+            text_matches.push((owner_key(OwnerKind::Entity), id));
         }
     }
 
-    let mut score_map: FxHashMap<EntityId, AggScore> = FxHashMap::with_capacity_and_hasher(
-        vec_matches.len() + text_matches.len(),
+    let mut score_map: FxHashMap<(u8, i64), AggScore> = FxHashMap::with_capacity_and_hasher(
+        vec_owners.len() + text_matches.len(),
         rustc_hash::FxBuildHasher,
     );
-
-    for (rank, (id, _dist)) in vec_matches.iter().enumerate() {
-        let entry = score_map.entry(*id).or_insert_with(|| AggScore {
-            id: *id,
-            total: 0.0,
-            vec_score: 0.0,
-            text_score: 0.0,
-        });
+    for (rank, (owner_kind, owner_id, _dist, _best)) in vec_owners.iter().enumerate() {
+        let entry = score_map
+            .entry((owner_key(*owner_kind), *owner_id))
+            .or_insert_with(|| AggScore {
+                kind: *owner_kind,
+                owner_id: *owner_id,
+                total: 0.0,
+                vec_score: 0.0,
+                text_score: 0.0,
+            });
         let rrf = vec_weight * (1.0 / (rrf_constant + rank as f64));
         entry.total += rrf;
         entry.vec_score += rrf;
     }
 
-    for (rank, tm) in text_matches.iter().enumerate() {
-        let entry = score_map.entry(tm.id).or_insert_with(|| AggScore {
-            id: tm.id,
+    for (rank, &(key_kind, id)) in text_matches.iter().enumerate() {
+        let entry = score_map.entry((key_kind, id)).or_insert_with(|| AggScore {
+            kind: OwnerKind::Entity,
+            owner_id: id,
             total: 0.0,
             vec_score: 0.0,
             text_score: 0.0,
@@ -290,10 +562,13 @@ fn perform_hybrid_search(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    // The centrality boost stays entity-keyed: relation rows get no boost.
     if vs.graph_node_count() > 0 {
         let g = vs.graph.read();
         for entry in &mut scored {
-            if let Some(nx) = vs.node_map.get(&entry.id) {
+            if entry.kind == OwnerKind::Entity
+                && let Some(nx) = vs.node_map.get(&entry.owner_id)
+            {
                 let deg = g.neighbors(*nx).count() as f64;
                 if deg > 0.0 {
                     let boost = 0.1 * (deg / (deg + 5.0));
@@ -310,21 +585,37 @@ fn perform_hybrid_search(
 
     let mut results = Vec::with_capacity(top_k.min(scored.len()));
     for entry in scored.iter().take(top_k) {
-        let (name, etype) = vs.resolve_name_type(entry.id);
-        if !name.is_empty() {
-            results.push((name, etype, entry.total, entry.text_score, entry.vec_score));
-        }
+        let Some((name, etype, kind_label)) = vs.resolve_owner(entry.kind, entry.owner_id)? else {
+            continue;
+        };
+        let chunk = if include_chunks {
+            hits.iter()
+                .find(|h| h.owner_kind == entry.kind && h.owner_id == entry.owner_id)
+                .and_then(|h| vs.chunk_text(h).map(|text| ChunkDetail {
+                    kind: h.chunk_kind.as_str().to_string(),
+                    text,
+                    score: f64::from(h.dist),
+                }))
+        } else {
+            None
+        };
+        results.push(FusedRow {
+            name,
+            entity_type: etype,
+            kind: kind_label,
+            score: entry.total,
+            text_score: entry.text_score,
+            vec_score: entry.vec_score,
+            chunk,
+        });
     }
 
     Ok(results)
 }
 
-struct EntityIdAndName {
-    id: EntityId,
-}
-
 struct AggScore {
-    id: EntityId,
+    kind: OwnerKind,
+    owner_id: i64,
     total: f64,
     vec_score: f64,
     text_score: f64,
@@ -511,8 +802,8 @@ pub fn handle_vector_get_embedding(
     }
 }
 
-/// "More like this": find entities nearest to a given entity's own embedding.
-/// `{ entityName, topK?, entityType?, excludeSelf? }`.
+/// "More like this": find owners nearest to a given entity's identity chunk.
+/// `{ entityName, topK?, filter?, includeChunks?, excludeSelf? }`.
 pub fn handle_vector_search_by_entity(
     vs: &VectorStore,
     _kg: &GraphHandle,
@@ -525,29 +816,40 @@ pub fn handle_vector_search_by_entity(
         .ok_or_else(|| MCSError::InvalidParams("Missing 'entityName' parameter".into()))?;
     validate_name(name)?;
     let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?.clamp(1, MAX_TOP_K);
-    let entity_type = params
-        .get("entityType")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+    let filter = parse_filter(params)?;
+    let include_chunks = params
+        .get("includeChunks")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let exclude_self = params
         .get("excludeSelf")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let (id, emb, _model) = vs
-        .get_embedding_by_name(name)?
-        .ok_or_else(|| MCSError::InvalidParams(format!("Entity '{name}' has no embedding")))?;
-
-    let mut exclude = std::collections::HashSet::new();
-    if exclude_self {
-        exclude.insert(id);
-    }
-    let rows = vs.search_resolved(&emb, top_k, entity_type, &exclude)?;
-    let named: Vec<(String, String, f64)> = rows
-        .into_iter()
-        .map(|(_, n, t, d)| (n, t, f64::from(d)))
-        .collect();
-    Ok(build_content_response(&build_named_results(&named)))
+    let Some(entity_id) = vs.entity_id_of(name)? else {
+        return Err(MCSError::InvalidParams(format!(
+            "Entity '{name}' does not exist"
+        )));
+    };
+    // The identity chunk is the query in a chunk-serving store. A store in
+    // legacy compatibility holds no chunk rows, so its stored embedding stands
+    // in; without either, the entity has no vector to search by.
+    let query = match vs.identity_vector(name)? {
+        Some(v) => v,
+        None => vs
+            .get_embedding_by_name(name)?
+            .map(|(_, emb, _)| emb)
+            .ok_or_else(|| {
+                MCSError::InvalidParams(format!("Entity '{name}' has no identity chunk"))
+            })?,
+    };
+    let exclude = if exclude_self {
+        Some((OwnerKind::Entity, entity_id))
+    } else {
+        None
+    };
+    let json = search_owners(vs, &query, top_k, exclude, filter.as_ref(), include_chunks)?;
+    Ok(build_content_response(&json))
 }
 
 /// Example-based recommendation: build a query from positive (and optional
@@ -653,28 +955,50 @@ pub fn handle_vector_mmr_search(
 
     let query = to_f32(&embedding);
 
-    // Fetch a candidate pool, then greedily select for MMR.
-    let pool = vs.search_embeddings(&query, fetch_k)?;
-    let mut cands: Vec<MmrCand> = Vec::with_capacity(pool.len());
-    for (id, _dist) in pool {
-        let (name, etype) = vs.resolve_name_type(id);
-        if name.is_empty() {
-            continue;
+    // The candidate pool is owner-level: chunk hits aggregate to one best
+    // chunk per owner, so one owner's many chunks cannot crowd out the others.
+    // A legacy store (no serving profile) holds no chunk rows, so its ANN
+    // serves the pool the same way it always did.
+    let mut pool: Vec<(OwnerKind, i64, f32)> = Vec::new();
+    if vs.serving_profile()?.is_some() {
+        let hits = vs.search_chunks(&query, fetch_k, Some("entity"), entity_type)?;
+        for (kind, id, dist, _) in vs.aggregate_owners(&hits, fetch_k) {
+            pool.push((kind, id, dist));
         }
+    } else {
+        for (id, dist) in vs.search_embeddings(&query, fetch_k)? {
+            pool.push((OwnerKind::Entity, id, dist));
+        }
+    }
+
+    let mut cands: Vec<MmrCand> = Vec::with_capacity(pool.len());
+    for (kind, id, dist) in pool {
+        let Some((name, etype, _)) = vs.resolve_owner(kind, id)? else {
+            continue;
+        };
         if let Some(ft) = entity_type
             && etype != ft
         {
             continue;
         }
-        if let Some(emb) = vs.get_embedding_by_id(id)? {
-            let rel = cosine_sim(&query, &emb);
-            cands.push(MmrCand {
-                name,
-                etype,
-                emb,
-                rel,
-            });
-        }
+        // Diversity compares the owner's identity chunk against the already
+        // selected ones; the legacy embedding stands in when no chunk store
+        // serves. Without a vector the owner cannot be diversified, so it
+        // drops out of the pool.
+        let emb = match vs.owner_identity_vector(kind, id)? {
+            Some(v) => v,
+            None => match vs.get_embedding_by_id(id)? {
+                Some(v) => v,
+                None => continue,
+            },
+        };
+        let rel = -(dist as f64);
+        cands.push(MmrCand {
+            name,
+            etype,
+            emb,
+            rel,
+        });
     }
 
     let mut selected: Vec<MmrCand> = Vec::with_capacity(top_k.min(cands.len()));
@@ -773,11 +1097,13 @@ fn l2_normalize(vector: &mut [f32]) {
     }
 }
 
-/// Search by text: `{ queryText, topK?, entityType?, textWeight?, vecWeight? }`.
+/// Search by text: `{ queryText, topK?, filter?, includeChunks?, textWeight?,
+/// vecWeight? }`.
 ///
 /// The server embeds the query with the model the serving index profile names,
 /// so the query vector and the stored vectors come from one model. A chat
-/// client needs no embedding service of its own.
+/// client needs no embedding service of its own. Result rows are kind-marked,
+/// and `filter` narrows the owner set before ranking.
 ///
 /// `textWeight` or `vecWeight` turns on fusion with the FTS5 ranking, through
 /// the same [`perform_hybrid_search`] that `hybrid_search` uses. Without
@@ -806,10 +1132,11 @@ pub fn handle_semantic_search(
     }
 
     let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?.clamp(1, MAX_TOP_K);
-    let entity_type = params
-        .get("entityType")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+    let filter = parse_filter(params)?;
+    let include_chunks = params
+        .get("includeChunks")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     // Either weight turns on fusion. The other one then takes its default, the
     // rule `hybrid_search` already follows. A null counts as absent, because
     // `opt_f64` reads it that way.
@@ -874,24 +1201,121 @@ pub fn handle_semantic_search(
     if fuse {
         let text_weight = opt_f64(params, "textWeight", 0.5)?;
         let vec_weight = opt_f64(params, "vecWeight", 0.5)?;
-        // Fusion ranks over both stores and knows no entity type, so a filtered
-        // call asks for a wider pool and drops the other types afterwards.
-        // Filtering a pool of exactly `top_k` would return too few rows while
-        // matching entities still wait below the cut.
-        let wanted = if entity_type.is_some() {
-            top_k.saturating_mul(4)
-        } else {
-            top_k
-        };
-        let mut results =
-            perform_hybrid_search(vs, kg, query_text, &query, text_weight, vec_weight, wanted)?;
-        if let Some(filter) = entity_type {
-            results.retain(|(_, etype, ..)| etype == filter);
-            results.truncate(top_k);
-        }
+        // The chunk-level filter applies inside the fusion, so a filtered call
+        // needs no widened pool and no post-filtering; the FTS half applies
+        // the same type predicate to its entity matches.
+        let results = perform_hybrid_search(
+            vs,
+            kg,
+            query_text,
+            &query,
+            text_weight,
+            vec_weight,
+            top_k,
+            filter.as_ref(),
+            include_chunks,
+        )?;
         return Ok(build_content_response(&build_fused_results(&results)));
     }
 
-    let json = vs.search_entities_json(&query, top_k, entity_type)?;
+    let json = search_owners(vs, &query, top_k, None, filter.as_ref(), include_chunks)?;
     Ok(build_content_response(&json))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared owner-row renderer: kind-marked rows, and the `chunk`
+    /// member exactly when detail is present, with the wire key names a client
+    /// parses for all four search tools.
+    #[test]
+    fn build_owner_results_renders_kind_rows_and_chunk_member() {
+        let rows = vec![(
+            "ada".to_string(),
+            "Person".to_string(),
+            "entity".to_string(),
+            0.25,
+            Some(ChunkDetail {
+                kind: "identity".to_string(),
+                text: "ada\nPerson".to_string(),
+                score: 0.25,
+            }),
+        )];
+        assert_eq!(
+            build_owner_results(&rows),
+            r#"{"results":[{"name":"ada","entityType":"Person","kind":"entity","score":0.250000,"chunk":{"kind":"identity","text":"ada\nPerson","score":0.250000}}],"count":1}"#
+        );
+    }
+
+    /// Without detail the row must not carry a `chunk` member at all.
+    #[test]
+    fn build_owner_results_omits_chunk_member_without_detail() {
+        let rows = vec![(
+            "acme".to_string(),
+            "Company".to_string(),
+            "entity".to_string(),
+            0.5,
+            None,
+        )];
+        let json = build_owner_results(&rows);
+        assert_eq!(
+            json,
+            r#"{"results":[{"name":"acme","entityType":"Company","kind":"entity","score":0.500000}],"count":1}"#
+        );
+        assert!(!json.contains("\"chunk\""), "no chunk member: {json}");
+    }
+
+    /// Chunk text escapes like any JSON string value: quotes and backslashes
+    /// must not break the row shape, and the text must round-trip through a
+    /// JSON parser back to the source bytes.
+    #[test]
+    fn chunk_member_escapes_text() {
+        let rows = vec![(
+            "e".to_string(),
+            "t".to_string(),
+            "relation".to_string(),
+            0.0,
+            Some(ChunkDetail {
+                kind: "relation".to_string(),
+                text: "a \"quoted\" \\ path\nline".to_string(),
+                score: 0.0,
+            }),
+        )];
+        let json = build_owner_results(&rows);
+        assert!(
+            json.contains(
+                r#""chunk":{"kind":"relation","text":"a \"quoted\" \\ path\nline","score":0.000000}"#
+            ),
+            "escaped text inside the chunk member: {json}"
+        );
+        let parsed: Value = serde_json::from_str(&json).expect("the row JSON parses");
+        assert_eq!(
+            parsed["results"][0]["chunk"]["text"].as_str(),
+            Some("a \"quoted\" \\ path\nline")
+        );
+    }
+
+    /// The fused renderer is the other `write_chunk_detail` consumer; the
+    /// chunk member must sit after the scores, kind-marked rows included.
+    #[test]
+    fn fused_rows_render_kind_and_chunk_member() {
+        let rows = vec![FusedRow {
+            name: "ada".to_string(),
+            entity_type: "Person".to_string(),
+            kind: "entity".to_string(),
+            score: 1.0,
+            text_score: 0.5,
+            vec_score: 0.5,
+            chunk: Some(ChunkDetail {
+                kind: "observation".to_string(),
+                text: "writes rust".to_string(),
+                score: 0.1,
+            }),
+        }];
+        assert_eq!(
+            build_fused_results(&rows),
+            r#"{"results":[{"name":"ada","entityType":"Person","kind":"entity","score":1.000000,"textScore":0.500000,"vecScore":0.500000,"chunk":{"kind":"observation","text":"writes rust","score":0.100000}}],"count":1}"#
+        );
+    }
 }

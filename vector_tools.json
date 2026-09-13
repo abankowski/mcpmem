@@ -25,7 +25,7 @@
   },
   {
     "name": "vector_search_entities",
-    "description": "Search entities by vector similarity. Finds the top-K entities whose stored embeddings are closest (cosine similarity) to the query embedding. Optionally filter by entity type.",
+    "description": "Search entities and relations by vector similarity over the serving chunk index. Finds the top-K owners whose chunks are closest to the query embedding, one row per owner, ranked by the best matching chunk. Result rows carry 'kind' ('entity' or 'relation'); a relation row displays 'from -> TYPE -> to' and its relation type in 'entityType'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -40,9 +40,19 @@
           "maximum": 100,
           "description": "Number of results to return (default 10)"
         },
-        "entityType": {
-          "type": "string",
-          "description": "Optional: only return entities of this type"
+        "filter": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["entity", "relation"] },
+            "type": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "description": "Optional: 'kind' limits the owner kind ('entity' or 'relation'); 'type' matches the owner type name exactly. 'type' without 'kind' matches either kind."
+        },
+        "includeChunks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Optional: attach the matched chunk (kind, reassembled text, score) to each result row"
         }
       },
       "required": ["embedding"]
@@ -66,7 +76,7 @@
   },
   {
     "name": "hybrid_search",
-    "description": "Combined vector + full-text search with Reciprocal Rank Fusion. Runs vector search on the query embedding, then FTS5 text search on the query text, and fuses the two result lists by rank. queryText is never embedded: the vector half needs queryEmbedding. Results are boosted by graph centrality whenever the graph mirror holds nodes; there is no flag to disable the boost.",
+    "description": "Combined vector + full-text search with Reciprocal Rank Fusion, fused at owner level: the vector half ranks owners by their best chunk, the FTS5 half matches entities only, so relation rows enter the fusion with their vector rank only. Results are boosted by graph centrality whenever the graph mirror holds nodes, for entity rows only; there is no flag to disable the boost. Result rows carry 'kind' ('entity' or 'relation'). Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. queryText is never embedded: the vector half needs queryEmbedding.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -92,6 +102,20 @@
           "minimum": 1,
           "maximum": 100,
           "description": "Number of fused results to return (default 10)"
+        },
+        "filter": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["entity", "relation"] },
+            "type": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "description": "Optional: 'kind' limits the owner kind ('entity' or 'relation'); 'type' matches the owner type name exactly. 'type' without 'kind' matches either kind."
+        },
+        "includeChunks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Optional: attach the matched vector chunk (kind, reassembled text, score) to each result row"
         }
       },
       "required": ["queryText", "queryEmbedding"]
@@ -154,13 +178,26 @@
   },
   {
     "name": "vector_search_by_entity",
-    "description": "'More like this': find entities most similar to a given entity by using that entity's own stored embedding as the query. The entity itself is excluded by default (excludeSelf). Ideal for recommendations and related-item lookups without recomputing an embedding.",
+    "description": "'More like this': search by the identity chunk of a given entity (its name and type), ranking owners by how close their best chunk is. The reference entity itself is excluded by default (excludeSelf). Result rows carry 'kind' ('entity' or 'relation'); a relation row displays 'from -> TYPE -> to' and its relation type in 'entityType'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'.",
     "inputSchema": {
       "type": "object",
       "properties": {
-        "entityName": { "type": "string", "description": "The reference entity (must have an embedding)" },
+        "entityName": { "type": "string", "description": "The reference entity (must have an identity chunk)" },
         "topK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results (default 10)" },
-        "entityType": { "type": "string", "description": "Optional: only return entities of this type" },
+        "filter": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["entity", "relation"] },
+            "type": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "description": "Optional: 'kind' limits the owner kind ('entity' or 'relation'); 'type' matches the owner type name exactly. 'type' without 'kind' matches either kind."
+        },
+        "includeChunks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Optional: attach the matched chunk (kind, reassembled text, score) to each result row"
+        },
         "excludeSelf": { "type": "boolean", "description": "Exclude the reference entity from results (default true)" }
       },
       "required": ["entityName"]
@@ -209,13 +246,26 @@
   },
   {
     "name": "semantic_search",
-    "description": "Search entities by meaning, with text only. Send 'queryText' and the server embeds it; the client needs no embedding service and sends no vector. The server embeds the query with the model named by the serving index profile — the same model that embedded the stored entities — so the query and the index agree. That model comes from the [indexer] section of the server configuration file, never from this call. Returns the topK entities whose stored embeddings are closest to the query. Set 'textWeight' or 'vecWeight' to fuse the vector result with the FTS5 text result, exactly as 'hybrid_search' does; leave both unset for a pure vector search. The server must be built with the 'indexer' feature and must have a configured embedding provider. Without either one the tool is absent from tools/list and a call to it is refused.",
+    "description": "Search entities and relations by meaning, with text only. Send 'queryText' and the server embeds it; the client needs no embedding service and sends no vector. The server embeds the query with the model named by the serving index profile — the same model that embedded the stored owners — so the query and the index agree. That model comes from the [indexer] section of the server configuration file, never from this call. Returns the topK owners whose best chunks are closest to the query, one row per owner; result rows carry 'kind' ('entity' or 'relation') and a relation row displays 'from -> TYPE -> to' with its relation type in 'entityType'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. Set 'textWeight' or 'vecWeight' to fuse the vector result with the FTS5 text result, exactly as 'hybrid_search' does; leave both unset for a pure vector search. The server must be built with the 'indexer' feature and must have a configured embedding provider. Without either one the tool is absent from tools/list and a call to it is refused.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "queryText": { "type": "string", "description": "The text to search for. The server embeds this text itself." },
         "topK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results to return (default 10)" },
-        "entityType": { "type": "string", "description": "Optional: only return entities of this type" },
+        "filter": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["entity", "relation"] },
+            "type": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "description": "Optional: 'kind' limits the owner kind ('entity' or 'relation'); 'type' matches the owner type name exactly. 'type' without 'kind' matches either kind."
+        },
+        "includeChunks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Optional: attach the matched chunk (kind, reassembled text, score) to each result row"
+        },
         "textWeight": { "type": "number", "description": "Optional weight for the FTS5 text rank (default 0.5). Setting this or 'vecWeight' turns on fusion." },
         "vecWeight": { "type": "number", "description": "Optional weight for the vector rank (default 0.5). Setting this or 'textWeight' turns on fusion." }
       },
