@@ -253,16 +253,6 @@ impl<'a> IndexProfileRegistry<'a> {
         })
     }
 
-    /// Must be checked within the same write transaction as a legacy mutation.
-    pub fn ensure_legacy_writes(&self, store_key: &str) -> Result<()> {
-        if self.state(store_key)? != StoreState::LegacyCompat {
-            return Err(MCSError::InvalidParams(
-                "direct_vector_writes_disabled".into(),
-            ));
-        }
-        Ok(())
-    }
-
     pub fn begin_rebuild(&self, profile: &IndexProfile) -> Result<()> {
         let fingerprint = profile.fingerprint()?;
         let tx = TxGuard::begin(self.conn)?;
@@ -795,7 +785,8 @@ impl<'a> TaxonomyJobRepository<'a> {
     pub fn claim_due(&self, now: i64, duration_us: i64) -> Result<Option<TaxonomyJob>> {
         let until = lease_until(now, duration_us)?;
         let tx = TxGuard::begin(self.conn)?;
-        let row: Option<(i64,i64,String,i64,String,i64,i64)> = self.conn.query_row("SELECT subject_kind,subject_id,profile_id,subject_revision,operation,lease_epoch,attempts FROM taxonomy_job j WHERE ((state='pending' AND next_attempt_us<=?1) OR (state='leased' AND lease_until_us<=?1)) AND EXISTS(SELECT 1 FROM index_profile_registry r WHERE r.serving_profile=j.profile_id OR (r.state='Rebuilding' AND r.candidate_profile=j.profile_id)) ORDER BY next_attempt_us,subject_kind,subject_id,profile_id LIMIT 1", [now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
+        // 0009 purges kind-2 rows in the same startup transaction and commit defends on missing rows; one must never claim.
+        let row: Option<(i64,i64,String,i64,String,i64,i64)> = self.conn.query_row("SELECT subject_kind,subject_id,profile_id,subject_revision,operation,lease_epoch,attempts FROM taxonomy_job j WHERE ((state='pending' AND next_attempt_us<=?1) OR (state='leased' AND lease_until_us<=?1)) AND subject_kind != 2 AND EXISTS(SELECT 1 FROM index_profile_registry r WHERE r.serving_profile=j.profile_id OR (r.state='Rebuilding' AND r.candidate_profile=j.profile_id)) ORDER BY next_attempt_us,subject_kind,subject_id,profile_id LIMIT 1", [now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
         let job = row.map(|(kind,id,profile,revision,operation,epoch,attempts)| -> Result<TaxonomyJob> {
             let token = Uuid::new_v4();
             self.conn.execute("UPDATE taxonomy_job SET state='leased',lease_token=?4,lease_epoch=lease_epoch+1,lease_until_us=?5,attempts=attempts+1 WHERE subject_kind=?1 AND subject_id=?2 AND profile_id=?3", params![kind,id,profile,token.to_string(),until]).map_err(sql_error)?;

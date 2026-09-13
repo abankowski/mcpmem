@@ -465,6 +465,11 @@ impl VectorStore {
         let Some(profile) = self.serving_profile_id(&conn)? else {
             return Ok(None);
         };
+        // The byte-length gate must follow the profile's own dimension. The
+        // CLI `--embedding-dims` default only describes stores that never
+        // adopted a profile; gating on it drops every identity chunk of a
+        // serving profile that differs (e.g. 768 while the flag stays 384).
+        let dims = IndexProfileRegistry::new(&conn).get(profile)?.dimensions as usize;
         let blob: Option<Vec<u8>> = conn
             .query_row(
                 "SELECT blob FROM chunk_vector
@@ -477,7 +482,7 @@ impl VectorStore {
         let Some(bytes) = blob else {
             return Ok(None);
         };
-        if bytes.len() != self.dims as usize * std::mem::size_of::<f32>() {
+        if bytes.len() != dims * std::mem::size_of::<f32>() {
             return Ok(None);
         }
         let (chunks, _) = bytes.as_chunks::<4>();
@@ -1897,6 +1902,47 @@ mod tests {
                 .owner_identity_vector(OwnerKind::Entity, ada)
                 .unwrap(),
             Some(vec![1.0, 0.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn identity_vector_follows_the_serving_profile_dimension() {
+        // The store is configured at 4 dims (`--embedding-dims 4`), but the
+        // serving profile embeds at 8. The chunk-length gate must follow the
+        // profile: gating on the CLI default would drop the identity chunk
+        // and break every search-by-entity read on such a store.
+        let env = setup(4);
+        let profile = seed_taxonomy_profile(&env, 8);
+        create_test_entity(&env.kg, "ada", "Person");
+        let ada = entity_id_of(&env, "ada");
+        env.vs
+            .seed_test_chunks(&[SeedChunk {
+                owner_kind: OwnerKind::Entity,
+                owner_id: ada,
+                chunk_kind: ChunkKind::Identity,
+                chunk_index: 0,
+                type_id: type_id_of(&env, "Person"),
+                vector: &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            }])
+            .expect("seed the identity chunk at profile dims");
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO ann_generation(profile_id) VALUES(?1)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        }
+        env.vs.reconcile_managed_snapshot().unwrap();
+        assert_eq!(
+            env.vs.identity_vector("ada").unwrap(),
+            Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            env.vs
+                .owner_identity_vector(OwnerKind::Entity, ada)
+                .unwrap(),
+            Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         );
     }
 
