@@ -378,6 +378,81 @@ fn e2e_delete_and_stats() {
 }
 
 #[test]
+fn e2e_type_descriptions() {
+    let mut c = spawn_server();
+
+    // Seed: the type "person" exists with one member.
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "Ada", "entityType": "person", "observations": [{"body":"mathematician"}]}
+        ]}),
+    );
+
+    // A description registers a type before any member exists.
+    let text = c.tool_text(
+        "set_type_description",
+        &serde_json::json!({"kind": "entityType", "name": "project", "description": "A planned effort with goals and milestones"}),
+    );
+    assert!(
+        !text.contains("error"),
+        "set_type_description failed: {text}"
+    );
+    assert!(
+        text.contains("\"desc\":\"A planned effort with goals and milestones\""),
+        "desc echoed: {text}"
+    );
+
+    // The list shows both types: person (count 1, no desc) and project
+    // (count 0, desc).
+    let types = c.tool_text("list_entity_types", &serde_json::json!({}));
+    assert!(
+        types.contains("\"type\":\"person\""),
+        "person listed: {types}"
+    );
+    assert!(
+        types.contains("\"type\":\"project\""),
+        "project listed pre-use: {types}"
+    );
+    assert!(
+        types.contains("\"desc\":\"A planned effort with goals and milestones\""),
+        "project desc: {types}"
+    );
+
+    // Relation types carry descriptions the same way.
+    let text = c.tool_text(
+        "set_type_description",
+        &serde_json::json!({"kind": "relationType", "name": "works_at", "description": "States the employer of a person"}),
+    );
+    assert!(!text.contains("error"), "relationType set failed: {text}");
+    let rtypes = c.tool_text("list_relation_types", &serde_json::json!({}));
+    assert!(
+        rtypes.contains("\"type\":\"works_at\""),
+        "works_at listed pre-use: {rtypes}"
+    );
+    assert!(
+        rtypes.contains("\"desc\":\"States the employer of a person\""),
+        "relation desc: {rtypes}"
+    );
+
+    // An empty description clears the stored one; a count-0 type with no desc
+    // leaves the list.
+    c.tool_text(
+        "set_type_description",
+        &serde_json::json!({"name": "project", "description": ""}),
+    );
+    let types = c.tool_text("list_entity_types", &serde_json::json!({}));
+    assert!(
+        !types.contains("project"),
+        "cleared count-0 type leaves the list: {types}"
+    );
+    assert!(
+        types.contains("\"type\":\"person\""),
+        "member type stays: {types}"
+    );
+}
+
+#[test]
 fn e2e_upsert_merge_and_wipe() {
     let mut c = spawn_server();
 

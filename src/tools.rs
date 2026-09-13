@@ -163,6 +163,10 @@ pub const ALL_TOOLS: &[ToolMeta] = &[
         write: false,
     },
     ToolMeta {
+        name: "set_type_description",
+        write: true,
+    },
+    ToolMeta {
         name: "upsert_entities",
         write: true,
     },

@@ -12,6 +12,13 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Added
 
+- **Optional descriptions on taxonomy types.** `set_type_description`
+  attaches a prose description to an entity type or relation type; an empty
+  string clears it, and the type row is created when no member exists yet.
+  `list_entity_types` and `list_relation_types` return the `desc` field on
+  every described type, so the registered taxonomy names what each type is
+  for, not just its name and count.
+
 - **Admin UI at `/ui/admin`:** principals management with OAuth (new `admin`
   scope), runtime principals in SQLite, JSON entries immutable built-ins,
   optional approval waitlist (`[oauth] approval-waitlist`).
