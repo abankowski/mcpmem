@@ -8,6 +8,16 @@ Every line number in this document belongs to commit `b2e4044`. The change set
 that followed this analysis moved some of those lines. The numbers here stay as
 they were, so read them against `b2e4044`.
 
+> **Status: superseded by 2.0.0.** This analysis describes the 1.x surface at
+> `b2e4044`. Section 1 and section 6 advertise `vector_recommend` as a current
+> tool, and section 5 item 4 defects against `vector_reindex`; 2.0.0 removed all
+> six client vector tools (`vector_recommend`, `vector_reindex`,
+> `vector_upsert_embedding`, `vector_batch_upsert`, `vector_get_embedding`,
+> `vector_delete_embedding`). `semantic_search` shipped as proposed in
+> section 4, and the store now serves an exact scan over the chunk snapshot
+> instead of an ANN index. Read the sections above as history; the current
+> surface is in `README.md`.
+
 ## Answer in one paragraph
 
 The caller must send the vector on every read path. No MCP tool takes text and

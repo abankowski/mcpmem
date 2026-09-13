@@ -706,10 +706,10 @@ sqlite3 /var/lib/mcpmem/memory.mcpmem \
   'SELECT principal, scopes FROM oauth_token WHERE revoked = 0;'
 ```
 
-`vector_upsert_embedding` wants the `vectors` scope and appears under it in
-`tools/list`. The 403 path in section 7 names scope failures; the missing-tool
-case above never produces one, because `tools/list` hides before `tools/call`
-can refuse.
+`semantic_search` wants the `vectors` scope and appears under it in
+`tools/list`, exactly like every other vector tool. The 403 path in section 7
+names scope failures; the missing-tool case above never produces one, because
+`tools/list` hides before `tools/call` can refuse.
 
 ## 9. The limits
 
