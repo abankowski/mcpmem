@@ -19,9 +19,8 @@ fn the_oauth_migration_applies_to_a_database_that_predates_it() {
         .query_row("SELECT COUNT(*) FROM schema_migration", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        count,
-        mcpmem_core::events::MIGRATIONS.len() as i64,
-        "the count tracks MIGRATIONS"
+        count, 8,
+        "the count tracks MIGRATIONS, currently 0008_chunked_embeddings"
     );
     conn.query_row("SELECT COUNT(*) FROM oauth_token", [], |r| {
         r.get::<_, i64>(0)

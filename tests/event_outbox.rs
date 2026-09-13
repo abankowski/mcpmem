@@ -418,6 +418,22 @@ fn startup_rejects_changed_migration_and_preserves_legacy_vector_rows() {
 }
 
 #[test]
+fn migration_0008_creates_chunk_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = graph(&path);
+    let conn = Connection::open(&path).unwrap();
+    for table in ["chunk_vector", "chunk_index_job"] {
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1", [table], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "table {table} must exist after migrate");
+    }
+    drop(conn);
+    drop(graph);
+}
+
+#[test]
 fn separately_opened_writers_do_not_reuse_entity_ids_or_lose_events() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
