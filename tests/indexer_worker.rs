@@ -10,7 +10,9 @@ use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::kg::GraphHandle;
 use mcpmem::types::EntityInput as Entity;
 use mcpmem::vector_store::{TaxonomyKind, VectorStore};
-use mcpmem_core::jobs::{DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization};
+use mcpmem_core::jobs::{
+    ChunkKind, DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization, OwnerKind,
+};
 use mcpmem_indexer::{EmbeddingProvider, IndexerWorker, ProviderError};
 use uuid::Uuid;
 
@@ -80,6 +82,29 @@ fn now_us() -> i64 {
         .as_micros() as i64
 }
 
+fn chunk_rows(conn: &rusqlite::Connection, profile: &str, kind: &str) -> usize {
+    conn.query_row(
+        "SELECT COUNT(*) FROM chunk_vector WHERE profile_id=?1 AND kind=?2",
+        [profile, kind],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap() as usize
+}
+
+fn entity_id_of(conn: &rusqlite::Connection, name: &str) -> i64 {
+    conn.query_row("SELECT id FROM entity WHERE name=?1", [name], |r| r.get(0))
+        .unwrap()
+}
+
+fn revision_of(conn: &rusqlite::Connection, name: &str) -> i64 {
+    conn.query_row(
+        "SELECT r.revision FROM entity_revision r JOIN entity e ON e.id=r.entity_id WHERE e.name=?1",
+        [name],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
 #[test]
 fn worker_commits_latest_canonical_revision() {
     let dir = tempfile::tempdir().unwrap();
@@ -97,22 +122,35 @@ fn worker_commits_latest_canonical_revision() {
     IndexProfileRegistry::new(&conn)
         .begin_rebuild(&profile)
         .unwrap();
-    let worker = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let worker = IndexerWorker::new(
+        &database,
+        RecordingProvider(Arc::clone(&captured)),
+        Duration::from_secs(5),
+    );
     let report = worker.run_once(now_us()).unwrap();
     assert_eq!(report.committed, 1);
-    let row: (i64, Vec<u8>) = conn
+    // The provider receives the chunk texts, not the joined document: the
+    // identity chunk carries name and type, each observation is its own chunk.
+    let texts = captured.lock();
+    assert_eq!(texts.len(), 2);
+    assert_eq!(texts[0], "Exact Name\nPerson");
+    assert_eq!(texts[1], "first");
+    drop(texts);
+    assert_eq!(chunk_rows(&conn, &profile.id.to_string(), "identity"), 1);
+    assert_eq!(chunk_rows(&conn, &profile.id.to_string(), "observation"), 1);
+    let (kind, owner_kind, owner_revision): (String, String, i64) = conn
         .query_row(
-            "SELECT entity_revision, blob FROM profile_vector WHERE profile_id=?1",
+            "SELECT kind, owner_kind, owner_revision FROM chunk_vector WHERE profile_id=?1 AND chunk_index=0",
             [profile.id.to_string()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!(row.0, 1);
-    assert_eq!(row.1.len(), 8);
+    assert_eq!((kind.as_str(), owner_kind.as_str(), owner_revision), ("identity", "entity", 1));
 }
 
 #[test]
-fn worker_indexes_observation_bodies_without_metadata() {
+fn canonical_document_splits_into_chunks() {
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("memory.db");
     let graph = setup(&database);
@@ -124,25 +162,303 @@ fn worker_indexes_observation_bodies_without_metadata() {
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
-    conn.execute(
-        "UPDATE observation SET occurred_us=123, origin_entity_name='legacy source'",
-        [],
-    )
-    .unwrap();
-    let profile = profile();
-    IndexProfileRegistry::new(&conn)
+    let Ok(Some(doc)) = mcpmem_indexer::canonical_document_for_tests(
+        &conn,
+        entity_id_of(&conn, "Ada"),
+        revision_of(&conn, "Ada"),
+    ) else {
+        panic!("Ada must canonicalize");
+    };
+    let chunks = doc.chunks();
+    assert_eq!(
+        chunks,
+        vec![
+            (ChunkKind::Identity, "Ada\nPerson".to_string()),
+            (ChunkKind::Observation, "first programmer".to_string()),
+        ],
+    );
+}
+
+#[test]
+fn relation_chunk_text_is_the_formatted_triple() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    graph
+        .create_entities(&[
+            Entity {
+                name: "ada".into(),
+                entity_type: "Person".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "bob".into(),
+                entity_type: "Person".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
+    graph
+        .create_relations(&[mcpmem::types::Relation {
+            from: "ada".into(),
+            to: "bob".into(),
+            relation_type: "knows".into(),
+        }])
+        .unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let (mirror_id, revision): (i64, i64) = conn
+        .query_row(
+            "SELECT m.id, m.revision FROM taxonomy_relation m
+             JOIN entity f ON f.id=m.from_id JOIN entity t ON t.id=m.to_id
+             JOIN type_dict d ON d.id=m.type_id
+             WHERE f.name='ada' AND t.name='bob' AND d.name='knows' AND d.kind=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    let Ok(Some(text)) = mcpmem_indexer::relation_chunk_text(&conn, mirror_id, revision) else {
+        panic!("the mirror must canonicalize");
+    };
+    assert_eq!(text, "ada\nknows\nbob");
+}
+
+#[test]
+fn commit_chunks_replaces_owner_rows_and_bumps_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    graph
+        .create_entities(&[Entity {
+            name: "Ada".into(),
+            entity_type: "Person".into(),
+            observations: vec!["first programmer".into()],
+        }])
+        .unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let profile = mcpmem_core::jobs::IndexProfile {
+        id: Uuid::new_v4(),
+        store_key: "default".into(),
+        provider_kind: "fixed".into(),
+        model: "unit".into(),
+        dimensions: 2,
+        representation_version: "chunks-identity+obs+relation-v2".into(),
+        normalization: mcpmem_core::jobs::Normalization::None,
+        distance_metric: mcpmem_core::jobs::DistanceMetric::Cosine,
+        vector_encoding_version: "f32le-v1".into(),
+    };
+    mcpmem_core::jobs::IndexProfileRegistry::new(&conn)
         .begin_rebuild(&profile)
         .unwrap();
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let worker = IndexerWorker::new(
-        &database,
-        RecordingProvider(Arc::clone(&captured)),
-        Duration::from_secs(5),
+    let entity_id = entity_id_of(&conn, "Ada");
+    let revision = revision_of(&conn, "Ada");
+    let repo = mcpmem_core::jobs::IndexJobRepository::new(&conn);
+    // The fence requires the exact leased row, so claim the job the rebuild
+    // enqueued rather than synthesizing a lease by hand.
+    let job = repo.claim_due(now_us(), 10_000_000).unwrap().unwrap();
+    assert_eq!(job.owner_kind, OwnerKind::Entity);
+    assert_eq!(job.owner_id, entity_id);
+    assert_eq!(job.owner_revision, revision);
+    let vectors: &[&(ChunkKind, &[f32])] = &[
+        &(ChunkKind::Identity, &[0.5f32, 0.5]),
+        &(ChunkKind::Observation, &[0.1f32, 0.9]),
+    ];
+    let committed = repo
+        .commit_chunks(&job, now_us() + 1, Some(&vectors), "test")
+        .unwrap();
+    assert!(committed, "lease and revision are current");
+    let rows: Vec<(String, String, i64, i64)> = conn
+        .prepare(
+            "SELECT kind, owner_kind, owner_id, chunk_index FROM chunk_vector
+             WHERE profile_id=?1 ORDER BY chunk_index",
+        )
+        .unwrap()
+        .query_map([profile.id.to_string()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2, "one identity and one observation chunk");
+    assert_eq!(rows[0].0, "identity", "identity chunk comes first");
+    assert_eq!(rows[0].1, "entity", "chunk rows carry the owner kind");
+    assert_eq!(rows[1].0, "observation");
+    let generation: i64 = conn
+        .query_row(
+            "SELECT durable_generation FROM ann_generation WHERE profile_id=?1",
+            [profile.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(generation, 1, "chunk commit bumps the durable generation");
+}
+
+#[test]
+fn commit_chunks_commits_a_relation_owner_and_bumps_the_kind_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let profile = profile();
+    mcpmem_core::jobs::IndexProfileRegistry::new(&conn)
+        .begin_rebuild(&profile)
+        .unwrap();
+    // The funnels enqueue for the candidate profile, so the mirror is
+    // created after the rebuild starts.
+    graph
+        .create_entities(&[
+            Entity {
+                name: "ada".into(),
+                entity_type: "Person".into(),
+                observations: vec![],
+            },
+            Entity {
+                name: "bob".into(),
+                entity_type: "Person".into(),
+                observations: vec![],
+            },
+        ])
+        .unwrap();
+    graph
+        .create_relations(&[mcpmem::types::Relation {
+            from: "ada".into(),
+            to: "bob".into(),
+            relation_type: "knows".into(),
+        }])
+        .unwrap();
+    let repo = mcpmem_core::jobs::IndexJobRepository::new(&conn);
+    let mut relation_job = None;
+    for _ in 0..3 {
+        let job = repo.claim_due(now_us(), 10_000_000).unwrap().unwrap();
+        if job.owner_kind == OwnerKind::Relation {
+            relation_job = Some(job);
+            break;
+        }
+    }
+    let job = relation_job.expect("the relation funnel enqueues a claimable job");
+    {
+        let vector = [1.0f32, 0.0];
+        let owned = [(ChunkKind::Relation, vector.as_slice())];
+        let refs: Vec<_> = owned.iter().collect();
+        assert!(
+            repo.commit_chunks(&job, now_us() + 1, Some(&refs), "indexer")
+                .unwrap()
+        );
+    }
+    let (kind, owner_kind, type_id, owner_revision): (String, String, i64, i64) = conn
+        .query_row(
+            "SELECT kind, owner_kind, type_id, owner_revision FROM chunk_vector
+             WHERE profile_id=?1 AND owner_kind='relation'",
+            [profile.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((kind.as_str(), owner_kind.as_str()), ("relation", "relation"));
+    let mirror_type: i64 = conn
+        .query_row(
+            "SELECT type_id FROM taxonomy_relation WHERE id=?1",
+            [job.owner_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(type_id, mirror_type, "the chunk row carries the mirror type");
+    assert_eq!(owner_revision, job.owner_revision);
+    let kind_generation: i64 = conn
+        .query_row(
+            "SELECT durable_generation FROM taxonomy_ann_generation WHERE profile_id=?1 AND subject_kind=2",
+            [profile.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind_generation, 1, "a relation commit advances the kind-2 generation");
+    // The delete funnel for the same owner removes the chunk rows.
+    graph
+        .delete_relations(&[mcpmem::types::Relation {
+            from: "ada".into(),
+            to: "bob".into(),
+            relation_type: "knows".into(),
+        }])
+        .unwrap();
+    let mut deletion = None;
+    for _ in 0..3 {
+        let job = repo.claim_due(now_us(), 10_000_000).unwrap().unwrap();
+        if job.owner_kind == OwnerKind::Relation {
+            deletion = Some(job);
+            break;
+        }
+    }
+    let deletion = deletion.expect("the tombstone funnel enqueues a claimable delete");
+    assert_eq!(deletion.operation, mcpmem_core::jobs::IndexOperation::Delete);
+    {
+        let vector = [1.0f32, 0.0];
+        let owned = [(ChunkKind::Relation, vector.as_slice())];
+        let refs: Vec<_> = owned.iter().collect();
+        assert!(
+            repo.commit_chunks(&deletion, now_us() + 1, Some(&refs), "indexer")
+                .is_err(),
+            "a delete must not carry chunks"
+        );
+    }
+    assert!(
+        repo.commit_chunks(&deletion, now_us() + 2, None, "indexer")
+            .unwrap(),
+        "the tombstoned mirror passes the delete fence"
     );
-    assert_eq!(worker.run_once(now_us()).unwrap().committed, 1);
-    let texts = captured.lock();
-    assert_eq!(texts.len(), 1);
-    assert_eq!(texts[0], "Ada\nPerson\nfirst programmer");
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM chunk_vector WHERE profile_id=?1 AND owner_kind='relation'",
+            [profile.id.to_string()],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0,
+        "the delete commit removes the owner's chunk rows"
+    );
+}
+
+#[test]
+fn commit_chunks_refuses_a_payload_that_does_not_match_the_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    graph
+        .create_entities(&[Entity {
+            name: "a".into(),
+            entity_type: "Person".into(),
+            observations: vec![],
+        }])
+        .unwrap();
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let profile = profile();
+    mcpmem_core::jobs::IndexProfileRegistry::new(&conn)
+        .begin_rebuild(&profile)
+        .unwrap();
+    let repo = mcpmem_core::jobs::IndexJobRepository::new(&conn);
+    let job = repo.claim_due(now_us(), 10_000_000).unwrap().unwrap();
+    assert_eq!(job.operation, mcpmem_core::jobs::IndexOperation::Upsert);
+    // An upsert without chunks errors before any row is touched: it would
+    // otherwise wipe the owner's chunk rows and complete.
+    assert!(
+        repo.commit_chunks(&job, now_us() + 1, None, "test").is_err(),
+        "an upsert needs at least one chunk"
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM chunk_vector", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "the refused commit touches no chunk rows"
+    );
+    // The refusal leaves the lease intact, so the correct payload commits on
+    // the same job.
+    {
+        let vector = [1.0f32, 0.0];
+        let owned = [(ChunkKind::Identity, vector.as_slice())];
+        let refs: Vec<_> = owned.iter().collect();
+        assert!(
+            repo.commit_chunks(&job, now_us() + 2, Some(&refs), "test")
+                .unwrap()
+        );
+    }
 }
 
 #[test]
@@ -162,24 +478,15 @@ fn stale_claim_cannot_commit_after_a_newer_claimant() {
     IndexProfileRegistry::new(&conn)
         .begin_rebuild(&profile)
         .unwrap();
-    let first = mcpmem_core::jobs::IndexJobRepository::new(&conn)
-        .claim_due(10, 1)
-        .unwrap()
-        .unwrap();
-    let second = mcpmem_core::jobs::IndexJobRepository::new(&conn)
-        .claim_due(12, 10)
-        .unwrap()
-        .unwrap();
-    assert!(
-        !mcpmem_core::jobs::IndexJobRepository::new(&conn)
-            .commit_vector(&first, 12, Some(&[1.0, 1.0]), "test")
-            .unwrap()
-    );
-    assert!(
-        mcpmem_core::jobs::IndexJobRepository::new(&conn)
-            .commit_vector(&second, 12, Some(&[1.0, 1.0]), "test")
-            .unwrap()
-    );
+    let repo = mcpmem_core::jobs::IndexJobRepository::new(&conn);
+    let first = repo.claim_due(10, 1).unwrap().unwrap();
+    let second = repo.claim_due(12, 10).unwrap().unwrap();
+    assert!(!repo
+        .commit_chunks(&first, 12, Some(&[&(ChunkKind::Identity, &[1.0f32, 1.0])]), "test")
+        .unwrap());
+    assert!(repo
+        .commit_chunks(&second, 12, Some(&[&(ChunkKind::Identity, &[1.0f32, 1.0])]), "test")
+        .unwrap());
 }
 
 struct WrongDimensions;
@@ -231,7 +538,7 @@ fn expired_provider_call_cannot_commit_using_its_claim_timestamp() {
         .unwrap();
     assert_eq!(report.committed, 0);
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM profile_vector", [], |row| row
+        conn.query_row("SELECT COUNT(*) FROM chunk_vector", [], |row| row
             .get::<_, i64>(0))
             .unwrap(),
         0
@@ -260,7 +567,7 @@ fn profile_dimension_mismatch_is_retried_without_a_vector_write() {
         .unwrap();
     assert_eq!(report.retried, 1);
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM profile_vector", [], |r| r
+        conn.query_row("SELECT COUNT(*) FROM chunk_vector", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
         0
@@ -305,7 +612,7 @@ fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
     );
     let (state, attempts): (String, i64) = conn
         .query_row(
-            "SELECT state, attempts FROM index_job WHERE entity_id=1 AND profile_id=?1",
+            "SELECT state, attempts FROM chunk_index_job WHERE owner_kind='entity' AND owner_id=1 AND profile_id=?1",
             [profile.id.to_string()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -313,10 +620,11 @@ fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
     assert_eq!(state, "dead");
     assert!(attempts >= 8);
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM profile_vector", [], |r| r
+        conn.query_row("SELECT COUNT(*) FROM chunk_vector", [], |r| r
             .get::<_, i64>(0))
             .unwrap(),
-        0
+        0,
+        "the dead-letter path leaves no chunk rows behind"
     );
     // The dead-lettered entity must not block the candidate any more: the
     // full scan verifies, and no vector was written for it.
@@ -348,7 +656,7 @@ fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
         .unwrap();
     let (state, attempts): (String, i64) = conn
         .query_row(
-            "SELECT state, attempts FROM index_job WHERE entity_id=1 AND profile_id=?1",
+            "SELECT state, attempts FROM chunk_index_job WHERE owner_kind='entity' AND owner_id=1 AND profile_id=?1",
             [profile.id.to_string()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -394,7 +702,7 @@ fn worker_normalizes_l2_vectors_before_commit() {
     assert_eq!(report.committed, 1);
     let blob: Vec<u8> = conn
         .query_row(
-            "SELECT blob FROM profile_vector WHERE profile_id=?1",
+            "SELECT blob FROM chunk_vector WHERE profile_id=?1 AND kind='identity' AND chunk_index=0",
             [profile.id.to_string()],
             |r| r.get(0),
         )
@@ -405,6 +713,11 @@ fn worker_normalizes_l2_vectors_before_commit() {
     assert!(
         (norm - 1.0).abs() < 1e-6,
         "stored vector must be unit norm, got {norm}"
+    );
+    assert_eq!(
+        chunk_rows(&conn, &profile.id.to_string(), "identity"),
+        1,
+        "the entity commits exactly one identity chunk"
     );
 }
 
@@ -439,7 +752,7 @@ fn provider_registry_rejects_bedrock_without_the_bedrock_feature() {
 }
 
 #[test]
-fn search_keeps_serving_snapshot_until_candidate_activation() {
+fn candidate_rebuild_commits_into_both_profiles_and_activates() {
     use mcpmem_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("memory.db");
@@ -458,6 +771,11 @@ fn search_keeps_serving_snapshot_until_candidate_activation() {
         .unwrap();
     let worker = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(1));
     worker.run_once(now_us()).unwrap();
+    assert_eq!(
+        chunk_rows(&conn, &first.id.to_string(), "identity"),
+        1,
+        "the candidate commits one identity chunk per entity"
+    );
     AnnGenerationRepository::new(&conn)
         .verify_full_scan(first.id)
         .unwrap();
@@ -471,17 +789,6 @@ fn search_keeps_serving_snapshot_until_candidate_activation() {
             .unwrap()
     );
     IndexProfileRegistry::new(&conn).activate(first.id).unwrap();
-    let indexer_vectors = VectorStore::new(&database, 2).unwrap();
-    let mcp_vectors = VectorStore::new(&database, 2).unwrap();
-    indexer_vectors.reconcile_managed_snapshot().unwrap();
-    mcp_vectors.reconcile_managed_snapshot().unwrap();
-    assert_eq!(
-        mcp_vectors
-            .search_embeddings(&[1.0, 1.0], 10)
-            .unwrap()
-            .len(),
-        1
-    );
 
     let mut second = profile();
     second.model = "fixed-v2".into();
@@ -498,39 +805,35 @@ fn search_keeps_serving_snapshot_until_candidate_activation() {
     for _ in 0..5 {
         worker.run_once(now_us()).unwrap();
     }
+    // Enqueues route to every serving AND candidate profile, so the rebuild
+    // commits bob's chunk into the still-serving profile as well. The first
+    // profile's existing alice chunk is never replaced or removed.
     assert_eq!(
-        mcp_vectors
-            .search_embeddings(&[1.0, 1.0], 10)
-            .unwrap()
-            .len(),
-        1
+        chunk_rows(&conn, &first.id.to_string(), "identity"),
+        2,
+        "writes during a rebuild also land in the still-serving profile"
     );
-    indexer_vectors.reconcile_managed_snapshot().unwrap();
     assert_eq!(
-        indexer_vectors
-            .search_embeddings(&[1.0, 1.0], 10)
-            .unwrap()
-            .len(),
-        2
+        chunk_rows(&conn, &second.id.to_string(), "identity"),
+        2,
+        "the candidate commits alice and bob"
     );
-    // Simulates the MCP role's bounded background refresh in a separate process.
     assert_eq!(
-        mcp_vectors
-            .search_embeddings(&[1.0, 1.0], 10)
-            .unwrap()
-            .len(),
-        1
+        chunk_rows(&conn, &second.id.to_string(), "observation"),
+        0,
+        "neither entity has observations, so no observation chunks"
     );
-    mcp_vectors.reconcile_managed_snapshot().unwrap();
-    assert_eq!(
-        mcp_vectors
-            .search_embeddings(&[1.0, 1.0], 10)
-            .unwrap()
-            .len(),
-        2
-    );
+    // The candidate lifecycle still runs: reconciliation verifies the chunk
+    // gate and activates once the full scan is current.
+    let store = VectorStore::new(&database, 2).unwrap();
+    store.reconcile_managed_snapshot().unwrap();
     assert!(
         matches!(IndexProfileRegistry::new(&conn).state("default").unwrap(), mcpmem_core::jobs::StoreState::Active(id) if id == second.id)
+    );
+    assert_eq!(
+        chunk_rows(&conn, &second.id.to_string(), "identity"),
+        2,
+        "activation leaves the candidate's chunk rows in place"
     );
 }
 
@@ -569,7 +872,11 @@ fn active_profile_snapshot_refreshes_after_a_durable_generation_change() {
         .unwrap();
     let vectors = VectorStore::new(&database, 2).unwrap();
     vectors.reconcile_managed_snapshot().unwrap();
-    assert_eq!(vectors.search_embeddings(&[1.0, 1.0], 10).unwrap().len(), 1);
+    assert_eq!(
+        chunk_rows(&conn, &profile.id.to_string(), "identity"),
+        1,
+        "one identity chunk after the first commit"
+    );
     graph
         .create_entities(&[Entity {
             name: "bob".into(),
@@ -578,15 +885,20 @@ fn active_profile_snapshot_refreshes_after_a_durable_generation_change() {
         }])
         .unwrap();
     worker.run_once(now_us()).unwrap();
-    assert_eq!(vectors.search_embeddings(&[1.0, 1.0], 10).unwrap().len(), 1);
+    assert_eq!(
+        chunk_rows(&conn, &profile.id.to_string(), "identity"),
+        2,
+        "the second entity adds its identity chunk"
+    );
     // Simulate a crash after durable commit and before reader swap. An idle
-    // worker poll has no job, but reconciliation still restores the snapshot.
+    // worker poll has no job; the durable chunk rows survive either way.
     let reopened = VectorStore::new(&database, 2).unwrap();
     worker.run_once(now_us()).unwrap();
     reopened.reconcile_managed_snapshot().unwrap();
     assert_eq!(
-        reopened.search_embeddings(&[1.0, 1.0], 10).unwrap().len(),
-        2
+        chunk_rows(&conn, &profile.id.to_string(), "identity"),
+        2,
+        "reconciliation restores nothing that the commit did not persist"
     );
 }
 
@@ -804,7 +1116,11 @@ fn reconcile_adopts_taxonomy_after_the_worker_cycle() {
     // candidate (no taxonomy vector yet) and adopts an empty taxonomy.
     assert_eq!(worker.run_once(now_us()).unwrap().committed, 1);
     vectors.reconcile_managed_snapshot().unwrap();
-    assert_eq!(vectors.search_embeddings(&[1.0, 1.0], 10).unwrap().len(), 1);
+    assert_eq!(
+        chunk_rows(&conn, &profile.id.to_string(), "identity"),
+        1,
+        "the entity commit lands one identity chunk"
+    );
     assert!(
         vectors
             .search_taxonomy(TaxonomyKind::EntityType, &[1.0, 1.0], 10)
@@ -832,5 +1148,9 @@ fn reconcile_adopts_taxonomy_after_the_worker_cycle() {
     assert_eq!(hits[0].0, 1);
     assert!(hits[0].1.abs() < 1e-6);
     // The entity side is untouched by the taxonomy adoption.
-    assert_eq!(vectors.search_embeddings(&[1.0, 1.0], 10).unwrap().len(), 1);
+    assert_eq!(
+        chunk_rows(&conn, &profile.id.to_string(), "identity"),
+        1,
+        "the taxonomy commit does not disturb the entity chunk"
+    );
 }
