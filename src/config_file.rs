@@ -707,7 +707,7 @@ impl ProfileSpec {
             provider_kind: self.provider_kind.clone(),
             model: self.model.clone(),
             dimensions: self.dimensions,
-            representation_version: "name+type+observations-v1".to_string(),
+            representation_version: "chunks-identity+obs+relation-v2".to_string(),
             normalization: self.normalization,
             distance_metric: self.distance_metric,
             vector_encoding_version: "f32le-v1".to_string(),
@@ -926,6 +926,27 @@ dimensions = 768
         spec.to_profile()
             .validate()
             .expect("the minted profile must satisfy the core validator");
+    }
+
+    /// The mint is the one place the representation version is chosen, and the
+    /// string is the whole "this store speaks chunks now" contract. Pin it so
+    /// an accidental revert cannot silently rebuild vectors under the old
+    /// encoding.
+    #[test]
+    fn the_minted_profile_carries_the_v2_chunk_representation() {
+        let file = indexer_file(
+            r#"provider = "ollama"
+model = "nomic-embed-text"
+dimensions = 768
+"#,
+        );
+        let spec = profile_spec(Some(&file))
+            .expect("a complete section must be accepted")
+            .expect("a complete section must name a profile");
+        assert_eq!(
+            spec.to_profile().representation_version,
+            "chunks-identity+obs+relation-v2"
+        );
     }
 
     #[test]

@@ -49,6 +49,38 @@ pub enum Normalization {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ChunkKind {
+    Identity,
+    Observation,
+    Relation,
+}
+
+impl ChunkKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ChunkKind::Identity => "identity",
+            ChunkKind::Observation => "observation",
+            ChunkKind::Relation => "relation",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum OwnerKind {
+    Entity,
+    Relation,
+}
+
+impl OwnerKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            OwnerKind::Entity => "entity",
+            OwnerKind::Relation => "relation",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DistanceMetric {
     Cosine,
     InnerProduct,
