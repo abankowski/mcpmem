@@ -7,8 +7,10 @@ Date: 2026-09-13. Status: approved for spec review.
 One vector represents one entity today. The vector text combines the name,
 the type, and every observation body in one string
 (`crates/mcpmem-indexer/src/provider.rs:14-20`). Long observation sets
-dilute the meaning of the vector. Relations have no embeddings at all, so
-semantic search cannot find a relation.
+dilute the meaning of the vector. Relations have embeddings only in the
+taxonomy corner: a kind-2 mirror and job stream feed `suggest_taxonomy`,
+so relation matches never reach the main search surface, and the entity
+vector cannot find a relation.
 
 ## 2. Goals
 
@@ -21,7 +23,10 @@ semantic search cannot find a relation.
 - Searches filter by owner kind and by type name.
 - The server owns every embedding. Client-supplied embedding tools
   disappear.
-- Relations join semantic search as kind-marked result rows.
+- Relations join semantic search as kind-marked result rows. `chunk_vector`
+  is the single relation embedding store; the taxonomy kind-2 snapshot
+  derives from it.
+- `vector_search_by_entity` stays, re-targeted at the identity chunk.
 
 ## 3. Non-goals
 
@@ -43,32 +48,38 @@ semantic search cannot find a relation.
 | Filtering | `filter: {kind, type}` on the search tools |
 | Embedding ownership | Server-only. Client upsert tools are removed |
 | Legacy rows | Dropped in the migration, full reindex from zero |
-| Read tools | `vector_get_embedding`, `vector_search_by_entity`, `vector_recommend` removed |
+| Read tools | `vector_get_embedding`, `vector_recommend` removed; `vector_search_by_entity` stays on the identity chunk |
+| Relation store | `chunk_vector` is the single store; the taxonomy kind-2 snapshot derives from it |
 | ANN for the knowledge graph | Entity ANN layers removed (no path feeds them) |
 
 ## 5. Data model
 
 Migration `0002_chunked_embeddings.sql`:
 
-1. `relation` gains `id INTEGER PRIMARY KEY AUTOINCREMENT`. The unique
-   relation triple stays the write identity.
-2. `profile_vector` becomes `chunk_vector`:
+1. `profile_vector` becomes `chunk_vector`:
    - Primary key `(profile_id, kind, owner_kind, owner_id, chunk_index)`.
    - `kind` is `identity`, `observation`, or `relation`.
    - `owner_kind` is `entity` or `relation`.
-   - `owner_id` is `entity.id` or `relation.id`.
+   - `owner_id` is `entity.id` or `taxonomy_relation.id`. The mirror id is
+     unique per triple and stable across deletes and recreates, so it is a
+     sound owner identity. The `relation` table needs no new id column.
    - `type_id` references `type_dict` (kinds 0 and 1 share one table).
      Every chunk of an owner carries the owner type. This makes type
      filtering an exact predicate over chunk rows.
-   - `owner_revision` fences the write, like `entity_revision` today.
+   - `owner_revision` fences the write. For an entity this is
+     `entity_revision.revision`. For a relation this is
+     `taxonomy_relation.revision`.
    - `blob`, `created_at_us`, `source` stay as today.
-3. `index_job` becomes `chunk_index_job` with the same owner
+2. `index_job` becomes `chunk_index_job` with the same owner
    generalization. The lease machinery (`lease_token`, `lease_epoch`,
-   `lease_until_us`, `attempts`, `state`) stays.
-4. New `relation_revision(relation_id, revision, deleted)` mirrors
-   `entity_revision`.
-5. `vector_embedding` is dropped, including its rows.
-6. `profile.representation_version` becomes
+   `lease_until_us`, `attempts`, `state`) stays. The kind-2 taxonomy job
+   stream retires: relation jobs enqueue into `chunk_index_job` through
+   the same mutation funnels that keep the mirror fresh.
+3. `taxonomy_vector` keeps kinds 0 and 1 (entity type, relation type).
+   Kind 2 rows (relation instances) are dropped. The taxonomy kind-2
+   snapshot derives from `chunk_vector` rows with `kind = 'relation'`.
+4. `vector_embedding` is dropped, including its rows.
+5. `profile.representation_version` becomes
    `chunks-identity+obs+relation-v2`.
 
 `type_dict` already stores both kinds in one table. The entity type has
@@ -95,14 +106,17 @@ The fenced commit stays one transaction:
 - Delete the old chunk rows of the owner.
 - Insert the new chunk rows.
 - Bump `durable_generation`. Null `full_scan_generation`.
+- A relation commit also advances the taxonomy kind-2 generation, so the
+  derived snapshot refreshes.
 
 Enqueue:
 
 - Entities enqueue as today (`persist_changes`).
-- Relations enqueue from the same transaction boundary. A new
-  `persist_relation_changes` records created and deleted relations.
-- Entity deletion cascades into relation-delete jobs. Merge re-points
-  relations into relation jobs.
+- Relations enqueue from the two funnels that already maintain the
+  mirror: `create_relation` (upsert) and `tombstone_relation_mirror`
+  (delete, including the entity-delete cascade). Merge re-points through
+  `create_relation`, so it needs no new hook. The mirror revision fences
+  each relation job.
 
 ## 7. Query path
 
@@ -129,7 +143,6 @@ Removed:
 - `vector_delete_embedding`
 - `vector_batch_upsert`
 - `vector_get_embedding`
-- `vector_search_by_entity`
 - `vector_recommend`
 - `vector_reindex`
 
@@ -139,6 +152,8 @@ Changed:
   `entityType` parameter is replaced by `filter.type`.
 - `hybrid_search` gains `filter` and `includeChunks`.
 - `semantic_search` gains `filter` and `includeChunks`.
+- `vector_search_by_entity` stays. Its query vector is the identity
+  chunk of the named entity. It gains `filter` and `includeChunks`.
 - Result rows carry `kind` (`entity` or `relation`).
 - `vector_store_stats` reports `embeddingCount` as chunk rows.
 
@@ -176,6 +191,10 @@ Numbered, each traceable to a unit of work:
 8. `REQ-SURFACE` — Relation rows appear kind-marked in entity search
    results.
 9. `REQ-DISPLAY` — A relation result displays `from -> TYPE -> to`.
+10. `REQ-SINGLE-STORE` — `chunk_vector` is the only relation embedding
+    store. The taxonomy kind-2 snapshot derives from it.
+11. `REQ-SIMILAR` — `vector_search_by_entity` searches by the identity
+    chunk of the named entity.
 
 ## 10. Verification commands
 
@@ -232,18 +251,30 @@ New tests:
 - Chunk layout for identity, observation, relation.
 - Filter by kind and type, exact and combined.
 - Best-chunk aggregation.
-- Relation enqueue, commit, cascade, and merge.
-- Relation revision fencing.
-- Migration drops legacy rows and re-enqueues all owners.
+- Relation enqueue, commit, cascade, and merge, fenced on the
+  `taxonomy_relation` mirror revision.
+- The taxonomy kind-2 snapshot derives from `chunk_vector` and refreshes
+  after a relation commit.
+- `vector_search_by_entity` uses the identity chunk.
+- Migration drops legacy rows, drops taxonomy kind-2 rows, and
+  re-enqueues every owner.
+
+Keep the existing mirror tests in `mutation.rs` (`create_relation_writes_mirror`,
+`delete_relation_tombstones_mirror_and_enqueues_delete`,
+`recreated_relation_reuses_no_freed_mirror_id`,
+`delete_entity_tombstones_its_relation_mirrors`). They pin the fence the
+relation chunks rely on.
 
 ## 12. Risks
 
 - The snapshot now holds every chunk. A graph with many observations
   grows the serving memory. The bench in `src/bin/bench.rs` measures the
   query cost.
-- Relation change detection is new. The cascade paths must be exhaustive:
-  create, delete, entity deletion, merge. A missed path leaves a stale
-  relation chunk.
+- The relation chunk fence depends on the `taxonomy_relation` mirror.
+  The mirror is a repository invariant with its own tests, but a future
+  relation mutation path could bypass the two enqueue funnels. The
+  full-scan gate must therefore count relation chunks, not only entity
+  chunks.
 
 ## 13. Versioning
 
