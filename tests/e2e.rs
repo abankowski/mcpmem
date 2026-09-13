@@ -790,7 +790,7 @@ fn e2e_vectors_disabled_by_default() {
         "base tools present: {list}"
     );
     assert!(
-        !list.contains("vector_upsert_embedding") && !list.contains("hybrid_search"),
+        !list.contains("vector_search_by_entity") && !list.contains("hybrid_search"),
         "vector tools must be hidden when --vectors is off: {list}"
     );
 

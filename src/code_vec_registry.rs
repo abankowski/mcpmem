@@ -7,7 +7,7 @@
 //! `entity` row id in that same file. So an HNSW index opened on the project DB
 //! indexes exactly the code symbols, with no separate identifier space. The
 //! main memory `VectorStore` serves the chunk snapshot only; the code world
-//! owns its own `vector_embedding` rows and its own blob format for them.
+//! owns its own `code_vector` rows and its own blob format for them.
 //!
 //! Like [`crate::code_registry`], there must be **at most one live
 //! [`CodeVecIndex`] per project file** in the process (the in-memory HNSW graph

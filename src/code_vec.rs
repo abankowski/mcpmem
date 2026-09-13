@@ -28,6 +28,57 @@ use crate::errors::{MCSError, Result};
 
 type EntityId = i64;
 
+/// Number of concurrent searcher threads reserved inside the usearch HNSW
+/// index. usearch hard-fails a search ("Reserve capacity ahead of searches!")
+/// when more threads query than were reserved, so [`SearchGate`] caps
+/// concurrent searches at exactly this number — correctness never depends on
+/// how many transport threads (stdio pipeline, HTTP handlers) pile in.
+fn search_thread_cap() -> usize {
+    static CAP: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .saturating_mul(2)
+            .clamp(8, 64)
+    });
+    *CAP
+}
+
+/// Counting gate bounding concurrent HNSW searches to the reserved thread
+/// capacity. Cheap: uncontended acquire is one mutex lock.
+struct SearchGate {
+    permits: parking_lot::Mutex<usize>,
+    cv: parking_lot::Condvar,
+}
+
+impl SearchGate {
+    const fn new(n: usize) -> Self {
+        Self {
+            permits: parking_lot::Mutex::new(n),
+            cv: parking_lot::Condvar::new(),
+        }
+    }
+
+    fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+        let mut p = self.permits.lock();
+        while *p == 0 {
+            self.cv.wait(&mut p);
+        }
+        *p -= 1;
+        drop(p);
+        // Release on all exits, including a panicking `f`.
+        struct Release<'a>(&'a SearchGate);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                *self.0.permits.lock() += 1;
+                self.0.cv.notify_one();
+            }
+        }
+        let _release = Release(self);
+        f()
+    }
+}
+
 fn sqlite_err(e: rusqlite::Error) -> MCSError {
     MCSError::IoError(std::io::Error::other(e))
 }
@@ -65,6 +116,7 @@ fn parse_embedding_blob(blob: &[u8]) -> Result<&[f32]> {
 pub struct CodeVecIndex {
     index: Arc<Index>,
     dims: u32,
+    gate: SearchGate,
     pub(crate) db: Mutex<Connection>,
 }
 
@@ -102,14 +154,17 @@ impl CodeVecIndex {
                 .map_err(|e| MCSError::MemoryError(format!("usearch init: {e}")))?,
         );
         // Reserve searcher threads up front so concurrent searches on a
-        // store that never inserted (or hasn't grown yet) also work.
+        // store that never inserted (or hasn't grown yet) also work. The
+        // count equals `search_thread_cap`, and SearchGate admits exactly
+        // that many concurrent searches: usearch hard-fails past it.
         index
-            .reserve_capacity_and_threads(1024, 8)
+            .reserve_capacity_and_threads(1024, search_thread_cap())
             .map_err(|e| MCSError::MemoryError(format!("usearch reserve: {e}")))?;
 
         let store = Self {
             index,
             dims,
+            gate: SearchGate::new(search_thread_cap()),
             db: Mutex::new(conn),
         };
         store.load_existing()?;
@@ -135,7 +190,7 @@ impl CodeVecIndex {
         if !rows.is_empty() {
             let needed = rows.len().div_ceil(1024).saturating_mul(1024).max(1024);
             self.index
-                .reserve_capacity_and_threads(needed, 8)
+                .reserve_capacity_and_threads(needed, search_thread_cap())
                 .map_err(|e| MCSError::MemoryError(format!("usearch reserve: {e}")))?;
         }
         for (id, blob) in rows {
@@ -176,7 +231,7 @@ impl CodeVecIndex {
             .max(1024);
         if needed > self.index.capacity() {
             self.index
-                .reserve_capacity_and_threads(needed, 8)
+                .reserve_capacity_and_threads(needed, search_thread_cap())
                 .map_err(|e| MCSError::MemoryError(format!("usearch reserve: {e}")))?;
         }
         let _ = self.index.remove(id as u64);
@@ -200,17 +255,19 @@ impl CodeVecIndex {
 
     /// Nearest symbol entity ids with distances (ascending = closer).
     pub fn search_embeddings(&self, query: &[f32], top_k: usize) -> Result<Vec<(EntityId, f32)>> {
-        if self.index.size() == 0 {
-            return Ok(Vec::new());
-        }
-        let m = self
-            .index
-            .search(query, top_k.clamp(1, 100))
-            .map_err(|e| MCSError::MemoryError(format!("usearch search: {e}")))?;
-        let cap = m.keys.len().min(m.distances.len());
-        Ok((0..cap)
-            .map(|j| (m.keys[j] as EntityId, m.distances[j]))
-            .collect())
+        self.gate.run(|| {
+            if self.index.size() == 0 {
+                return Ok(Vec::new());
+            }
+            let m = self
+                .index
+                .search(query, top_k.clamp(1, 100))
+                .map_err(|e| MCSError::MemoryError(format!("usearch search: {e}")))?;
+            let cap = m.keys.len().min(m.distances.len());
+            Ok((0..cap)
+                .map(|j| (m.keys[j] as EntityId, m.distances[j]))
+                .collect())
+        })
     }
 
     /// Resolve a symbol entity id to its current `(name, entityType)` row.
