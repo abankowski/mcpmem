@@ -50,18 +50,22 @@ fn result_text(value: &Value) -> String {
         .to_owned()
 }
 
-fn call(kg: &GraphHandle, vs: &VectorStore, arguments: &Value) -> Value {
+fn call_tool(kg: &GraphHandle, vs: &VectorStore, name: &str, arguments: &Value) -> Value {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
-        "params": { "name": SEMANTIC_SEARCH, "arguments": arguments },
+        "params": { "name": name, "arguments": arguments },
     })
     .to_string();
     body_of(
         dispatch_http_body(&body, kg, Some(vs), &mcpmem::authz::local_principal())
             .expect("the body is valid JSON"),
     )
+}
+
+fn call(kg: &GraphHandle, vs: &VectorStore, arguments: &Value) -> Value {
+    call_tool(kg, vs, SEMANTIC_SEARCH, arguments)
 }
 
 fn listed_tool_names(kg: &GraphHandle, vs: &VectorStore) -> Vec<String> {
@@ -107,12 +111,23 @@ fn the_manifest_declares_semantic_search() {
         serde_json::json!(["queryText"]),
         "queryText is the only required argument: {tool}"
     );
-    for key in ["queryText", "topK", "entityType", "textWeight", "vecWeight"] {
+    for key in ["queryText", "topK", "filter", "includeChunks", "textWeight", "vecWeight"] {
         assert!(
             schema["properties"][key].is_object(),
             "the schema must declare {key}: {tool}"
         );
     }
+    // The replaced `entityType` parameter must be gone from the manifest.
+    assert!(
+        schema["properties"]["entityType"].is_null(),
+        "entityType is replaced by filter: {tool}"
+    );
+    // The filter whitelist is exactly the two owner kinds.
+    assert_eq!(
+        schema["properties"]["filter"]["properties"]["kind"]["enum"],
+        serde_json::json!(["entity", "relation"]),
+        "the filter kind enum: {tool}"
+    );
     // The clamp is one constant in `vector_actions`, so the advertised cap must
     // be the cap the sibling vector tools advertise.
     assert_eq!(
@@ -379,4 +394,141 @@ fn a_missing_query_text_is_rejected() {
     let text = result_text(&v);
     assert_eq!(v["result"]["isError"], Value::Bool(true), "{v}");
     assert!(text.contains("'queryText'"), "{text}");
+}
+
+/// The search tools share one filter contract: `filter.kind` limits the owner
+/// kind, `filter.type` the owner type, and result rows carry `kind`. This file
+/// cannot run a live `semantic_search` query (no provider is ever installed),
+/// so the behaviour is exercised through `vector_search_entities`, which uses
+/// the same handler core and needs no provider. A legacy store holds no
+/// relation rows, so `kind: "relation"` must match nothing, not error.
+#[test]
+fn filter_selects_kind_and_type_before_ranking() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kg, vs) = vector_server(&dir);
+    let seed = |name: &str, etype: &str| {
+        let v = call_tool(
+            &kg,
+            &vs,
+            "create_entities",
+            &serde_json::json!({
+                "entities": [{"name": name, "entityType": etype, "observations": []}]
+            }),
+        );
+        assert!(v["error"].is_null(), "seed {name}: {v}");
+    };
+    seed("ada", "Person");
+    seed("acme", "Company");
+    let emb = vec![1.0f64; DIMS as usize];
+    let v = call_tool(
+        &kg,
+        &vs,
+        "vector_upsert_embedding",
+        &serde_json::json!({ "entityName": "ada", "embedding": emb }),
+    );
+    assert!(v["error"].is_null(), "embed ada: {v}");
+    let v = call_tool(
+        &kg,
+        &vs,
+        "vector_upsert_embedding",
+        &serde_json::json!({ "entityName": "acme", "embedding": vec![0.1f64; DIMS as usize] }),
+    );
+    assert!(v["error"].is_null(), "embed acme: {v}");
+
+    // Without a filter both entities come back, kind-marked.
+    let text = result_text(&call_tool(
+        &kg,
+        &vs,
+        "vector_search_entities",
+        &serde_json::json!({ "embedding": vec![1.0f64; DIMS as usize], "topK": 10 }),
+    ));
+    let rows = serde_json::from_str::<Value>(&text).expect("rows JSON")["results"]
+        .as_array()
+        .expect("results array")
+        .clone();
+    assert_eq!(rows.len(), 2, "both entities match unfiltered: {rows:?}");
+    for row in &rows {
+        assert_eq!(row["kind"].as_str(), Some("entity"), "kind on every row: {row:?}");
+    }
+
+    // A `{kind, type}` filter narrows before ranking.
+    let text = result_text(&call_tool(
+        &kg,
+        &vs,
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": vec![1.0f64; DIMS as usize],
+            "topK": 10,
+            "filter": { "kind": "entity", "type": "Person" },
+        }),
+    ));
+    let rows = serde_json::from_str::<Value>(&text).expect("rows JSON")["results"]
+        .as_array()
+        .expect("results array")
+        .clone();
+    assert!(!rows.is_empty(), "a Person must match");
+    for row in &rows {
+        assert_eq!(row["kind"].as_str(), Some("entity"), "{row:?}");
+        assert_eq!(row["entityType"].as_str(), Some("Person"), "{row:?}");
+    }
+
+    // A type filter without a kind also applies, on the entities a legacy
+    // store holds.
+    let text = result_text(&call_tool(
+        &kg,
+        &vs,
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": vec![1.0f64; DIMS as usize],
+            "topK": 10,
+            "filter": { "type": "Person" },
+        }),
+    ));
+    let rows = serde_json::from_str::<Value>(&text).expect("rows JSON")["results"]
+        .as_array()
+        .expect("results array")
+        .clone();
+    assert!(!rows.is_empty(), "a Person must match the type-only filter");
+    for row in &rows {
+        assert_eq!(row["entityType"].as_str(), Some("Person"), "{row:?}");
+    }
+
+    // `kind: "relation"` matches nothing in a legacy store, without erroring.
+    let text = result_text(&call_tool(
+        &kg,
+        &vs,
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": vec![1.0f64; DIMS as usize],
+            "topK": 10,
+            "filter": { "kind": "relation" },
+        }),
+    ));
+    assert!(
+        text.contains(r#""count":0"#),
+        "a legacy store has no relation rows: {text}"
+    );
+}
+
+/// `filter.kind` takes exactly "entity" and "relation". Anything else is an
+/// invalid parameter, refused before any search runs.
+#[test]
+fn filter_rejects_unknown_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let (kg, vs) = vector_server(&dir);
+    let v = call_tool(
+        &kg,
+        &vs,
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": vec![1.0f64; DIMS as usize],
+            "filter": { "kind": "property" },
+        }),
+    );
+    let text = result_text(&v);
+    assert_eq!(v["result"]["isError"], Value::Bool(true), "{v}");
+    assert!(
+        text.contains("entity") && text.contains("relation"),
+        "the refusal must name the allowed kinds: {text}"
+    );
 }

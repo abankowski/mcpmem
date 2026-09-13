@@ -251,6 +251,10 @@ fn test_vector_e2e_upsert_and_search() {
         text.contains("score"),
         "search should include scores: {text}"
     );
+    assert!(
+        text.contains(r#""kind":"entity""#),
+        "search rows must be kind-marked: {text}"
+    );
 }
 
 #[test]
@@ -352,16 +356,47 @@ fn test_vector_e2e_search_type_filter() {
         &serde_json::json!({"entityName": "acme", "embedding": make_embedding(4, 0.95)}),
     );
 
-    // Filter by person — should only get alice
+    // Filter by kind and type — should only get alice.
     let text = c.tool_text(
         "vector_search_entities",
         &serde_json::json!({
             "embedding": make_embedding(4, 1.0),
-            "entityType": "person"
+            "filter": { "kind": "entity", "type": "person" }
         }),
     );
     assert!(text.contains("alice"), "should contain alice: {text}");
     assert!(!text.contains("acme"), "should not contain acme: {text}");
+    assert!(
+        text.contains(r#""kind":"entity""#),
+        "filtered rows must be kind-marked: {text}"
+    );
+
+    // A relation-kind filter matches nothing in a store without relation
+    // chunks, without erroring.
+    let none = c.tool_text(
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": make_embedding(4, 1.0),
+            "filter": { "kind": "relation" }
+        }),
+    );
+    assert!(!none.contains("alice"), "no relation rows: {none}");
+    assert!(!none.contains("acme"), "no relation rows: {none}");
+
+    // includeChunks changes the row shape but never breaks the search; a
+    // legacy store has no chunk rows, so no chunk member is attached.
+    let chunks = c.tool_text(
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": make_embedding(4, 1.0),
+            "includeChunks": true
+        }),
+    );
+    assert!(chunks.contains("alice"), "includeChunks search: {chunks}");
+    assert!(
+        !chunks.contains("\"chunk\""),
+        "a legacy store has no chunk rows to attach: {chunks}"
+    );
 }
 
 #[test]
@@ -442,6 +477,10 @@ fn test_vector_e2e_hybrid_search() {
     assert!(
         text.contains("score"),
         "hybrid should include scores: {text}"
+    );
+    assert!(
+        text.contains(r#""kind":"entity""#),
+        "hybrid rows must be kind-marked: {text}"
     );
 }
 
