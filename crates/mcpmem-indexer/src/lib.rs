@@ -299,8 +299,10 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                 .map_err(|error| error.to_string()),
             IndexOperation::Upsert => {
                 let chunks: Option<Vec<(ChunkKind, String)>> = match job.owner_kind {
-                    OwnerKind::Entity => canonical_document(&conn, job.owner_id, job.owner_revision)?
-                        .map(|document| document.chunks()),
+                    OwnerKind::Entity => {
+                        canonical_document(&conn, job.owner_id, job.owner_revision)?
+                            .map(|document| document.chunks())
+                    }
                     OwnerKind::Relation => {
                         relation_chunk_text(&conn, job.owner_id, job.owner_revision)?
                             .map(|text| vec![(ChunkKind::Relation, text)])
@@ -309,13 +311,13 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                 match chunks {
                     Some(chunks) => self.embed_chunks_and_commit(
                         &profile,
-                        chunks,
+                        &chunks,
                         || {
                             jobs.renew(&job, current_us(), self.lease_us)
                                 .map_err(|error| error.to_string())
                         },
                         |vectors| {
-                            jobs.commit_chunks(&job, current_us(), Some(&vectors), "indexer")
+                            jobs.commit_chunks(&job, current_us(), Some(vectors), "indexer")
                                 .map_err(|error| error.to_string())
                         },
                     ),
@@ -372,7 +374,7 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
     fn embed_chunks_and_commit<Renew, Commit>(
         &self,
         profile: &IndexProfile,
-        chunks: Vec<(ChunkKind, String)>,
+        chunks: &[(ChunkKind, String)],
         mut renew: Renew,
         commit: Commit,
     ) -> Result<bool, String>
@@ -479,13 +481,6 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
         let Some(tax_job) = tax_jobs.claim_due(now_us, self.lease_us)? else {
             return Ok(RunReport::default());
         };
-        // Task 5 retires the kind-2 taxonomy funnel: relation vectors live in
-        // `chunk_vector` and the kind-2 snapshot derives from them.
-        // `claim_due` never returns a kind-2 row; this guard keeps such a row
-        // from running even if older code claims it.
-        if tax_job.subject_kind == 2 {
-            return Ok(RunReport::default());
-        }
         let mut report = RunReport {
             claimed: 1,
             ..RunReport::default()
@@ -618,16 +613,17 @@ pub fn relation_chunk_text(
     mirror_id: i64,
     expected_revision: i64,
 ) -> Result<Option<String>, rusqlite::Error> {
-    let row: Option<(String, String, String, i64)> = conn.query_row(
-        "SELECT f.name, d.name, t.name, m.revision FROM taxonomy_relation m
+    let row: Option<(String, String, String, i64)> = conn
+        .query_row(
+            "SELECT f.name, d.name, t.name, m.revision FROM taxonomy_relation m
          JOIN entity f ON f.id=m.from_id
          JOIN entity t ON t.id=m.to_id
          JOIN type_dict d ON d.id=m.type_id
          WHERE m.id=?1 AND m.deleted=0 AND f.flags=0 AND t.flags=0",
-        [mirror_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-    )
-    .optional()?;
+            [mirror_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
     Ok(match row {
         Some((from_name, rtype, to_name, revision)) if revision == expected_revision => {
             Some(format!("{from_name}\n{rtype}\n{to_name}"))
@@ -652,7 +648,6 @@ pub fn taxonomy_document(
     match kind {
         0 => entity_type_document(conn, subject_id, expected_revision),
         1 => relation_type_document(conn, subject_id, expected_revision),
-        2 => relation_instance_document(conn, subject_id, expected_revision),
         _ => Ok(None),
     }
 }
@@ -742,59 +737,6 @@ fn relation_type_document(
     }))
 }
 
-/// Kind 2: one relation instance, fenced on its `taxonomy_relation` mirror
-/// row. The document mirrors the entity shape: the formatted triple is the
-/// name and its single observation line.
-fn relation_instance_document(
-    conn: &Connection,
-    subject_id: i64,
-    expected_revision: i64,
-) -> Result<Option<CanonicalDocument>, rusqlite::Error> {
-    let row: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT revision, deleted FROM taxonomy_relation WHERE id=?1",
-            [subject_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((revision, deleted)) = row else {
-        return Ok(None);
-    };
-    if deleted != 0 || revision != expected_revision {
-        return Ok(None);
-    }
-    let row: Option<(String, String, String, String, String)> = conn
-        .query_row(
-            "SELECT f.name, ft.name, ty.name, t.name, tt.name
-             FROM taxonomy_relation r
-             JOIN entity f ON f.id = r.from_id
-             JOIN type_dict ft ON ft.id = f.type_id
-             JOIN entity t ON t.id = r.to_id
-             JOIN type_dict tt ON tt.id = t.type_id
-             JOIN type_dict ty ON ty.id = r.type_id
-             WHERE r.id = ?1 AND f.flags = 0 AND t.flags = 0
-             ORDER BY f.id, t.id
-             LIMIT 1",
-            [subject_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .optional()?;
-    let Some((from_name, from_type, relation_type, to_name, to_type)) = row else {
-        return Ok(None);
-    };
-    let line = format!(
-        "{} ({}) -[{}]-> {} ({})",
-        from_name, from_type, relation_type, to_name, to_type,
-    );
-    Ok(Some(CanonicalDocument {
-        entity_id: subject_id,
-        revision,
-        name: line.clone(),
-        entity_type: "".to_string(),
-        observations: vec![line],
-    }))
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -830,23 +772,6 @@ mod tests {
         conn.execute(
             "INSERT INTO relation(from_id, to_id, type_id, created_us) VALUES(?1, ?2, ?3, 1)",
             params![from_id, to_id, type_id],
-        )
-        .unwrap();
-    }
-
-    fn seed_taxonomy_relation(
-        conn: &Connection,
-        id: i64,
-        from_id: i64,
-        to_id: i64,
-        type_id: i64,
-        revision: i64,
-        deleted: i64,
-    ) {
-        conn.execute(
-            "INSERT INTO taxonomy_relation(id, from_id, to_id, type_id, revision, deleted) \
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, from_id, to_id, type_id, revision, deleted],
         )
         .unwrap();
     }
@@ -901,62 +826,6 @@ mod tests {
             doc.text(),
             "relationType: works_at\n\ncompany works_at person\nperson works_at company"
         );
-    }
-
-    #[test]
-    fn relation_instance_document_formats_the_triple() {
-        let conn = test_db();
-        seed_type(&conn, 1, 0, "person", 0);
-        seed_type(&conn, 2, 0, "company", 0);
-        seed_type(&conn, 3, 1, "works_at", 0);
-        seed_entity(&conn, 1, "ada lovelace", 1);
-        seed_entity(&conn, 2, "acme ltd", 2);
-        seed_taxonomy_relation(&conn, 1, 1, 2, 3, 5, 0);
-        let doc = taxonomy_document(&conn, 2, 1, 5)
-            .unwrap()
-            .expect("the seeded relation must produce a document");
-        assert_eq!(doc.entity_id, 1);
-        assert_eq!(doc.revision, 5);
-        assert_eq!(
-            doc.name,
-            "ada lovelace (person) -[works_at]-> acme ltd (company)"
-        );
-        assert_eq!(doc.entity_type, "");
-        assert_eq!(
-            doc.observations,
-            vec!["ada lovelace (person) -[works_at]-> acme ltd (company)".to_string()]
-        );
-        assert_eq!(
-            doc.text(),
-            "ada lovelace (person) -[works_at]-> acme ltd (company)\n\n\
-ada lovelace (person) -[works_at]-> acme ltd (company)"
-        );
-    }
-
-    #[test]
-    fn revision_mismatch_returns_none_for_every_kind() {
-        let conn = test_db();
-        seed_type(&conn, 1, 0, "person", 7);
-        seed_type(&conn, 2, 0, "company", 0);
-        seed_type(&conn, 3, 1, "works_at", 9);
-        seed_entity(&conn, 1, "ada", 1);
-        seed_entity(&conn, 2, "acme", 2);
-        seed_taxonomy_relation(&conn, 1, 1, 2, 3, 5, 0);
-        assert!(taxonomy_document(&conn, 0, 1, 8).unwrap().is_none());
-        assert!(taxonomy_document(&conn, 1, 3, 1).unwrap().is_none());
-        assert!(taxonomy_document(&conn, 2, 1, 6).unwrap().is_none());
-    }
-
-    #[test]
-    fn deleted_taxonomy_relation_returns_none() {
-        let conn = test_db();
-        seed_type(&conn, 1, 0, "person", 0);
-        seed_type(&conn, 2, 0, "company", 0);
-        seed_type(&conn, 3, 1, "works_at", 0);
-        seed_entity(&conn, 1, "ada", 1);
-        seed_entity(&conn, 2, "acme", 2);
-        seed_taxonomy_relation(&conn, 1, 1, 2, 3, 5, 1);
-        assert!(taxonomy_document(&conn, 2, 1, 5).unwrap().is_none());
     }
 
     #[test]

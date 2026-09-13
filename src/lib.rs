@@ -5,6 +5,8 @@ pub mod code;
 #[cfg(feature = "code")]
 pub mod code_registry;
 #[cfg(feature = "code")]
+pub mod code_vec;
+#[cfg(feature = "code")]
 pub mod code_vec_registry;
 pub mod config;
 pub mod config_file;
@@ -12,7 +14,6 @@ pub use mcpmem_core::errors;
 pub mod http;
 #[cfg(feature = "indexer")]
 pub mod indexer_provider;
-pub mod ivf;
 pub mod kg;
 pub mod oauth_routes;
 pub mod principals;
@@ -25,83 +26,13 @@ pub mod server;
 pub mod taxonomy;
 pub mod tls;
 pub mod tools;
-pub mod turboquant;
 pub use mcpmem_core::types;
 pub mod vector_actions;
 pub mod vector_store;
 pub mod watcher;
 
 use clap::{Parser, ValueEnum};
-use usearch::{MetricKind, ScalarKind};
-use vector_store::{IndexKind, VectorConfig};
-
-/// ANN index backend selectable from the CLI.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum VecIndex {
-    /// usearch HNSW graph index (default): best recall/latency.
-    Hnsw,
-    /// IVF-Flat: k-means partitioned, lighter memory, fast to build/rebuild.
-    Ivf,
-    /// TurboQuant (arXiv:2504.19874): data-oblivious quantization to `--tq-bits`
-    /// bits per coordinate with unbiased inner-product estimates; smallest
-    /// memory, zero training/indexing time, brute-force scan over codes.
-    Turbo,
-}
-
-impl From<VecIndex> for IndexKind {
-    fn from(v: VecIndex) -> Self {
-        match v {
-            VecIndex::Hnsw => IndexKind::Hnsw,
-            VecIndex::Ivf => IndexKind::Ivf,
-            VecIndex::Turbo => IndexKind::TurboQuant,
-        }
-    }
-}
-
-/// Distance metric for the vector index.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum VecMetric {
-    /// Cosine similarity (default; good for normalized embeddings).
-    Cos,
-    /// Inner / dot product.
-    Ip,
-    /// Squared Euclidean (L2) distance.
-    L2sq,
-}
-
-impl From<VecMetric> for MetricKind {
-    fn from(m: VecMetric) -> Self {
-        match m {
-            VecMetric::Cos => MetricKind::Cos,
-            VecMetric::Ip => MetricKind::IP,
-            VecMetric::L2sq => MetricKind::L2sq,
-        }
-    }
-}
-
-/// Scalar representation stored in the index (lower precision = less memory).
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum VecQuant {
-    /// 32-bit float (default; full precision).
-    F32,
-    /// 16-bit half-precision IEEE float (half the memory, slight recall loss).
-    F16,
-    /// 16-bit brain float (half the memory, wider range than f16).
-    Bf16,
-    /// 8-bit integer quantization (quarter the memory).
-    I8,
-}
-
-impl From<VecQuant> for ScalarKind {
-    fn from(q: VecQuant) -> Self {
-        match q {
-            VecQuant::F32 => ScalarKind::F32,
-            VecQuant::F16 => ScalarKind::F16,
-            VecQuant::Bf16 => ScalarKind::BF16,
-            VecQuant::I8 => ScalarKind::I8,
-        }
-    }
-}
+use vector_store::VectorConfig;
 
 /// Wire transport the server listens on. The JSON-RPC/MCP semantics are
 /// identical across all three — only the framing differs.
@@ -293,8 +224,8 @@ pub struct Args {
     pub enable_graph_write: bool,
 
     /// Enable vector / semantic search: the `vector_*` and `hybrid_search` tools
-    /// backed by a usearch index. The `--embedding-dims` / `--vec-*` flags only
-    /// take effect when this is set.
+    /// backed by the durable chunk index. The `--embedding-dims` flag only
+    /// takes effect when this is set.
     #[arg(long = "enable-vectors", default_value_t = false)]
     pub enable_vectors: bool,
 
@@ -305,7 +236,8 @@ pub struct Args {
     pub enable_code: bool,
 
     /// Embedding dimension for vector search (default: 384). Requires
-    /// --enable-vectors. The `turbo` backend accepts 384-1536 only.
+    /// --enable-vectors. The serving index profile owns the dimension that
+    /// actually validates chunk rows; this flag is the startup default.
     #[arg(long = "embedding-dims", default_value_t = 384)]
     pub embedding_dims: u32,
 
@@ -313,44 +245,6 @@ pub struct Args {
     /// `code_semantic_search` HNSW index (default: 768). Requires --enable-code.
     #[arg(long = "code-embedding-dims", default_value_t = 768)]
     pub code_embedding_dims: u32,
-
-    /// Distance metric for the vector index. Requires --enable-vectors.
-    #[arg(long = "vec-metric", value_enum, default_value_t = VecMetric::Cos)]
-    pub vec_metric: VecMetric,
-
-    /// Scalar quantization for the vector index (lower = less memory). Requires --enable-vectors.
-    #[arg(long = "vec-quantization", value_enum, default_value_t = VecQuant::F32)]
-    pub vec_quantization: VecQuant,
-
-    /// HNSW graph degree `M` (higher = better recall, more memory). Requires --enable-vectors.
-    #[arg(long = "vec-connectivity", default_value_t = 16)]
-    pub vec_connectivity: usize,
-
-    /// HNSW `efConstruction` (higher = better index quality, slower inserts). Requires --enable-vectors.
-    #[arg(long = "vec-expansion-add", default_value_t = 200)]
-    pub vec_expansion_add: usize,
-
-    /// HNSW `efSearch` (higher = better recall, slower queries). Requires --enable-vectors.
-    #[arg(long = "vec-expansion-search", default_value_t = 50)]
-    pub vec_expansion_search: usize,
-
-    /// ANN index backend: `hnsw` (default) or `ivf` (IVF-Flat). Requires --enable-vectors.
-    #[arg(long = "vec-index", value_enum, default_value_t = VecIndex::Hnsw)]
-    pub vec_index: VecIndex,
-
-    /// IVF: number of Voronoi cells / centroids (default: 256). Requires --vec-index ivf.
-    #[arg(long = "ivf-nlist", default_value_t = 256)]
-    pub ivf_nlist: usize,
-
-    /// IVF: cells probed per query — higher = better recall, slower (default: 8).
-    /// Requires --vec-index ivf.
-    #[arg(long = "ivf-nprobe", default_value_t = 8)]
-    pub ivf_nprobe: usize,
-
-    /// TurboQuant: bits per coordinate, 1-8 (default: 4 ≈ 8x smaller than f32
-    /// with near-lossless recall). Requires --vec-index turbo.
-    #[arg(long = "tq-bits", default_value_t = 4)]
-    pub tq_bits: u32,
 }
 
 impl Args {
@@ -376,20 +270,11 @@ impl Args {
         cats
     }
 
-    /// Build the vector index configuration from the `--embedding-dims` /
-    /// `--vec-*` / `--ivf-*` flags. Only meaningful when `--enable-vectors` is set.
-    pub fn vector_config(&self) -> VectorConfig {
+    /// Build the vector index configuration from the `--embedding-dims` flag.
+    /// Only meaningful when `--enable-vectors` is set.
+    pub const fn vector_config(&self) -> VectorConfig {
         VectorConfig {
             dims: self.embedding_dims,
-            index_kind: self.vec_index.into(),
-            metric: self.vec_metric.into(),
-            quantization: self.vec_quantization.into(),
-            connectivity: self.vec_connectivity,
-            expansion_add: self.vec_expansion_add,
-            expansion_search: self.vec_expansion_search,
-            ivf_nlist: self.ivf_nlist,
-            ivf_nprobe: self.ivf_nprobe,
-            tq_bits: self.tq_bits,
         }
     }
 }

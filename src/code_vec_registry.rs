@@ -1,14 +1,16 @@
 //! Per-project registry of code-symbol vector indexes (HNSW ANN).
 //!
-//! Semantic code search reuses the [`VectorStore`](crate::vector_store::VectorStore)
-//! (usearch HNSW) directly on top of each project's code database: code symbols
-//! are already stored as entities in `<memory_file>.code/<project>.code.db`, and
-//! `VectorStore` keys embeddings by the `entity` row id in that same file. So an
-//! HNSW index opened on the project DB indexes exactly the code symbols, with no
-//! separate identifier space.
+//! Semantic code search keeps its own per-project ANN store
+//! ([`CodeVecIndex`](crate::code_vec::CodeVecIndex), usearch HNSW) on top of
+//! each project's code database: code symbols are already stored as entities in
+//! `<memory_file>.code/<project>.code.db`, and the index keys embeddings by the
+//! `entity` row id in that same file. So an HNSW index opened on the project DB
+//! indexes exactly the code symbols, with no separate identifier space. The
+//! main memory `VectorStore` serves the chunk snapshot only; the code world
+//! owns its own `vector_embedding` rows and its own blob format for them.
 //!
 //! Like [`crate::code_registry`], there must be **at most one live
-//! [`VectorStore`] per project file** in the process (the in-memory HNSW graph
+//! [`CodeVecIndex`] per project file** in the process (the in-memory HNSW graph
 //! must not diverge from a second instance's). The same `Weak` + warm-LRU scheme
 //! upholds that invariant. [`resolve`] first ensures the project's
 //! knowledge-graph schema exists (via [`crate::code_registry::resolve`]) so the
@@ -24,8 +26,8 @@ use std::sync::{Arc, OnceLock, Weak};
 use lru::LruCache;
 use parking_lot::Mutex;
 
+use crate::code_vec::CodeVecIndex;
 use crate::errors::{MCSError, Result};
-use crate::vector_store::{VectorConfig, VectorStore};
 
 /// Default embedding dimension for code semantic search. Matches common
 /// open-weight code/text embedders (e.g. bge-base, nomic-embed, all-mpnet).
@@ -43,9 +45,9 @@ struct RegistryConfig {
 struct Inner {
     /// Canonical instance per project — `Weak` so the index is freed once no
     /// caller and no warm slot hold it.
-    live: HashMap<String, Weak<VectorStore>>,
+    live: HashMap<String, Weak<CodeVecIndex>>,
     /// Recently-used indexes kept alive to avoid reopen churn.
-    warm: LruCache<String, Arc<VectorStore>>,
+    warm: LruCache<String, Arc<CodeVecIndex>>,
 }
 
 static CONFIG: OnceLock<RegistryConfig> = OnceLock::new();
@@ -74,7 +76,7 @@ pub fn embedding_dims() -> u32 {
 
 /// Resolve the (lazily opened) HNSW vector index for `project`, opening it if
 /// necessary. Returns the single canonical instance so callers share one index.
-pub fn resolve(project: &str) -> Result<Arc<VectorStore>> {
+pub fn resolve(project: &str) -> Result<Arc<CodeVecIndex>> {
     crate::code_registry::validate_project(project)?;
     let cfg = CONFIG.get().ok_or_else(|| {
         MCSError::InvalidParams(
@@ -96,10 +98,7 @@ pub fn resolve(project: &str) -> Result<Arc<VectorStore>> {
     g.live.retain(|_, w| w.strong_count() > 0);
 
     let path = cfg.base.join(format!("{project}.code.db"));
-    let store = Arc::new(VectorStore::with_config(
-        &path,
-        &VectorConfig::new(cfg.dims),
-    )?);
+    let store = CodeVecIndex::open(&path, cfg.dims)?;
     g.live.insert(project.to_string(), Arc::downgrade(&store));
     g.warm.put(project.to_string(), Arc::clone(&store));
     Ok(store)

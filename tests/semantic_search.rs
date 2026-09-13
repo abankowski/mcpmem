@@ -111,7 +111,14 @@ fn the_manifest_declares_semantic_search() {
         serde_json::json!(["queryText"]),
         "queryText is the only required argument: {tool}"
     );
-    for key in ["queryText", "topK", "filter", "includeChunks", "textWeight", "vecWeight"] {
+    for key in [
+        "queryText",
+        "topK",
+        "filter",
+        "includeChunks",
+        "textWeight",
+        "vecWeight",
+    ] {
         assert!(
             schema["properties"][key].is_object(),
             "the schema must declare {key}: {tool}"
@@ -402,6 +409,81 @@ fn a_missing_query_text_is_rejected() {
 /// so the behaviour is exercised through `vector_search_entities`, which uses
 /// the same handler core and needs no provider. A legacy store holds no
 /// relation rows, so `kind: "relation"` must match nothing, not error.
+fn seed_chunk_snapshot(dir: &tempfile::TempDir) {
+    // Build a serving profile and chunk rows exactly as the worker would, via
+    // an independent connection, then publish the snapshot on the store the
+    // test holds. The 2.0.0 surface has no client ingestion tool: chunks are
+    // the only vector source.
+    let db = dir.path().join("memory.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let profile = "11111111-2222-3333-4444-555555555555";
+    conn.execute(
+        "INSERT INTO index_profile VALUES(?1,'default',?2,?3,'Active')",
+        rusqlite::params![
+            profile,
+            "test-fixture",
+            serde_json::to_string(&serde_json::json!({
+                "id": profile,
+                "store_key": "default",
+                "provider_kind": "test",
+                "model": "test",
+                "dimensions": 8,
+                "representation_version": "v1",
+                "normalization": "None",
+                "distance_metric": "L2Squared",
+                "vector_encoding_version": "f32le-v1",
+            }))
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE index_profile_registry SET state='Active',serving_profile=?1 WHERE store_key='default'",
+        [profile],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO ann_generation(profile_id) VALUES(?1)",
+        [profile],
+    )
+    .unwrap();
+    let seed = |name: &str, _etype: &str, value: f64| {
+        let entity_id: i64 = conn
+            .query_row(
+                "SELECT id FROM entity WHERE name=?1 AND flags=0",
+                [name],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        let type_id: i64 = conn
+            .query_row(
+                "SELECT t.id FROM entity e JOIN type_dict t ON t.id=e.type_id WHERE e.id=?1",
+                [entity_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        let v: f32 = value as f32;
+        let bytes: Vec<u8> = v.to_le_bytes().to_vec();
+        let blob: Vec<u8> = (0..8)
+            .flat_map(|_| bytes.iter().cloned())
+            .collect::<Vec<_>>();
+        conn.execute(
+            "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+             VALUES(?1,'identity','entity',?2,0,?3,1,?4,1,'test')",
+            rusqlite::params![profile, entity_id, type_id, blob],
+        )
+        .unwrap();
+    };
+    seed("ada", "Person", 1.0);
+    seed("acme", "Company", 0.1);
+    drop(conn);
+}
+
+/// The search tools share one filter contract: `filter.kind` limits the owner
+/// kind, `filter.type` the owner type, and result rows carry `kind`. This file
+/// cannot run a live `semantic_search` query (no provider is ever installed),
+/// so the behaviour is exercised through `vector_search_entities`, which uses
+/// the same handler core and needs no provider.
 #[test]
 fn filter_selects_kind_and_type_before_ranking() {
     let dir = tempfile::tempdir().unwrap();
@@ -419,21 +501,8 @@ fn filter_selects_kind_and_type_before_ranking() {
     };
     seed("ada", "Person");
     seed("acme", "Company");
-    let emb = vec![1.0f64; DIMS as usize];
-    let v = call_tool(
-        &kg,
-        &vs,
-        "vector_upsert_embedding",
-        &serde_json::json!({ "entityName": "ada", "embedding": emb }),
-    );
-    assert!(v["error"].is_null(), "embed ada: {v}");
-    let v = call_tool(
-        &kg,
-        &vs,
-        "vector_upsert_embedding",
-        &serde_json::json!({ "entityName": "acme", "embedding": vec![0.1f64; DIMS as usize] }),
-    );
-    assert!(v["error"].is_null(), "embed acme: {v}");
+    seed_chunk_snapshot(&dir);
+    vs.reconcile_managed_snapshot().unwrap();
 
     // Without a filter both entities come back, kind-marked.
     let text = result_text(&call_tool(
@@ -448,7 +517,11 @@ fn filter_selects_kind_and_type_before_ranking() {
         .clone();
     assert_eq!(rows.len(), 2, "both entities match unfiltered: {rows:?}");
     for row in &rows {
-        assert_eq!(row["kind"].as_str(), Some("entity"), "kind on every row: {row:?}");
+        assert_eq!(
+            row["kind"].as_str(),
+            Some("entity"),
+            "kind on every row: {row:?}"
+        );
     }
 
     // A `{kind, type}` filter narrows before ranking.
@@ -472,8 +545,7 @@ fn filter_selects_kind_and_type_before_ranking() {
         assert_eq!(row["entityType"].as_str(), Some("Person"), "{row:?}");
     }
 
-    // A type filter without a kind also applies, on the entities a legacy
-    // store holds.
+    // A type filter without a kind also applies.
     let text = result_text(&call_tool(
         &kg,
         &vs,
@@ -493,7 +565,8 @@ fn filter_selects_kind_and_type_before_ranking() {
         assert_eq!(row["entityType"].as_str(), Some("Person"), "{row:?}");
     }
 
-    // `kind: "relation"` matches nothing in a legacy store, without erroring.
+    // The seeded snapshot holds no relation chunks, so `kind: "relation"`
+    // matches nothing, without erroring.
     let text = result_text(&call_tool(
         &kg,
         &vs,
@@ -506,12 +579,10 @@ fn filter_selects_kind_and_type_before_ranking() {
     ));
     assert!(
         text.contains(r#""count":0"#),
-        "a legacy store has no relation rows: {text}"
+        "no relation chunks are seeded: {text}"
     );
 }
 
-/// `filter.kind` takes exactly "entity" and "relation". Anything else is an
-/// invalid parameter, refused before any search runs.
 #[test]
 fn filter_rejects_unknown_kind() {
     let dir = tempfile::tempdir().unwrap();

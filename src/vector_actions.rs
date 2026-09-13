@@ -30,8 +30,6 @@ const MAX_EMBEDDING_DIMS: usize = 4096;
 const MAX_TOP_K: usize = 100;
 const DEFAULT_TOP_K: usize = 10;
 const MAX_NAME_BYTES: usize = 1024;
-/// Cap on items in a single `vector_batch_upsert` call.
-const MAX_BATCH_ITEMS: usize = 1024;
 
 fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() {
@@ -186,59 +184,34 @@ fn search_owner_rows(
     let ftype = filter.and_then(|f| f.r#type.as_deref());
     let mut rows: Vec<OwnerRow> = Vec::with_capacity(target);
 
-    if vs.serving_profile()?.is_some() {
-        // Chunk-serving store: overfetch chunks so owners whose best chunk sits
-        // past `top_k` still rank, then reduce to one best chunk per owner.
-        // Truncating at the chunk level first would let one owner's many near
-        // chunks crowd out the other owners and under-fill the result set.
-        let fetch = (target * 8).clamp(target, 1000);
-        let hits = vs.search_chunks(query, fetch, kind, ftype)?;
-        let owners = vs.aggregate_owners(&hits, target);
-        for (owner_kind, owner_id, dist, _best_idx) in owners {
-            if exclude == Some((owner_kind, owner_id)) {
-                continue;
-            }
-            let Some((name, etype, kind_label)) = vs.resolve_owner(owner_kind, owner_id)? else {
-                continue;
-            };
-            let chunk = if include_chunks {
-                hits.iter()
-                    .find(|h| h.owner_kind == owner_kind && h.owner_id == owner_id)
-                    .and_then(|h| {
-                        vs.chunk_text(h).map(|text| ChunkDetail {
-                            kind: h.chunk_kind.as_str().to_string(),
-                            text,
-                            score: f64::from(h.dist),
-                        })
+    // Chunk-serving store: overfetch chunks so owners whose best chunk sits
+    // past `top_k` still rank, then reduce to one best chunk per owner.
+    // Truncating at the chunk level first would let one owner's many near
+    // chunks crowd out the other owners and under-fill the result set.
+    let fetch = (target * 8).clamp(target, 1000);
+    let hits = vs.search_chunks(query, fetch, kind, ftype)?;
+    let owners = vs.aggregate_owners(&hits, target);
+    for (owner_kind, owner_id, dist, _best_idx) in owners {
+        if exclude == Some((owner_kind, owner_id)) {
+            continue;
+        }
+        let Some((name, etype, kind_label)) = vs.resolve_owner(owner_kind, owner_id)? else {
+            continue;
+        };
+        let chunk = if include_chunks {
+            hits.iter()
+                .find(|h| h.owner_kind == owner_kind && h.owner_id == owner_id)
+                .and_then(|h| {
+                    vs.chunk_text(h).map(|text| ChunkDetail {
+                        kind: h.chunk_kind.as_str().to_string(),
+                        text,
+                        score: f64::from(h.dist),
                     })
-            } else {
-                None
-            };
-            rows.push((name, etype, kind_label, f64::from(dist), chunk));
-        }
-    } else {
-        // Legacy compatibility: the in-memory ANN serves entities only, so a
-        // relation filter matches nothing and no chunk text exists. Overfetch
-        // so the type filter does not under-fill the result set.
-        if kind != Some("relation") {
-            let fetch = (target * 8).clamp(target, 100);
-            for (id, dist) in vs.search_embeddings(query, fetch)? {
-                if exclude == Some((OwnerKind::Entity, id)) {
-                    continue;
-                }
-                let Some((name, etype, kind_label)) =
-                    vs.resolve_owner(OwnerKind::Entity, id)?
-                else {
-                    continue;
-                };
-                if let Some(want) = ftype
-                    && etype != want
-                {
-                    continue;
-                }
-                rows.push((name, etype, kind_label, f64::from(dist), None));
-            }
-        }
+                })
+        } else {
+            None
+        };
+        rows.push((name, etype, kind_label, f64::from(dist), chunk));
     }
     rows.truncate(top_k);
     Ok(rows)
@@ -285,48 +258,11 @@ fn build_owner_results(rows: &[OwnerRow]) -> String {
 
 /// The `(kind, id)` fusion key. `OwnerKind` implements no `Hash`, so the key
 /// is the owner kind's discriminant.
-fn owner_key(kind: OwnerKind) -> u8 {
+const fn owner_key(kind: OwnerKind) -> u8 {
     match kind {
         OwnerKind::Entity => 0,
         OwnerKind::Relation => 1,
     }
-}
-
-pub fn handle_vector_upsert_embedding(
-    vs: &VectorStore,
-    _kg: &GraphHandle,
-    args: Option<&Value>,
-) -> Result<Value> {
-    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
-
-    let entity_name = params
-        .get("entityName")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| MCSError::InvalidParams("Missing 'entityName' parameter".into()))?;
-    validate_name(entity_name)?;
-
-    let embedding = parse_embedding(
-        params
-            .get("embedding")
-            .ok_or_else(|| MCSError::InvalidParams("Missing 'embedding' parameter".into()))?,
-    )?;
-
-    let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("");
-
-    with_scratch(|buf| {
-        buf.reserve(embedding.len());
-        buf.extend(embedding.iter().map(|&v| v as f32));
-        vs.upsert_embedding(entity_name, buf, model)
-    })?;
-
-    let text = serde_json::to_string(&json!({
-        "entityName": entity_name,
-        "dims": vs.dims(),
-        "model": model,
-    }))
-    .map_err(MCSError::JsonError)?;
-
-    Ok(text_content(&text))
 }
 
 pub fn handle_vector_search_entities(
@@ -358,30 +294,6 @@ pub fn handle_vector_search_entities(
     Ok(build_content_response(&json))
 }
 
-pub fn handle_vector_delete_embedding(
-    vs: &VectorStore,
-    _kg: &GraphHandle,
-    args: Option<&Value>,
-) -> Result<Value> {
-    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
-
-    let entity_name = params
-        .get("entityName")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| MCSError::InvalidParams("Missing 'entityName' parameter".into()))?;
-    validate_name(entity_name)?;
-
-    let deleted = vs.delete_embedding(entity_name)?;
-
-    let text = serde_json::to_string(&json!({
-        "deleted": deleted,
-        "entityName": entity_name,
-    }))
-    .map_err(MCSError::JsonError)?;
-
-    Ok(text_content(&text))
-}
-
 pub fn handle_hybrid_search(
     vs: &VectorStore,
     kg: &GraphHandle,
@@ -411,17 +323,14 @@ pub fn handle_hybrid_search(
     let results = with_scratch(|buf| {
         buf.reserve(query_embedding.len());
         buf.extend(query_embedding.iter().map(|&v| v as f32));
-        perform_hybrid_search(
-            vs,
-            kg,
-            query_text,
-            buf,
+        let params = HybridParams {
             text_weight,
             vec_weight,
             top_k,
-            filter.as_ref(),
+            filter: filter.as_ref(),
             include_chunks,
-        )
+        };
+        perform_hybrid_search(vs, kg, query_text, buf, &params)
     })?;
 
     Ok(build_content_response(&build_fused_results(&results)))
@@ -467,44 +376,18 @@ fn perform_hybrid_search(
     kg: &GraphHandle,
     query_text: &str,
     query_emb: &[f32],
-    text_weight: f64,
-    vec_weight: f64,
-    top_k: usize,
-    filter: Option<&SearchFilter>,
-    include_chunks: bool,
+    params: &HybridParams<'_>,
 ) -> Result<Vec<FusedRow>> {
+    let top_k = params.top_k;
     let fetch_k = top_k.saturating_mul(3).clamp(1, 100);
     let rrf_constant = 60.0;
-    let kind = filter.and_then(|f| f.kind.as_deref());
-    let ftype = filter.and_then(|f| f.r#type.as_deref());
+    let kind = params.filter.and_then(|f| f.kind.as_deref());
+    let ftype = params.filter.and_then(|f| f.r#type.as_deref());
 
     // The vector half runs at owner level: chunk hits aggregate to one best
     // chunk per owner, so one owner's many chunks cannot crowd out the others.
-    // A legacy store (no serving profile) holds no chunk rows, so its ANN
-    // serves the pool the same way it always did; relation rows cannot exist
-    // there, so a relation-kind filter matches nothing.
-    let chunk_serving = vs.serving_profile()?.is_some();
-    let hits = if chunk_serving {
-        vs.search_chunks(query_emb, fetch_k, kind, ftype)?
-    } else {
-        Vec::new()
-    };
-    let vec_owners = if chunk_serving {
-        vs.aggregate_owners(&hits, fetch_k)
-    } else if kind != Some("relation") {
-        let mut owners = Vec::new();
-        for (id, dist) in vs.search_embeddings(query_emb, fetch_k)? {
-            if let Some(want) = ftype
-                && vs.get_entity_type(id)?.as_deref() != Some(want)
-            {
-                continue;
-            }
-            owners.push((OwnerKind::Entity, id, dist, None));
-        }
-        owners
-    } else {
-        Vec::new()
-    };
+    let hits = vs.search_chunks(query_emb, fetch_k, kind, ftype)?;
+    let vec_owners = vs.aggregate_owners(&hits, fetch_k);
 
     // The FTS half matches entities only. A relation-kind filter excludes it
     // (relation rows enter the fusion with their vector rank only), and a type
@@ -513,7 +396,9 @@ fn perform_hybrid_search(
     if kind != Some("relation") {
         let kg_results = kg.search_nodes_filtered(query_text, None, 0, fetch_k);
         for entity in &kg_results {
-            let Some(id) = vs.entity_id_of(&entity.name)? else { continue };
+            let Some(id) = vs.entity_id_of(&entity.name)? else {
+                continue;
+            };
             if let Some(want) = ftype
                 && vs.get_entity_type(id)?.as_deref() != Some(want)
             {
@@ -537,7 +422,7 @@ fn perform_hybrid_search(
                 vec_score: 0.0,
                 text_score: 0.0,
             });
-        let rrf = vec_weight * (1.0 / (rrf_constant + rank as f64));
+        let rrf = params.vec_weight * (1.0 / (rrf_constant + rank as f64));
         entry.total += rrf;
         entry.vec_score += rrf;
     }
@@ -550,7 +435,7 @@ fn perform_hybrid_search(
             vec_score: 0.0,
             text_score: 0.0,
         });
-        let rrf = text_weight * (1.0 / (rrf_constant + rank as f64));
+        let rrf = params.text_weight * (1.0 / (rrf_constant + rank as f64));
         entry.total += rrf;
         entry.text_score += rrf;
     }
@@ -588,14 +473,16 @@ fn perform_hybrid_search(
         let Some((name, etype, kind_label)) = vs.resolve_owner(entry.kind, entry.owner_id)? else {
             continue;
         };
-        let chunk = if include_chunks {
+        let chunk = if params.include_chunks {
             hits.iter()
                 .find(|h| h.owner_kind == entry.kind && h.owner_id == entry.owner_id)
-                .and_then(|h| vs.chunk_text(h).map(|text| ChunkDetail {
-                    kind: h.chunk_kind.as_str().to_string(),
-                    text,
-                    score: f64::from(h.dist),
-                }))
+                .and_then(|h| {
+                    vs.chunk_text(h).map(|text| ChunkDetail {
+                        kind: h.chunk_kind.as_str().to_string(),
+                        text,
+                        score: f64::from(h.dist),
+                    })
+                })
         } else {
             None
         };
@@ -621,6 +508,17 @@ struct AggScore {
     text_score: f64,
 }
 
+/// The tunable half of a fused search, packed so the fusion core stays under
+/// the argument-cap lint. `filter` borrows the caller's parsed filter; the
+/// fusion core only reads it.
+struct HybridParams<'a> {
+    text_weight: f64,
+    vec_weight: f64,
+    top_k: usize,
+    filter: Option<&'a SearchFilter>,
+    include_chunks: bool,
+}
+
 pub fn handle_refresh_graph_cache(
     vs: &VectorStore,
     _kg: &GraphHandle,
@@ -640,22 +538,11 @@ pub fn handle_vector_store_stats(
     _kg: &GraphHandle,
     _args: Option<&Value>,
 ) -> Result<Value> {
-    let (graph_bytes, vectors_bytes) = vs.index_memory_breakdown();
-    let index_kind = match vs.index_kind() {
-        crate::vector_store::IndexKind::Hnsw => "hnsw",
-        crate::vector_store::IndexKind::Ivf => "ivf",
-        crate::vector_store::IndexKind::TurboQuant => "turboquant",
-    };
     let text = serde_json::to_string(&json!({
         "embeddingCount": vs.count(),
         "dims": vs.dims(),
-        "indexKind": index_kind,
         "petgraphNodes": vs.graph_node_count(),
         "petgraphEdges": vs.graph_edge_count(),
-        "indexCapacity": vs.index_capacity(),
-        "indexMemoryBytes": vs.index_memory_bytes(),
-        "indexGraphBytes": graph_bytes,
-        "indexVectorsBytes": vectors_bytes,
     }))
     .map_err(MCSError::JsonError)?;
     Ok(text_content(&text))
@@ -701,107 +588,6 @@ fn build_named_results(rows: &[(String, String, f64)]) -> String {
     out
 }
 
-/// Bulk-ingest embeddings: `{ items: [{entityName, embedding, model?}, ...] }`.
-/// Each item is upserted independently; per-item failures are reported rather
-/// than aborting the batch — the shape RAG ingestion pipelines expect.
-pub fn handle_vector_batch_upsert(
-    vs: &VectorStore,
-    _kg: &GraphHandle,
-    args: Option<&Value>,
-) -> Result<Value> {
-    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
-    let items = params
-        .get("items")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| MCSError::InvalidParams("'items' must be an array".into()))?;
-    if items.len() > MAX_BATCH_ITEMS {
-        return Err(MCSError::InvalidParams(format!(
-            "Too many items (max {MAX_BATCH_ITEMS})"
-        )));
-    }
-
-    // Parse every item first, then store the whole batch under one SQLite
-    // transaction (one WAL commit instead of one per item).
-    let mut errors: Vec<Value> = Vec::new();
-    let mut parsed: Vec<(&str, Vec<f32>, &str)> = Vec::with_capacity(items.len());
-    for item in items {
-        let name = match item.get("entityName").and_then(|v| v.as_str()) {
-            Some(n) if !n.is_empty() && n.len() <= MAX_NAME_BYTES => n,
-            _ => {
-                errors.push(
-                    json!({"entityName": item.get("entityName"), "error": "invalid entityName"}),
-                );
-                continue;
-            }
-        };
-        let emb = match item.get("embedding").map(parse_embedding) {
-            Some(Ok(e)) => e,
-            Some(Err(e)) => {
-                errors.push(json!({"entityName": name, "error": e.to_string()}));
-                continue;
-            }
-            None => {
-                errors.push(json!({"entityName": name, "error": "missing embedding"}));
-                continue;
-            }
-        };
-        let model = item.get("model").and_then(|v| v.as_str()).unwrap_or("");
-        parsed.push((name, to_f32(&emb), model));
-    }
-
-    let mut upserted = 0usize;
-    for ((name, _, _), result) in parsed.iter().zip(vs.upsert_embeddings_batch(&parsed)) {
-        match result {
-            Ok(()) => upserted += 1,
-            Err(e) => errors.push(json!({"entityName": name, "error": e.to_string()})),
-        }
-    }
-
-    let text = serde_json::to_string(&json!({
-        "upserted": upserted,
-        "failed": errors.len(),
-        "errors": errors,
-    }))
-    .map_err(MCSError::JsonError)?;
-    Ok(text_content(&text))
-}
-
-/// Fetch the stored embedding for an entity: `{ entityName }`.
-pub fn handle_vector_get_embedding(
-    vs: &VectorStore,
-    _kg: &GraphHandle,
-    args: Option<&Value>,
-) -> Result<Value> {
-    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
-    let name = params
-        .get("entityName")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| MCSError::InvalidParams("Missing 'entityName' parameter".into()))?;
-    validate_name(name)?;
-
-    match vs.get_embedding_by_name(name)? {
-        Some((_id, emb, model)) => {
-            let text = serde_json::to_string(&json!({
-                "entityName": name,
-                "dims": emb.len(),
-                "model": model,
-                "embedding": emb,
-            }))
-            .map_err(MCSError::JsonError)?;
-            Ok(text_content(&text))
-        }
-        None => {
-            let text = serde_json::to_string(&json!({
-                "entityName": name,
-                "embedding": Value::Null,
-                "found": false,
-            }))
-            .map_err(MCSError::JsonError)?;
-            Ok(text_content(&text))
-        }
-    }
-}
-
 /// "More like this": find owners nearest to a given entity's identity chunk.
 /// `{ entityName, topK?, filter?, includeChunks?, excludeSelf? }`.
 pub fn handle_vector_search_by_entity(
@@ -831,18 +617,11 @@ pub fn handle_vector_search_by_entity(
             "Entity '{name}' does not exist"
         )));
     };
-    // The identity chunk is the query in a chunk-serving store. A store in
-    // legacy compatibility holds no chunk rows, so its stored embedding stands
-    // in; without either, the entity has no vector to search by.
-    let query = match vs.identity_vector(name)? {
-        Some(v) => v,
-        None => vs
-            .get_embedding_by_name(name)?
-            .map(|(_, emb, _)| emb)
-            .ok_or_else(|| {
-                MCSError::InvalidParams(format!("Entity '{name}' has no identity chunk"))
-            })?,
-    };
+    // The identity chunk is the query. Without one the entity has no vector
+    // to search by: the managed snapshot is the only vector source now.
+    let query = vs
+        .identity_vector(name)?
+        .ok_or_else(|| MCSError::InvalidParams(format!("Entity '{name}' has no identity chunk")))?;
     let exclude = if exclude_self {
         Some((OwnerKind::Entity, entity_id))
     } else {
@@ -850,84 +629,6 @@ pub fn handle_vector_search_by_entity(
     };
     let json = search_owners(vs, &query, top_k, exclude, filter.as_ref(), include_chunks)?;
     Ok(build_content_response(&json))
-}
-
-/// Example-based recommendation: build a query from positive (and optional
-/// negative) example entities and search. `{ positive: [names], negative?:
-/// [names], topK?, entityType? }`. The example entities are excluded from results.
-pub fn handle_vector_recommend(
-    vs: &VectorStore,
-    _kg: &GraphHandle,
-    args: Option<&Value>,
-) -> Result<String> {
-    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
-    let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?.clamp(1, MAX_TOP_K);
-    let entity_type = params
-        .get("entityType")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
-
-    let positive = collect_names(params, "positive")?;
-    if positive.is_empty() {
-        return Err(MCSError::InvalidParams(
-            "'positive' must contain at least one entity name".into(),
-        ));
-    }
-    let negative = collect_names(params, "negative").unwrap_or_default();
-
-    let dims = vs.dims() as usize;
-    let mut query = vec![0.0f64; dims];
-    let mut exclude = std::collections::HashSet::new();
-
-    let mut pos_count = 0usize;
-    for n in &positive {
-        if let Some((id, emb, _)) = vs.get_embedding_by_name(n)? {
-            if emb.len() != dims {
-                continue;
-            }
-            for (q, &e) in query.iter_mut().zip(&emb) {
-                *q += f64::from(e);
-            }
-            exclude.insert(id);
-            pos_count += 1;
-        }
-    }
-    if pos_count == 0 {
-        return Err(MCSError::InvalidParams(
-            "None of the 'positive' entities have embeddings".into(),
-        ));
-    }
-    for q in query.iter_mut() {
-        *q /= pos_count as f64;
-    }
-
-    let mut neg_count = 0usize;
-    let mut neg = vec![0.0f64; dims];
-    for n in &negative {
-        if let Some((id, emb, _)) = vs.get_embedding_by_name(n)? {
-            if emb.len() != dims {
-                continue;
-            }
-            for (q, &e) in neg.iter_mut().zip(&emb) {
-                *q += f64::from(e);
-            }
-            exclude.insert(id);
-            neg_count += 1;
-        }
-    }
-    if neg_count > 0 {
-        for (q, n) in query.iter_mut().zip(&neg) {
-            *q -= n / neg_count as f64;
-        }
-    }
-
-    let qf = to_f32(&query);
-    let rows = vs.search_resolved(&qf, top_k, entity_type, &exclude)?;
-    let named: Vec<(String, String, f64)> = rows
-        .into_iter()
-        .map(|(_, n, t, d)| (n, t, f64::from(d)))
-        .collect();
-    Ok(build_content_response(&build_named_results(&named)))
 }
 
 /// Maximal Marginal Relevance search: diversified semantic retrieval.
@@ -957,18 +658,10 @@ pub fn handle_vector_mmr_search(
 
     // The candidate pool is owner-level: chunk hits aggregate to one best
     // chunk per owner, so one owner's many chunks cannot crowd out the others.
-    // A legacy store (no serving profile) holds no chunk rows, so its ANN
-    // serves the pool the same way it always did.
     let mut pool: Vec<(OwnerKind, i64, f32)> = Vec::new();
-    if vs.serving_profile()?.is_some() {
-        let hits = vs.search_chunks(&query, fetch_k, Some("entity"), entity_type)?;
-        for (kind, id, dist, _) in vs.aggregate_owners(&hits, fetch_k) {
-            pool.push((kind, id, dist));
-        }
-    } else {
-        for (id, dist) in vs.search_embeddings(&query, fetch_k)? {
-            pool.push((OwnerKind::Entity, id, dist));
-        }
+    let hits = vs.search_chunks(&query, fetch_k, Some("entity"), entity_type)?;
+    for (kind, id, dist, _) in vs.aggregate_owners(&hits, fetch_k) {
+        pool.push((kind, id, dist));
     }
 
     let mut cands: Vec<MmrCand> = Vec::with_capacity(pool.len());
@@ -982,17 +675,13 @@ pub fn handle_vector_mmr_search(
             continue;
         }
         // Diversity compares the owner's identity chunk against the already
-        // selected ones; the legacy embedding stands in when no chunk store
-        // serves. Without a vector the owner cannot be diversified, so it
-        // drops out of the pool.
+        // selected ones. Without a vector the owner cannot be diversified, so
+        // it drops out of the pool.
         let emb = match vs.owner_identity_vector(kind, id)? {
             Some(v) => v,
-            None => match vs.get_embedding_by_id(id)? {
-                Some(v) => v,
-                None => continue,
-            },
+            None => continue,
         };
-        let rel = -(dist as f64);
+        let rel = -f64::from(dist);
         cands.push(MmrCand {
             name,
             etype,
@@ -1035,46 +724,6 @@ struct MmrCand {
     etype: String,
     emb: Vec<f32>,
     rel: f64,
-}
-
-/// Rebuild/retrain the ANN index (IVF k-means; HNSW is a no-op). `{}`.
-pub fn handle_vector_reindex(
-    vs: &VectorStore,
-    _kg: &GraphHandle,
-    _args: Option<&Value>,
-) -> Result<Value> {
-    vs.reindex()?;
-    let kind = match vs.index_kind() {
-        crate::vector_store::IndexKind::Hnsw => "hnsw",
-        crate::vector_store::IndexKind::Ivf => "ivf",
-        crate::vector_store::IndexKind::TurboQuant => "turboquant",
-    };
-    let text = serde_json::to_string(&json!({
-        "reindexed": true,
-        "indexKind": kind,
-        "embeddingCount": vs.count(),
-    }))
-    .map_err(MCSError::JsonError)?;
-    Ok(text_content(&text))
-}
-
-fn collect_names(params: &Value, key: &str) -> Result<Vec<String>> {
-    match params.get(key) {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(arr)) => {
-            let mut out = Vec::with_capacity(arr.len());
-            for v in arr {
-                let s = v.as_str().ok_or_else(|| {
-                    MCSError::InvalidParams(format!("'{key}' must be an array of strings"))
-                })?;
-                out.push(s.to_string());
-            }
-            Ok(out)
-        }
-        Some(_) => Err(MCSError::InvalidParams(format!(
-            "'{key}' must be an array of strings"
-        ))),
-    }
 }
 
 /// Scale a vector to unit length in place.
@@ -1204,17 +853,14 @@ pub fn handle_semantic_search(
         // The chunk-level filter applies inside the fusion, so a filtered call
         // needs no widened pool and no post-filtering; the FTS half applies
         // the same type predicate to its entity matches.
-        let results = perform_hybrid_search(
-            vs,
-            kg,
-            query_text,
-            &query,
+        let params = HybridParams {
             text_weight,
             vec_weight,
             top_k,
-            filter.as_ref(),
+            filter: filter.as_ref(),
             include_chunks,
-        )?;
+        };
+        let results = perform_hybrid_search(vs, kg, query_text, &query, &params)?;
         return Ok(build_content_response(&build_fused_results(&results)));
     }
 

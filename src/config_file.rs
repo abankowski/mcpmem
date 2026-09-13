@@ -22,7 +22,7 @@ use mcpmem_core::jobs::{DistanceMetric, Normalization};
 use serde::Deserialize;
 
 use crate::errors::{MCSError, Result};
-use crate::{Args, Transport, VecIndex, VecMetric, VecQuant};
+use crate::{Args, Transport};
 
 /// Environment variable naming the configuration file.
 pub const CONFIG_PATH_ENV: &str = "MCP_MEMORY_CONFIG";
@@ -53,18 +53,6 @@ impl ExplicitArgs {
                 .filter(|id| matches.value_source(id.as_str()) == Some(ValueSource::CommandLine))
                 .map(|id| id.as_str().to_string())
                 .collect(),
-            known: <Args as clap::CommandFactory>::command()
-                .get_arguments()
-                .map(|arg| arg.get_id().to_string())
-                .collect(),
-        }
-    }
-
-    /// Only for a test that drives `apply` directly.
-    #[cfg(test)]
-    fn none() -> Self {
-        Self {
-            explicit: HashSet::new(),
             known: <Args as clap::CommandFactory>::command()
                 .get_arguments()
                 .map(|arg| arg.get_id().to_string())
@@ -214,15 +202,6 @@ pub struct ToolsSection {
 pub struct VectorsSection {
     pub embedding_dims: Option<u32>,
     pub code_embedding_dims: Option<u32>,
-    pub index: Option<String>,
-    pub metric: Option<String>,
-    pub quantization: Option<String>,
-    pub connectivity: Option<usize>,
-    pub expansion_add: Option<usize>,
-    pub expansion_search: Option<usize>,
-    pub ivf_nlist: Option<usize>,
-    pub ivf_nprobe: Option<usize>,
-    pub tq_bits: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -428,47 +407,6 @@ impl FileConfig {
             vectors.code_embedding_dims,
             cli.absent("code_embedding_dims"),
         );
-        assign(
-            &mut args.vec_index,
-            parse_enum::<VecIndex>("vectors.index", vectors.index.as_ref())?,
-            cli.absent("vec_index"),
-        );
-        assign(
-            &mut args.vec_metric,
-            parse_enum::<VecMetric>("vectors.metric", vectors.metric.as_ref())?,
-            cli.absent("vec_metric"),
-        );
-        assign(
-            &mut args.vec_quantization,
-            parse_enum::<VecQuant>("vectors.quantization", vectors.quantization.as_ref())?,
-            cli.absent("vec_quantization"),
-        );
-        assign(
-            &mut args.vec_connectivity,
-            vectors.connectivity,
-            cli.absent("vec_connectivity"),
-        );
-        assign(
-            &mut args.vec_expansion_add,
-            vectors.expansion_add,
-            cli.absent("vec_expansion_add"),
-        );
-        assign(
-            &mut args.vec_expansion_search,
-            vectors.expansion_search,
-            cli.absent("vec_expansion_search"),
-        );
-        assign(
-            &mut args.ivf_nlist,
-            vectors.ivf_nlist,
-            cli.absent("ivf_nlist"),
-        );
-        assign(
-            &mut args.ivf_nprobe,
-            vectors.ivf_nprobe,
-            cli.absent("ivf_nprobe"),
-        );
-        assign(&mut args.tq_bits, vectors.tq_bits, cli.absent("tq_bits"));
 
         let security = &self.security;
         assign(
@@ -776,12 +714,12 @@ fn parse_choice<T: Copy>(
 }
 
 /// The index profile the file names, or `None` when it names none. `None`
-/// leaves the store in legacy compatibility, so a client keeps writing its own
-/// vectors and the embedding worker stays idle.
+/// leaves the store in legacy compatibility and the embedding worker stays
+/// idle.
 ///
 /// Every rejection here is cheap, and every mistake that reaches the store is
-/// not: adopting a profile re-enqueues every live entity and refuses a direct
-/// `vector_upsert_embedding` write from that moment on.
+/// not: adopting a profile re-enqueues every live entity; the 2.0.0 surface
+/// has no client ingestion tools left to refuse.
 pub fn profile_spec(file: Option<&FileConfig>) -> Result<Option<ProfileSpec>> {
     let Some(section) = file.map(|file| &file.indexer) else {
         return Ok(None);
@@ -863,7 +801,6 @@ pub fn profile_spec(file: Option<&FileConfig>) -> Result<Option<ProfileSpec>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
 
     #[test]
     fn rejects_an_unknown_key() {
@@ -880,15 +817,14 @@ mod tests {
     }
 
     #[test]
-    fn reports_the_field_on_a_bad_enum_value() {
-        let file: FileConfig =
-            toml::from_str("[vectors]\nindex = \"quantum\"\n").expect("parses as a string");
-        let mut args = Args::parse_from(["mcpmem"]);
-        let cli = ExplicitArgs::none();
-        let error = file
-            .apply(&mut args, &cli, &|_| true)
-            .expect_err("an unknown backend must be rejected");
-        assert!(error.to_string().contains("vectors.index"), "{error}");
+    fn rejects_a_removed_vectors_key() {
+        // The ANN knobs (`vectors.index`, `vectors.metric`,
+        // `vectors.quantization`, `vectors.ivf-*`, `vectors.tq-bits`) were
+        // removed in 2.0.0. The section denies unknown fields, so a config
+        // file still naming one fails to load instead of silently ignoring it.
+        let error = toml::from_str::<FileConfig>("[vectors]\nindex = \"quantum\"\n")
+            .expect_err("a removed vectors key must not parse");
+        assert!(error.to_string().contains("index"), "{error}");
     }
 
     #[test]

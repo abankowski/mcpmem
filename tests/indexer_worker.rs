@@ -146,7 +146,10 @@ fn worker_commits_latest_canonical_revision() {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!((kind.as_str(), owner_kind.as_str(), owner_revision), ("identity", "entity", 1));
+    assert_eq!(
+        (kind.as_str(), owner_kind.as_str(), owner_revision),
+        ("identity", "entity", 1)
+    );
 }
 
 #[test]
@@ -263,7 +266,7 @@ fn commit_chunks_replaces_owner_rows_and_bumps_generation() {
         &(ChunkKind::Observation, &[0.1f32, 0.9]),
     ];
     let committed = repo
-        .commit_chunks(&job, now_us() + 1, Some(&vectors), "test")
+        .commit_chunks(&job, now_us() + 1, Some(vectors), "test")
         .unwrap();
     assert!(committed, "lease and revision are current");
     let rows: Vec<(String, String, i64, i64)> = conn
@@ -352,7 +355,10 @@ fn commit_chunks_commits_a_relation_owner_and_bumps_the_kind_generation() {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .unwrap();
-    assert_eq!((kind.as_str(), owner_kind.as_str()), ("relation", "relation"));
+    assert_eq!(
+        (kind.as_str(), owner_kind.as_str()),
+        ("relation", "relation")
+    );
     let mirror_type: i64 = conn
         .query_row(
             "SELECT type_id FROM taxonomy_relation WHERE id=?1",
@@ -360,7 +366,10 @@ fn commit_chunks_commits_a_relation_owner_and_bumps_the_kind_generation() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(type_id, mirror_type, "the chunk row carries the mirror type");
+    assert_eq!(
+        type_id, mirror_type,
+        "the chunk row carries the mirror type"
+    );
     assert_eq!(owner_revision, job.owner_revision);
     let kind_generation: i64 = conn
         .query_row(
@@ -369,7 +378,10 @@ fn commit_chunks_commits_a_relation_owner_and_bumps_the_kind_generation() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(kind_generation, 1, "a relation commit advances the kind-2 generation");
+    assert_eq!(
+        kind_generation, 1,
+        "a relation commit advances the kind-2 generation"
+    );
     // The delete funnel for the same owner removes the chunk rows.
     graph
         .delete_relations(&[mcpmem::types::Relation {
@@ -387,7 +399,10 @@ fn commit_chunks_commits_a_relation_owner_and_bumps_the_kind_generation() {
         }
     }
     let deletion = deletion.expect("the tombstone funnel enqueues a claimable delete");
-    assert_eq!(deletion.operation, mcpmem_core::jobs::IndexOperation::Delete);
+    assert_eq!(
+        deletion.operation,
+        mcpmem_core::jobs::IndexOperation::Delete
+    );
     {
         let vector = [1.0f32, 0.0];
         let owned = [(ChunkKind::Relation, vector.as_slice())];
@@ -438,7 +453,8 @@ fn commit_chunks_refuses_a_payload_that_does_not_match_the_operation() {
     // An upsert without chunks errors before any row is touched: it would
     // otherwise wipe the owner's chunk rows and complete.
     assert!(
-        repo.commit_chunks(&job, now_us() + 1, None, "test").is_err(),
+        repo.commit_chunks(&job, now_us() + 1, None, "test")
+            .is_err(),
         "an upsert needs at least one chunk"
     );
     assert_eq!(
@@ -481,12 +497,25 @@ fn stale_claim_cannot_commit_after_a_newer_claimant() {
     let repo = mcpmem_core::jobs::IndexJobRepository::new(&conn);
     let first = repo.claim_due(10, 1).unwrap().unwrap();
     let second = repo.claim_due(12, 10).unwrap().unwrap();
-    assert!(!repo
-        .commit_chunks(&first, 12, Some(&[&(ChunkKind::Identity, &[1.0f32, 1.0])]), "test")
-        .unwrap());
-    assert!(repo
-        .commit_chunks(&second, 12, Some(&[&(ChunkKind::Identity, &[1.0f32, 1.0])]), "test")
-        .unwrap());
+    assert!(
+        !repo
+            .commit_chunks(
+                &first,
+                12,
+                Some(&[&(ChunkKind::Identity, &[1.0f32, 1.0])]),
+                "test"
+            )
+            .unwrap()
+    );
+    assert!(
+        repo.commit_chunks(
+            &second,
+            12,
+            Some(&[&(ChunkKind::Identity, &[1.0f32, 1.0])]),
+            "test"
+        )
+        .unwrap()
+    );
 }
 
 struct WrongDimensions;
@@ -643,7 +672,13 @@ fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
         .unwrap();
     let vectors = VectorStore::new(&database, 2).unwrap();
     vectors.reconcile_managed_snapshot().unwrap();
-    assert_eq!(vectors.search_embeddings(&[1.0, 1.0], 10).unwrap().len(), 0);
+    let hits = vectors
+        .search_chunks(&[1.0f32, 1.0f32], 10, None, None)
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "a dead-lettered poison must not stay served"
+    );
     // A later write to the same entity re-enqueues it with a fresh budget.
     graph
         .add_observations(
@@ -1002,49 +1037,6 @@ fn stale_taxonomy_job_fails_the_fence_without_a_vector_row() {
 }
 
 #[test]
-fn worker_never_claims_a_retired_kind2_taxonomy_job() {
-    // Task 5 retires the kind-2 taxonomy funnel: relation vectors live in
-    // chunk_vector and the kind-2 snapshot derives from them. A held kind-2
-    // taxonomy job row must never claim or run; the row stays untouched
-    // (migration 0009 drops it).
-    let dir = tempfile::tempdir().unwrap();
-    let (database, conn, profile) = taxonomy_fixture(dir.path());
-    // A relation tombstone at revision 5 with a stale kind-2 vector row.
-    // Neither the job nor the stale vector may cause any worker work.
-    conn.execute(
-        "INSERT INTO taxonomy_relation(id, from_id, to_id, type_id, revision, deleted) VALUES(10, 1, 2, 3, 5, 1)",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO taxonomy_vector(profile_id, subject_kind, subject_id, subject_revision, blob, created_at_us, source) VALUES(?1, 2, 10, 5, X'0000000000000000', 1, 'seed')",
-        [profile.id.to_string()],
-    )
-    .unwrap();
-    seed_taxonomy_job(&conn, 2, 10, 5, "delete", &profile.id);
-    let report = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5))
-        .run_once(now_us())
-        .unwrap();
-    assert_eq!(report.claimed, 0, "a retired kind-2 row is never claimed");
-    assert_eq!(report.committed, 0);
-    let state: String = conn
-        .query_row(
-            "SELECT state FROM taxonomy_job WHERE subject_kind=2 AND subject_id=10 AND profile_id=?1",
-            [profile.id.to_string()],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(state, "pending", "the held kind-2 row is untouched");
-    assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM taxonomy_vector", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        1,
-        "no kind-2 vector is touched"
-    );
-}
-
-#[test]
 fn vanished_taxonomy_subject_retries_then_dead_letters() {
     let dir = tempfile::tempdir().unwrap();
     let (database, conn, profile) = taxonomy_fixture(dir.path());
@@ -1114,7 +1106,9 @@ fn relation(from: &str, to: &str, relation_type: &str) -> mcpmem::types::Relatio
 fn seed_profile(database: &Path) -> IndexProfile {
     let conn = rusqlite::Connection::open(database).unwrap();
     let profile = profile();
-    IndexProfileRegistry::new(&conn).begin_rebuild(&profile).unwrap();
+    IndexProfileRegistry::new(&conn)
+        .begin_rebuild(&profile)
+        .unwrap();
     profile
 }
 
@@ -1131,8 +1125,12 @@ fn taxonomy_relation_snapshot_derives_from_chunk_vector() {
     let database = dir.path().join("memory.db");
     let graph = setup(&database);
     seed_profile(&database);
-    graph.create_entities(&[entity("ada", "Person"), entity("bob", "Person")]).unwrap();
-    graph.create_relations(&[relation("ada", "bob", "knows")]).unwrap();
+    graph
+        .create_entities(&[entity("ada", "Person"), entity("bob", "Person")])
+        .unwrap();
+    graph
+        .create_relations(&[relation("ada", "bob", "knows")])
+        .unwrap();
     let worker = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5));
     // Chunk jobs claim before taxonomy jobs, and the entity jobs before the
     // relation job. Drain the queue: ada, bob and the relation each get one
@@ -1145,8 +1143,12 @@ fn taxonomy_relation_snapshot_derives_from_chunk_vector() {
     let store = vs_of(&database);
     store.reconcile_managed_snapshot().unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
-    store.adopt_taxonomy(&IndexProfileRegistry::new(&conn), false).unwrap();
-    let hits = store.search_taxonomy(TaxonomyKind::Relation, &[1.0, 0.0], 5).unwrap();
+    store
+        .adopt_taxonomy(&IndexProfileRegistry::new(&conn), false)
+        .unwrap();
+    let hits = store
+        .search_taxonomy(TaxonomyKind::Relation, &[1.0, 0.0], 5)
+        .unwrap();
     assert_eq!(hits.len(), 1, "one relation chunk in the kind-2 snapshot");
 }
 
