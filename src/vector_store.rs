@@ -1746,6 +1746,100 @@ impl VectorStore {
             .unwrap_or_default()
     }
 
+    /// Resolve one owner to its display row: `(name, entityType, kind)`.
+    ///
+    /// An entity row shows its current name and type, marked `"entity"`. A
+    /// relation row shows the live triple `from -> TYPE -> to` and the relation
+    /// type, marked `"relation"`. A row whose subject is gone (deleted entity,
+    /// deleted or endpoint-less relation) is `None`, not a placeholder: the
+    /// caller drops it instead of serving a name that no longer exists.
+    pub fn resolve_owner(
+        &self,
+        owner_kind: OwnerKind,
+        owner_id: i64,
+    ) -> Result<Option<(String, String, String)>> {
+        match owner_kind {
+            OwnerKind::Entity => {
+                let conn = self.db.lock();
+                let Some((name, etype)) = self.get_entity_name_type(&conn, owner_id)? else {
+                    return Ok(None);
+                };
+                Ok(Some((name, etype, "entity".to_string())))
+            }
+            OwnerKind::Relation => {
+                let conn = self.db.lock();
+                let row: Option<(String, String, String)> = conn
+                    .query_row(
+                        "SELECT f.name, d.name, t.name FROM taxonomy_relation m
+                         JOIN entity f ON f.id=m.from_id JOIN entity t ON t.id=m.to_id
+                         JOIN type_dict d ON d.id=m.type_id
+                         WHERE m.id=?1 AND m.deleted=0 AND f.flags=0 AND t.flags=0",
+                        [owner_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(sqlite_err)?;
+                Ok(row.map(|(f, ty, t)| (format!("{f} -> {ty} -> {t}"), ty, "relation".to_string())))
+            }
+        }
+    }
+
+    /// The stored text of one chunk, reassembled from SQL for `includeChunks`.
+    ///
+    /// Identity text is `name \n type`, observation text is the body, and
+    /// relation text is the triple `from \n type \n to` — the exact texts the
+    /// worker embedded. `None` when the underlying row is gone (or, for
+    /// entity chunks, when the store never wrote that chunk kind).
+    pub fn chunk_text(&self, hit: &ChunkHit) -> Option<String> {
+        match hit.owner_kind {
+            OwnerKind::Entity => match hit.chunk_kind {
+                ChunkKind::Identity => {
+                    let conn = self.db.lock();
+                    conn.query_row(
+                        "SELECT e.name || char(10) || COALESCE(t.name,'')
+                         FROM entity e LEFT JOIN type_dict t ON t.id=e.type_id WHERE e.id=?1",
+                        [hit.owner_id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_err)
+                    .ok()
+                    .flatten()
+                }
+                ChunkKind::Observation => {
+                    let conn = self.db.lock();
+                    // The chunk_index is the observation idx.
+                    conn.query_row(
+                        "SELECT body FROM observation WHERE entity_id=?1 AND idx=?2",
+                        params![hit.owner_id, hit.chunk_index],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_err)
+                    .ok()
+                    .flatten()
+                }
+                _ => None,
+            },
+            OwnerKind::Relation => {
+                // Rebuild "from \n type \n to" from the mirror.
+                let conn = self.db.lock();
+                conn.query_row(
+                    "SELECT f.name || char(10) || d.name || char(10) || t.name
+                     FROM taxonomy_relation m JOIN entity f ON f.id=m.from_id
+                     JOIN entity t ON t.id=m.to_id JOIN type_dict d ON d.id=m.type_id
+                     WHERE m.id=?1",
+                    [hit.owner_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(sqlite_err)
+                .ok()
+                .flatten()
+            }
+        }
+    }
+
     /// k-NN that returns resolved `(id, name, entityType, distance)`, optionally
     /// filtered by `entity_type` and excluding `exclude` ids. Over-fetches to
     /// compensate for filtered-out rows.
@@ -3481,5 +3575,169 @@ mod tests {
             .unwrap();
         let names: Vec<&str> = rows.iter().map(|(_, n, _, _)| n.as_str()).collect();
         assert_eq!(names, vec!["b"]);
+    }
+
+    /// The mirror row `(from_id, to_id, type_id)` of one relation owner.
+    fn relation_row(env: &TestEnv, id: i64) -> (i64, i64, i64) {
+        let conn = env.vs.db.lock();
+        conn.query_row(
+            "SELECT from_id, to_id, type_id FROM taxonomy_relation WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resolve_owner_renders_entity_and_relation_rows() {
+        let env = setup(4);
+        create_test_entity(&env.kg, "ada", "Person");
+        create_test_entity(&env.kg, "acme", "Company");
+        let ada = entity_id_of(&env, "ada");
+        let acme = entity_id_of(&env, "acme");
+
+        let (name, etype, kind) = env
+            .vs
+            .resolve_owner(OwnerKind::Entity, ada)
+            .unwrap()
+            .expect("ada is a live entity");
+        assert_eq!((name.as_str(), etype.as_str(), kind.as_str()), ("ada", "Person", "entity"));
+
+        // Unknown entity: None, not a placeholder.
+        assert!(env.vs.resolve_owner(OwnerKind::Entity, 999_999).unwrap().is_none());
+
+        // A deleted relation resolves to None even when its endpoints live on.
+        {
+            let conn = env.vs.db.lock();
+            conn.execute(
+                "INSERT INTO type_dict(kind,name) VALUES(1,'works_at')",
+                [],
+            )
+            .unwrap();
+            let type_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM type_dict WHERE kind=1 AND name='works_at'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            conn.execute(
+                "INSERT INTO taxonomy_relation(id,from_id,to_id,type_id,revision,deleted) VALUES(42,?1,?2,?3,1,0)",
+                params![ada, acme, type_id],
+            )
+            .unwrap();
+            // The mirror allows one id per triple, so the deleted twin uses a
+            // different triple (acme -> ada) and the same relation type.
+            conn.execute(
+                "INSERT INTO taxonomy_relation(id,from_id,to_id,type_id,revision,deleted) VALUES(43,?1,?2,?3,1,1)",
+                params![acme, ada, type_id],
+            )
+            .unwrap();
+        }
+
+        let (name, etype, kind) = env
+            .vs
+            .resolve_owner(OwnerKind::Relation, 42)
+            .unwrap()
+            .expect("the live relation row resolves");
+        assert_eq!((name.as_str(), etype.as_str(), kind.as_str()), ("ada -> works_at -> acme", "works_at", "relation"));
+
+        let (from_id, to_id, _) = relation_row(&env, 42);
+        assert_eq!((from_id, to_id), (ada, acme));
+        assert!(
+            env.vs.resolve_owner(OwnerKind::Relation, 43).unwrap().is_none(),
+            "a deleted relation must not render a row"
+        );
+        assert!(
+            env.vs.resolve_owner(OwnerKind::Relation, 999_999).unwrap().is_none(),
+            "an unknown relation must not render a row"
+        );
+    }
+
+    #[test]
+    fn chunk_text_reassembles_identity_observation_and_relation() {
+        let env = setup(4);
+        // create_test_entity writes one observation at idx 0.
+        create_test_entity(&env.kg, "ada", "Person");
+        create_test_entity(&env.kg, "acme", "Company");
+        let ada = entity_id_of(&env, "ada");
+        let acme = entity_id_of(&env, "acme");
+        {
+            let conn = env.vs.db.lock();
+            let type_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM type_dict WHERE kind=1 AND name='works_at'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| {
+                    conn.execute("INSERT INTO type_dict(kind,name) VALUES(1,'works_at')", [])
+                        .unwrap();
+                    conn.query_row(
+                        "SELECT id FROM type_dict WHERE kind=1 AND name='works_at'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+                });
+            conn.execute(
+                "INSERT INTO taxonomy_relation(id,from_id,to_id,type_id,revision,deleted) VALUES(42,?1,?2,?3,1,0)",
+                params![ada, acme, type_id],
+            )
+            .unwrap();
+        }
+
+        let identity = ChunkHit {
+            owner_kind: OwnerKind::Entity,
+            owner_id: ada,
+            chunk_kind: ChunkKind::Identity,
+            chunk_index: 0,
+            type_id: 0,
+            dist: 0.0,
+        };
+        assert_eq!(
+            env.vs.chunk_text(&identity).unwrap(),
+            "ada\nPerson",
+            "identity text is name \\n type"
+        );
+
+        let observation = ChunkHit {
+            owner_kind: OwnerKind::Entity,
+            owner_id: ada,
+            chunk_kind: ChunkKind::Observation,
+            chunk_index: 0,
+            type_id: 0,
+            dist: 0.0,
+        };
+        assert_eq!(
+            env.vs.chunk_text(&observation).unwrap(),
+            "test observation",
+            "observation text is the body"
+        );
+
+        let relation = ChunkHit {
+            owner_kind: OwnerKind::Relation,
+            owner_id: 42,
+            chunk_kind: ChunkKind::Relation,
+            chunk_index: 0,
+            type_id: 0,
+            dist: 0.0,
+        };
+        assert_eq!(
+            env.vs.chunk_text(&relation).unwrap(),
+            "ada\nworks_at\nacme",
+            "relation text is the triple"
+        );
+
+        // A missing observation index is None, not an empty string.
+        let missing = ChunkHit {
+            owner_kind: OwnerKind::Entity,
+            owner_id: ada,
+            chunk_kind: ChunkKind::Observation,
+            chunk_index: 7,
+            type_id: 0,
+            dist: 0.0,
+        };
+        assert!(env.vs.chunk_text(&missing).is_none());
     }
 }
