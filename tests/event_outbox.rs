@@ -70,7 +70,11 @@ fn graph_bootstrap_precedes_migration_statements() {
            SELECT count(*) FROM relation;
            SELECT count(*) FROM name_fts;
            SELECT count(*) FROM obs_fts;
-           SELECT CASE WHEN (SELECT count(*) FROM graph_stat) != 5
+           -- Bootstrap seeds exactly these five graph_stat keys; migrations
+           -- legitimately ADD rows (0011 seeds rel_obs_seq and relation_obs),
+           -- so check the seeds are present, not the total row count.
+           SELECT CASE WHEN (SELECT count(*) FROM graph_stat
+             WHERE key IN ('entities','relations','observations','entity_seq','obs_seq')) != 5
              THEN RAISE(ABORT, 'graph statistics must be seeded before migrations') END;
          END;",
     ).unwrap();
@@ -274,7 +278,8 @@ fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_t
             expected
         );
     }
-    assert_eq!(count(&conn, "graph_stat"), 5);
+    // Five bootstrap seeds plus rel_obs_seq and relation_obs seeded by migration 0011.
+    assert_eq!(count(&conn, "graph_stat"), 7);
 }
 
 #[cfg(feature = "indexer")]
@@ -300,7 +305,8 @@ fn indexer_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
     assert_eq!(worker.run_once(1).unwrap().claimed, 0);
     let conn = Connection::open(&path).unwrap();
     assert_eq!(count(&conn, "entity"), 0);
-    assert_eq!(count(&conn, "graph_stat"), 5);
+    // Five bootstrap seeds plus rel_obs_seq and relation_obs seeded by migration 0011.
+    assert_eq!(count(&conn, "graph_stat"), 7);
     let graph = graph(&path);
     graph.create_entities(&[entity("retained")]).unwrap();
     assert_eq!(worker.run_once(1).unwrap().claimed, 0);
