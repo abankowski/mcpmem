@@ -1027,6 +1027,7 @@ rather than an error, so one file can serve several deployments.
 | `-t`, `--transport` | `stdio` | `stdio` or `http` |
 | `-b`, `--bind` | `127.0.0.1:8080` | Listen address for the `http` transport |
 | `-l`, `--log-level` | `info` | Tracing filter |
+| `--log-file` | stderr | Append logs to this path instead of stderr; created when absent, never truncated |
 | `--role` | `mcp` | Roles to start in this process. See [Runtime roles](#runtime-roles) |
 | `--legacy-observations` | off | The deprecated string-observation adapter. Removed in 2.0.0 |
 | `--mmap-size` | `67108864` | SQLite mmap size in bytes |

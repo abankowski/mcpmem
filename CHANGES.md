@@ -150,6 +150,10 @@ This entry lists every change since that snapshot. The version line restarts at
   `MCP_MEMORY_DURABILITY`. The flag and the `[storage] durability` key reject a
   bad value; the environment variable keeps its older warn-and-continue
   behaviour, so a typo there cannot stop a restart.
+- **Logs can go to a file.** `[server] log-file = "/path"` (or `--log-file`)
+  appends every log line to that file instead of stderr. The file is created
+  when absent and never truncated; rotation and retention belong to the
+  operator. The same level filter and formatter apply as to stderr.
 - **`ProviderRegistry::from_settings` and `ProviderSettings`** in
   `mcpmem-indexer`. The embedding worker can now be built from settings the
   caller resolved, so a configuration file reaches the provider without writing
@@ -157,6 +161,12 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Fixed
 
+- **The candidate-snapshot refusal read like a failure.** While a rebuild
+  runs, the indexer poll retries the candidate publish every 250 ms, and the
+  full-scan gate refuses until the last chunk job commits. The line was
+  logged at `debug` with a message that named no cause. It now logs at
+  `warn` and says the publish is deferred, the rebuild is incomplete, and
+  the next poll retries — a self-healing state, not an error.
 - **The `indexer` role could never start with a provider configured.** Every
   provider holds a `reqwest::blocking::Client`, whose builder creates and
   drops a temporary Tokio runtime. Dropping a runtime inside an async context
