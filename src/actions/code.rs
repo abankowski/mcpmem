@@ -361,6 +361,7 @@ pub(crate) fn index_paths(
             .into_iter()
             .map(Into::into)
             .collect(),
+            attributes: None,
         });
         for (d, q) in &fw.named {
             let mut obs = vec![
@@ -380,6 +381,7 @@ pub(crate) fn index_paths(
                 name: q.clone(),
                 entity_type: format!("code:{}", d.kind),
                 observations: obs.into_iter().map(Into::into).collect(),
+                attributes: None,
             });
             symbols += 1;
         }
