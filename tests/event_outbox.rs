@@ -1337,3 +1337,66 @@ fn concurrent_process_writers_keep_all_events() {
     assert_eq!(count(&conn, "change_event"), 80);
     assert_eq!(count(&conn, "chunk_index_job"), 80);
 }
+
+/// External-content FTS5 delete must pass the original body: with '' the
+/// posting survives the row deletion, so a later MATCH can either return the
+/// ghost or raise "database disk image is malformed". Regression for the
+/// rel_obs_fts_bd trigger in migration 0011.
+#[test]
+fn deleted_relation_observation_does_not_match_fts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rel_obs_fts.db");
+    // Building the graph bootstraps the schema and applies every migration,
+    // which creates rel_obs_fts and its sync triggers.
+    let _graph = graph(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO relation_observation(relation_id, idx, body, created_us)
+         VALUES(1, 0, 'fleeting relation note', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM relation_observation WHERE idx = 0", [])
+        .unwrap();
+    let matches: Vec<String> = conn
+        .prepare("SELECT body FROM rel_obs_fts WHERE rel_obs_fts MATCH 'fleeting'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        matches.is_empty(),
+        "deleted relation observation still matches: {matches:?}"
+    );
+}
+
+/// Same invariant for the entity observation trigger (obs_fts_bd), originally
+/// created by the schema bootstrap and repaired for existing databases by
+/// migration 0012.
+#[test]
+fn deleted_entity_observation_does_not_match_fts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("obs_fts.db");
+    let _graph = graph(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "INSERT INTO observation(entity_id, idx, body, created_us)
+         VALUES(1, 0, 'fleeting entity note', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM observation WHERE idx = 0", [])
+        .unwrap();
+    let matches: Vec<String> = conn
+        .prepare("SELECT body FROM obs_fts WHERE obs_fts MATCH 'fleeting'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        matches.is_empty(),
+        "deleted entity observation still matches: {matches:?}"
+    );
+}
