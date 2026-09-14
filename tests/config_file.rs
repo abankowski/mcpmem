@@ -109,6 +109,18 @@ fn roles_from_the_file_reach_the_config() {
 }
 
 #[test]
+fn the_log_file_comes_from_the_file_and_a_flag_beats_it() {
+    let from_file = merge(&[], "[server]\nlog-file = \"/var/log/mcpmem.log\"\n");
+    assert_eq!(from_file.log_file, Some("/var/log/mcpmem.log".into()));
+
+    let from_cli = merge(
+        &["--log-file", "/tmp/run.log"],
+        "[server]\nlog-file = \"/var/log/mcpmem.log\"\n",
+    );
+    assert_eq!(from_cli.log_file, Some("/tmp/run.log".into()));
+}
+
+#[test]
 fn an_unknown_role_in_the_file_fails_with_the_same_error_as_the_flag() {
     let args = merge(&[], "[server]\nroles = [\"indexerr\"]\n");
     let error = Config::from_args(&args).expect_err("an unknown role must be rejected");

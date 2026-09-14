@@ -31,6 +31,11 @@
 
 # log-level = "info"
 
+# Append every log line to this file instead of stderr. The file is created
+# when absent and never truncated; rotation and retention belong to the
+# operator.
+# log-file = "/var/log/mcpmem.log"
+
 # Roles this process starts. "indexer" needs the `indexer` Cargo feature and
 # "webhooks" needs the `webhooks` feature; a role whose feature is absent is a
 # startup error.
