@@ -55,7 +55,8 @@ fn webhook_bootstraps_fresh_graph_and_reopens_without_resetting_it() {
     assert_eq!(worker.run_once(1).unwrap().claimed, 0);
     let conn = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(count(&conn, "entity"), 0);
-    assert_eq!(count(&conn, "graph_stat"), 5);
+    // Five bootstrap seeds plus rel_obs_seq and relation_obs seeded by migration 0011.
+    assert_eq!(count(&conn, "graph_stat"), 7);
     let graph = graph(&path);
     graph.create_entities(&[entity("retained")]).unwrap();
     assert_eq!(worker.run_once(1).unwrap().claimed, 0);
@@ -510,7 +511,8 @@ fn migration_from_a_real_0001_database_applies_remaining_migrations() {
     mcpmem_core::schema::initialize_database(&conn).unwrap();
     assert_eq!(count(&conn, "schema_migration"), migration_count());
     assert_eq!(count(&conn, "entity"), 0);
-    assert_eq!(count(&conn, "graph_stat"), 5);
+    // Five bootstrap seeds plus rel_obs_seq and relation_obs seeded by migration 0011.
+    assert_eq!(count(&conn, "graph_stat"), 7);
     let historical: (String, i64) = conn
         .query_row(
             "SELECT checksum,applied_at_us FROM schema_migration WHERE version=1",
