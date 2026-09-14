@@ -304,8 +304,7 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                             .map(|document| document.chunks())
                     }
                     OwnerKind::Relation => {
-                        relation_chunk_text(&conn, job.owner_id, job.owner_revision)?
-                            .map(|text| vec![(ChunkKind::Relation, text)])
+                        relation_chunks(&conn, job.owner_id, job.owner_revision)?
                     }
                 };
                 match chunks {
@@ -606,13 +605,14 @@ pub fn canonical_document_for_tests(
     canonical_document(conn, entity_id, expected_revision)
 }
 
-/// The text of one relation chunk: the formatted triple. Fenced on the
-/// taxonomy_relation mirror revision and the liveness of both endpoints.
-pub fn relation_chunk_text(
+/// The chunks of one relation: the triple, then one observation chunk per
+/// relation_observation row in idx order. Fenced on the taxonomy_relation
+/// mirror revision and the liveness of both endpoints.
+pub fn relation_chunks(
     conn: &Connection,
     mirror_id: i64,
     expected_revision: i64,
-) -> Result<Option<String>, rusqlite::Error> {
+) -> Result<Option<Vec<(ChunkKind, String)>>, rusqlite::Error> {
     let row: Option<(String, String, String, i64)> = conn
         .query_row(
             "SELECT f.name, d.name, t.name, m.revision FROM taxonomy_relation m
@@ -624,12 +624,29 @@ pub fn relation_chunk_text(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    Ok(match row {
-        Some((from_name, rtype, to_name, revision)) if revision == expected_revision => {
-            Some(format!("{from_name}\n{rtype}\n{to_name}"))
-        }
-        _ => None,
-    })
+    let Some((from_name, rtype, to_name, revision)) = row else {
+        return Ok(None);
+    };
+    if revision != expected_revision {
+        return Ok(None);
+    }
+    let bodies: Vec<String> = conn
+        .query_row(
+            "SELECT COALESCE(json_group_array(o.body ORDER BY o.idx), json('[]'))
+             FROM relation_observation o WHERE o.relation_id=?1",
+            [mirror_id],
+            |r| r.get::<_, String>(0),
+        )
+        .map(|json| serde_json::from_str(&json).unwrap_or_default())?;
+    let mut chunks = Vec::with_capacity(1 + bodies.len());
+    chunks.push((
+        ChunkKind::Relation,
+        format!("{from_name}\n{rtype}\n{to_name}"),
+    ));
+    for body in bodies {
+        chunks.push((ChunkKind::Observation, body));
+    }
+    Ok(Some(chunks))
 }
 
 /// Build the canonical document for a taxonomy subject, in the fencing style
