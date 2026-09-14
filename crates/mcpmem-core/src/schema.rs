@@ -80,7 +80,7 @@ pub fn initialize_database(conn: &Connection) -> Result<()> {
          END;
 
          CREATE TRIGGER IF NOT EXISTS obs_fts_bd BEFORE DELETE ON observation BEGIN
-           INSERT INTO obs_fts(obs_fts, rowid, body) VALUES ('delete', old.id, '');
+           INSERT INTO obs_fts(obs_fts, rowid, body) VALUES ('delete', old.id, old.body);
          END;
 
          CREATE TABLE IF NOT EXISTS type_dict (
