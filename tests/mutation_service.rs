@@ -83,7 +83,7 @@ fn committed_changes_keep_tombstones_and_only_effective_updates() {
     let related = service
         .apply(
             MutationRequest::CreateRelations {
-                relations: vec![relation.clone()],
+                relations: vec![relation_input("a", "b", "knows")],
             },
             MutationContext::local(),
         )
@@ -250,7 +250,7 @@ fn late_entity_delete_failure_rolls_back_observations_and_stats() {
 
 #[test]
 fn every_write_path_rolls_back_on_a_final_statement_failure() {
-    use mcpmem::types::Relation;
+    use mcpmem::types::{Relation, RelationInput};
     let relation = Relation {
         from: "a".into(),
         to: "b".into(),
@@ -272,10 +272,12 @@ fn every_write_path_rolls_back_on_a_final_statement_failure() {
             names: vec!["a".into()],
         },
         MutationRequest::CreateRelations {
-            relations: vec![Relation {
+            relations: vec![RelationInput {
                 from: "b".into(),
                 to: "a".into(),
                 relation_type: "reverse".into(),
+                observations: vec![],
+                attributes: None,
             }],
         },
         MutationRequest::DeleteRelations {
@@ -318,7 +320,7 @@ fn every_write_path_rolls_back_on_a_final_statement_failure() {
         .unwrap();
         graph.create_entities(&[entity("a"), entity("b")]).unwrap();
         graph
-            .create_relations(std::slice::from_ref(&relation))
+            .create_relations(&[relation_input("a", "b", "defines")])
             .unwrap();
         let before = graph.export("json", 100).unwrap();
         let probe = Connection::open(&path).unwrap();
@@ -384,7 +386,21 @@ fn duplicate_relation_deletion_and_merge_keep_effective_counters() {
         to: "c".into(),
         relation_type: "link".into(),
     };
-    graph.create_relations(&[ac.clone(), bc.clone()]).unwrap();
+    let ac_input = mcpmem::types::RelationInput {
+        from: ac.from.clone(),
+        to: ac.to.clone(),
+        relation_type: ac.relation_type.clone(),
+        observations: vec![],
+        attributes: None,
+    };
+    let bc_input = mcpmem::types::RelationInput {
+        from: bc.from.clone(),
+        to: bc.to.clone(),
+        relation_type: bc.relation_type.clone(),
+        observations: vec![],
+        attributes: None,
+    };
+    graph.create_relations(&[ac_input, bc_input]).unwrap();
     graph.merge_entities("a", "b").unwrap();
     assert!(graph.get_entity("a").unwrap().is_none());
     assert_eq!(graph.get_relation_count().unwrap(), 1);
@@ -482,7 +498,7 @@ fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
         relation_type: "link".into(),
     };
     graph
-        .create_relations(std::slice::from_ref(&relation))
+        .create_relations(&[relation_input("a", "b", "link")])
         .unwrap();
     let probe = Connection::open(&path).unwrap();
     // Legacy storage permits repeated physical rows and counts each one.
@@ -552,7 +568,7 @@ fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
 
 #[test]
 fn rename_preserves_the_stable_entity_and_its_incident_graph() {
-    use mcpmem::types::Relation;
+    use mcpmem::types::RelationInput;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
@@ -569,20 +585,26 @@ fn rename_preserves_the_stable_entity_and_its_incident_graph() {
         .unwrap();
     graph
         .create_relations(&[
-            Relation {
+            RelationInput {
                 from: "incoming".into(),
                 to: "old".into(),
                 relation_type: "in".into(),
+                observations: vec![],
+                attributes: None,
             },
-            Relation {
+            RelationInput {
                 from: "old".into(),
                 to: "outgoing".into(),
                 relation_type: "out".into(),
+                observations: vec![],
+                attributes: None,
             },
-            Relation {
+            RelationInput {
                 from: "old".into(),
                 to: "old".into(),
                 relation_type: "self".into(),
+                observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -745,4 +767,504 @@ fn rename_rejects_a_distinct_existing_target_and_same_name_is_eventless_noop() {
             .unwrap(),
         before_jobs
     );
+}
+
+// ── Relation observations and attributes (wave 1 core) ─────────────────
+
+fn relation_input(from: &str, to: &str, relation_type: &str) -> mcpmem::types::RelationInput {
+    mcpmem::types::RelationInput {
+        from: from.into(),
+        to: to.into(),
+        relation_type: relation_type.into(),
+        observations: vec![],
+        attributes: None,
+    }
+}
+
+#[test]
+fn relation_observations_lifecycle_and_revision_bump() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("a"), entity("b")]).unwrap();
+    graph
+        .create_relations(&[relation_input("a", "b", "uses")])
+        .unwrap();
+    let probe = Connection::open(&path).unwrap();
+    let mirror: (i64, i64) = probe
+        .query_row(
+            "SELECT m.id, m.revision FROM taxonomy_relation m
+             JOIN entity f ON f.id = m.from_id AND f.name = 'a'
+             JOIN entity t ON t.id = m.to_id AND t.name = 'b'
+             JOIN type_dict d ON d.id = m.type_id AND d.name = 'uses'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(mirror.1, 1, "fresh mirror revision");
+
+    let added = graph
+        .add_relation_observations("a", "b", "uses", &["contract #12".into()])
+        .unwrap();
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].body, "contract #12");
+    assert!(added[0].created_at_us.is_some());
+    assert_eq!(added[0].occurred_at_us, None);
+    assert_eq!(added[0].origin_entity_name, None);
+
+    let after_add: i64 = probe
+        .query_row(
+            "SELECT revision FROM taxonomy_relation WHERE id=?1",
+            [mirror.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after_add, mirror.1 + 1, "add bumps the mirror revision");
+    let job: (i64, String) = probe
+        .query_row(
+            "SELECT owner_revision, operation FROM chunk_index_job
+             WHERE owner_kind='relation' AND owner_id=?1
+             ORDER BY lease_epoch DESC LIMIT 1",
+            [mirror.0],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((job.0, job.1.as_str()), (after_add, "upsert"));
+
+    graph
+        .delete_relation_observations("a", "b", "uses", &["contract #12".into()])
+        .unwrap();
+    let remaining: i64 = probe
+        .query_row(
+            "SELECT COUNT(*) FROM relation_observation WHERE relation_id=?1",
+            [mirror.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0, "body-matched delete removes the row");
+    let after_delete: i64 = probe
+        .query_row(
+            "SELECT revision FROM taxonomy_relation WHERE id=?1",
+            [mirror.0],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after_delete,
+        after_add + 1,
+        "delete bumps the revision again"
+    );
+}
+
+#[test]
+fn tombstoned_relation_loses_observations_and_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("a"), entity("b")]).unwrap();
+    graph
+        .create_relations(&[mcpmem::types::RelationInput {
+            from: "a".into(),
+            to: "b".into(),
+            relation_type: "uses".into(),
+            observations: vec!["bond".into()],
+            attributes: Some(std::collections::BTreeMap::from([(
+                "weight".into(),
+                "heavy".into(),
+            )])),
+        }])
+        .unwrap();
+    let probe = Connection::open(&path).unwrap();
+    let mirror: i64 = probe
+        .query_row(
+            "SELECT m.id FROM taxonomy_relation m
+             JOIN entity f ON f.id = m.from_id AND f.name = 'a'
+             JOIN entity t ON t.id = m.to_id AND t.name = 'b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    graph
+        .delete_relations(&[mcpmem::types::Relation {
+            from: "a".into(),
+            to: "b".into(),
+            relation_type: "uses".into(),
+        }])
+        .unwrap();
+
+    let (revision, deleted): (i64, i64) = probe
+        .query_row(
+            "SELECT revision, deleted FROM taxonomy_relation WHERE id=?1",
+            [mirror],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((revision, deleted), (2, 1), "tombstone expected");
+    let obs_left: i64 = probe
+        .query_row(
+            "SELECT COUNT(*) FROM relation_observation WHERE relation_id=?1",
+            [mirror],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(obs_left, 0, "relation observations die with the relation");
+    let attrs_left: i64 = probe
+        .query_row(
+            "SELECT COUNT(*) FROM attribute WHERE owner_kind='relation' AND owner_id=?1",
+            [mirror],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(attrs_left, 0, "relation attributes die with the relation");
+    let job: (i64, String) = probe
+        .query_row(
+            "SELECT owner_revision, operation FROM chunk_index_job
+             WHERE owner_kind='relation' AND owner_id=?1
+             ORDER BY lease_epoch DESC LIMIT 1",
+            [mirror],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((job.0, job.1.as_str()), (2, "delete"));
+}
+
+#[test]
+fn entity_delete_cascades_relation_observations_and_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("a"), entity("b")]).unwrap();
+    graph
+        .create_relations(&[mcpmem::types::RelationInput {
+            from: "a".into(),
+            to: "b".into(),
+            relation_type: "uses".into(),
+            observations: vec!["bond".into()],
+            attributes: None,
+        }])
+        .unwrap();
+    graph
+        .set_attributes(&[mcpmem::types::AttributeSet {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            attributes: std::collections::BTreeMap::from([("color".into(), "red".into())]),
+        }])
+        .unwrap();
+    let probe = Connection::open(&path).unwrap();
+    let mirror: i64 = probe
+        .query_row(
+            "SELECT m.id FROM taxonomy_relation m
+             JOIN entity f ON f.id = m.from_id AND f.name = 'a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    graph.delete_entities(&["a".into()]).unwrap();
+
+    assert_eq!(
+        probe
+            .query_row(
+                "SELECT COUNT(*) FROM relation_observation WHERE relation_id=?1",
+                [mirror],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "incident relation observations cascade through the tombstone"
+    );
+    assert_eq!(
+        probe
+            .query_row(
+                "SELECT COUNT(*) FROM attribute WHERE owner_kind='relation' AND owner_id=?1",
+                [mirror],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "incident relation attributes cascade through the tombstone"
+    );
+    assert_eq!(
+        probe
+            .query_row(
+                "SELECT COUNT(*) FROM attribute
+                 WHERE owner_kind='entity' AND owner_id IN
+                     (SELECT id FROM entity WHERE name='a')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "entity attribute rows are deleted with the entity"
+    );
+}
+
+#[test]
+fn attribute_writes_never_touch_chunk_index_job_or_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("a"), entity("b")]).unwrap();
+    graph
+        .create_relations(&[relation_input("a", "b", "uses")])
+        .unwrap();
+    let probe = Connection::open(&path).unwrap();
+    let mirror: i64 = probe
+        .query_row(
+            "SELECT m.id FROM taxonomy_relation m
+             JOIN entity f ON f.id = m.from_id AND f.name = 'a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let jobs_before: i64 = probe
+        .query_row("SELECT COUNT(*) FROM chunk_index_job", [], |row| row.get(0))
+        .unwrap();
+    let revision_before: i64 = probe
+        .query_row(
+            "SELECT revision FROM taxonomy_relation WHERE id=?1",
+            [mirror],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    graph
+        .set_attributes(&[
+            mcpmem::types::AttributeSet {
+                owner_kind: "entity".into(),
+                entity_name: Some("a".into()),
+                from: None,
+                to: None,
+                relation_type: None,
+                attributes: std::collections::BTreeMap::from([("k".into(), "v".into())]),
+            },
+            mcpmem::types::AttributeSet {
+                owner_kind: "relation".into(),
+                entity_name: None,
+                from: Some("a".into()),
+                to: Some("b".into()),
+                relation_type: Some("uses".into()),
+                attributes: std::collections::BTreeMap::from([("r".into(), "s".into())]),
+            },
+        ])
+        .unwrap();
+
+    let jobs_after: i64 = probe
+        .query_row("SELECT COUNT(*) FROM chunk_index_job", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        jobs_after, jobs_before,
+        "no index job row for attribute writes"
+    );
+    let revision_after: i64 = probe
+        .query_row(
+            "SELECT revision FROM taxonomy_relation WHERE id=?1",
+            [mirror],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        revision_after, revision_before,
+        "no revision bump for attributes"
+    );
+    assert_eq!(
+        probe
+            .query_row(
+                "SELECT COUNT(*) FROM attribute WHERE owner_kind='entity' AND owner_id IN (SELECT id FROM entity WHERE name='a')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "entity attribute row upserted"
+    );
+    assert_eq!(
+        probe
+            .query_row(
+                "SELECT COUNT(*) FROM attribute WHERE owner_kind='relation' AND owner_id=?1",
+                [mirror],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "relation attribute row upserted"
+    );
+
+    // Re-set with a new value: upsert, not a second row.
+    graph
+        .set_attributes(&[mcpmem::types::AttributeSet {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            attributes: std::collections::BTreeMap::from([("k".into(), "v2".into())]),
+        }])
+        .unwrap();
+    let (rows, value): (i64, String) = probe
+        .query_row(
+            "SELECT COUNT(*), COALESCE(MAX(value),'') FROM attribute
+             WHERE owner_kind='entity' AND key='k' AND owner_id IN (SELECT id FROM entity WHERE name='a')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (rows, value.as_str()),
+        (1, "v2"),
+        "upsert replaces the value"
+    );
+
+    // delete_attributes removes keys without touching jobs or revisions.
+    graph
+        .delete_attributes(&[mcpmem::types::AttributeDelete {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            keys: vec!["k".into()],
+        }])
+        .unwrap();
+    assert_eq!(
+        probe
+            .query_row("SELECT COUNT(*) FROM chunk_index_job", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        jobs_before,
+        "attribute delete enqueues nothing"
+    );
+    assert_eq!(
+        probe
+            .query_row(
+                "SELECT revision FROM taxonomy_relation WHERE id=?1",
+                [mirror],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        revision_after,
+        "attribute delete leaves the mirror revision untouched"
+    );
+    assert_eq!(
+        probe
+            .query_row(
+                "SELECT COUNT(*) FROM attribute WHERE owner_kind='entity' AND key='k'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "deleted key is gone"
+    );
+
+    // Mixed owner shapes are rejected in the service layer ("exactly one of
+    // entity_name vs the full triple, matching owner_kind"); nothing lands.
+    let mixed = mcpmem::types::AttributeSet {
+        owner_kind: "entity".into(),
+        entity_name: Some("a".into()),
+        from: Some("a".into()),
+        to: None,
+        relation_type: None,
+        attributes: std::collections::BTreeMap::from([("z".into(), "1".into())]),
+    };
+    assert!(graph.set_attributes(&[mixed]).is_err());
+    assert_eq!(
+        probe
+            .query_row("SELECT COUNT(*) FROM attribute", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "the rejected target writes nothing"
+    );
+}
+
+#[test]
+fn merge_moves_source_attributes_and_source_wins_on_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph
+        .create_entities(&[entity("source"), entity("target")])
+        .unwrap();
+    let target_attrs = mcpmem::types::AttributeSet {
+        owner_kind: "entity".into(),
+        entity_name: Some("target".into()),
+        from: None,
+        to: None,
+        relation_type: None,
+        attributes: std::collections::BTreeMap::from([("k".into(), "t".into())]),
+    };
+    let source_attrs = mcpmem::types::AttributeSet {
+        owner_kind: "entity".into(),
+        entity_name: Some("source".into()),
+        from: None,
+        to: None,
+        relation_type: None,
+        attributes: std::collections::BTreeMap::from([
+            ("k".into(), "s".into()),
+            ("j".into(), "x".into()),
+        ]),
+    };
+    graph.set_attributes(&[target_attrs, source_attrs]).unwrap();
+
+    graph.merge_entities("source", "target").unwrap();
+
+    let merged = graph.get_entity("target").unwrap().unwrap();
+    assert_eq!(
+        merged.attributes,
+        Some(std::collections::BTreeMap::from([
+            ("j".into(), "x".into()),
+            ("k".into(), "s".into()),
+        ])),
+        "source attributes move to the target and win on collision"
+    );
+    let probe = Connection::open(&path).unwrap();
+    let source_left: i64 = probe
+        .query_row(
+            "SELECT COUNT(*) FROM attribute
+             WHERE owner_kind='entity' AND owner_id IN (SELECT id FROM entity WHERE name='source')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(source_left, 0, "source attribute rows die with the source");
 }

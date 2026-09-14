@@ -8,7 +8,10 @@ use uuid::Uuid;
 
 use crate::errors::{MCSError, Result};
 use crate::graph::{GraphHandle, TxGuard, name_hash};
-use crate::types::{Entity, EntityInput, Observation, ObservationInput, Relation};
+use crate::types::{
+    AttributeDelete, AttributeSet, Entity, EntityInput, Observation, ObservationInput, Relation,
+    RelationInput, RelationObservationUpdate,
+};
 
 pub type MutationError = MCSError;
 
@@ -80,10 +83,22 @@ pub enum MutationRequest {
         names: Vec<String>,
     },
     CreateRelations {
-        relations: Vec<Relation>,
+        relations: Vec<RelationInput>,
     },
     DeleteRelations {
         relations: Vec<Relation>,
+    },
+    AddRelationObservations {
+        relations: Vec<RelationObservationUpdate>,
+    },
+    DeleteRelationObservations {
+        relations: Vec<RelationObservationUpdate>,
+    },
+    SetAttributes {
+        targets: Vec<AttributeSet>,
+    },
+    DeleteAttributes {
+        targets: Vec<AttributeDelete>,
     },
     AddObservations {
         observations: Vec<ObservationUpdate>,
@@ -168,6 +183,18 @@ pub struct ObservationResult {
     pub added_observations: Vec<Observation>,
 }
 
+/// Per-target result of an `AddRelationObservations` write. The triple strings
+/// name the mirrored relation the observations were appended to; the handler
+/// layer serializes this shape directly on the MCP wire.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationObservationResult {
+    pub from: String,
+    pub to: String,
+    pub relation_type: String,
+    pub added_observations: Vec<Observation>,
+}
+
 /// Legacy response data is captured inside the same transaction, preventing
 /// an adapter from returning a concurrent writer's later state.
 #[derive(Debug, Serialize, Deserialize)]
@@ -175,6 +202,7 @@ pub enum MutationResult {
     Entities(Vec<Entity>),
     Relations(Vec<Relation>),
     Observations(Vec<ObservationResult>),
+    RelationObservations(Vec<RelationObservationResult>),
     Entity(Entity),
     Count(usize),
     Unit,
@@ -392,8 +420,11 @@ fn affected_names(conn: &Connection, request: &MutationRequest) -> Result<BTreeS
             entities.iter().map(|e| e.name.clone()).collect()
         }
         MutationRequest::DeleteEntities { names } => names.iter().cloned().collect(),
-        MutationRequest::CreateRelations { relations }
-        | MutationRequest::DeleteRelations { relations } => relations
+        MutationRequest::CreateRelations { relations } => relations
+            .iter()
+            .flat_map(|r| [r.from.clone(), r.to.clone()])
+            .collect(),
+        MutationRequest::DeleteRelations { relations } => relations
             .iter()
             .flat_map(|r| [r.from.clone(), r.to.clone()])
             .collect(),
@@ -401,6 +432,14 @@ fn affected_names(conn: &Connection, request: &MutationRequest) -> Result<BTreeS
         | MutationRequest::DeleteObservations { observations } => {
             observations.iter().map(|o| o.entity_name.clone()).collect()
         }
+        // REQ-ATTR-OFFLINE: relation observation and attribute writes are
+        // structurally excluded from the entity event stream. An endpoint
+        // entity here would bump entity_revision, emit a change event, and
+        // re-enqueue its index job on every attribute write.
+        MutationRequest::AddRelationObservations { .. }
+        | MutationRequest::DeleteRelationObservations { .. }
+        | MutationRequest::SetAttributes { .. }
+        | MutationRequest::DeleteAttributes { .. } => BTreeSet::new(),
         MutationRequest::MergeEntities { source, target } => {
             [source.clone(), target.clone()].into()
         }
@@ -578,6 +617,9 @@ fn enqueue_taxonomy_jobs(
 
 /// Tombstone the taxonomy mirror of one deleted relation triple and enqueue
 /// the delete. A missing mirror is a legacy row: insert it tombstoned.
+/// REQ-LIFECYCLE: the mirror's observations and attributes die with the
+/// relation in the same transaction, via the same funnel the entity-delete
+/// cascade uses.
 fn tombstone_relation_mirror(
     conn: &Connection,
     from_id: i64,
@@ -593,6 +635,16 @@ fn tombstone_relation_mirror(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(sql_error)?;
+    conn.execute(
+        "DELETE FROM relation_observation WHERE relation_id=?1",
+        [id],
+    )
+    .map_err(sql_error)?;
+    conn.execute(
+        "DELETE FROM attribute WHERE owner_kind='relation' AND owner_id=?1",
+        [id],
+    )
+    .map_err(sql_error)?;
     crate::jobs::enqueue_chunk_change(conn, crate::jobs::OwnerKind::Relation, id, revision, true)
 }
 
@@ -641,6 +693,178 @@ fn insert_observations(
     Ok(inserted)
 }
 
+/// Resolve the live taxonomy mirror id of one relation triple. A triple that
+/// does not exist as a live mirror is an `InvalidParams` error, mirroring the
+/// entity observation path: there is nothing to append to.
+fn resolve_relation_mirror(conn: &Connection, relation: &Relation) -> Result<i64> {
+    conn.query_row(
+        "SELECT m.id FROM taxonomy_relation m
+         JOIN entity f ON f.id = m.from_id AND f.name = ?1 AND f.flags = 0
+         JOIN entity t ON t.id = m.to_id AND t.name = ?2 AND t.flags = 0
+         JOIN type_dict d ON d.id = m.type_id AND d.kind = 1 AND d.name = ?3
+         WHERE m.deleted = 0",
+        params![relation.from, relation.to, relation.relation_type],
+        |row| row.get(0),
+    )
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => MCSError::InvalidParams(format!(
+            "{} -> {} -> {} not found",
+            relation.from, relation.relation_type, relation.to
+        )),
+        _ => sql_error(error),
+    })
+}
+
+/// Insert relation observation rows, keyed on the mirror id, id from the
+/// `rel_obs_seq` cell. The relational counter is maintained here — the change
+/// snapshot carries no relation observations, so `update_counters` cannot
+/// derive the delta. The FTS projection updates through its insert trigger.
+fn insert_relation_observations(
+    graph: &GraphHandle,
+    conn: &Connection,
+    relation_id: i64,
+    contents: &[ObservationInput],
+) -> Result<Vec<Observation>> {
+    let idx: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(idx),-1) FROM relation_observation WHERE relation_id=?1",
+            [relation_id],
+            |r| r.get(0),
+        )
+        .map_err(sql_error)?;
+    let mut stmt = conn
+        .prepare_cached(
+            "INSERT INTO relation_observation(id,relation_id,idx,body,created_us,occurred_us) VALUES(?1,?2,?3,?4,?5,?6)",
+        )
+        .map_err(sql_error)?;
+    let mut inserted = Vec::with_capacity(contents.len());
+    for (offset, observation) in contents.iter().enumerate() {
+        if observation.occurred_at_us.is_some_and(|time| time < 0) {
+            return Err(MCSError::InvalidParams(
+                "occurredAtUs must be non-negative".into(),
+            ));
+        }
+        let created_at_us = now_us();
+        stmt.execute(params![
+            graph.next_rel_obs_id(),
+            relation_id,
+            idx + offset as i64 + 1,
+            observation.body,
+            created_at_us,
+            observation.occurred_at_us
+        ])
+        .map_err(sql_error)?;
+        inserted.push(Observation {
+            body: observation.body.clone(),
+            created_at_us: Some(created_at_us),
+            occurred_at_us: observation.occurred_at_us,
+            origin_entity_name: None,
+        });
+    }
+    if !inserted.is_empty() {
+        conn.execute(
+            "UPDATE graph_stat SET value=value+?1 WHERE key='relation_obs'",
+            [inserted.len() as i64],
+        )
+        .map_err(sql_error)?;
+    }
+    Ok(inserted)
+}
+
+/// Upsert one k:v write set for an owner. `ON CONFLICT ... DO UPDATE` makes
+/// the provided value win over an existing row; keys not in the set stay.
+/// REQ-ATTR-OFFLINE: no revision bump, no queue row, no event — enforced by
+/// the empty `affected_names` arms, asserted in the integration suite.
+fn upsert_attributes(
+    conn: &Connection,
+    owner_kind: &str,
+    owner_id: i64,
+    attributes: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare_cached(
+            "INSERT INTO attribute(owner_kind,owner_id,key,value,created_us,updated_us)
+             VALUES(?1,?2,?3,?4,?5,?5)
+             ON CONFLICT(owner_kind,owner_id,key) DO UPDATE
+             SET value=excluded.value, updated_us=excluded.updated_us",
+        )
+        .map_err(sql_error)?;
+    for (key, value) in attributes {
+        stmt.execute(params![owner_kind, owner_id, key, value, now_us()])
+            .map_err(sql_error)?;
+    }
+    Ok(())
+}
+
+fn delete_attribute_keys(
+    conn: &Connection,
+    owner_kind: &str,
+    owner_id: i64,
+    keys: &[String],
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare_cached("DELETE FROM attribute WHERE owner_kind=?1 AND owner_id=?2 AND key=?3")
+        .map_err(sql_error)?;
+    for key in keys {
+        stmt.execute(params![owner_kind, owner_id, key])
+            .map_err(sql_error)?;
+    }
+    Ok(())
+}
+
+/// Bump the mirror revision and enqueue the relation owner for re-embedding.
+/// The worker reads `relation_observation` at claim time, so the single
+/// enqueue covers rows already present in this transaction.
+fn bump_relation_revision_enqueue(conn: &Connection, relation_id: i64) -> Result<()> {
+    let revision: i64 = conn
+        .query_row(
+            "UPDATE taxonomy_relation SET revision=revision+1 WHERE id=?1 RETURNING revision",
+            [relation_id],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    crate::jobs::enqueue_chunk_change(
+        conn,
+        crate::jobs::OwnerKind::Relation,
+        relation_id,
+        revision,
+        false,
+    )
+}
+
+/// Validate one attribute target's owner shape and resolve its owner id.
+/// Exactly one owner shape is legal per `owner_kind`; the wire DTO parses
+/// either shape alone (absent fields default to `None`), so a mixed shape is
+/// rejected here, in the service layer.
+fn resolve_attribute_owner(
+    conn: &Connection,
+    owner_kind: &str,
+    entity_name: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+    relation_type: Option<&str>,
+) -> Result<(String, i64)> {
+    match (owner_kind, entity_name, from, to, relation_type) {
+        ("entity", Some(name), None, None, None) => {
+            Ok(("entity".into(), require_entity(conn, name)?.entity_id))
+        }
+        ("relation", None, Some(from), Some(to), Some(relation_type)) => Ok((
+            "relation".into(),
+            resolve_relation_mirror(
+                conn,
+                &Relation {
+                    from: from.into(),
+                    to: to.into(),
+                    relation_type: relation_type.into(),
+                },
+            )?,
+        )),
+        _ => Err(MCSError::InvalidParams(format!(
+            "Invalid attribute target for owner_kind '{owner_kind}'"
+        ))),
+    }
+}
+
 fn create_entity(graph: &GraphHandle, conn: &Connection, entity: &EntityInput) -> Result<bool> {
     if entity.name.is_empty() || read_entity(conn, &entity.name)?.is_some() {
         return Ok(false);
@@ -649,6 +873,9 @@ fn create_entity(graph: &GraphHandle, conn: &Connection, entity: &EntityInput) -
     let kind = type_id(conn, &entity.entity_type, 0)?;
     conn.execute("INSERT INTO entity(id,name_hash,name,type_id,obs_count,out_deg,in_deg,created_us,updated_us,flags) VALUES(?1,?2,?3,?4,0,0,0,?5,?5,0)", params![id,name_hash(&entity.name),entity.name,kind,now_us()]).map_err(sql_error)?;
     insert_observations(graph, conn, id, &entity.observations)?;
+    if let Some(attributes) = &entity.attributes {
+        upsert_attributes(conn, "entity", id, attributes)?;
+    }
     conn.execute(
         "INSERT INTO name_fts(rowid,name) VALUES(?1,?2)",
         params![id, entity.name],
@@ -692,6 +919,35 @@ fn create_relation(conn: &Connection, relation: &Relation) -> Result<bool> {
     Ok(changed > 0)
 }
 
+/// The create-with-detail path behind `CreateRelations`. The bare-triple
+/// insert and its single revision-1 enqueue run first; the observation rows
+/// land in the same transaction, so the enqueued worker reads them at claim
+/// time and the existing single enqueue covers them. Attributes are upserted
+/// with no revision bump (REQ-ATTR-OFFLINE).
+fn create_relation_with(
+    graph: &GraphHandle,
+    conn: &Connection,
+    input: &RelationInput,
+) -> Result<bool> {
+    let triple = Relation {
+        from: input.from.clone(),
+        to: input.to.clone(),
+        relation_type: input.relation_type.clone(),
+    };
+    if !create_relation(conn, &triple)? {
+        return Ok(false);
+    }
+    if !input.observations.is_empty() {
+        let mirror_id = resolve_relation_mirror(conn, &triple)?;
+        insert_relation_observations(graph, conn, mirror_id, &input.observations)?;
+    }
+    if let Some(attributes) = &input.attributes {
+        let mirror_id = resolve_relation_mirror(conn, &triple)?;
+        upsert_attributes(conn, "relation", mirror_id, attributes)?;
+    }
+    Ok(true)
+}
+
 fn delete_entities(conn: &Connection, names: &[String]) -> Result<()> {
     for name in names.iter().collect::<BTreeSet<_>>() {
         if let Some(entity) = read_entity(conn, name)? {
@@ -723,6 +979,11 @@ fn delete_entities(conn: &Connection, names: &[String]) -> Result<()> {
             conn.execute(
                 "INSERT INTO name_fts(name_fts,rowid,name) VALUES('delete',?1,?2)",
                 params![entity.entity_id, entity.name],
+            )
+            .map_err(sql_error)?;
+            conn.execute(
+                "DELETE FROM attribute WHERE owner_kind='entity' AND owner_id=?1",
+                [entity.entity_id],
             )
             .map_err(sql_error)?;
             conn.execute("DELETE FROM entity WHERE id=?1", [entity.entity_id])
@@ -773,6 +1034,9 @@ fn execute(
                         .cloned()
                         .collect();
                     insert_observations(graph, conn, existing.entity_id, &added)?;
+                    if let Some(attributes) = &entity.attributes {
+                        upsert_attributes(conn, "entity", existing.entity_id, attributes)?;
+                    }
                     result.push(require_entity(conn, &entity.name)?.entity());
                 } else if create_entity(graph, conn, &entity)? {
                     result.push(require_entity(conn, &entity.name)?.entity());
@@ -787,8 +1051,12 @@ fn execute(
         MutationRequest::CreateRelations { relations } => {
             let mut created = Vec::new();
             for relation in relations {
-                if create_relation(conn, &relation)? {
-                    created.push(relation);
+                if create_relation_with(graph, conn, &relation)? {
+                    created.push(Relation {
+                        from: relation.from,
+                        to: relation.to,
+                        relation_type: relation.relation_type,
+                    });
                 }
             }
             Ok(MutationResult::Relations(created))
@@ -819,6 +1087,78 @@ fn execute(
                 for (from_id, to_id, type_id) in triples {
                     tombstone_relation_mirror(conn, from_id, to_id, type_id)?;
                 }
+            }
+            Ok(MutationResult::Unit)
+        }
+        MutationRequest::AddRelationObservations { relations } => {
+            let mut result = Vec::new();
+            for update in relations {
+                let mirror_id = resolve_relation_mirror(conn, &update.relation)?;
+                let inserted =
+                    insert_relation_observations(graph, conn, mirror_id, &update.contents)?;
+                if !inserted.is_empty() {
+                    bump_relation_revision_enqueue(conn, mirror_id)?;
+                }
+                result.push(RelationObservationResult {
+                    from: update.relation.from,
+                    to: update.relation.to,
+                    relation_type: update.relation.relation_type,
+                    added_observations: inserted,
+                });
+            }
+            Ok(MutationResult::RelationObservations(result))
+        }
+        MutationRequest::DeleteRelationObservations { relations } => {
+            for update in relations {
+                if update.contents.is_empty() {
+                    continue;
+                }
+                let mirror_id = resolve_relation_mirror(conn, &update.relation)?;
+                let mut deleted: i64 = 0;
+                for body in &update.contents {
+                    deleted += conn
+                        .execute(
+                            "DELETE FROM relation_observation WHERE relation_id=?1 AND body=?2",
+                            params![mirror_id, body.body],
+                        )
+                        .map_err(sql_error)? as i64;
+                }
+                if deleted > 0 {
+                    conn.execute(
+                        "UPDATE graph_stat SET value=value-?1 WHERE key='relation_obs'",
+                        [deleted],
+                    )
+                    .map_err(sql_error)?;
+                    bump_relation_revision_enqueue(conn, mirror_id)?;
+                }
+            }
+            Ok(MutationResult::Unit)
+        }
+        MutationRequest::SetAttributes { targets } => {
+            for target in targets {
+                let (owner_kind, owner_id) = resolve_attribute_owner(
+                    conn,
+                    &target.owner_kind,
+                    target.entity_name.as_deref(),
+                    target.from.as_deref(),
+                    target.to.as_deref(),
+                    target.relation_type.as_deref(),
+                )?;
+                upsert_attributes(conn, &owner_kind, owner_id, &target.attributes)?;
+            }
+            Ok(MutationResult::Unit)
+        }
+        MutationRequest::DeleteAttributes { targets } => {
+            for target in targets {
+                let (owner_kind, owner_id) = resolve_attribute_owner(
+                    conn,
+                    &target.owner_kind,
+                    target.entity_name.as_deref(),
+                    target.from.as_deref(),
+                    target.to.as_deref(),
+                    target.relation_type.as_deref(),
+                )?;
+                delete_attribute_keys(conn, &owner_kind, owner_id, &target.keys)?;
             }
             Ok(MutationResult::Unit)
         }
@@ -872,6 +1212,22 @@ fn execute(
                         idx += 1;
                         conn.execute("INSERT INTO observation(id,entity_id,idx,body,created_us,occurred_us,origin_entity_id,origin_entity_name) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![graph.next_obs_id(),into.entity_id,idx,observation.body,observation.created_at_us,observation.occurred_at_us,old.entity_id,old.name]).map_err(sql_error)?;
                     }
+                }
+                // Source k:v attributes move to the target; the collision rule
+                // is source-wins (`ON CONFLICT ... DO UPDATE`). The source's
+                // own rows are deleted by the delete_entities below.
+                let source_attributes: BTreeMap<String, String> = conn
+                    .prepare_cached(
+                        "SELECT key, value FROM attribute
+                         WHERE owner_kind='entity' AND owner_id=?1",
+                    )
+                    .map_err(sql_error)?
+                    .query_map([old.entity_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(sql_error)?
+                    .collect::<rusqlite::Result<_>>()
+                    .map_err(sql_error)?;
+                if !source_attributes.is_empty() {
+                    upsert_attributes(conn, "entity", into.entity_id, &source_attributes)?;
                 }
                 let relations = relations_for(conn, &source)?;
                 for mut relation in relations {
@@ -942,7 +1298,9 @@ fn execute(
             // legacy deletions. Reset the indexes inside this transaction too.
             conn.execute_batch(
                 "INSERT INTO name_fts(name_fts) VALUES('delete-all');
-                 INSERT INTO obs_fts(obs_fts) VALUES('delete-all');",
+                 INSERT INTO obs_fts(obs_fts) VALUES('delete-all');
+                 INSERT INTO rel_obs_fts(rel_obs_fts) VALUES('delete-all');
+                 UPDATE graph_stat SET value=0 WHERE key='relation_obs';",
             )
             .map_err(sql_error)?;
             Ok(MutationResult::Unit)
@@ -1136,6 +1494,16 @@ mod tests {
         }
     }
 
+    fn relation_input(from: &str, to: &str, relation_type: &str) -> RelationInput {
+        RelationInput {
+            from: from.into(),
+            to: to.into(),
+            relation_type: relation_type.into(),
+            observations: vec![],
+            attributes: None,
+        }
+    }
+
     /// (owner_id, owner_revision, operation, state) of the chunk jobs for
     /// relation owners. The relation funnels enqueue these instead of the
     /// retired taxonomy kind-2 rows.
@@ -1252,7 +1620,7 @@ mod tests {
         serving_profile(&kg);
         kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
             .unwrap();
-        kg.create_relations(&[relation("ada", "bob", "knows")])
+        kg.create_relations(&[relation_input("ada", "bob", "knows")])
             .unwrap();
 
         let (mirror_id, mirror_revision, deleted) = mirror_row(&kg, "ada", "bob", "knows");
@@ -1274,7 +1642,7 @@ mod tests {
         serving_profile(&kg);
         kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
             .unwrap();
-        kg.create_relations(&[relation("ada", "bob", "knows")])
+        kg.create_relations(&[relation_input("ada", "bob", "knows")])
             .unwrap();
         let (mirror_id, _, _) = mirror_row(&kg, "ada", "bob", "knows");
 
@@ -1314,14 +1682,14 @@ mod tests {
             entity("carol", "person"),
         ])
         .unwrap();
-        kg.create_relations(&[relation("ada", "bob", "knows")])
+        kg.create_relations(&[relation_input("ada", "bob", "knows")])
             .unwrap();
         let (first_id, _, _) = mirror_row(&kg, "ada", "bob", "knows");
         kg.delete_relations(&[relation("ada", "bob", "knows")])
             .unwrap();
         // The new triple reuses the freed relation rowid; its mirror must get
         // a fresh id instead of colliding with the tombstoned mirror above.
-        kg.create_relations(&[relation("ada", "carol", "knows")])
+        kg.create_relations(&[relation_input("ada", "carol", "knows")])
             .unwrap();
         let (second_id, revision, deleted) = mirror_row(&kg, "ada", "carol", "knows");
         assert_ne!(first_id, second_id);
@@ -1356,7 +1724,7 @@ mod tests {
         serving_profile(&kg);
         kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
             .unwrap();
-        kg.create_relations(&[relation("ada", "bob", "knows")])
+        kg.create_relations(&[relation_input("ada", "bob", "knows")])
             .unwrap();
         let (mirror_id, _, _) = mirror_row(&kg, "ada", "bob", "knows");
 

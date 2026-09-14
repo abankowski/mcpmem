@@ -304,12 +304,18 @@ fn example_relations(kg: &GraphHandle, similar: &[Suggestion]) -> Vec<ExampleRel
         if out.len() >= MAX_TAXONOMY_EXAMPLES {
             break;
         }
-        for relation in kg.search_relations(
-            None,
-            None,
-            Some(&suggestion.name),
-            Some(MAX_TAXONOMY_EXAMPLES),
-        ) {
+        for relation in kg
+            .search_relations(
+                None,
+                None,
+                Some(&suggestion.name),
+                None,
+                Some(MAX_TAXONOMY_EXAMPLES),
+            )
+            .unwrap_or_default()
+        {
+            // `search_relations` now returns detail rows; suggestions only
+            // consume the triple fields.
             out.push(ExampleRelation {
                 from: relation.from,
                 relation_type: relation.relation_type,
@@ -444,7 +450,7 @@ pub fn handle_create_relations(
         .get("relations")
         .ok_or_else(|| MCSError::InvalidParams("Missing 'relations' parameter".into()))?;
 
-    let input_relations: Vec<crate::types::Relation> =
+    let input_relations: Vec<crate::types::RelationInput> =
         serde_json::from_value(relations_val.clone())
             .map_err(|e| MCSError::InvalidParams(format!("Invalid relation: {e}")))?;
 
@@ -765,7 +771,17 @@ pub fn handle_search_relations(kg: &GraphHandle, args: Option<&Value>) -> Result
     let to = params.get("to").and_then(|v| v.as_str());
     let rtype = params.get("relationType").and_then(|v| v.as_str());
 
-    let mut results = kg.search_relations(from, to, rtype, Some(MAX_RELATION_SEARCH_RESULTS));
+    let mut results: Vec<crate::types::Relation> = kg
+        .search_relations(from, to, rtype, None, Some(MAX_RELATION_SEARCH_RESULTS))?
+        .into_iter()
+        // Superseded by T7b: the response keeps today's triple shape until the
+        // query-mode handlers land; RelationDetail carries the same fields.
+        .map(|detail| crate::types::Relation {
+            from: detail.from,
+            to: detail.to,
+            relation_type: detail.relation_type,
+        })
+        .collect();
     results.truncate(MAX_RELATION_SEARCH_RESULTS);
     let text = serde_json::to_string(&results).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))

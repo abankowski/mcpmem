@@ -225,6 +225,8 @@ pub struct EntityDescription {
     pub relations: Vec<Relation>,
     pub neighbors: Vec<String>,
     pub degree: Degree,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
