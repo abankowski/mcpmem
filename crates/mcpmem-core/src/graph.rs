@@ -1887,7 +1887,7 @@ impl GraphHandle {
             Ok(tx) => tx,
             Err(_) => return names.iter().map(|_| None).collect(),
         };
-        let (ids, by_name): (Vec<Option<i64>>, FxHashMap<String, Entity>) = {
+        let (_, by_name): (Vec<Option<i64>>, FxHashMap<String, Entity>) = {
             let ids: Vec<Option<i64>> = names
                 .iter()
                 .map(|n| entity_name_lookup(&tx, n).ok().flatten())
