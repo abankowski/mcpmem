@@ -185,7 +185,7 @@ fn test_graph(dir: &tempfile::TempDir) -> Arc<GraphHandle> {
 
 /// A graph over an explicitly named database, for tests that must open the
 /// database directly (the chunk-index-job counting test).
-fn test_graph_at(database: &std::path::PathBuf) -> Arc<GraphHandle> {
+fn test_graph_at(database: &std::path::Path) -> Arc<GraphHandle> {
     let config = Config {
         memory_file_path: database.to_string_lossy().into_owned(),
         enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
@@ -235,9 +235,8 @@ fn call_text(kg: &GraphHandle, name: &str, arguments: &Value) -> String {
     let raw = call_raw(kg, name, arguments);
     // A successful tool result carries no `isError` key at all; an error
     // result carries `true`.
-    assert_eq!(
-        raw["result"]["isError"].as_bool().unwrap_or(false),
-        false,
+    assert!(
+        !raw["result"]["isError"].as_bool().unwrap_or(false),
         "{name} must succeed: {raw}"
     );
     raw["result"]["content"][0]["text"]
