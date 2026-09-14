@@ -206,11 +206,7 @@ fn relation_without_observations_embeds_only_the_triple() {
         ])
         .unwrap();
     graph
-        .create_relations(&[mcpmem::types::Relation {
-            from: "ada".into(),
-            to: "bob".into(),
-            relation_type: "knows".into(),
-        }])
+        .create_relations(&[relation("ada", "bob", "knows")])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
     let (mirror_id, revision): (i64, i64) = conn
@@ -421,11 +417,7 @@ fn commit_chunks_commits_a_relation_owner_and_bumps_the_kind_generation() {
         ])
         .unwrap();
     graph
-        .create_relations(&[mcpmem::types::Relation {
-            from: "ada".into(),
-            to: "bob".into(),
-            relation_type: "knows".into(),
-        }])
+        .create_relations(&[relation("ada", "bob", "knows")])
         .unwrap();
     let repo = mcpmem_core::jobs::IndexJobRepository::new(&conn);
     let mut relation_job = None;
@@ -1202,11 +1194,13 @@ fn entity(name: &str, entity_type: &str) -> Entity {
     }
 }
 
-fn relation(from: &str, to: &str, relation_type: &str) -> mcpmem::types::Relation {
-    mcpmem::types::Relation {
+fn relation(from: &str, to: &str, relation_type: &str) -> mcpmem::types::RelationInput {
+    mcpmem::types::RelationInput {
         from: from.into(),
         to: to.into(),
         relation_type: relation_type.into(),
+        observations: vec![],
+        attributes: None,
     }
 }
 
