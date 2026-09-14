@@ -271,9 +271,10 @@ fn e2e_legacy_relation_observation_arms() {
         "{added}"
     );
 
-    let found: serde_json::Value = serde_json::from_str(
-        &c.tool_text("search_relations", &serde_json::json!({"query": "contract"})),
-    )
+    let found: serde_json::Value = serde_json::from_str(&c.tool_text(
+        "search_relations",
+        &serde_json::json!({"query": "contract"}),
+    ))
     .unwrap();
     let row = found
         .as_array()
@@ -298,9 +299,10 @@ fn e2e_legacy_relation_observation_arms() {
         !deleted.contains("error"),
         "delete_relation_observations failed: {deleted}"
     );
-    let found: serde_json::Value = serde_json::from_str(
-        &c.tool_text("search_relations", &serde_json::json!({"query": "contract"})),
-    )
+    let found: serde_json::Value = serde_json::from_str(&c.tool_text(
+        "search_relations",
+        &serde_json::json!({"query": "contract"}),
+    ))
     .unwrap();
     let row = &found
         .as_array()
