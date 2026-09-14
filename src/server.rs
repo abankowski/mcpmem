@@ -50,6 +50,11 @@ fn legacy_observation_input(tool: &str, args: Option<&Value>) -> Result<Option<V
         "create_entities" | "upsert_entities" => ("entities", "observations"),
         "add_observations" => ("observations", "contents"),
         "delete_observations" => ("deletions", "observations"),
+        // Relation observation arrays land inside the `relations` envelope:
+        // appends arrive in `contents`, deletes and create-time observations
+        // in `observations`.
+        "add_relation_observations" => ("relations", "contents"),
+        "delete_relation_observations" | "create_relations" => ("relations", "observations"),
         _ => return Ok(Some(args)),
     };
     let entries = args
@@ -854,6 +859,12 @@ fn handle_tools_list(vs: Option<&VectorStore>, principal: &Principal) -> Value {
                 Some("delete_observations") => {
                     "/inputSchema/properties/deletions/items/properties/observations/items"
                 }
+                Some("add_relation_observations") => {
+                    "/inputSchema/properties/relations/items/properties/contents/items"
+                }
+                Some("delete_relation_observations" | "create_relations") => {
+                    "/inputSchema/properties/relations/items/properties/observations/items"
+                }
                 _ => continue,
             };
             *tool
@@ -1134,6 +1145,18 @@ fn handle_tools_call(
         }
         "add_observations" => {
             memory::handle_add_observations(kg, tool_args).map(HandlerResult::Value)
+        }
+        "add_relation_observations" => {
+            memory::handle_add_relation_observations(kg, tool_args).map(HandlerResult::Value)
+        }
+        "delete_relation_observations" => {
+            memory::handle_delete_relation_observations(kg, tool_args).map(HandlerResult::Value)
+        }
+        "set_attributes" => {
+            memory::handle_set_attributes(kg, tool_args).map(HandlerResult::Value)
+        }
+        "delete_attributes" => {
+            memory::handle_delete_attributes(kg, tool_args).map(HandlerResult::Value)
         }
         "delete_entities" => {
             let r = memory::handle_delete_entities(kg, tool_args);

@@ -105,6 +105,65 @@ fn validate_observation(content: &str) -> Result<()> {
     Ok(())
 }
 
+/// One k:v attribute key: non-empty and bounded by [`MAX_NAME_BYTES`].
+fn validate_attribute_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(MCSError::InvalidParams("Attribute key must not be empty".into()));
+    }
+    if key.len() > MAX_NAME_BYTES {
+        return Err(MCSError::InvalidParams(format!(
+            "Attribute key too long (max {MAX_NAME_BYTES} bytes)"
+        )));
+    }
+    Ok(())
+}
+
+/// One k:v attribute write: the key is a name, the value is observation-sized
+/// prose, so each half obeys the cap of the thing it resembles.
+fn validate_attribute(key: &str, value: &str) -> Result<()> {
+    validate_attribute_key(key)?;
+    if value.len() > MAX_OBSERVATION_BYTES {
+        return Err(MCSError::InvalidParams(format!(
+            "Attribute value too long (max {MAX_OBSERVATION_BYTES} bytes)"
+        )));
+    }
+    Ok(())
+}
+
+/// Validates one relation triple from the wire, the shape every relation
+/// write tool shares.
+fn validate_triple(from: &str, to: &str, relation_type: &str) -> Result<()> {
+    validate_name(from)?;
+    validate_name(to)?;
+    validate_name(relation_type)?;
+    Ok(())
+}
+
+/// Validates an attribute owner target. The schema describes the
+/// owner-kind-discriminated shape; the handler enforces it: an `entity` owner
+/// carries exactly `entityName`, a `relation` owner exactly the triple.
+fn validate_attribute_target(
+    owner_kind: &str,
+    entity_name: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+    relation_type: Option<&str>,
+) -> Result<()> {
+    match (owner_kind, entity_name, from, to, relation_type) {
+        ("entity", Some(name), None, None, None) => {
+            validate_name(name)?;
+            Ok(())
+        }
+        ("relation", None, Some(from), Some(to), Some(relation_type)) => {
+            validate_triple(from, to, relation_type)?;
+            Ok(())
+        }
+        _ => Err(MCSError::InvalidParams(format!(
+            "Invalid attribute target for owner_kind '{owner_kind}'"
+        ))),
+    }
+}
+
 macro_rules! text_content {
     ($text:expr) => {
         json!({
@@ -396,6 +455,11 @@ pub fn handle_create_entities(
         for obs in &entity.observations {
             validate_observation(&obs.body)?;
         }
+        if let Some(attributes) = &entity.attributes {
+            for (key, value) in attributes {
+                validate_attribute(key.as_str(), value.as_str())?;
+            }
+        }
     }
 
     // The write inserts the authored type row, so existence must be captured
@@ -463,6 +527,19 @@ pub fn handle_create_relations(
         validate_name(&rel.from)?;
         validate_name(&rel.to)?;
         validate_name(&rel.relation_type)?;
+        if rel.observations.len() > MAX_OBSERVATIONS_PER_ENTITY {
+            return Err(MCSError::InvalidParams(format!(
+                "Too many observations per relation (max {MAX_OBSERVATIONS_PER_ENTITY})"
+            )));
+        }
+        for obs in &rel.observations {
+            validate_observation(&obs.body)?;
+        }
+        if let Some(attributes) = &rel.attributes {
+            for (key, value) in attributes {
+                validate_attribute(key, value)?;
+            }
+        }
     }
 
     // The write inserts the authored type row, so existence must be captured
@@ -567,6 +644,268 @@ pub fn handle_add_observations(kg: &GraphHandle, args: Option<&Value>) -> Result
     };
     let text = serde_json::to_string(&json!({"results": results})).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
+}
+
+/// One relation target of `add_relation_observations`: the triple plus the
+/// observation contents to append, parsed from the wire.
+struct RelationObservationWire {
+    from: String,
+    to: String,
+    relation_type: String,
+    contents: Vec<crate::types::ObservationInput>,
+}
+
+/// Parses a `relations` array into [`RelationObservationWire`] targets,
+/// validating names, caps and observation bodies on the way. Shared by the
+/// add and delete relation-observation handlers, which differ only in which
+/// field carries the observations (`contents` vs `observations`) and in the
+/// mutation arm they apply.
+fn parse_relation_observation_updates(
+    params: &Value,
+    field: &str,
+) -> Result<Vec<RelationObservationWire>> {
+    let relations_val = params
+        .get("relations")
+        .ok_or_else(|| MCSError::InvalidParams("Missing 'relations' parameter".into()))?;
+
+    let relations: Vec<Value> = serde_json::from_value(relations_val.clone())
+        .map_err(|e| MCSError::InvalidParams(format!("Invalid relations: {e}")))?;
+    if relations.len() > MAX_RELATIONS_PER_REQUEST {
+        return Err(MCSError::InvalidParams(format!(
+            "Too many relations (max {MAX_RELATIONS_PER_REQUEST})"
+        )));
+    }
+
+    let mut out = Vec::new();
+    for relation in &relations {
+        let from = relation
+            .get("from")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| MCSError::InvalidParams("Missing 'from' in relation".into()))?;
+        let to = relation
+            .get("to")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| MCSError::InvalidParams("Missing 'to' in relation".into()))?;
+        let relation_type = relation
+            .get("relationType")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                MCSError::InvalidParams("Missing 'relationType' in relation".into())
+            })?;
+        let contents: Vec<crate::types::ObservationInput> = serde_json::from_value(
+            relation
+                .get(field)
+                .cloned()
+                .ok_or_else(|| {
+                    MCSError::InvalidParams(format!("Missing '{field}' in relation"))
+                })?,
+        )
+        .map_err(|e| {
+            MCSError::InvalidParams(format!("Invalid observations: {e}"))
+        })?;
+        validate_triple(from, to, relation_type)?;
+        if contents.len() > MAX_OBSERVATIONS_PER_ENTITY {
+            return Err(MCSError::InvalidParams(format!(
+                "Too many observations per relation (max {MAX_OBSERVATIONS_PER_ENTITY})"
+            )));
+        }
+        for content in &contents {
+            validate_observation(&content.body)?;
+        }
+        out.push(RelationObservationWire {
+            from: from.into(),
+            to: to.into(),
+            relation_type: relation_type.into(),
+            contents,
+        });
+    }
+    Ok(out)
+}
+
+pub fn handle_add_relation_observations(
+    kg: &GraphHandle,
+    args: Option<&Value>,
+) -> Result<Value> {
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+    let updates = parse_relation_observation_updates(params, "contents")?
+        .iter()
+        .map(|update| crate::types::RelationObservationUpdate {
+            relation: crate::types::Relation {
+                from: update.from.clone(),
+                to: update.to.clone(),
+                relation_type: update.relation_type.clone(),
+            },
+            contents: update.contents.clone(),
+        })
+        .collect();
+
+    let MutationResult::RelationObservations(results) = apply_mutation(
+        kg,
+        MutationRequest::AddRelationObservations {
+            relations: updates,
+        },
+    )?
+    else {
+        unreachable!("relation observation mutation result")
+    };
+    let text = serde_json::to_string(&json!({"results": results})).map_err(MCSError::JsonError)?;
+    Ok(text_content!(text))
+}
+
+pub fn handle_delete_relation_observations(
+    kg: &GraphHandle,
+    args: Option<&Value>,
+) -> Result<Value> {
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+    let updates = parse_relation_observation_updates(params, "observations")?
+        .iter()
+        .map(|update| crate::types::RelationObservationUpdate {
+            relation: crate::types::Relation {
+                from: update.from.clone(),
+                to: update.to.clone(),
+                relation_type: update.relation_type.clone(),
+            },
+            contents: update.contents.clone(),
+        })
+        .collect();
+
+    apply_mutation(
+        kg,
+        MutationRequest::DeleteRelationObservations {
+            relations: updates,
+        },
+    )?;
+
+    Ok(text_content!("Relation observations deleted successfully"))
+}
+
+/// Parses the `targets` array of `set_attributes`, validating owner kind,
+/// target shape and caps. `check_values` additionally validates every
+/// key and value of the attribute maps; the delete tool validates its keys
+/// separately.
+fn parse_attribute_targets(
+    params: &Value,
+    check_values: bool,
+) -> Result<Vec<crate::types::AttributeSet>> {
+    let targets_val = params
+        .get("targets")
+        .ok_or_else(|| MCSError::InvalidParams("Missing 'targets' parameter".into()))?;
+    let targets: Vec<crate::types::AttributeSet> = serde_json::from_value(targets_val.clone())
+        .map_err(|e| MCSError::InvalidParams(format!("Invalid target: {e}")))?;
+    if targets.len() > MAX_RELATIONS_PER_REQUEST {
+        return Err(MCSError::InvalidParams(format!(
+            "Too many targets (max {MAX_RELATIONS_PER_REQUEST})"
+        )));
+    }
+    for target in &targets {
+        validate_attribute_target(
+            target.owner_kind.as_str(),
+            target.entity_name.as_ref().and_then(|v| Some(v.as_str())),
+            target.from.as_ref().and_then(|v| Some(v.as_str())),
+            target.to.as_ref().and_then(|v| Some(v.as_str())),
+            target.relation_type.as_ref().and_then(|v| Some(v.as_str())),
+        )?;
+        if check_values {
+            for (key, value) in &target.attributes {
+                validate_attribute(key.as_str(), value.as_str())?;
+            }
+        }
+    }
+    Ok(targets)
+}
+
+pub fn handle_set_attributes(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+    let targets = parse_attribute_targets(params, true)?;
+
+    apply_mutation(
+        kg,
+        MutationRequest::SetAttributes {
+            targets: targets.clone(),
+        },
+    )?;
+
+    // Spec 9: the response is the applied post-state per target, re-read so
+    // the caller sees the merged map and not the input.
+    let results: Vec<Value> = targets
+        .iter()
+        .map(|target| {
+            if target.owner_kind.as_str() == "entity" {
+                let entity_name = target
+                    .entity_name
+                    .as_ref()
+                    .expect("validated entity owner")
+                    .as_str();
+                match kg.get_entity(entity_name)? {
+                    Some(entity) => {
+                        let value =
+                            serde_json::to_value(&entity).map_err(MCSError::JsonError)?;
+                        Ok(value)
+                    }
+                    None => Err(MCSError::InvalidParams(format!(
+                        "Entity '{entity_name}' not found"
+                    ))),
+                }
+            } else {
+                let from = target.from.as_ref().expect("validated relation owner").as_str();
+                let to = target.to.as_ref().expect("validated relation owner").as_str();
+                let relation_type = target
+                    .relation_type
+                    .as_ref()
+                    .expect("validated relation owner")
+                    .as_str();
+                let details = kg
+                    .search_relations(Some(from), Some(to), Some(relation_type), None, Some(1))?;
+                let detail = details
+                    .first()
+                    .ok_or_else(|| {
+                        MCSError::InvalidParams(format!(
+                            "Relation '{from}' -> '{to}' ({relation_type}) not found"
+                        ))
+                    })?;
+                let value = serde_json::to_value(detail).map_err(MCSError::JsonError)?;
+                Ok(value)
+            }
+        })
+        .collect::<Result<Vec<Value>>>()?;
+
+    let text = serde_json::to_string(&json!({"results": results})).map_err(MCSError::JsonError)?;
+    Ok(text_content!(text))
+}
+
+pub fn handle_delete_attributes(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
+    let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+    let targets_val = params
+        .get("targets")
+        .ok_or_else(|| MCSError::InvalidParams("Missing 'targets' parameter".into()))?;
+    let targets: Vec<crate::types::AttributeDelete> = serde_json::from_value(targets_val.clone())
+        .map_err(|e| MCSError::InvalidParams(format!("Invalid target: {e}")))?;
+    if targets.len() > MAX_RELATIONS_PER_REQUEST {
+        return Err(MCSError::InvalidParams(format!(
+            "Too many targets (max {MAX_RELATIONS_PER_REQUEST})"
+        )));
+    }
+    for target in &targets {
+        validate_attribute_target(
+            target.owner_kind.as_str(),
+            target.entity_name.as_ref().and_then(|v| Some(v.as_str())),
+            target.from.as_ref().and_then(|v| Some(v.as_str())),
+            target.to.as_ref().and_then(|v| Some(v.as_str())),
+            target.relation_type.as_ref().and_then(|v| Some(v.as_str())),
+        )?;
+        for key in &target.keys {
+            validate_attribute_key(key.as_str())?;
+        }
+    }
+
+    apply_mutation(
+        kg,
+        MutationRequest::DeleteAttributes {
+            targets,
+        },
+    )?;
+
+    Ok(text_content!("Attributes deleted successfully"))
 }
 
 pub fn handle_delete_entities(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
@@ -770,18 +1109,10 @@ pub fn handle_search_relations(kg: &GraphHandle, args: Option<&Value>) -> Result
     let from = params.get("from").and_then(|v| v.as_str());
     let to = params.get("to").and_then(|v| v.as_str());
     let rtype = params.get("relationType").and_then(|v| v.as_str());
+    let query = params.get("query").and_then(|v| v.as_str());
 
-    let mut results: Vec<crate::types::Relation> = kg
-        .search_relations(from, to, rtype, None, Some(MAX_RELATION_SEARCH_RESULTS))?
-        .into_iter()
-        // Superseded by T7b: the response keeps today's triple shape until the
-        // query-mode handlers land; RelationDetail carries the same fields.
-        .map(|detail| crate::types::Relation {
-            from: detail.from,
-            to: detail.to,
-            relation_type: detail.relation_type,
-        })
-        .collect();
+    let mut results: Vec<crate::types::RelationDetail> = kg
+        .search_relations(from, to, rtype, query, Some(MAX_RELATION_SEARCH_RESULTS))?;
     results.truncate(MAX_RELATION_SEARCH_RESULTS);
     let text = serde_json::to_string(&results).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))
@@ -962,6 +1293,11 @@ pub fn handle_upsert_entities(
         }
         for obs in &entity.observations {
             validate_observation(&obs.body)?;
+        }
+        if let Some(attributes) = &entity.attributes {
+            for (key, value) in attributes {
+                validate_attribute(key.as_str(), value.as_str())?;
+            }
         }
     }
 
