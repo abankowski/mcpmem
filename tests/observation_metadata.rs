@@ -199,6 +199,7 @@ fn merge_copies_source_provenance_without_rewriting_equal_target_bodies() {
                         occurred_at_us: Some(12),
                     },
                 ],
+                attributes: None,
             },
             EntityInput {
                 name: "target".into(),
@@ -207,6 +208,7 @@ fn merge_copies_source_provenance_without_rewriting_equal_target_bodies() {
                     body: "same".into(),
                     occurred_at_us: Some(99),
                 }],
+                attributes: None,
             },
         ])
         .unwrap();

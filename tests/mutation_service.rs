@@ -168,6 +168,7 @@ fn entity(name: &str) -> Entity {
         name: name.into(),
         entity_type: "test".into(),
         observations: vec!["original".into()],
+        attributes: None,
     }
 }
 
@@ -264,6 +265,7 @@ fn every_write_path_rolls_back_on_a_final_statement_failure() {
                 name: "a".into(),
                 entity_type: "changed".into(),
                 observations: vec!["new".into()],
+                attributes: None,
             }],
         },
         MutationRequest::DeleteEntities {

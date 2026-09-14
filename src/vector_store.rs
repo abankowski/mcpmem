@@ -1263,6 +1263,7 @@ mod tests {
             name: name.into(),
             entity_type: etype.into(),
             observations: vec!["test observation".into()],
+            attributes: None,
         }])
         .unwrap();
     }

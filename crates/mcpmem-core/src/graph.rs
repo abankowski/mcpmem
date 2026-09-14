@@ -190,6 +190,7 @@ fn batch_entities_by_ids(conn: &Connection, ids: &[i64]) -> FxHashMap<i64, Entit
                     name,
                     entity_type: etype,
                     observations,
+                    attributes: None,
                 },
             );
         }
@@ -2093,6 +2094,7 @@ mod tests {
             name: "test".into(),
             entity_type: "person".into(),
             observations: vec!["obs1".into(), "obs2".into()],
+            attributes: None,
         }];
         let created = kg.create_entities(&entities).unwrap();
         assert_eq!(created.len(), 1);
@@ -2122,6 +2124,7 @@ mod tests {
             name: "del".into(),
             entity_type: "t".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
         assert!(kg.get_entity("del").unwrap().is_some());
@@ -2136,6 +2139,7 @@ mod tests {
             name: "obs_test".into(),
             entity_type: "t".into(),
             observations: vec!["a".into()],
+            attributes: None,
         }])
         .unwrap();
 
@@ -2163,11 +2167,13 @@ mod tests {
                 name: "A".into(),
                 entity_type: "node".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "node".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2192,6 +2198,7 @@ mod tests {
             name: "Einstein".into(),
             entity_type: "scientist".into(),
             observations: vec!["physics".into(), "relativity".into()],
+            attributes: None,
         }])
         .unwrap();
 
@@ -2214,16 +2221,19 @@ mod tests {
                 name: "A".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "C".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2254,16 +2264,19 @@ mod tests {
                 name: "A".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "C".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2295,11 +2308,13 @@ mod tests {
                 name: "A".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2325,11 +2340,13 @@ mod tests {
                 name: "X".into(),
                 entity_type: "n".into(),
                 observations: vec!["obs_x".into()],
+                attributes: None,
             },
             Entity {
                 name: "Y".into(),
                 entity_type: "n".into(),
                 observations: vec!["obs_y".into()],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2354,6 +2371,7 @@ mod tests {
             name: "exists".into(),
             entity_type: "t".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
 
@@ -2371,16 +2389,19 @@ mod tests {
                 name: "A".into(),
                 entity_type: "t".into(),
                 observations: vec!["o".into()],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "C".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2474,16 +2495,19 @@ mod tests {
                 name: "a".into(),
                 entity_type: "person".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "b".into(),
                 entity_type: "person".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "c".into(),
                 entity_type: "place".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2502,16 +2526,19 @@ mod tests {
                 name: "a".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "b".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "c".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2542,6 +2569,7 @@ mod tests {
             name: "A".into(),
             entity_type: "OldType".into(),
             observations: vec!["old".into()],
+            attributes: None,
         }])
         .unwrap();
         kg.create_relations(&[Relation {
@@ -2556,6 +2584,7 @@ mod tests {
             name: "A".into(),
             entity_type: "NewType".into(),
             observations: vec!["old".into(), "new".into()],
+            attributes: None,
         }])
         .unwrap();
 
@@ -2592,11 +2621,13 @@ mod tests {
                 name: "source".into(),
                 entity_type: "t".into(),
                 observations: vec!["src_obs".into()],
+                attributes: None,
             },
             Entity {
                 name: "target".into(),
                 entity_type: "t".into(),
                 observations: vec!["tgt_obs".into()],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2621,16 +2652,19 @@ mod tests {
                 name: "A".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "C".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2666,11 +2700,13 @@ mod tests {
                 name: "a".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "b".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2689,6 +2725,7 @@ mod tests {
             name: "exp".into(),
             entity_type: "t".into(),
             observations: vec!["o".into()],
+            attributes: None,
         }])
         .unwrap();
 
@@ -2707,6 +2744,7 @@ mod tests {
             name: "s".into(),
             entity_type: "t".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
 
@@ -2721,11 +2759,13 @@ mod tests {
                 name: "p1".into(),
                 entity_type: "person".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "p2".into(),
                 entity_type: "place".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -2743,6 +2783,7 @@ mod tests {
             name: "w".into(),
             entity_type: "t".into(),
             observations: vec!["o".into()],
+            attributes: None,
         }])
         .unwrap();
         assert_eq!(kg.get_entity_count().unwrap(), 1);
@@ -2778,6 +2819,7 @@ mod tests {
                 name: "".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             }])
             .unwrap();
         assert!(created.is_empty());
@@ -2791,6 +2833,7 @@ mod tests {
             name: "dup".into(),
             entity_type: "t".into(),
             observations: vec!["obs".into()],
+            attributes: None,
         };
         let first = kg.create_entities(std::slice::from_ref(&e)).unwrap();
         assert_eq!(first.len(), 1);
@@ -2808,11 +2851,13 @@ mod tests {
                     name: "a".into(),
                     entity_type: "t".into(),
                     observations: vec![],
+                    attributes: None,
                 },
                 Entity {
                     name: "b".into(),
                     entity_type: "t".into(),
                     observations: vec![],
+                    attributes: None,
                 },
             ])
             .unwrap();
@@ -2824,11 +2869,13 @@ mod tests {
                     name: "b".into(),
                     entity_type: "t".into(),
                     observations: vec![],
+                    attributes: None,
                 },
                 Entity {
                     name: "c".into(),
                     entity_type: "t".into(),
                     observations: vec![],
+                    attributes: None,
                 },
             ])
             .unwrap();
@@ -2846,16 +2893,19 @@ mod tests {
                     name: "".into(),
                     entity_type: "t".into(),
                     observations: vec![],
+                    attributes: None,
                 },
                 Entity {
                     name: "valid".into(),
                     entity_type: "t".into(),
                     observations: vec![],
+                    attributes: None,
                 },
                 Entity {
                     name: "".into(),
                     entity_type: "t".into(),
                     observations: vec![],
+                    attributes: None,
                 },
             ])
             .unwrap();
@@ -2873,11 +2923,13 @@ mod tests {
                     name: "dup_in_batch".into(),
                     entity_type: "t".into(),
                     observations: vec![],
+                    attributes: None,
                 },
                 Entity {
                     name: "dup_in_batch".into(),
                     entity_type: "t".into(),
                     observations: vec![],
+                    attributes: None,
                 },
             ])
             .unwrap();
@@ -2901,6 +2953,7 @@ mod tests {
             name: "B".into(),
             entity_type: "t".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
 
@@ -2922,6 +2975,7 @@ mod tests {
             name: "A".into(),
             entity_type: "t".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
 
@@ -2956,6 +3010,7 @@ mod tests {
             name: "self".into(),
             entity_type: "t".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
 
@@ -2980,11 +3035,13 @@ mod tests {
                 name: "A".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -3010,11 +3067,13 @@ mod tests {
                 name: "A".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -3041,16 +3100,19 @@ mod tests {
                 name: "A".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "C".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -3084,11 +3146,13 @@ mod tests {
                 name: "A".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -3120,11 +3184,13 @@ mod tests {
                 name: "A".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "B".into(),
                 entity_type: "t".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -3150,6 +3216,7 @@ mod tests {
             name: "stat".into(),
             entity_type: "t".into(),
             observations: vec!["o1".into(), "o2".into(), "o3".into()],
+            attributes: None,
         }])
         .unwrap();
 
@@ -3187,6 +3254,7 @@ mod tests {
                 name: format!("n{i}"),
                 entity_type: "node".into(),
                 observations: vec![format!("obs of n{i}").into()],
+                attributes: None,
             })
             .collect();
         kg.create_entities(&entities).unwrap();
@@ -3233,6 +3301,7 @@ mod tests {
             name: "fresh".into(),
             entity_type: "t".into(),
             observations: vec!["v".into()],
+            attributes: None,
         }])
         .unwrap();
         // get_entity goes through the reader pool.
@@ -3273,6 +3342,7 @@ mod tests {
                         name: format!("w{i}"),
                         entity_type: "node".into(),
                         observations: vec![format!("w obs {i}").into()],
+                        attributes: None,
                     }])
                     .unwrap();
                 }
@@ -3359,16 +3429,19 @@ mod tests {
                 name: "p1".into(),
                 entity_type: "person".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "q1".into(),
                 entity_type: "place".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "p2".into(),
                 entity_type: "person".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -3416,6 +3489,7 @@ mod tests {
                 name: format!("e{i}"),
                 entity_type: "t".into(),
                 observations: vec![format!("o{i}").into()],
+                attributes: None,
             }])
             .unwrap();
         }
@@ -3435,6 +3509,7 @@ mod tests {
             name: "Einstein".into(),
             entity_type: "scientist".into(),
             observations: vec!["physics".into()],
+            attributes: None,
         }])
         .unwrap();
 
@@ -3460,6 +3535,7 @@ mod tests {
             name: "Einstein".into(),
             entity_type: "scientist".into(),
             observations: vec!["physics".into()],
+            attributes: None,
         }])
         .unwrap();
         kg.wipe().unwrap();
@@ -3468,6 +3544,7 @@ mod tests {
             name: "Einstein".into(),
             entity_type: "scientist".into(),
             observations: vec!["physics".into(), "relativity".into()],
+            attributes: None,
         }])
         .unwrap();
 
@@ -3500,6 +3577,7 @@ mod tests {
             name: "a".into(),
             entity_type: "person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
         assert!(kg.entity_type_exists("person"));
@@ -3555,6 +3633,7 @@ mod tests {
             name: "alice".into(),
             entity_type: "person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
         assert_eq!(
@@ -3591,11 +3670,13 @@ mod tests {
                 name: "a".into(),
                 entity_type: "person".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "b".into(),
                 entity_type: "person".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -3650,16 +3731,19 @@ mod tests {
                 name: "a".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "b".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "c".into(),
                 entity_type: "n".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -3711,6 +3795,7 @@ mod tests {
             name: "a".into(),
             entity_type: "n".into(),
             observations: vec!["o".into()],
+            attributes: None,
         }])
         .unwrap();
 
@@ -3740,6 +3825,7 @@ mod tests {
             name: "a".into(),
             entity_type: "n".into(),
             observations: vec!["o".into()],
+            attributes: None,
         }])
         .unwrap();
         // And after a write, repeatedly, without error or deadlock.
