@@ -1268,3 +1268,62 @@ fn merge_moves_source_attributes_and_source_wins_on_collision() {
         .unwrap();
     assert_eq!(source_left, 0, "source attribute rows die with the source");
 }
+
+#[test]
+fn create_and_upsert_persist_entity_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph
+        .create_entities(&[Entity {
+            name: "a".into(),
+            entity_type: "test".into(),
+            observations: vec![],
+            attributes: Some(std::collections::BTreeMap::from([
+                ("k".into(), "v".into()),
+                ("m".into(), "o".into()),
+            ])),
+        }])
+        .unwrap();
+
+    let created = graph.get_entity("a").unwrap().unwrap();
+    assert_eq!(
+        created.attributes,
+        Some(std::collections::BTreeMap::from([
+            ("k".into(), "v".into()),
+            ("m".into(), "o".into()),
+        ])),
+        "create persists the entity attributes"
+    );
+
+    // Upsert with a colliding key and a new key: the new map wins on the
+    // collision, the new key is added, and untouched keys stay.
+    graph
+        .upsert_entities(&[Entity {
+            name: "a".into(),
+            entity_type: "test".into(),
+            observations: vec![],
+            attributes: Some(std::collections::BTreeMap::from([
+                ("k".into(), "v2".into()),
+                ("j".into(), "x".into()),
+            ])),
+        }])
+        .unwrap();
+    let upserted = graph.get_entity("a").unwrap().unwrap();
+    assert_eq!(
+        upserted.attributes,
+        Some(std::collections::BTreeMap::from([
+            ("j".into(), "x".into()),
+            ("k".into(), "v2".into()),
+            ("m".into(), "o".into()),
+        ])),
+        "upsert collides source-wins and keeps untouched keys"
+    );
+}
