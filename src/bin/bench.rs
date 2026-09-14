@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::kg::{Direction, GraphHandle};
-use mcpmem::types::{EntityInput as Entity, Relation};
+use mcpmem::types::{EntityInput as Entity, RelationInput};
 
 /// Standalone knowledge-graph benchmark.
 ///
@@ -91,11 +91,13 @@ fn bench(args: &Args) {
         })
         .collect();
 
-    let relations: Vec<Relation> = (0..last)
-        .map(|i| Relation {
+    let relations: Vec<RelationInput> = (0..last)
+        .map(|i| RelationInput {
             from: format!("entity_{i}"),
             to: format!("entity_{}", i + 1),
             relation_type: "edge".into(),
+            observations: vec![],
+            attributes: None,
         })
         .collect();
 
@@ -325,13 +327,15 @@ fn bench(args: &Args) {
     });
 
     measure!("search_relations (from)", 200, {
-        !kg.search_relations(Some(first), None, None, None)
-            .is_empty()
+        !kg.search_relations(Some(first), None, None, None, None)
+            .map(|r| r.is_empty())
+            .unwrap_or(true)
     });
 
     measure!("search_relations (from+type)", 200, {
-        !kg.search_relations(Some(first), None, Some("edge"), None)
-            .is_empty()
+        !kg.search_relations(Some(first), None, Some("edge"), None, None)
+            .map(|r| r.is_empty())
+            .unwrap_or(true)
     });
 
     // Cleanup
