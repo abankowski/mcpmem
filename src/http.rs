@@ -25,7 +25,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -84,6 +85,11 @@ const MAX_UI_NODES: usize = 1000;
 /// expand). One hop matches the Neo4j "expand relationships" gesture; the cap
 /// bounds a single interaction's payload.
 const MAX_UI_EXPAND_DEPTH: u32 = 3;
+
+/// The `Server` response header carried on every HTTP response,
+/// `mcpmem <version>`. An operator can identify the running build from any
+/// reply — `curl -i http://host:port/` answers before any MCP handshake.
+const SERVER_HEADER_VALUE: &str = concat!("mcpmem ", env!("CARGO_PKG_VERSION"));
 
 /// Shared state for the HTTP handlers: the graph, the optional vector store,
 /// an optional bearer token required on every request when present, the scopes
@@ -274,6 +280,9 @@ pub fn router(state: HttpState) -> Router {
         // (`text/event-stream`), so the `/mcp` streams are left untouched.
         .layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(server::MAX_REQUEST_BYTES))
+        // Outermost, after the layers above: the `Server` header must survive
+        // on every response, including ones those layers reject.
+        .layer(middleware::from_fn(server_header_layer))
         .with_state(state)
 }
 
@@ -351,6 +360,18 @@ fn resolve_addr(addr: &str) -> Result<std::net::SocketAddr> {
                 format!("could not resolve bind address '{addr}'"),
             ))
         })
+}
+
+/// Tag every response with the server version, whatever inner layer produced
+/// it — a handler result, a 404 fallback, a 413 from the body limit. Placed
+/// outermost in `router`, so no response leaves without it.
+async fn server_header_layer(request: Request<axum::body::Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::SERVER,
+        HeaderValue::from_static(SERVER_HEADER_VALUE),
+    );
+    response
 }
 
 fn wants_sse(headers: &HeaderMap) -> bool {
@@ -1908,5 +1929,53 @@ mod tests {
         let state = ui_state(&dir, &[ToolCategory::GraphRead]);
         let resp = ui_graph_handler(State(state), HeaderMap::new(), Query(HashMap::new())).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Every response leaves the router with `Server: mcpmem <version>`, so
+    /// an operator can identify a running build without opening a session.
+    #[tokio::test]
+    async fn every_response_carries_the_server_version_header() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = ui_state(&dir, &[ToolCategory::GraphRead]);
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/graph")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let server = response
+            .headers()
+            .get(header::SERVER)
+            .expect("every response carries a Server header")
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            server,
+            concat!("mcpmem ", env!("CARGO_PKG_VERSION")),
+            "the Server header must name the binary and the version"
+        );
+        // A 404 fallback is produced inside the router, below the header
+        // layer — it must carry the header too.
+        let not_found = router(ui_state(&dir, &[ToolCategory::GraphRead]))
+            .oneshot(
+                Request::builder()
+                    .uri("/no-such-route")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        assert!(not_found.headers().contains_key(header::SERVER));
+        // Drain both bodies so the responses are fully read.
+        let _ = response.into_body().collect().await.unwrap();
+        let _ = not_found.into_body().collect().await.unwrap();
     }
 }
