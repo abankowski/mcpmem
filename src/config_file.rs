@@ -169,6 +169,7 @@ pub struct ServerSection {
     pub transport: Option<String>,
     pub bind: Option<String>,
     pub log_level: Option<String>,
+    pub log_file: Option<String>,
     pub roles: Option<Vec<String>>,
     pub legacy_observations: Option<bool>,
     pub stdio_concurrency: Option<usize>,
@@ -322,6 +323,11 @@ impl FileConfig {
             &mut args.log_level,
             server.log_level.clone(),
             cli.absent("log_level"),
+        );
+        assign(
+            &mut args.log_file,
+            server.log_file.clone().map(Some),
+            cli.absent("log_file"),
         );
         assign_vec(&mut args.roles, server.roles.clone(), cli.absent("roles"));
         assign(

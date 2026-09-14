@@ -79,6 +79,12 @@ pub struct Args {
     #[arg(short, long, default_value = "info")]
     pub log_level: String,
 
+    /// Append logs to this file instead of stderr. The file is created when
+    /// absent and never truncated; rotation and retention belong to the
+    /// operator.
+    #[arg(long = "log-file", value_name = "PATH")]
+    pub log_file: Option<String>,
+
     /// Runtime roles to start in this process. Repeat the flag or separate roles with commas.
     /// Defaults to `mcp`, preserving the existing single-server behavior.
     #[arg(long = "role", value_delimiter = ',', value_name = "ROLE")]

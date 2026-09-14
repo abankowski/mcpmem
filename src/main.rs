@@ -19,7 +19,7 @@ async fn inner_main() -> Result<()> {
     // (idempotent) so the HTTPS transport can build its TLS config. See src/tls.rs.
     mcpmem::tls::ensure_crypto_provider();
 
-    init_tracing(&args.log_level)?;
+    init_tracing(&args.log_level, args.log_file.clone())?;
 
     info!("Starting MCP Memory Server");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
@@ -234,16 +234,36 @@ fn adopt_index_profile(
     Ok(())
 }
 
-fn init_tracing(log_level: &str) -> Result<()> {
+fn init_tracing(log_level: &str, log_file: Option<String>) -> Result<()> {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
     let env_filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(log_level))
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
+    // A log file is append-only: each run continues the last one, and a
+    // supervisor restart cannot truncate the history it overwrites.
+    let writer = match log_file {
+        Some(path) => {
+            let file = std::fs::File::options()
+                .append(true)
+                .create(true)
+                .open(path.as_str())
+                .map_err(|error| -> anyhow::Error {
+                    mcpmem::errors::MCSError::InvalidParams(format!(
+                        "config 'server.log-file': cannot open '{path}': {error}"
+                    ))
+                    .into()
+                })?;
+            BoxMakeWriter::new(std::sync::Mutex::new(file))
+        }
+        None => BoxMakeWriter::new(std::io::stderr),
+    };
+
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(fmt::layer().with_writer(writer))
         .init();
 
     Ok(())
