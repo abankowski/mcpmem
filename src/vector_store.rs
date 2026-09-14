@@ -1122,10 +1122,11 @@ impl VectorStore {
 
     /// The stored text of one chunk, reassembled from SQL for `includeChunks`.
     ///
-    /// Identity text is `name \n type`, observation text is the body, and
-    /// relation text is the triple `from \n type \n to` — the exact texts the
-    /// worker embedded. `None` when the underlying row is gone (or, for
-    /// entity chunks, when the store never wrote that chunk kind).
+    /// Identity text is `name \n type`, observation text (entity or relation)
+    /// is the body, and relation text is the triple `from \n type \n to` —
+    /// the exact texts the worker embedded. `None` when the underlying row is
+    /// gone (or, for entity chunks, when the store never wrote that chunk
+    /// kind).
     pub fn chunk_text(&self, hit: &ChunkHit) -> Option<String> {
         match hit.owner_kind {
             OwnerKind::Entity => match hit.chunk_kind {
@@ -1157,22 +1158,38 @@ impl VectorStore {
                 }
                 _ => None,
             },
-            OwnerKind::Relation => {
-                // Rebuild "from \n type \n to" from the mirror.
-                let conn = self.db.lock();
-                conn.query_row(
-                    "SELECT f.name || char(10) || d.name || char(10) || t.name
-                     FROM taxonomy_relation m JOIN entity f ON f.id=m.from_id
-                     JOIN entity t ON t.id=m.to_id JOIN type_dict d ON d.id=m.type_id
-                     WHERE m.id=?1",
-                    [hit.owner_id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(sqlite_err)
-                .ok()
-                .flatten()
-            }
+            OwnerKind::Relation => match hit.chunk_kind {
+                ChunkKind::Observation => {
+                    // The chunk_index is the observation idx.
+                    let conn = self.db.lock();
+                    conn.query_row(
+                        "SELECT body FROM relation_observation
+                         WHERE relation_id=?1 AND idx=?2",
+                        params![hit.owner_id, hit.chunk_index],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_err)
+                    .ok()
+                    .flatten()
+                }
+                _ => {
+                    // Rebuild "from \n type \n to" from the mirror.
+                    let conn = self.db.lock();
+                    conn.query_row(
+                        "SELECT f.name || char(10) || d.name || char(10) || t.name
+                         FROM taxonomy_relation m JOIN entity f ON f.id=m.from_id
+                         JOIN entity t ON t.id=m.to_id JOIN type_dict d ON d.id=m.type_id
+                         WHERE m.id=?1",
+                        [hit.owner_id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(sqlite_err)
+                    .ok()
+                    .flatten()
+                }
+            },
         }
     }
 
@@ -2153,6 +2170,76 @@ mod tests {
             owner_id: ada,
             chunk_kind: ChunkKind::Observation,
             chunk_index: 7,
+            type_id: 0,
+            dist: 0.0,
+        };
+        assert!(env.vs.chunk_text(&missing).is_none());
+    }
+
+    #[test]
+    fn chunk_text_relation_observation_hit_returns_the_body() {
+        let env = setup(4);
+        create_test_entity(&env.kg, "ada", "Person");
+        create_test_entity(&env.kg, "acme", "Company");
+        let ada = entity_id_of(&env, "ada");
+        let acme = entity_id_of(&env, "acme");
+        {
+            let conn = env.vs.db.lock();
+            let type_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM type_dict WHERE kind=1 AND name='works_at'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| {
+                    conn.execute("INSERT INTO type_dict(kind,name) VALUES(1,'works_at')", [])
+                        .unwrap();
+                    conn.query_row(
+                        "SELECT id FROM type_dict WHERE kind=1 AND name='works_at'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+                });
+            conn.execute(
+                "INSERT INTO taxonomy_relation(id,from_id,to_id,type_id,revision,deleted) VALUES(42,?1,?2,?3,1,0)",
+                params![ada, acme, type_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO relation_observation(relation_id,idx,body,created_us) VALUES(42,0,'first observation',1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO relation_observation(relation_id,idx,body,created_us) VALUES(42,1,'second observation',2)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // A (Relation, Observation) hit resolves to the observation body by
+        // (mirror id, idx), exactly like the entity observation path.
+        let hit = ChunkHit {
+            owner_kind: OwnerKind::Relation,
+            owner_id: 42,
+            chunk_kind: ChunkKind::Observation,
+            chunk_index: 1,
+            type_id: 0,
+            dist: 0.0,
+        };
+        assert_eq!(
+            env.vs.chunk_text(&hit).unwrap(),
+            "second observation",
+            "relation observation text is the body at the matching idx"
+        );
+
+        // A missing observation index is None, not the triple.
+        let missing = ChunkHit {
+            owner_kind: OwnerKind::Relation,
+            owner_id: 42,
+            chunk_kind: ChunkKind::Observation,
+            chunk_index: 9,
             type_id: 0,
             dist: 0.0,
         };
