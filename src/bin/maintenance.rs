@@ -7,6 +7,7 @@ use mcpmem_core::relation_integrity::{audit, repair};
 #[derive(Parser)]
 #[command(name = "mcpmem-maintenance")]
 #[command(about = "Offline maintenance for an mcpmem SQLite database")]
+#[command(version)]
 struct Args {
     #[command(subcommand)]
     command: Command,
