@@ -125,8 +125,14 @@ mod migration_inventory {
                     10,
                     "fc42f71ef3edc7e6ccb7a695456d519e394c9ab92de8f2078bdc3b60c4f4bca2".to_string()
                 ),
-                (11, "d40de0c1ff739dc3de16cf251da6f5744b40e8c898abcb0754191a6e716f3c40".to_string()),
-                (12, "4b2628d44c1b9e7cb626e6e5869637c48ba2e5ac34fbf661a0aaeec1df515db5".to_string()),
+                (
+                    11,
+                    "d40de0c1ff739dc3de16cf251da6f5744b40e8c898abcb0754191a6e716f3c40".to_string()
+                ),
+                (
+                    12,
+                    "4b2628d44c1b9e7cb626e6e5869637c48ba2e5ac34fbf661a0aaeec1df515db5".to_string()
+                ),
             ],
             "a migration was added, removed, renumbered or edited"
         );
