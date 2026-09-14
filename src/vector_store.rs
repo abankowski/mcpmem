@@ -1145,10 +1145,12 @@ impl VectorStore {
                 }
                 ChunkKind::Observation => {
                     let conn = self.db.lock();
-                    // The chunk_index is the observation idx.
+                    // Observation chunks sit at chunk_index = idx + 1:
+                    // position 0 is the identity chunk, so the observation's
+                    // own idx is one less than its chunk_index.
                     conn.query_row(
                         "SELECT body FROM observation WHERE entity_id=?1 AND idx=?2",
-                        params![hit.owner_id, hit.chunk_index],
+                        params![hit.owner_id, hit.chunk_index - 1],
                         |r| r.get(0),
                     )
                     .optional()
@@ -1160,12 +1162,14 @@ impl VectorStore {
             },
             OwnerKind::Relation => match hit.chunk_kind {
                 ChunkKind::Observation => {
-                    // The chunk_index is the observation idx.
                     let conn = self.db.lock();
+                    // Observation chunks sit at chunk_index = idx + 1:
+                    // position 0 is the relation triple, so the observation's
+                    // own idx is one less than its chunk_index.
                     conn.query_row(
                         "SELECT body FROM relation_observation
                          WHERE relation_id=?1 AND idx=?2",
-                        params![hit.owner_id, hit.chunk_index],
+                        params![hit.owner_id, hit.chunk_index - 1],
                         |r| r.get(0),
                     )
                     .optional()
@@ -2142,7 +2146,9 @@ mod tests {
             owner_kind: OwnerKind::Entity,
             owner_id: ada,
             chunk_kind: ChunkKind::Observation,
-            chunk_index: 0,
+            // Position 0 is the identity chunk, so the first observation
+            // holds chunk_index 1 even though its idx is 0.
+            chunk_index: 1,
             type_id: 0,
             dist: 0.0,
         };
@@ -2221,12 +2227,14 @@ mod tests {
         }
 
         // A (Relation, Observation) hit resolves to the observation body by
-        // (mirror id, idx), exactly like the entity observation path.
+        // (mirror id, idx), where the idx is one less than the chunk_index:
+        // position 0 is the triple, so the second observation (idx 1) holds
+        // chunk_index 2, exactly as the worker commits them.
         let hit = ChunkHit {
             owner_kind: OwnerKind::Relation,
             owner_id: 42,
             chunk_kind: ChunkKind::Observation,
-            chunk_index: 1,
+            chunk_index: 2,
             type_id: 0,
             dist: 0.0,
         };

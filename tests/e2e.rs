@@ -61,7 +61,7 @@ fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient
     }
 }
 
-const fn observation_write_envelopes() -> [(&'static str, &'static str); 4] {
+const fn observation_write_envelopes() -> [(&'static str, &'static str); 7] {
     [
         (
             "create_entities",
@@ -78,6 +78,18 @@ const fn observation_write_envelopes() -> [(&'static str, &'static str); 4] {
         (
             "delete_observations",
             "/inputSchema/properties/deletions/items/properties/observations/items/type",
+        ),
+        (
+            "add_relation_observations",
+            "/inputSchema/properties/relations/items/properties/contents/items/type",
+        ),
+        (
+            "delete_relation_observations",
+            "/inputSchema/properties/relations/items/properties/observations/items/type",
+        ),
+        (
+            "create_relations",
+            "/inputSchema/properties/relations/items/properties/observations/items/type",
         ),
     ]
 }
@@ -215,6 +227,91 @@ fn e2e_legacy_observations_switches_only_the_mcp_boundary() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&read).unwrap()["observations"],
         serde_json::json!(["historical string"])
+    );
+}
+
+/// The three relation observation write arms under `--legacy-observations`:
+/// `create_relations.observations`, `add_relation_observations.contents` and
+/// `delete_relation_observations.observations` all switch to string arrays.
+/// The round trip must reach storage and read back as strings.
+#[test]
+fn e2e_legacy_relation_observation_arms() {
+    let mut c = spawn_server_with_legacy_observations(true);
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "alice", "entityType": "person", "observations": []},
+            {"name": "acme", "entityType": "company", "observations": []}
+        ]}),
+    );
+
+    let created = c.tool_text(
+        "create_relations",
+        &serde_json::json!({"relations": [{
+            "from": "alice", "to": "acme", "relationType": "employs",
+            "observations": ["contract signed in 2026"]
+        }]}),
+    );
+    assert!(
+        !created.contains("error"),
+        "create_relations failed: {created}"
+    );
+
+    let added = c.tool_text(
+        "add_relation_observations",
+        &serde_json::json!({"relations": [{
+            "from": "alice", "to": "acme", "relationType": "employs",
+            "contents": ["contract renewed"]
+        }]}),
+    );
+    let added: serde_json::Value = serde_json::from_str(&added).unwrap();
+    assert_eq!(
+        added["results"][0]["addedObservations"],
+        serde_json::json!(["contract renewed"]),
+        "{added}"
+    );
+
+    let found: serde_json::Value = serde_json::from_str(
+        &c.tool_text("search_relations", &serde_json::json!({"query": "contract"})),
+    )
+    .unwrap();
+    let row = found
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["from"] == "alice" && r["to"] == "acme")
+        .unwrap_or_else(|| panic!("the query finds the relation: {found}"));
+    assert_eq!(
+        row["observations"],
+        serde_json::json!(["contract signed in 2026", "contract renewed"]),
+        "both observations read back as legacy strings: {row}"
+    );
+
+    let deleted = c.tool_text(
+        "delete_relation_observations",
+        &serde_json::json!({"relations": [{
+            "from": "alice", "to": "acme", "relationType": "employs",
+            "observations": ["contract renewed"]
+        }]}),
+    );
+    assert!(
+        !deleted.contains("error"),
+        "delete_relation_observations failed: {deleted}"
+    );
+    let found: serde_json::Value = serde_json::from_str(
+        &c.tool_text("search_relations", &serde_json::json!({"query": "contract"})),
+    )
+    .unwrap();
+    let row = &found
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["from"] == "alice" && r["to"] == "acme")
+        .unwrap_or_else(|| panic!("the relation still exists: {found}"));
+    assert_eq!(
+        row["observations"],
+        serde_json::json!(["contract signed in 2026"]),
+        "the deleted observation must not read back: {found}"
     );
 }
 

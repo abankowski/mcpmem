@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn attribute_set_validates_owner_shape_and_rejects_unknown() {
+    fn attribute_set_parses_each_owner_shape_and_rejects_unknown() {
         assert!(
             serde_json::from_str::<AttributeSet>(
                 r#"{"ownerKind":"entity","entityName":"x","attributes":{"k":"v"}}"#,

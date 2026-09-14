@@ -739,3 +739,178 @@ fn identity_and_stats_follow_the_serving_profile_dimension() {
         "stats report the profile dimension, not the CLI default: {text}"
     );
 }
+
+/// REQ-OBS-SEARCH end to end: a relation observation is embedded by the
+/// indexer worker against a real profile, a vector search finds the relation,
+/// and `includeChunks` reassembles the observation body. The chain is only
+/// assembled from unit tests elsewhere; this test runs it in one database.
+///
+/// The worker receives its provider directly, so nothing is installed in the
+/// process-wide `indexer_provider` cell and no child process is needed. The
+/// search uses `vector_search_entities`, which shares the handler core of
+/// `semantic_search` and needs no provider.
+#[cfg(feature = "indexer")]
+#[test]
+fn relation_observation_chain_serves_include_chunks() {
+    use mcpmem_core::jobs::{DistanceMetric, IndexProfile, IndexProfileRegistry, Normalization};
+    use mcpmem_indexer::{EmbeddingProvider, IndexerWorker, ProviderError};
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    /// Identity chunks (entity name and type) and the relation triple point
+    /// along unit axis 0; observation bodies point along unit axis 1, so a
+    /// query along axis 1 makes the observation chunk the relation's best
+    /// chunk, deterministically ahead of the triple.
+    struct AxisProvider;
+    impl EmbeddingProvider for AxisProvider {
+        fn embed_texts(
+            &self,
+            profile: &IndexProfile,
+            texts: &[String],
+        ) -> Result<Vec<Vec<f32>>, ProviderError> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    let mut vector = vec![0.0f32; profile.dimensions as usize];
+                    if text.contains('\n') {
+                        vector[0] = 1.0;
+                    } else {
+                        vector[1] = 1.0;
+                    }
+                    vector
+                })
+                .collect())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let (kg, vs) = vector_server(&dir);
+    let database = dir.path().join("memory.db");
+
+    // A candidate profile: mutations enqueue their chunk jobs against it, and
+    // the worker then serves them (the arrangement `indexer_worker` uses).
+    let profile = {
+        let profile = IndexProfile {
+            id: Uuid::new_v4(),
+            store_key: "default".into(),
+            provider_kind: "test".into(),
+            model: "fixed".into(),
+            dimensions: DIMS,
+            representation_version: "v1".into(),
+            normalization: Normalization::None,
+            distance_metric: DistanceMetric::Cosine,
+            vector_encoding_version: "f32le-v1".into(),
+        };
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        IndexProfileRegistry::new(&conn)
+            .begin_rebuild(&profile)
+            .unwrap();
+        profile
+    };
+
+    // Seed the graph through the real tools: two entities, one relation, and
+    // one observation on the relation.
+    let v = call_tool(
+        &kg,
+        &vs,
+        "create_entities",
+        &serde_json::json!({
+            "entities": [
+                {"name": "ada", "entityType": "Person", "observations": []},
+                {"name": "bob", "entityType": "Person", "observations": []}
+            ]
+        }),
+    );
+    assert!(v["error"].is_null(), "seed entities: {v}");
+    let v = call_tool(
+        &kg,
+        &vs,
+        "create_relations",
+        &serde_json::json!({
+            "relations": [{"from": "ada", "to": "bob", "relationType": "knows"}]
+        }),
+    );
+    assert!(v["error"].is_null(), "seed relation: {v}");
+    let v = call_tool(
+        &kg,
+        &vs,
+        "add_relation_observations",
+        &serde_json::json!({
+            "relations": [{
+                "from": "ada",
+                "to": "bob",
+                "relationType": "knows",
+                "contents": [{"body": "braids her hair"}]
+            }]
+        }),
+    );
+    assert!(v["error"].is_null(), "seed relation observation: {v}");
+
+    // Run the indexer worker against the profile until every job drains.
+    let worker = IndexerWorker::new(&database, AxisProvider, Duration::from_secs(5));
+    let mut polls = 0;
+    for _ in 0..10 {
+        let report = worker.run_once(mcpmem_core::events::now_us()).unwrap();
+        polls += 1;
+        if report.claimed == 0 {
+            break;
+        }
+    }
+    assert!(polls < 10, "the worker must drain in ten polls");
+
+    // The observation chunk is embedded for the relation owner.
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let observation_chunks: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunk_vector
+             WHERE profile_id=?1 AND kind='observation' AND owner_kind='relation'",
+            [profile.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        observation_chunks, 1,
+        "the relation observation must be embedded"
+    );
+
+    // Publish the candidate snapshot, then search with the observation axis.
+    // The relation ranks first, and its best chunk is the observation body.
+    vs.reconcile_managed_snapshot().unwrap();
+    let mut query = vec![0.0f64; DIMS as usize];
+    query[1] = 1.0;
+    let text = result_text(&call_tool(
+        &kg,
+        &vs,
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": query,
+            "topK": 10,
+            "includeChunks": true,
+        }),
+    ));
+    let rows = serde_json::from_str::<Value>(&text).expect("rows JSON")["results"]
+        .as_array()
+        .expect("results array")
+        .clone();
+    assert!(!rows.is_empty(), "the search must find owners: {text}");
+    assert_eq!(
+        rows[0]["kind"].as_str(),
+        Some("relation"),
+        "the observation chunk must rank the relation first: {text}"
+    );
+    assert_eq!(
+        rows[0]["name"].as_str(),
+        Some("ada -> knows -> bob"),
+        "{text}"
+    );
+    assert_eq!(
+        rows[0]["chunk"]["kind"].as_str(),
+        Some("observation"),
+        "the best chunk of the relation is its observation chunk: {text}"
+    );
+    assert_eq!(
+        rows[0]["chunk"]["text"].as_str(),
+        Some("braids her hair"),
+        "includeChunks must reassemble the observation body: {text}"
+    );
+}
