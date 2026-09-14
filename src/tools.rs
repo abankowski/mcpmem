@@ -99,6 +99,22 @@ pub const ALL_TOOLS: &[ToolMeta] = &[
         write: true,
     },
     ToolMeta {
+        name: "add_relation_observations",
+        write: true,
+    },
+    ToolMeta {
+        name: "delete_relation_observations",
+        write: true,
+    },
+    ToolMeta {
+        name: "set_attributes",
+        write: true,
+    },
+    ToolMeta {
+        name: "delete_attributes",
+        write: true,
+    },
+    ToolMeta {
         name: "delete_entities",
         write: true,
     },
