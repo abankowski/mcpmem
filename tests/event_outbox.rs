@@ -641,6 +641,18 @@ fn relation(from: &str, to: &str, relation_type: &str) -> Relation {
     }
 }
 
+/// `create_relations` takes `RelationInput` since the core wave-1 widening;
+/// the delete paths keep the bare triple.
+fn relation_input(from: &str, to: &str, relation_type: &str) -> mcpmem_core::types::RelationInput {
+    mcpmem_core::types::RelationInput {
+        from: from.into(),
+        to: to.into(),
+        relation_type: relation_type.into(),
+        observations: vec![],
+        attributes: None,
+    }
+}
+
 #[test]
 fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
     use mcpmem_core::jobs::{
@@ -764,7 +776,7 @@ fn rebuilt_profile_requires_every_relation_chunk() {
     let graph = graph(&database);
     graph.create_entities(&[entity("ada")]).unwrap();
     graph
-        .create_relations(&[relation("ada", "ada", "knows")])
+        .create_relations(&[relation_input("ada", "ada", "knows")])
         .unwrap();
     let conn = Connection::open(&database).unwrap();
     let registry = IndexProfileRegistry::new(&conn);
@@ -820,7 +832,7 @@ fn rebuilt_profile_enqueues_tombstoned_relation_as_delete() {
     let graph = graph(&database);
     graph.create_entities(&[entity("ada")]).unwrap();
     graph
-        .create_relations(&[relation("ada", "ada", "knows")])
+        .create_relations(&[relation_input("ada", "ada", "knows")])
         .unwrap();
     graph
         .delete_relations(&[relation("ada", "ada", "knows")])
@@ -859,7 +871,7 @@ fn completed_relation_rebuild_passes_the_full_scan() {
     let graph = graph(&database);
     graph.create_entities(&[entity("ada")]).unwrap();
     graph
-        .create_relations(&[relation("ada", "ada", "knows")])
+        .create_relations(&[relation_input("ada", "ada", "knows")])
         .unwrap();
     let conn = Connection::open(&database).unwrap();
     let registry = IndexProfileRegistry::new(&conn);
@@ -920,7 +932,7 @@ fn stale_relation_chunk_fails_the_full_scan() {
     let graph = graph(&database);
     graph.create_entities(&[entity("ada")]).unwrap();
     graph
-        .create_relations(&[relation("ada", "ada", "knows")])
+        .create_relations(&[relation_input("ada", "ada", "knows")])
         .unwrap();
     let conn = Connection::open(&database).unwrap();
     let registry = IndexProfileRegistry::new(&conn);
@@ -980,20 +992,26 @@ fn rename_persists_one_rename_event_and_matches_rename_subscriptions() {
         .unwrap();
     graph
         .create_relations(&[
-            Relation {
+            mcpmem_core::types::RelationInput {
                 from: "incoming".into(),
                 to: "old".into(),
                 relation_type: "in".into(),
+                observations: vec![],
+                attributes: None,
             },
-            Relation {
+            mcpmem_core::types::RelationInput {
                 from: "old".into(),
                 to: "outgoing".into(),
                 relation_type: "out".into(),
+                observations: vec![],
+                attributes: None,
             },
-            Relation {
+            mcpmem_core::types::RelationInput {
                 from: "old".into(),
                 to: "old".into(),
                 relation_type: "self".into(),
+                observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
