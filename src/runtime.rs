@@ -226,7 +226,10 @@ impl RoleService for IndexerService {
                         // between these two calls, so no error here is
                         // permanent, and the next poll retries it.
                         if let Err(error) = vectors.reconcile_managed_snapshot() {
-                            tracing::debug!(%error, "managed snapshot is not published yet");
+                            tracing::warn!(
+                                %error,
+                                "candidate snapshot publish deferred: rebuild incomplete, self-healing, retried each poll"
+                            );
                         }
                     }
                     Ok::<_, String>(())
