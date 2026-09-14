@@ -457,6 +457,28 @@ fn attribute_tools_cover_entities_and_relations() {
     assert_eq!(entity["attributes"].get("color"), None, "{entity}");
     assert_eq!(entity["attributes"]["weight"].as_str(), Some("5"), "{entity}");
 
+    // upsert_entities persists its attributes too: the new map overwrites
+    // the given keys and leaves the rest of the stored map alone. The
+    // mutation result rows carry no attributes (core entity snapshots), so
+    // persistence is read back through get_entity.
+    call_payload(
+        &kg,
+        "upsert_entities",
+        &serde_json::json!({"entities": [{
+            "name": "widget",
+            "entityType": "product",
+            "observations": [],
+            "attributes": {"color": "blue"}
+        }]}),
+    );
+    let entity = call_payload(&kg, "get_entity", &serde_json::json!({"name": "widget"}));
+    assert_eq!(entity["attributes"]["color"].as_str(), Some("blue"), "{entity}");
+    assert_eq!(
+        entity["attributes"]["weight"].as_str(),
+        Some("5"),
+        "upsert keeps the keys outside its map: {entity}"
+    );
+
     // Relation owner: the same round trip through the triple shape.
     call_payload(
         &kg,
@@ -568,6 +590,47 @@ fn attribute_tools_enforce_owner_kind_and_target_exclusivity() {
             "{name} with {arguments} must be refused"
         );
     }
+
+    // The request cap is part of the shared target validation: one target
+    // past MAX_RELATIONS_PER_REQUEST is refused wholesale.
+    let too_many = (0..=1000)
+        .map(|_| {
+            serde_json::json!({"ownerKind": "entity", "entityName": "a", "attributes": {}})
+        })
+        .collect::<Vec<Value>>();
+    let too_many_args = serde_json::json!({"targets": too_many});
+    for name in ["set_attributes", "delete_attributes"] {
+        let raw = call_raw(&kg, name, &too_many_args);
+        assert_eq!(
+            raw["result"]["isError"].as_bool(),
+            Some(true),
+            "{name} with 1001 targets must be refused"
+        );
+    }
+
+    // Key and value length caps from the shared validators.
+    let long_key: String = "k".repeat(1025);
+    let long_value: String = "v".repeat(65537);
+    let long_key_payload = serde_json::json!({"targets": [
+        {"ownerKind": "entity", "entityName": "a",
+         "attributes": {long_key: "v"}},
+    ]});
+    let raw = call_raw(&kg, "set_attributes", &long_key_payload);
+    assert_eq!(
+        raw["result"]["isError"].as_bool(),
+        Some(true),
+        "an over-length attribute key must be refused"
+    );
+    let long_value_payload = serde_json::json!({"targets": [
+        {"ownerKind": "entity", "entityName": "a",
+         "attributes": {"k": long_value}},
+    ]});
+    let raw = call_raw(&kg, "set_attributes", &long_value_payload);
+    assert_eq!(
+        raw["result"]["isError"].as_bool(),
+        Some(true),
+        "an over-length attribute value must be refused"
+    );
 
     // Control: a well-formed target passes the same gate.
     let set = call_payload(
