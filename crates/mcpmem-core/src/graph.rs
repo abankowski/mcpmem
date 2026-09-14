@@ -1877,52 +1877,61 @@ impl GraphHandle {
 
     pub fn batch_get_entities(&self, names: &[String]) -> Vec<Option<Entity>> {
         let conn = self.readers.get();
-        // Resolve ids, load the full entities in one query, then attach every
-        // resolved id's attributes from a single `attribute` lookup — no N+1.
-        let ids: Vec<Option<i64>> = names
-            .iter()
-            .map(|n| entity_name_lookup(&conn, n).ok().flatten())
-            .collect();
-        let resolved: Vec<i64> = ids.iter().flatten().copied().collect();
-        let mut by_id = batch_entities_by_ids(&conn, &resolved);
-        let mut attrs: FxHashMap<i64, BTreeMap<String, String>> = FxHashMap::default();
-        if !resolved.is_empty() {
-            let sql = format!(
-                "SELECT owner_id, key, value FROM attribute
-                 WHERE owner_kind = 'entity' AND owner_id IN ({})
-                 ORDER BY owner_id, key",
-                int_csv(&resolved)
-            );
-            if let Ok(mut stmt) = conn.prepare(&sql)
-                && let Ok(rows) = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-            {
-                for row in rows.flatten() {
-                    attrs.entry(row.0).or_default().insert(row.1, row.2);
+        // One read transaction spans id resolution, the entity query, and the
+        // attributes query, so each returned entity is snapshot-consistent: a
+        // concurrent writer commit cannot split its observations from its
+        // attributes. The signature is infallible, so a failed transaction
+        // degrades to all-`None`, the same best-effort spirit as the old
+        // per-name `unwrap_or(None)`.
+        let tx = match conn.unchecked_transaction().map_err(sqlite_err) {
+            Ok(tx) => tx,
+            Err(_) => return names.iter().map(|_| None).collect(),
+        };
+        let (ids, by_name): (Vec<Option<i64>>, FxHashMap<String, Entity>) = {
+            let ids: Vec<Option<i64>> = names
+                .iter()
+                .map(|n| entity_name_lookup(&tx, n).ok().flatten())
+                .collect();
+            let resolved: Vec<i64> = ids.iter().flatten().copied().collect();
+            let mut by_id = batch_entities_by_ids(&tx, &resolved);
+            let mut attrs: FxHashMap<i64, BTreeMap<String, String>> = FxHashMap::default();
+            if !resolved.is_empty() {
+                let sql = format!(
+                    "SELECT owner_id, key, value FROM attribute
+                     WHERE owner_kind = 'entity' AND owner_id IN ({})
+                     ORDER BY owner_id, key",
+                    int_csv(&resolved)
+                );
+                if let Ok(mut stmt) = tx.prepare(&sql)
+                    && let Ok(rows) = stmt.query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                {
+                    for row in rows.flatten() {
+                        attrs.entry(row.0).or_default().insert(row.1, row.2);
+                    }
                 }
             }
-        }
-        names
-            .iter()
-            .enumerate()
-            .map(|(i, _)| -> Option<Entity> {
-                let Some(id) = ids[i] else {
-                    return None;
-                };
-                let Some(mut entity) = by_id.remove(&id) else {
-                    return None;
-                };
-                if let Some(map) = attrs.remove(&id) {
-                    entity.attributes = some_nonempty(map);
+            // Assemble a name -> entity map (entity names are unique among
+            // live rows) so every input occurrence resolves independently —
+            // duplicate names in the input each get the entity.
+            let mut by_name: FxHashMap<String, Entity> = FxHashMap::default();
+            for id in &resolved {
+                if let Some(mut entity) = by_id.remove(id) {
+                    if let Some(map) = attrs.remove(id) {
+                        entity.attributes = some_nonempty(map);
+                    }
+                    by_name.insert(entity.name.clone(), entity);
                 }
-                Some(entity)
-            })
-            .collect()
+            }
+            (ids, by_name)
+        };
+        let _ = tx.commit().map_err(sqlite_err);
+        names.iter().map(|n| by_name.get(n).cloned()).collect()
     }
 
     pub fn find_all_paths(
@@ -4140,6 +4149,13 @@ mod tests {
         );
         assert!(results[1].is_none());
         assert_eq!(results[2].as_ref().unwrap().attributes, None);
+
+        // Duplicate names in the input each resolve to the entity; lookups
+        // must not consume the map.
+        let dupes = kg.batch_get_entities(&["a".into(), "a".into()]);
+        assert_eq!(dupes.len(), 2);
+        assert!(dupes[0].is_some());
+        assert!(dupes[1].is_some(), "duplicate input names each resolve");
     }
 
     #[test]
@@ -4162,7 +4178,7 @@ mod tests {
                 .map(|o| o.body.as_str())
                 .collect::<Vec<_>>(),
             ["contract #12", "legacy"],
-            "owner-level detail carries the full observation list, matched body first"
+            "owner-level detail carries the full observation list in idx order"
         );
         assert_eq!(
             detail[0].attributes,
@@ -4255,17 +4271,13 @@ mod tests {
         kg.wipe().unwrap();
 
         let conn = kg.writer.lock();
-        for (table, field) in [
-            ("relation_observation", "relation_id"),
-            ("attribute", "owner_id"),
-        ] {
+        for table in ["relation_observation", "attribute"] {
             let count: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                     row.get(0)
                 })
                 .unwrap();
             assert_eq!(count, 0, "{table} must be empty after wipe");
-            let _ = field;
         }
         let fts_hits: i64 = conn
             .query_row(
