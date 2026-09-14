@@ -50,7 +50,7 @@
   },
   {
     "name": "add_observations",
-    "description": "Add new observations to existing entities in the knowledge graph. Observations that already exist on the entity are silently skipped.",
+    "description": "Add new observations to existing entities in the knowledge graph. Observations are appended; duplicates are not removed.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -72,7 +72,7 @@
   },
   {
     "name": "add_relation_observations",
-    "description": "Add new observations to existing relations in the knowledge graph. Each relation is identified by its from, to, and relationType triple. Observations that already exist on the relation are silently skipped.",
+    "description": "Add new observations to existing relations in the knowledge graph. Each relation is identified by its from, to, and relationType triple. Observations are appended; duplicates are not removed.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -246,7 +246,7 @@
   },
   {
     "name": "search_nodes",
-    "description": "Search for entities in the knowledge graph. Matches against entity names, types, and observation content (case-insensitive), returned best-match-first by relevance. Matching entities; relation text is searched via search_relations. Optionally restrict by entityType and paginate with offset/limit.",
+    "description": "Search for entities in the knowledge graph. Matches against entity names, types, and observation content (case-insensitive), returned best-match-first by relevance. Returns matching entities. Relation text is searched via search_relations. Optionally restrict by entityType and paginate with offset/limit.",
     "inputSchema": {
       "type": "object",
       "properties": {
