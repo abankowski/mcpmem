@@ -779,18 +779,17 @@ pub fn handle_delete_relation_observations(
     Ok(text_content!("Relation observations deleted successfully"))
 }
 
-/// Parses the `targets` array of `set_attributes`, validating owner kind,
-/// target shape and caps. `check_values` additionally validates every
-/// key and value of the attribute maps; the delete tool validates its keys
-/// separately.
-fn parse_attribute_targets(
-    params: &Value,
-    check_values: bool,
-) -> Result<Vec<crate::types::AttributeSet>> {
+/// Parses the raw `targets` array shared by the two attribute tools and
+/// validates the part they have in common: the request cap and every owner
+/// shape (owner kind plus the exclusive entity/triple fields). Each handler
+/// then deserializes its own DTO (`AttributeSet` carries `attributes`,
+/// `AttributeDelete` carries `keys`) and validates its own payload, so any
+/// future change to the owner shape is edited at exactly one site.
+fn parse_attribute_targets(params: &Value) -> Result<Vec<Value>> {
     let targets_val = params
         .get("targets")
         .ok_or_else(|| MCSError::InvalidParams("Missing 'targets' parameter".into()))?;
-    let targets: Vec<crate::types::AttributeSet> = serde_json::from_value(targets_val.clone())
+    let targets: Vec<Value> = serde_json::from_value(targets_val.clone())
         .map_err(|e| MCSError::InvalidParams(format!("Invalid target: {e}")))?;
     if targets.len() > MAX_RELATIONS_PER_REQUEST {
         return Err(MCSError::InvalidParams(format!(
@@ -798,25 +797,33 @@ fn parse_attribute_targets(
         )));
     }
     for target in &targets {
+        let owner_kind = target
+            .get("ownerKind")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                MCSError::InvalidParams("Missing 'ownerKind' in target".into())
+            })?;
         validate_attribute_target(
-            target.owner_kind.as_str(),
-            target.entity_name.as_ref().and_then(|v| Some(v.as_str())),
-            target.from.as_ref().and_then(|v| Some(v.as_str())),
-            target.to.as_ref().and_then(|v| Some(v.as_str())),
-            target.relation_type.as_ref().and_then(|v| Some(v.as_str())),
+            owner_kind,
+            target.get("entityName").and_then(|v| v.as_str()),
+            target.get("from").and_then(|v| v.as_str()),
+            target.get("to").and_then(|v| v.as_str()),
+            target.get("relationType").and_then(|v| v.as_str()),
         )?;
-        if check_values {
-            for (key, value) in &target.attributes {
-                validate_attribute(key.as_str(), value.as_str())?;
-            }
-        }
     }
     Ok(targets)
 }
 
 pub fn handle_set_attributes(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
-    let targets = parse_attribute_targets(params, true)?;
+    let targets: Vec<crate::types::AttributeSet> =
+        serde_json::from_value(Value::Array(parse_attribute_targets(params)?))
+            .map_err(|e| MCSError::InvalidParams(format!("Invalid target: {e}")))?;
+    for target in &targets {
+        for (key, value) in &target.attributes {
+            validate_attribute(key.as_str(), value.as_str())?;
+        }
+    }
 
     apply_mutation(
         kg,
@@ -827,6 +834,11 @@ pub fn handle_set_attributes(kg: &GraphHandle, args: Option<&Value>) -> Result<V
 
     // Spec 9: the response is the applied post-state per target, re-read so
     // the caller sees the merged map and not the input.
+    //
+    // The relation re-read relies on search_relations' no-query path being
+    // an exact triple filter that also returns relations without
+    // observations; keep this in mind if that path ever grows fuzzy
+    // semantics.
     let results: Vec<Value> = targets
         .iter()
         .map(|target| {
@@ -875,24 +887,10 @@ pub fn handle_set_attributes(kg: &GraphHandle, args: Option<&Value>) -> Result<V
 
 pub fn handle_delete_attributes(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
-    let targets_val = params
-        .get("targets")
-        .ok_or_else(|| MCSError::InvalidParams("Missing 'targets' parameter".into()))?;
-    let targets: Vec<crate::types::AttributeDelete> = serde_json::from_value(targets_val.clone())
-        .map_err(|e| MCSError::InvalidParams(format!("Invalid target: {e}")))?;
-    if targets.len() > MAX_RELATIONS_PER_REQUEST {
-        return Err(MCSError::InvalidParams(format!(
-            "Too many targets (max {MAX_RELATIONS_PER_REQUEST})"
-        )));
-    }
+    let targets: Vec<crate::types::AttributeDelete> =
+        serde_json::from_value(Value::Array(parse_attribute_targets(params)?))
+            .map_err(|e| MCSError::InvalidParams(format!("Invalid target: {e}")))?;
     for target in &targets {
-        validate_attribute_target(
-            target.owner_kind.as_str(),
-            target.entity_name.as_ref().and_then(|v| Some(v.as_str())),
-            target.from.as_ref().and_then(|v| Some(v.as_str())),
-            target.to.as_ref().and_then(|v| Some(v.as_str())),
-            target.relation_type.as_ref().and_then(|v| Some(v.as_str())),
-        )?;
         for key in &target.keys {
             validate_attribute_key(key.as_str())?;
         }
