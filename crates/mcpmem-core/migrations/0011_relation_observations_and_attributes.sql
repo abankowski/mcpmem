@@ -18,7 +18,7 @@ CREATE TRIGGER rel_obs_fts_ai AFTER INSERT ON relation_observation BEGIN
 END;
 
 CREATE TRIGGER rel_obs_fts_bd BEFORE DELETE ON relation_observation BEGIN
-  INSERT INTO rel_obs_fts(rel_obs_fts, rowid, body) VALUES ('delete', old.id, '');
+  INSERT INTO rel_obs_fts(rel_obs_fts, rowid, body) VALUES ('delete', old.id, old.body);
 END;
 
 CREATE TABLE attribute (
