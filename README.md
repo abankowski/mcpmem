@@ -21,8 +21,8 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
 - 🧠 **Real memory, not a scratchpad.** A typed knowledge graph — entities, directed relations,
   and free-form observations — with FTS5 full-text search and graph traversal (paths, neighbors,
   subgraphs, centrality). Survives restarts; portable as a single file.
-- ⚡ **Fast and embedded.** Pure Rust on SQLite in WAL mode. Sub-microsecond cache hits,
-  microsecond reads, batched writes. No external services, no network round-trips, no daemons.
+- ⚡ **Fast and embedded.** Pure Rust on SQLite in WAL mode. Microsecond reads,
+  batched writes, no external services, no network round-trips, no daemons.
 - 🔎 **Semantic + hybrid search.** With the `indexer` feature and a serving
   profile, the server embeds entity, observation and relation chunks by itself,
   then fuses vector similarity with full-text relevance and graph centrality —
@@ -55,7 +55,7 @@ flowchart TB
     OAuth["OAuth 2.1 server — discovery · consent · tokens<br/>(--oidc-issuer)"]
     Idx["indexer role — embedding worker<br/>(--features indexer)"]
     Wbk["webhooks role — delivery outbox<br/>(--features webhooks)"]
-    Gr["GraphHandle<br/>LRU cache · name→id · FTS5"]
+    Gr["GraphHandle<br/>SQLite write path · read pool · FTS5"]
     Vc["VectorStore<br/>chunk snapshot · exact scan"]
     Cd["Code index — tree-sitter<br/>symbol + call graph · 10 languages"]
     Sql[("SQLite — WAL · 4 KB pages<br/>graph tables · *_fts · chunk_vector")]
@@ -1149,13 +1149,13 @@ Key pragmas (defaults, all tunable): `page_size=4096`, `journal_mode=WAL`,
 `temp_store=MEMORY`, `busy_timeout=5000`. A background `wal_checkpoint(PASSIVE)` runs every
 `--wal-flush-ms` to bound the async durability window.
 
-### In-memory caches
+### Caches and indexes
 
-| Cache | Purpose |
+| Cache or index | Purpose |
 |---|---|
-| Entity LRU (10,000) | Avoids deserializing hot entities (`EntityMeta`) |
-| Name-hash map | O(1) name→ID resolution via 64-bit hash |
-| Prepared-statement cache | Reuses compiled SQLite queries |
+| SQLite page cache | Caches database pages on each SQLite connection |
+| SQLite name-hash index | Resolves a name with its 64-bit hash and text |
+| Prepared-statement cache | Reuses compiled SQLite queries per connection |
 | Chunk snapshot *(vectors)* | The serving chunk snapshot, exactly scanned per query; republished by the indexer |
 | petgraph adjacency *(vectors)* | Directed graph cache for the hybrid-search centrality boost |
 
@@ -1217,22 +1217,58 @@ for the full procedure.
 
 ## Benchmarks
 
-Measured end-to-end via the `bench` binary — 1,000 entities (5 observations each) + 999 relations
-pre-populated, on a **MacBook Pro (Apple M1 Pro, 32 GB)**. Averages; run
-`cargo run --release --bin bench` on your own hardware.
+The `bench` binary creates a fresh SQLite database with a chain graph. This run
+used 1,000 entities, five observations per entity, and 999 relations. The calls
+use the in-process `GraphHandle`; MCP and HTTP serialization are not in these
+values. The release build ran on a **Mac Studio (Apple M1 Max, 32 GB)**.
 
-| Operation | Avg latency | Notes |
-|---|---|---|
-| `degree` (cache hit) | ~44 ns | Materialized column |
-| `get_entity` (cache hit) | ~5.4 µs | LRU hit; no SQLite I/O |
-| `search_relations` | ~6.3 µs | Covering index scan |
-| `find_all_paths` (depth 5) | ~12 µs | Bounded DFS |
-| `neighbors` (depth 1–2) | ~50 µs | Index-only covering scan |
-| `search_nodes` (name match) | ~96 µs | FTS5 query + entity lookup |
-| `find_path` (BFS) | ~453 µs | Worst case: full BFS |
-| `read_graph` (all) | ~3.4 ms | Full dump |
-| `create_relations` (999) | ~10 ms | Batch write + degree updates |
-| `create_entities` (1000) | ~41 ms | Batch write + FTS index |
+A warm row is already in the SQLite page cache. The graph has no process-level
+entity cache. Each mutation row has one run because a later call would measure a
+changed state or a no-op.
+
+```sh
+# Identical in Bash and fish.
+cargo run --release --bin bench
+cargo run --release --bin bench -- --entities 10000 --obs-per-entity 3
+cargo run --release --bin bench -- --help
+bench --help
+```
+
+`--entities` must be at least 2. `--obs-per-entity` must be at least 1. Use
+`--db <path>` to select the temporary SQLite file.
+
+| Operation | Runs | Avg latency |
+|---|---:|---:|
+| `create_entities` | 1 | 161.111 ms |
+| `get_entity` (warm row) | 1,000 | 7.102 µs |
+| `create_relations` | 1 | 142.307 ms |
+| `get_entity_count` | 1,000 | 2.199 µs |
+| `get_relation_count` | 1,000 | 1.994 µs |
+| `degree` (outgoing) | 1,000 | 3.979 µs |
+| `degree` (both) | 1,000 | 4.072 µs |
+| `get_entity` (missing) | 1,000 | 5.155 µs |
+| `search_nodes` (name match) | 200 | 75.033 µs |
+| `search_nodes` (observation match) | 200 | 119.366 µs |
+| `search_nodes` (type filter) | 200 | 592.999 µs |
+| `read_graph` (all) | 5 | 86.958 ms |
+| `read_graph` (type filter) | 5 | 27.740 ms |
+| `open_nodes` (one name) | 100 | 342.091 µs |
+| `open_nodes` (five names) | 100 | 142.816 µs |
+| `find_path` (first → last) | 200 | 4.420 ms |
+| `entities_exist` (10 names) | 200 | 42.521 µs |
+| `describe_entity` | 200 | 17.712 µs |
+| `entity_type_counts` | 1,000 | 1.871 µs |
+| `relation_type_counts` | 1,000 | 1.701 µs |
+| `batch_get_entities` (10 names) | 100 | 82.580 µs |
+| `neighbors` (depth 1) | 200 | 50.209 µs |
+| `neighbors` (depth 2) | 100 | 78.975 µs |
+| `export` (JSON) | 10 | 3.901 ms |
+| `find_all_paths` (first → third, depth 5) | 200 | 20.536 µs |
+| `add_observations` (2 observations) | 1 | 1.176 ms |
+| `delete_observations` (1 observation) | 1 | 875.292 µs |
+| `upsert_entities` (type and observations) | 1 | 440.542 µs |
+| `search_relations` (from) | 200 | 4.831 µs |
+| `search_relations` (from and type) | 200 | 5.330 µs |
 
 ## Tools
 
@@ -1343,7 +1379,7 @@ Each library crate has its own README with the detail for that layer.
 cargo test                       # unit + integration tests
 cargo clippy --all-targets       # lint
 cargo build --release            # LTO + fat, opt-level 3
-cargo run --release --bin bench  # standalone benchmark
+cargo run --release --bin bench  # standalone benchmark; pass --help for flags
 ```
 
 The suite covers protocol handling, every tool handler, CRUD/search/path persistence,
