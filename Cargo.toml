@@ -34,13 +34,13 @@ axum-server = { version = "0.8", default-features = false, features = ["tls-rust
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Response compression for the HTTP transport (graph JSON + embedded UI assets).
 # The default predicate skips SSE, so the `/mcp` streams stay uncompressed.
-tower-http = { version = "0.6", default-features = false, features = ["compression-gzip", "compression-br"] }
+tower-http = { version = "0.7", default-features = false, features = ["compression-gzip", "compression-br"] }
 futures = "0.3"
 subtle = "2.6"
-lru = "0.12"
+lru = "0.18"
 rusqlite = { version = "0.40", features = ["bundled"] }
 dashmap = "6"
-petgraph = "0.7"
+petgraph = "0.8"
 usearch = "2"
 zerocopy = { version = "0.8", features = ["derive"] }
 mcpmem-core = { path = "crates/mcpmem-core", version = "2.1.1" }
@@ -66,8 +66,8 @@ toml = { version = "1", default-features = false, features = ["parse", "serde", 
 # Tree-sitter parsing + the `tags` extractor drive the code knowledge graph.
 # All optional and gated behind the default-on `code` feature so
 # `--no-default-features` yields a lean pure-memory build with no C grammars.
-tree-sitter = { version = "0.26", optional = true }
-tree-sitter-tags = { version = "0.26", optional = true }
+tree-sitter = { version = "0.27", optional = true }
+tree-sitter-tags = { version = "0.27", optional = true }
 tree-sitter-rust = { version = "0.24", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
