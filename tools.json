@@ -12,7 +12,8 @@
             "properties": {
               "name": { "type": "string", "description": "The unique name of the entity" },
               "entityType": { "type": "string", "description": "The type of the entity (e.g. person, organization, event)" },
-              "observations": { "type": "array", "items": { "type": "object", "properties": { "body": { "type": "string" }, "occurredAtUs": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 } }, "required": ["body"], "additionalProperties": false }, "description": "An array of observation contents associated with the entity" }
+              "observations": { "type": "array", "items": { "type": "object", "properties": { "body": { "type": "string" }, "occurredAtUs": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 } }, "required": ["body"], "additionalProperties": false }, "description": "An array of observation contents associated with the entity" },
+              "attributes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Key-value attributes to store on the entity" }
             },
             "required": ["name", "entityType", "observations"]
           }
@@ -35,7 +36,9 @@
             "properties": {
               "from": { "type": "string", "description": "The name of the entity where the relation starts" },
               "to": { "type": "string", "description": "The name of the entity where the relation ends" },
-              "relationType": { "type": "string", "description": "The type of the relation" }
+              "relationType": { "type": "string", "description": "The type of the relation" },
+              "observations": { "type": "array", "items": { "type": "object", "properties": { "body": { "type": "string" }, "occurredAtUs": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 } }, "required": ["body"], "additionalProperties": false }, "description": "An array of observation contents associated with the relation" },
+              "attributes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Key-value attributes to store on the relation" }
             },
             "required": ["from", "to", "relationType"]
           }
@@ -66,6 +69,106 @@
       "required": ["observations"]
     },
     "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false }
+  },
+  {
+    "name": "add_relation_observations",
+    "description": "Add new observations to existing relations in the knowledge graph. Each relation is identified by its from, to, and relationType triple. Observations that already exist on the relation are silently skipped.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": { "type": "string", "description": "The name of the entity where the relation starts" },
+              "to": { "type": "string", "description": "The name of the entity where the relation ends" },
+              "relationType": { "type": "string", "description": "The type of the relation" },
+              "contents": { "type": "array", "items": { "type": "object", "properties": { "body": { "type": "string" }, "occurredAtUs": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 } }, "required": ["body"], "additionalProperties": false }, "description": "An array of observation contents to add to the relation" }
+            },
+            "required": ["from", "to", "relationType", "contents"]
+          }
+        }
+      },
+      "required": ["relations"]
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false }
+  },
+  {
+    "name": "delete_relation_observations",
+    "description": "Delete specific observations from relations in the knowledge graph. Each relation is identified by its from, to, and relationType triple; the observations array lists the exact observations (body and optional timestamp) to remove.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": { "type": "string", "description": "The name of the entity where the relation starts" },
+              "to": { "type": "string", "description": "The name of the entity where the relation ends" },
+              "relationType": { "type": "string", "description": "The type of the relation" },
+              "observations": { "type": "array", "items": { "type": "object", "properties": { "body": { "type": "string" }, "occurredAtUs": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 } }, "required": ["body"], "additionalProperties": false }, "description": "An array of observations to delete from the relation" }
+            },
+            "required": ["from", "to", "relationType", "observations"]
+          }
+        }
+      },
+      "required": ["relations"]
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true }
+  },
+  {
+    "name": "set_attributes",
+    "description": "Set or replace key-value attributes on a target entity or relation in the knowledge graph. Attributes are targeted by owner kind: an entity is addressed by entityName, a relation by its from/to/relationType triple. Each target carries the attribute map to apply; keys already present are overwritten. Target exclusivity is enforced by the handler: exactly one of entityName or from/to/relationType must be provided per target.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ownerKind": { "type": "string", "enum": ["entity", "relation"], "description": "The kind of the attribute owner: 'entity' or 'relation'" },
+              "entityName": { "type": "string", "description": "The name of the entity to set attributes on (required when ownerKind is 'entity')" },
+              "from": { "type": "string", "description": "The source entity name of the relation (required when ownerKind is 'relation')" },
+              "to": { "type": "string", "description": "The target entity name of the relation (required when ownerKind is 'relation')" },
+              "relationType": { "type": "string", "description": "The type of the relation (required when ownerKind is 'relation')" },
+              "attributes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Key-value attributes to set or replace on the target" }
+            },
+            "required": ["ownerKind", "attributes"]
+          }
+        }
+      },
+      "required": ["targets"]
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false }
+  },
+  {
+    "name": "delete_attributes",
+    "description": "Delete specific key-value attributes from a target entity or relation in the knowledge graph. Attributes are targeted by owner kind: an entity is addressed by entityName, a relation by its from/to/relationType triple. The keys array lists which attributes to remove. Target exclusivity is enforced by the handler: exactly one of entityName or from/to/relationType must be provided per target.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ownerKind": { "type": "string", "enum": ["entity", "relation"], "description": "The kind of the attribute owner: 'entity' or 'relation'" },
+              "entityName": { "type": "string", "description": "The name of the entity to delete attributes from (required when ownerKind is 'entity')" },
+              "from": { "type": "string", "description": "The source entity name of the relation (required when ownerKind is 'relation')" },
+              "to": { "type": "string", "description": "The target entity name of the relation (required when ownerKind is 'relation')" },
+              "relationType": { "type": "string", "description": "The type of the relation (required when ownerKind is 'relation')" },
+              "keys": { "type": "array", "items": { "type": "string" }, "description": "Attribute keys to delete from the target" }
+            },
+            "required": ["ownerKind", "keys"]
+          }
+        }
+      },
+      "required": ["targets"]
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true }
   },
   {
     "name": "delete_entities",
@@ -143,7 +246,7 @@
   },
   {
     "name": "search_nodes",
-    "description": "Search for entities in the knowledge graph. Matches against entity names, types, and observation content (case-insensitive), returned best-match-first by relevance. Also returns any relations connected to matching entities. Optionally restrict by entityType and paginate with offset/limit.",
+    "description": "Search for entities in the knowledge graph. Matches against entity names, types, and observation content (case-insensitive), returned best-match-first by relevance. Matching entities; relation text is searched via search_relations. Optionally restrict by entityType and paginate with offset/limit.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -174,7 +277,7 @@
   },
   {
     "name": "get_entity",
-    "description": "Retrieve a single entity by its exact name. Returns the entity with its observations but no associated relations.",
+    "description": "Retrieve a single entity by its exact name. Returns the entity with its observations and attributes but no associated relations.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -195,13 +298,14 @@
   },
   {
     "name": "search_relations",
-    "description": "Search for relations by optional from/to/relationType filters. Omitted or empty fields match all values.",
+    "description": "Search for relations by optional from/to/relationType filters and an optional full-text query. Omitted or empty fields match all values. Each returned row is a relation detail carrying its observations and attributes; the query matches against relation text.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "from": { "type": "string", "description": "Filter by the source entity name (optional)" },
         "to": { "type": "string", "description": "Filter by the target entity name (optional)" },
-        "relationType": { "type": "string", "description": "Filter by relation type (optional)" }
+        "relationType": { "type": "string", "description": "Filter by relation type (optional)" },
+        "query": { "type": "string", "description": "Full-text search query matched against relation text (optional)" }
       }
     },
     "annotations": { "readOnlyHint": true }
@@ -244,8 +348,8 @@
     "annotations": { "readOnlyHint": true }
   },
   {
-    "name": "describe_entity",
-    "description": "One-shot context bundle for a single entity: the entity with its observations, every incident relation, its distinct neighbor names, and its degree. Replaces a get_entity plus two search_relations calls.",
+"name": "describe_entity",
+    "description": "One-shot context bundle for a single entity: the entity with its observations and attributes, every incident relation, its distinct neighbor names, and its degree. Replaces a get_entity plus two search_relations calls.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -336,7 +440,8 @@
             "properties": {
               "name": { "type": "string", "description": "The unique name of the entity" },
                 "entityType": { "type": "string", "description": "The type of the entity (applied when creating and when retyping an existing exact-name entity)" },
-              "observations": { "type": "array", "items": { "type": "object", "properties": { "body": { "type": "string" }, "occurredAtUs": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 } }, "required": ["body"], "additionalProperties": false }, "description": "Observations to add (new ones are merged in)" }
+              "observations": { "type": "array", "items": { "type": "object", "properties": { "body": { "type": "string" }, "occurredAtUs": { "type": "integer", "minimum": 0, "maximum": 9223372036854775807 } }, "required": ["body"], "additionalProperties": false }, "description": "Observations to add (new ones are merged in)" },
+              "attributes": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Key-value attributes to store on the entity" }
             },
             "required": ["name", "entityType", "observations"]
           }
@@ -348,7 +453,7 @@
   },
   {
     "name": "export_graph",
-    "description": "Export the entire knowledge graph as text in the requested format: 'json' (entities and relations), 'mermaid' (a Mermaid graph diagram), or 'dot' (Graphviz DOT). Defaults to json.",
+    "description": "Export the entire knowledge graph as text in the requested format: 'json' (entities and relations, including observations and attributes), 'mermaid' (a Mermaid graph diagram), or 'dot' (Graphviz DOT). Defaults to json.",
     "inputSchema": {
       "type": "object",
       "properties": {
