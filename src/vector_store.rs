@@ -1986,10 +1986,12 @@ mod tests {
         create_test_entity(&env.kg, "charlie", "person");
 
         env.kg
-            .create_relations(&[crate::types::Relation {
+            .create_relations(&[crate::types::RelationInput {
                 from: "alice".into(),
                 to: "bob".into(),
                 relation_type: "knows".into(),
+                observations: vec![],
+                attributes: None,
             }])
             .unwrap();
 
