@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
@@ -14,7 +14,8 @@ use crate::mutation::{
 };
 use crate::storage::{Durability, SqliteTuning};
 use crate::types::{
-    Degree, Entity, EntityDescription, EntityInput, Observation, ObservationInput, Relation,
+    AttributeDelete, AttributeSet, Degree, Entity, EntityDescription, EntityInput, Observation,
+    ObservationInput, Relation, RelationDetail, RelationInput, RelationObservationUpdate,
 };
 
 /// Single SQL projection for every full graph JSON read. Alias `o` is an observation row.
@@ -63,6 +64,93 @@ fn lookup_type_id(conn: &Connection, type_name: &str, kind: i64) -> Option<i64> 
         .ok()?
         .query_row(params![kind, type_name], |row| row.get::<_, i64>(0))
         .ok()
+}
+
+/// Load the k:v attribute map of one owner from the `attribute` table.
+/// REQ-ATTR-READ: the read models populate attributes here, on the result
+/// path — the write snapshot (`EntitySnapshot`) stays free of them.
+fn attributes_for(
+    conn: &Connection,
+    owner_kind: &str,
+    owner_id: i64,
+) -> Result<BTreeMap<String, String>> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT key, value FROM attribute
+             WHERE owner_kind = ?1 AND owner_id = ?2
+             ORDER BY key",
+        )
+        .map_err(sqlite_err)?;
+    let rows = stmt
+        .query_map(params![owner_kind, owner_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(sqlite_err)?;
+    rows.collect::<rusqlite::Result<BTreeMap<String, String>>>()
+        .map_err(sqlite_err)
+}
+
+/// Canonicalize an attribute map for the read models: `None` when empty, so
+/// attribute-less entities and descriptions keep the previous wire shape.
+fn some_nonempty(map: BTreeMap<String, String>) -> Option<BTreeMap<String, String>> {
+    if map.is_empty() { None } else { Some(map) }
+}
+
+/// Build the detail rows (always-present observations and attributes) of a
+/// list of relation triples, preserving order. A live triple always has a
+/// live mirror; a row whose mirror is absent (legacy corruption) is skipped
+/// rather than surfaced with fabricated metadata.
+fn relation_details(
+    conn: &Connection,
+    triples: impl Iterator<Item = Relation>,
+) -> Result<Vec<RelationDetail>> {
+    use rusqlite::OptionalExtension;
+    let mut out = Vec::new();
+    for relation in triples {
+        let Some(mirror_id) = conn
+            .query_row(
+                "SELECT m.id FROM taxonomy_relation m
+                 JOIN entity f ON f.id = m.from_id AND f.name = ?1 AND f.flags = 0
+                 JOIN entity t ON t.id = m.to_id AND t.name = ?2 AND t.flags = 0
+                 JOIN type_dict d ON d.id = m.type_id AND d.kind = 1 AND d.name = ?3
+                 WHERE m.deleted = 0",
+                params![relation.from, relation.to, relation.relation_type],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_err)?
+        else {
+            continue;
+        };
+        let observations: Vec<Observation> = {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT body, created_us, occurred_us
+                     FROM relation_observation WHERE relation_id = ?1
+                     ORDER BY idx, id",
+                )
+                .map_err(sqlite_err)?;
+            stmt.query_map([mirror_id], |row| {
+                Ok(Observation {
+                    body: row.get(0)?,
+                    created_at_us: Some(row.get(1)?),
+                    occurred_at_us: row.get(2)?,
+                    origin_entity_name: None,
+                })
+            })
+            .map_err(sqlite_err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sqlite_err)?
+        };
+        out.push(RelationDetail {
+            from: relation.from,
+            to: relation.to,
+            relation_type: relation.relation_type,
+            observations,
+            attributes: attributes_for(conn, "relation", mirror_id)?,
+        });
+    }
+    Ok(out)
 }
 
 fn read_graph_stat(conn: &Connection, key: &str) -> Result<i64> {
@@ -397,6 +485,7 @@ pub struct GraphHandle {
     readers: ReaderPool,
     seq_entity: AtomicI64,
     seq_obs: AtomicI64,
+    seq_rel_obs: AtomicI64,
 }
 
 /// Open one `query_only` reader connection against an existing WAL database.
@@ -484,6 +573,7 @@ impl GraphHandle {
 
         let seq_entity = read_graph_stat(&conn, "entity_seq").unwrap_or(0);
         let seq_obs = read_graph_stat(&conn, "obs_seq").unwrap_or(0);
+        let seq_rel_obs = read_graph_stat(&conn, "rel_obs_seq").unwrap_or(0);
 
         // Open the reader pool against the now-initialized database. At least one
         // reader is always created.
@@ -502,6 +592,7 @@ impl GraphHandle {
             readers,
             seq_entity: AtomicI64::new(seq_entity),
             seq_obs: AtomicI64::new(seq_obs),
+            seq_rel_obs: AtomicI64::new(seq_rel_obs),
         })
     }
 
@@ -516,11 +607,19 @@ impl GraphHandle {
             .fetch_max(read_graph_stat(conn, "entity_seq")?, Ordering::Relaxed);
         self.seq_obs
             .fetch_max(read_graph_stat(conn, "obs_seq")?, Ordering::Relaxed);
+        self.seq_rel_obs
+            .fetch_max(read_graph_stat(conn, "rel_obs_seq")?, Ordering::Relaxed);
         Ok(())
     }
 
     pub(crate) fn next_obs_id(&self) -> i64 {
         self.seq_obs.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Next relation observation id, from the dedicated `rel_obs_seq` cell.
+    /// The id space is disjoint from entity observation ids.
+    pub(crate) fn next_rel_obs_id(&self) -> i64 {
+        self.seq_rel_obs.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     fn get_entity_id(&self, conn: &Connection, name: &str) -> Result<Option<(i64, i64, i64, i64)>> {
@@ -535,10 +634,15 @@ impl GraphHandle {
     pub(crate) fn sync_seqs(&self, conn: &Connection) -> Result<()> {
         let seq_e = self.seq_entity.load(Ordering::Relaxed);
         let seq_o = self.seq_obs.load(Ordering::Relaxed);
+        let seq_r = self.seq_rel_obs.load(Ordering::Relaxed);
         conn.execute(
-            "UPDATE graph_stat SET value = CASE key WHEN 'entity_seq' THEN ?1 WHEN 'obs_seq' THEN ?2 ELSE value END
-             WHERE key IN ('entity_seq', 'obs_seq')",
-            params![seq_e, seq_o],
+            "UPDATE graph_stat SET value = CASE key
+                 WHEN 'entity_seq' THEN ?1
+                 WHEN 'obs_seq' THEN ?2
+                 WHEN 'rel_obs_seq' THEN ?3
+                 ELSE value END
+             WHERE key IN ('entity_seq', 'obs_seq', 'rel_obs_seq')",
+            params![seq_e, seq_o, seq_r],
         )
         .map_err(sqlite_err)?;
         Ok(())
@@ -551,7 +655,15 @@ impl GraphHandle {
         // One read transaction prevents mixing metadata and observations from
         // opposite sides of a concurrent commit.
         let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
-        let entity = crate::mutation::read_entity(&tx, name)?.map(|snapshot| snapshot.entity());
+        let entity = match crate::mutation::read_entity(&tx, name)? {
+            Some(snapshot) => {
+                let mut entity = snapshot.entity();
+                entity.attributes =
+                    some_nonempty(attributes_for(&tx, "entity", snapshot.entity_id)?);
+                Some(entity)
+            }
+            None => None,
+        };
         tx.commit().map_err(sqlite_err)?;
         Ok(entity)
     }
@@ -587,7 +699,7 @@ impl GraphHandle {
         .map(|_| ())
     }
 
-    pub fn create_relations(&self, relations: &[Relation]) -> Result<Vec<Relation>> {
+    pub fn create_relations(&self, relations: &[RelationInput]) -> Result<Vec<Relation>> {
         match self.mutate(MutationRequest::CreateRelations {
             relations: relations.to_vec(),
         })? {
@@ -599,6 +711,64 @@ impl GraphHandle {
     pub fn delete_relations(&self, relations: &[Relation]) -> Result<()> {
         self.mutate(MutationRequest::DeleteRelations {
             relations: relations.to_vec(),
+        })
+        .map(|_| ())
+    }
+
+    pub fn add_relation_observations(
+        &self,
+        from: &str,
+        to: &str,
+        relation_type: &str,
+        contents: &[ObservationInput],
+    ) -> Result<Vec<Observation>> {
+        match self.mutate(MutationRequest::AddRelationObservations {
+            relations: vec![RelationObservationUpdate {
+                relation: Relation {
+                    from: from.into(),
+                    to: to.into(),
+                    relation_type: relation_type.into(),
+                },
+                contents: contents.to_vec(),
+            }],
+        })? {
+            MutationResult::RelationObservations(mut result) => {
+                Ok(result.remove(0).added_observations)
+            }
+            _ => unreachable!("add_relation_observations always returns observations"),
+        }
+    }
+
+    pub fn delete_relation_observations(
+        &self,
+        from: &str,
+        to: &str,
+        relation_type: &str,
+        observations: &[ObservationInput],
+    ) -> Result<()> {
+        self.mutate(MutationRequest::DeleteRelationObservations {
+            relations: vec![RelationObservationUpdate {
+                relation: Relation {
+                    from: from.into(),
+                    to: to.into(),
+                    relation_type: relation_type.into(),
+                },
+                contents: observations.to_vec(),
+            }],
+        })
+        .map(|_| ())
+    }
+
+    pub fn set_attributes(&self, targets: &[AttributeSet]) -> Result<()> {
+        self.mutate(MutationRequest::SetAttributes {
+            targets: targets.to_vec(),
+        })
+        .map(|_| ())
+    }
+
+    pub fn delete_attributes(&self, targets: &[AttributeDelete]) -> Result<()> {
+        self.mutate(MutationRequest::DeleteAttributes {
+            targets: targets.to_vec(),
         })
         .map(|_| ())
     }
@@ -1047,10 +1217,10 @@ impl GraphHandle {
         from: Option<&str>,
         to: Option<&str>,
         rtype: Option<&str>,
+        query: Option<&str>,
         limit: Option<usize>,
-    ) -> Vec<Relation> {
+    ) -> Result<Vec<RelationDetail>> {
         let conn = self.readers.get();
-        let mut results = Vec::new();
 
         // A filter that is supplied but resolves to nothing uses the sentinel
         // id -1 (which matches no row), so the query returns empty rather than
@@ -1067,6 +1237,70 @@ impl GraphHandle {
             .filter(|rt| !rt.is_empty())
             .map(|rt| lookup_type_id(&conn, rt, 1).unwrap_or(-1));
 
+        // REQ-OBS-FTS: query mode matches `rel_obs_fts` (bm25 rank) and
+        // resolves matched observation rows to their owner relation, composed
+        // with the structural filters as AND. Results stay owner-level: one
+        // detail row per distinct triple, in best-rank order.
+        if let Some(query) = query.filter(|q| !q.trim().is_empty()) {
+            let mut sql = String::from(
+                "SELECT f.name, t.name, d.name
+                 FROM rel_obs_fts ft
+                 JOIN relation_observation ro ON ro.id = ft.rowid
+                 JOIN taxonomy_relation m ON m.id = ro.relation_id
+                 JOIN entity f ON f.id = m.from_id
+                 JOIN entity t ON t.id = m.to_id
+                 JOIN type_dict d ON d.id = m.type_id
+                 WHERE rel_obs_fts MATCH ?1 AND m.deleted = 0
+                   AND f.flags = 0 AND t.flags = 0",
+            );
+            // Resolved ids (or the -1 sentinel for supplied-but-missing) are
+            // DB row ids, never user text, so inlining them is injection-safe
+            // and avoids binding-temporary lifetimes — the same convention as
+            // `int_csv` / `rel_values_literal`.
+            if let Some(fid) = from_id {
+                sql.push_str(&format!(" AND m.from_id = {fid}"));
+            }
+            if let Some(tid) = to_id {
+                sql.push_str(&format!(" AND m.to_id = {tid}"));
+            }
+            if let Some(tpid) = type_id {
+                sql.push_str(&format!(" AND m.type_id = {tpid}"));
+            }
+            sql.push_str(" ORDER BY rank");
+            if let Some(lim) = limit
+                && lim > 0
+            {
+                sql.push_str(&format!(" LIMIT {lim}"));
+            }
+            let mut triples: Vec<Relation> = Vec::new();
+            let mut seen: HashSet<(String, String, String)> = HashSet::new();
+            let mut stmt = conn.prepare(&sql).map_err(sqlite_err)?;
+            let rows = stmt
+                .query_map(params![query], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(sqlite_err)?;
+            for row in rows {
+                let (from, to, relation_type) = row.map_err(sqlite_err)?;
+                if seen.insert((from.clone(), to.clone(), relation_type.clone())) {
+                    triples.push(Relation {
+                        from,
+                        to,
+                        relation_type,
+                    });
+                }
+            }
+            return relation_details(&conn, triples.into_iter());
+        }
+
+        // No-query path: keep the existing exact-match arms and their ordering
+        // semantics (ORDER BY from_id, to_id) byte-identical, then attach the
+        // always-present per-row observations and attributes.
+        let mut triples: Vec<Relation> = Vec::new();
         match (from_id, to_id, type_id) {
             (Some(fid), Some(tid), Some(tpid)) => {
                 if let Ok(mut stmt) = conn.prepare_cached(
@@ -1086,7 +1320,7 @@ impl GraphHandle {
                     })
                 }) {
                     for row in rows.flatten() {
-                        results.push(row);
+                        triples.push(row);
                     }
                 }
             }
@@ -1108,7 +1342,7 @@ impl GraphHandle {
                     })
                 }) {
                     for row in rows.flatten() {
-                        results.push(row);
+                        triples.push(row);
                     }
                 }
             }
@@ -1130,7 +1364,7 @@ impl GraphHandle {
                     })
                 }) {
                     for row in rows.flatten() {
-                        results.push(row);
+                        triples.push(row);
                     }
                 }
             }
@@ -1152,7 +1386,7 @@ impl GraphHandle {
                     })
                 }) {
                     for row in rows.flatten() {
-                        results.push(row);
+                        triples.push(row);
                     }
                 }
             }
@@ -1174,7 +1408,7 @@ impl GraphHandle {
                     })
                 }) {
                     for row in rows.flatten() {
-                        results.push(row);
+                        triples.push(row);
                     }
                 }
             }
@@ -1196,7 +1430,7 @@ impl GraphHandle {
                     })
                 }) {
                     for row in rows.flatten() {
-                        results.push(row);
+                        triples.push(row);
                     }
                 }
             }
@@ -1218,7 +1452,7 @@ impl GraphHandle {
                     })
                 }) {
                     for row in rows.flatten() {
-                        results.push(row);
+                        triples.push(row);
                     }
                 }
             }
@@ -1239,15 +1473,15 @@ impl GraphHandle {
                     })
                 }) {
                     for row in rows.flatten() {
-                        results.push(row);
+                        triples.push(row);
                     }
                 }
             }
         }
         if let Some(lim) = limit {
-            results.truncate(lim);
+            triples.truncate(lim);
         }
-        results
+        relation_details(&conn, triples.into_iter())
     }
 
     pub fn find_path(&self, from: &str, to: &str) -> Result<Option<Vec<String>>> {
@@ -1538,6 +1772,7 @@ impl GraphHandle {
             .iter()
             .filter(|relation| relation.from == name)
             .count() as i64;
+        let attributes = some_nonempty(attributes_for(&tx, "entity", entity.entity_id)?);
         tx.commit().map_err(sqlite_err)?;
 
         Ok(EntityDescription {
@@ -1547,6 +1782,7 @@ impl GraphHandle {
             relations,
             neighbors,
             degree: Degree { incoming, outgoing },
+            attributes,
         })
     }
 
@@ -1640,9 +1876,52 @@ impl GraphHandle {
     }
 
     pub fn batch_get_entities(&self, names: &[String]) -> Vec<Option<Entity>> {
+        let conn = self.readers.get();
+        // Resolve ids, load the full entities in one query, then attach every
+        // resolved id's attributes from a single `attribute` lookup — no N+1.
+        let ids: Vec<Option<i64>> = names
+            .iter()
+            .map(|n| entity_name_lookup(&conn, n).ok().flatten())
+            .collect();
+        let resolved: Vec<i64> = ids.iter().flatten().copied().collect();
+        let mut by_id = batch_entities_by_ids(&conn, &resolved);
+        let mut attrs: FxHashMap<i64, BTreeMap<String, String>> = FxHashMap::default();
+        if !resolved.is_empty() {
+            let sql = format!(
+                "SELECT owner_id, key, value FROM attribute
+                 WHERE owner_kind = 'entity' AND owner_id IN ({})
+                 ORDER BY owner_id, key",
+                int_csv(&resolved)
+            );
+            if let Ok(mut stmt) = conn.prepare(&sql)
+                && let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+            {
+                for row in rows.flatten() {
+                    attrs.entry(row.0).or_default().insert(row.1, row.2);
+                }
+            }
+        }
         names
             .iter()
-            .map(|n| self.get_entity(n).unwrap_or(None))
+            .enumerate()
+            .map(|(i, _)| -> Option<Entity> {
+                let Some(id) = ids[i] else {
+                    return None;
+                };
+                let Some(mut entity) = by_id.remove(&id) else {
+                    return None;
+                };
+                if let Some(map) = attrs.remove(&id) {
+                    entity.attributes = some_nonempty(map);
+                }
+                Some(entity)
+            })
             .collect()
     }
 
@@ -1795,7 +2074,11 @@ impl GraphHandle {
                         'observations', COALESCE((
                             SELECT json_group_array({OBSERVATION_JSON} ORDER BY o.idx, o.id)
                             FROM observation o WHERE o.entity_id = e.id
-                        ), json('[]'))
+                        ), json('[]')),
+                        'attributes', COALESCE((
+                            SELECT json_group_object(key, value) FROM attribute
+                            WHERE owner_kind = 'entity' AND owner_id = e.id
+                        ), json('{{}}'))
                     ) ORDER BY e.id)
                     FROM (
                         SELECT id, name, type_id FROM entity
@@ -1807,7 +2090,25 @@ impl GraphHandle {
                     SELECT json_group_array(json_object(
                         'from', e1.name,
                         'to', e2.name,
-                        'relationType', t.name
+                        'relationType', t.name,
+                        'observations', COALESCE((
+                            SELECT json_group_array(json_object(
+                                'body', ro.body,
+                                'createdAtUs', ro.created_us,
+                                'occurredAtUs', ro.occurred_us,
+                                'originEntityName', NULL))
+                            FROM relation_observation ro
+                            JOIN taxonomy_relation m ON m.id = ro.relation_id AND m.deleted = 0
+                            WHERE m.from_id = r.from_id AND m.to_id = r.to_id AND m.type_id = r.type_id
+                            ORDER BY ro.idx
+                        ), json('[]')),
+                        'attributes', COALESCE((
+                            SELECT json_group_object(key, value) FROM attribute
+                            WHERE owner_kind = 'relation' AND owner_id = (
+                                SELECT id FROM taxonomy_relation
+                                WHERE from_id = r.from_id AND to_id = r.to_id
+                                  AND type_id = r.type_id AND deleted = 0)
+                        ), json('{{}}'))
                     ))
                     FROM (
                         SELECT from_id, to_id, type_id FROM relation LIMIT ?1
@@ -1843,7 +2144,8 @@ impl GraphHandle {
         let tx = TxGuard::begin(&conn)?;
         conn.execute_batch(
             "INSERT INTO name_fts(name_fts) VALUES('optimize');
-             INSERT INTO obs_fts(obs_fts) VALUES('optimize');",
+             INSERT INTO obs_fts(obs_fts) VALUES('optimize');
+             INSERT INTO rel_obs_fts(rel_obs_fts) VALUES('optimize');",
         )
         .map_err(sqlite_err)?;
         tx.commit()?;
@@ -2178,13 +2480,7 @@ mod tests {
         ])
         .unwrap();
 
-        let rels = kg
-            .create_relations(&[Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "edge".into(),
-            }])
-            .unwrap();
+        let rels = kg.create_relations(&[rel_input("A", "B", "edge")]).unwrap();
         assert_eq!(rels.len(), 1);
 
         assert_eq!(kg.get_entity_count().unwrap(), 2);
@@ -2238,19 +2534,8 @@ mod tests {
         ])
         .unwrap();
 
-        kg.create_relations(&[
-            Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "e".into(),
-            },
-            Relation {
-                from: "B".into(),
-                to: "C".into(),
-                relation_type: "e".into(),
-            },
-        ])
-        .unwrap();
+        kg.create_relations(&[rel_input("A", "B", "e"), rel_input("B", "C", "e")])
+            .unwrap();
 
         let path = kg.find_path("A", "C").unwrap().unwrap();
         assert_eq!(path, vec!["A", "B", "C"]);
@@ -2281,19 +2566,8 @@ mod tests {
         ])
         .unwrap();
 
-        kg.create_relations(&[
-            Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "e".into(),
-            },
-            Relation {
-                from: "A".into(),
-                to: "C".into(),
-                relation_type: "e".into(),
-            },
-        ])
-        .unwrap();
+        kg.create_relations(&[rel_input("A", "B", "e"), rel_input("A", "C", "e")])
+            .unwrap();
 
         assert_eq!(kg.degree("A", Direction::Outgoing).unwrap(), 2);
         assert_eq!(kg.degree("A", Direction::Incoming).unwrap(), 0);
@@ -2319,12 +2593,7 @@ mod tests {
         ])
         .unwrap();
 
-        kg.create_relations(&[Relation {
-            from: "A".into(),
-            to: "B".into(),
-            relation_type: "e".into(),
-        }])
-        .unwrap();
+        kg.create_relations(&[rel_input("A", "B", "e")]).unwrap();
 
         let result = kg.neighbors("A", Direction::Outgoing, None, 1).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
@@ -2351,12 +2620,7 @@ mod tests {
         ])
         .unwrap();
 
-        kg.create_relations(&[Relation {
-            from: "X".into(),
-            to: "Y".into(),
-            relation_type: "e".into(),
-        }])
-        .unwrap();
+        kg.create_relations(&[rel_input("X", "Y", "e")]).unwrap();
 
         let result = kg.open_nodes(&["X".into()]);
         let v: Value = serde_json::from_str(&result).unwrap();
@@ -2407,26 +2671,10 @@ mod tests {
         .unwrap();
 
         kg.create_relations(&[
-            Relation {
-                from: "B".into(),
-                to: "A".into(),
-                relation_type: "inbound".into(),
-            },
-            Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "outbound".into(),
-            },
-            Relation {
-                from: "A".into(),
-                to: "C".into(),
-                relation_type: "other".into(),
-            },
-            Relation {
-                from: "A".into(),
-                to: "A".into(),
-                relation_type: "self".into(),
-            },
+            rel_input("B", "A", "inbound"),
+            rel_input("A", "B", "outbound"),
+            rel_input("A", "C", "other"),
+            rel_input("A", "A", "self"),
         ])
         .unwrap();
 
@@ -2543,19 +2791,8 @@ mod tests {
         ])
         .unwrap();
 
-        kg.create_relations(&[
-            Relation {
-                from: "a".into(),
-                to: "b".into(),
-                relation_type: "knows".into(),
-            },
-            Relation {
-                from: "a".into(),
-                to: "c".into(),
-                relation_type: "knows".into(),
-            },
-        ])
-        .unwrap();
+        kg.create_relations(&[rel_input("a", "b", "knows"), rel_input("a", "c", "knows")])
+            .unwrap();
 
         let counts = kg.relation_type_counts();
         let map: FxHashMap<_, _> = counts.into_iter().collect();
@@ -2572,12 +2809,7 @@ mod tests {
             attributes: None,
         }])
         .unwrap();
-        kg.create_relations(&[Relation {
-            from: "A".into(),
-            to: "A".into(),
-            relation_type: "self".into(),
-        }])
-        .unwrap();
+        kg.create_relations(&[rel_input("A", "A", "self")]).unwrap();
 
         // Upsert retypes an exact-name entity and only adds novel observations.
         kg.upsert_entities(&[Entity {
@@ -2604,11 +2836,14 @@ mod tests {
         assert_eq!(type_counts.get("NewType"), Some(&1));
 
         assert_eq!(
-            kg.search_relations(Some("A"), Some("A"), Some("self"), None),
-            [Relation {
+            kg.search_relations(Some("A"), Some("A"), Some("self"), None, None)
+                .unwrap(),
+            [RelationDetail {
                 from: "A".into(),
                 to: "A".into(),
                 relation_type: "self".into(),
+                observations: vec![],
+                attributes: BTreeMap::new(),
             }]
         );
     }
@@ -2632,12 +2867,8 @@ mod tests {
         ])
         .unwrap();
 
-        kg.create_relations(&[Relation {
-            from: "source".into(),
-            to: "target".into(),
-            relation_type: "e".into(),
-        }])
-        .unwrap();
+        kg.create_relations(&[rel_input("source", "target", "e")])
+            .unwrap();
 
         let merged = kg.merge_entities("source", "target").unwrap();
         assert_eq!(merged.name, "target");
@@ -2670,21 +2901,9 @@ mod tests {
         .unwrap();
 
         kg.create_relations(&[
-            Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "e".into(),
-            },
-            Relation {
-                from: "B".into(),
-                to: "C".into(),
-                relation_type: "e".into(),
-            },
-            Relation {
-                from: "A".into(),
-                to: "C".into(),
-                relation_type: "e".into(),
-            },
+            rel_input("A", "B", "e"),
+            rel_input("B", "C", "e"),
+            rel_input("A", "C", "e"),
         ])
         .unwrap();
 
@@ -2957,13 +3176,7 @@ mod tests {
         }])
         .unwrap();
 
-        let rels = kg
-            .create_relations(&[Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "e".into(),
-            }])
-            .unwrap();
+        let rels = kg.create_relations(&[rel_input("A", "B", "e")]).unwrap();
         assert!(rels.is_empty());
         assert_eq!(kg.get_relation_count().unwrap(), 0);
     }
@@ -2979,13 +3192,7 @@ mod tests {
         }])
         .unwrap();
 
-        let rels = kg
-            .create_relations(&[Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "e".into(),
-            }])
-            .unwrap();
+        let rels = kg.create_relations(&[rel_input("A", "B", "e")]).unwrap();
         assert!(rels.is_empty());
         assert_eq!(kg.get_relation_count().unwrap(), 0);
     }
@@ -2993,13 +3200,7 @@ mod tests {
     #[test]
     fn test_create_relations_both_nonexistent() {
         let kg = new_kg();
-        let rels = kg
-            .create_relations(&[Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "e".into(),
-            }])
-            .unwrap();
+        let rels = kg.create_relations(&[rel_input("A", "B", "e")]).unwrap();
         assert!(rels.is_empty());
     }
 
@@ -3015,11 +3216,7 @@ mod tests {
         .unwrap();
 
         let rels = kg
-            .create_relations(&[Relation {
-                from: "self".into(),
-                to: "self".into(),
-                relation_type: "loop".into(),
-            }])
+            .create_relations(&[rel_input("self", "self", "loop")])
             .unwrap();
         assert_eq!(rels.len(), 1);
         assert_eq!(kg.get_relation_count().unwrap(), 1);
@@ -3046,10 +3243,12 @@ mod tests {
         ])
         .unwrap();
 
-        let r = Relation {
+        let r = RelationInput {
             from: "A".into(),
             to: "B".into(),
             relation_type: "e".into(),
+            observations: vec![],
+            attributes: None,
         };
         let first = kg.create_relations(std::slice::from_ref(&r)).unwrap();
         assert_eq!(first.len(), 1);
@@ -3079,11 +3278,7 @@ mod tests {
         .unwrap();
 
         let rels = kg
-            .create_relations(&[Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "brand_new_type".into(),
-            }])
+            .create_relations(&[rel_input("A", "B", "brand_new_type")])
             .unwrap();
         assert_eq!(rels.len(), 1);
 
@@ -3117,19 +3312,8 @@ mod tests {
         ])
         .unwrap();
 
-        kg.create_relations(&[
-            Relation {
-                from: "A".into(),
-                to: "B".into(),
-                relation_type: "e".into(),
-            },
-            Relation {
-                from: "A".into(),
-                to: "C".into(),
-                relation_type: "e".into(),
-            },
-        ])
-        .unwrap();
+        kg.create_relations(&[rel_input("A", "B", "e"), rel_input("A", "C", "e")])
+            .unwrap();
 
         assert_eq!(kg.degree("A", Direction::Outgoing).unwrap(), 2);
         assert_eq!(kg.degree("A", Direction::Incoming).unwrap(), 0);
@@ -3162,14 +3346,21 @@ mod tests {
             to: "B".into(),
             relation_type: "e".into(),
         };
-        kg.create_relations(std::slice::from_ref(&r)).unwrap();
+        let input = RelationInput {
+            from: r.from.clone(),
+            to: r.to.clone(),
+            relation_type: r.relation_type.clone(),
+            observations: vec![],
+            attributes: None,
+        };
+        kg.create_relations(std::slice::from_ref(&input)).unwrap();
         assert_eq!(kg.get_relation_count().unwrap(), 1);
 
         kg.delete_relations(std::slice::from_ref(&r)).unwrap();
         assert_eq!(kg.get_relation_count().unwrap(), 0);
 
         // Recreate after delete
-        let re = kg.create_relations(&[r]).unwrap();
+        let re = kg.create_relations(&[input]).unwrap();
         assert_eq!(re.len(), 1);
         assert_eq!(kg.get_relation_count().unwrap(), 1);
     }
@@ -3194,12 +3385,7 @@ mod tests {
             },
         ])
         .unwrap();
-        kg.create_relations(&[Relation {
-            from: "A".into(),
-            to: "B".into(),
-            relation_type: "e".into(),
-        }])
-        .unwrap();
+        kg.create_relations(&[rel_input("A", "B", "e")]).unwrap();
 
         assert_eq!(kg.get_relation_count().unwrap(), 1);
 
@@ -3258,11 +3444,13 @@ mod tests {
             })
             .collect();
         kg.create_entities(&entities).unwrap();
-        let rels: Vec<Relation> = (0..n.saturating_sub(1))
-            .map(|i| Relation {
+        let rels: Vec<RelationInput> = (0..n.saturating_sub(1))
+            .map(|i| RelationInput {
                 from: format!("n{i}"),
                 to: format!("n{}", i + 1),
                 relation_type: "edge".into(),
+                observations: vec![],
+                attributes: None,
             })
             .collect();
         if !rels.is_empty() {
@@ -3563,7 +3751,9 @@ mod tests {
         seed_line(&kg, 3); // edges of type "edge"
         // A filter for a relation type that does not exist must return nothing,
         // not every relation — and must not create a phantom type row.
-        let r = kg.search_relations(None, None, Some("does_not_exist"), None);
+        let r = kg
+            .search_relations(None, None, Some("does_not_exist"), None, None)
+            .unwrap();
         assert!(r.is_empty());
         // The phantom type must not have been inserted by the read.
         let types = kg.relation_type_counts();
@@ -3680,12 +3870,8 @@ mod tests {
             },
         ])
         .unwrap();
-        kg.create_relations(&[Relation {
-            from: "a".into(),
-            to: "b".into(),
-            relation_type: "knows".into(),
-        }])
-        .unwrap();
+        kg.create_relations(&[rel_input("a", "b", "knows")])
+            .unwrap();
         assert!(kg.relation_type_exists("knows"));
         assert!(!kg.relation_type_exists("unknown_kind"));
         // The negative read must not have inserted a phantom type row.
@@ -3697,7 +3883,9 @@ mod tests {
     fn test_search_relations_missing_from_returns_empty() {
         let kg = new_kg_with_pool(2);
         seed_line(&kg, 3);
-        let r = kg.search_relations(Some("ghost"), None, None, None);
+        let r = kg
+            .search_relations(Some("ghost"), None, None, None, None)
+            .unwrap();
         assert!(r.is_empty(), "missing 'from' must not match every relation");
     }
 
@@ -3705,7 +3893,9 @@ mod tests {
     fn test_search_relations_existing_filters_still_work() {
         let kg = new_kg_with_pool(2);
         seed_line(&kg, 3);
-        let r = kg.search_relations(Some("n0"), None, Some("edge"), None);
+        let r = kg
+            .search_relations(Some("n0"), None, Some("edge"), None, None)
+            .unwrap();
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].from, "n0");
         assert_eq!(r[0].to, "n1");
@@ -3747,19 +3937,8 @@ mod tests {
             },
         ])
         .unwrap();
-        kg.create_relations(&[
-            Relation {
-                from: "a".into(),
-                to: "b".into(),
-                relation_type: "knows".into(),
-            },
-            Relation {
-                from: "a".into(),
-                to: "c".into(),
-                relation_type: "likes".into(),
-            },
-        ])
-        .unwrap();
+        kg.create_relations(&[rel_input("a", "b", "knows"), rel_input("a", "c", "likes")])
+            .unwrap();
         let json = kg
             .neighbors("a", Direction::Outgoing, Some("knows"), 1)
             .unwrap();
@@ -3833,5 +4012,269 @@ mod tests {
         kg.checkpoint_passive().unwrap();
         // Data is still readable afterwards.
         assert!(kg.get_entity("a").unwrap().is_some());
+    }
+
+    // ── Relation observations and attributes (wave 1 core) ────────────────
+
+    fn rel_input(from: &str, to: &str, relation_type: &str) -> RelationInput {
+        RelationInput {
+            from: from.into(),
+            to: to.into(),
+            relation_type: relation_type.into(),
+            observations: vec![],
+            attributes: None,
+        }
+    }
+
+    fn seed_relation_obs_attrs(kg: &GraphHandle) -> i64 {
+        kg.create_entities(&[
+            Entity {
+                name: "a".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+                attributes: None,
+            },
+            Entity {
+                name: "b".into(),
+                entity_type: "n".into(),
+                observations: vec![],
+                attributes: None,
+            },
+        ])
+        .unwrap();
+        kg.create_relations(&[RelationInput {
+            from: "a".into(),
+            to: "b".into(),
+            relation_type: "uses".into(),
+            observations: vec!["contract #12".into(), "legacy".into()],
+            attributes: Some(std::collections::BTreeMap::from([("k".into(), "v".into())])),
+        }])
+        .unwrap();
+        let conn = kg.writer.lock();
+        conn.query_row(
+            "SELECT m.id FROM taxonomy_relation m
+             JOIN entity f ON f.id = m.from_id AND f.name = 'a'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn get_entity_and_describe_include_attributes() {
+        let kg = new_kg();
+        kg.create_entities(&[Entity {
+            name: "a".into(),
+            entity_type: "t".into(),
+            observations: vec![],
+            attributes: None,
+        }])
+        .unwrap();
+        let conn = kg.writer.lock();
+        let id: i64 = conn
+            .query_row("SELECT id FROM entity WHERE name='a'", [], |row| row.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO attribute(owner_kind,owner_id,key,value,created_us,updated_us)
+             VALUES('entity',?1,'k','v',1,1)",
+            [id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let got = kg.get_entity("a").unwrap().unwrap();
+        assert_eq!(
+            got.attributes,
+            Some(std::collections::BTreeMap::from([("k".into(), "v".into())]))
+        );
+        let described = kg.describe_entity("a").unwrap();
+        assert_eq!(
+            described.attributes,
+            Some(std::collections::BTreeMap::from([("k".into(), "v".into())]))
+        );
+
+        // Attribute-less entities canonicalize to None on the wire.
+        kg.create_entities(&[Entity {
+            name: "plain".into(),
+            entity_type: "t".into(),
+            observations: vec![],
+            attributes: None,
+        }])
+        .unwrap();
+        assert_eq!(kg.get_entity("plain").unwrap().unwrap().attributes, None);
+        assert_eq!(kg.describe_entity("plain").unwrap().attributes, None);
+    }
+
+    #[test]
+    fn batch_get_entities_include_attributes() {
+        let kg = new_kg();
+        kg.create_entities(&[
+            Entity {
+                name: "a".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+                attributes: None,
+            },
+            Entity {
+                name: "b".into(),
+                entity_type: "t".into(),
+                observations: vec![],
+                attributes: None,
+            },
+        ])
+        .unwrap();
+        let conn = kg.writer.lock();
+        conn.execute(
+            "INSERT INTO attribute(owner_kind,owner_id,key,value,created_us,updated_us)
+             SELECT 'entity', e.id, 'k', 'v', 1, 1 FROM entity e WHERE e.name='a'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let results = kg.batch_get_entities(&["a".into(), "missing".into(), "b".into()]);
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results[0].as_ref().unwrap().attributes,
+            Some(std::collections::BTreeMap::from([("k".into(), "v".into())]))
+        );
+        assert!(results[1].is_none());
+        assert_eq!(results[2].as_ref().unwrap().attributes, None);
+    }
+
+    #[test]
+    fn search_relations_query_matches_relation_observation_bodies() {
+        let kg = new_kg();
+        seed_relation_obs_attrs(&kg);
+
+        // Query mode returns owner-level detail rows in rank order.
+        let detail = kg
+            .search_relations(None, None, None, Some("contract"), Some(10usize))
+            .unwrap();
+        assert_eq!(detail.len(), 1);
+        assert_eq!(detail[0].from, "a");
+        assert_eq!(detail[0].to, "b");
+        assert_eq!(detail[0].relation_type, "uses");
+        assert_eq!(
+            detail[0]
+                .observations
+                .iter()
+                .map(|o| o.body.as_str())
+                .collect::<Vec<_>>(),
+            ["contract #12", "legacy"],
+            "owner-level detail carries the full observation list, matched body first"
+        );
+        assert_eq!(
+            detail[0].attributes,
+            std::collections::BTreeMap::from([("k".into(), "v".into())])
+        );
+
+        // Query mode composes with structural filters.
+        let filtered = kg
+            .search_relations(
+                Some("a"),
+                Some("b"),
+                Some("uses"),
+                Some("legacy"),
+                Some(10usize),
+            )
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        let no_match = kg
+            .search_relations(Some("ghost"), None, None, Some("contract"), Some(10usize))
+            .unwrap();
+        assert!(no_match.is_empty(), "missing entity filter yields nothing");
+
+        // Without a query every relation row carries always-present detail.
+        let all = kg
+            .search_relations(None, None, None, None, Some(10usize))
+            .unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            all[0]
+                .observations
+                .iter()
+                .map(|o| o.body.as_str())
+                .collect::<Vec<_>>(),
+            ["contract #12", "legacy"],
+            "observations always present, ordered by idx"
+        );
+        assert_eq!(
+            all[0].attributes,
+            std::collections::BTreeMap::from([("k".into(), "v".into())]),
+            "attributes always present"
+        );
+    }
+
+    #[test]
+    fn export_contains_relation_observations_and_attributes() {
+        let kg = new_kg();
+        seed_relation_obs_attrs(&kg);
+        // Entity attribute rows ride along in export too.
+        kg.set_attributes(&[AttributeSet {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            attributes: std::collections::BTreeMap::from([("ea".into(), "ev".into())]),
+        }])
+        .unwrap();
+
+        let exported = kg.export("json", 100).unwrap();
+        assert!(exported.contains("\"contract #12\""), "observation body");
+        assert!(exported.contains("\"legacy\""), "second observation body");
+        assert!(exported.contains("\"k\":\"v\""), "relation attribute map");
+        assert!(exported.contains("\"ea\":\"ev\""), "entity attribute map");
+    }
+
+    #[test]
+    fn wipe_clears_relation_observations_attributes_and_fts() {
+        let kg = new_kg();
+        seed_relation_obs_attrs(&kg);
+        kg.set_attributes(&[AttributeSet {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            attributes: std::collections::BTreeMap::from([("ea".into(), "ev".into())]),
+        }])
+        .unwrap();
+        let conn = kg.writer.lock();
+        let obs_hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rel_obs_fts WHERE rel_obs_fts MATCH 'contract'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(obs_hits, 1, "non-empty rel_obs_fts fixture");
+        drop(conn);
+
+        kg.wipe().unwrap();
+
+        let conn = kg.writer.lock();
+        for (table, field) in [
+            ("relation_observation", "relation_id"),
+            ("attribute", "owner_id"),
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} must be empty after wipe");
+            let _ = field;
+        }
+        let fts_hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rel_obs_fts WHERE rel_obs_fts MATCH 'contract'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(fts_hits, 0, "rel_obs_fts must not retain postings");
     }
 }

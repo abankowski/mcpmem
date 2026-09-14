@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use crate::code::{self, Def, MAX_SYMBOLS_PER_FILE};
 use crate::errors::{MCSError, Result};
 use crate::kg::GraphHandle;
-use crate::types::{Entity, EntityInput, Relation};
+use crate::types::{Entity, EntityInput, RelationInput};
 
 /// Cap on files processed in a single `code_index` call.
 const MAX_INDEX_FILES: usize = 100_000;
@@ -395,16 +395,18 @@ pub(crate) fn index_paths(
     }
 
     // Pass 2: write `defines` edges and unambiguously-resolved call edges.
-    let mut rbuf: Vec<Relation> = Vec::with_capacity(WRITE_BATCH);
+    let mut rbuf: Vec<RelationInput> = Vec::with_capacity(WRITE_BATCH);
     let mut rel_seen: HashSet<(String, String, &'static str)> = HashSet::new();
     let mut relation_count = 0usize;
     for fw in &work {
         let file_entity = &fw.rel;
         for (_, q) in &fw.named {
-            rbuf.push(Relation {
+            rbuf.push(RelationInput {
                 from: file_entity.clone(),
                 to: q.clone(),
                 relation_type: "defines".into(),
+                observations: vec![],
+                attributes: None,
             });
             relation_count += 1;
         }
@@ -430,10 +432,12 @@ pub(crate) fn index_paths(
             if !rel_seen.insert((caller.clone(), callee.clone(), rtype)) {
                 continue;
             }
-            rbuf.push(Relation {
+            rbuf.push(RelationInput {
                 from: caller,
                 to: callee.clone(),
                 relation_type: rtype.into(),
+                observations: vec![],
+                attributes: None,
             });
             relation_count += 1;
         }
@@ -483,12 +487,15 @@ pub fn handle_code_outline(args: Option<&Value>) -> Result<Value> {
     // already repo-relative (matches the stored name); an absolute path is
     // canonicalized + based exactly as the indexer does.
     let lookup = lookup_file_name(&file);
-    let defines = kg.search_relations(
-        Some(&lookup),
-        None,
-        Some("defines"),
-        Some(MAX_SYMBOLS_PER_FILE),
-    );
+    let defines = kg
+        .search_relations(
+            Some(&lookup),
+            None,
+            Some("defines"),
+            None,
+            Some(MAX_SYMBOLS_PER_FILE),
+        )
+        .unwrap_or_default();
     let names: Vec<String> = defines.into_iter().map(|r| r.to).collect();
     if names.is_empty() {
         return to_json(&json!({
@@ -603,11 +610,15 @@ pub fn handle_code_get_symbol(args: Option<&Value>) -> Result<Value> {
             let mut callers: Vec<String> = Vec::new();
             let mut callees: Vec<String> = Vec::new();
             for t in edge_types {
-                for r in kg.search_relations(None, Some(&e.name), Some(t), Some(MAX_EDGES_RETURNED))
+                for r in kg
+                    .search_relations(None, Some(&e.name), Some(t), None, Some(MAX_EDGES_RETURNED))
+                    .unwrap_or_default()
                 {
                     callers.push(r.from);
                 }
-                for r in kg.search_relations(Some(&e.name), None, Some(t), Some(MAX_EDGES_RETURNED))
+                for r in kg
+                    .search_relations(Some(&e.name), None, Some(t), None, Some(MAX_EDGES_RETURNED))
+                    .unwrap_or_default()
                 {
                     callees.push(r.to);
                 }
