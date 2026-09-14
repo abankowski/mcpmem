@@ -185,7 +185,7 @@ fn canonical_document_splits_into_chunks() {
 }
 
 #[test]
-fn relation_chunk_text_is_the_formatted_triple() {
+fn relation_without_observations_embeds_only_the_triple() {
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("memory.db");
     let graph = setup(&database);
@@ -223,10 +223,98 @@ fn relation_chunk_text_is_the_formatted_triple() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    let Ok(Some(text)) = mcpmem_indexer::relation_chunk_text(&conn, mirror_id, revision) else {
+    let Ok(Some(chunks)) = mcpmem_indexer::relation_chunks(&conn, mirror_id, revision) else {
         panic!("the mirror must canonicalize");
     };
-    assert_eq!(text, "ada\nknows\nbob");
+    assert_eq!(
+        chunks,
+        vec![(ChunkKind::Relation, "ada\nknows\nbob".to_string())],
+        "a relation with zero observations still yields the triple-only list"
+    );
+}
+
+#[test]
+fn relation_with_observations_embeds_triple_then_one_chunk_per_observation() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    let graph = setup(&database);
+    let profile = seed_profile(&database);
+    graph
+        .create_entities(&[entity("ada", "Thing"), entity("bob", "Thing")])
+        .unwrap();
+    graph.create_relations(&[relation("ada", "bob", "uses")]).unwrap();
+    // The worker reads relation_observation directly; seed the rows through
+    // SQL, not the mutation API (outside this task's file scope).
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute(
+            "INSERT INTO relation_observation(relation_id, idx, body, created_us, occurred_us)
+             SELECT m.id, 0, 'body zero', ?1, NULL FROM taxonomy_relation m
+             JOIN entity f ON f.id=m.from_id JOIN entity t ON t.id=m.to_id
+             JOIN type_dict d ON d.id=m.type_id
+             WHERE f.name='ada' AND t.name='bob' AND d.name='uses' AND d.kind=1",
+            [now_us()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO relation_observation(relation_id, idx, body, created_us, occurred_us)
+             SELECT m.id, 1, 'body one', ?1, NULL FROM taxonomy_relation m
+             JOIN entity f ON f.id=m.from_id JOIN entity t ON t.id=m.to_id
+             JOIN type_dict d ON d.id=m.type_id
+             WHERE f.name='ada' AND t.name='bob' AND d.name='uses' AND d.kind=1",
+            [now_us()],
+        )
+        .unwrap();
+    }
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let worker = IndexerWorker::new(
+        &database,
+        RecordingProvider(Arc::clone(&captured)),
+        Duration::from_secs(5),
+    );
+    // Chunk jobs claim before taxonomy jobs, and entity jobs before the
+    // relation job: ada, bob and the relation each get one chunk job.
+    let mut claimed = 0;
+    for _ in 0..3 {
+        claimed += worker.run_once(now_us()).unwrap().claimed;
+    }
+    assert_eq!(claimed, 3, "ada, bob and the relation each get one chunk job");
+    // The provider receives one batch: the two entity identity chunks, then
+    // the relation triple and one observation chunk per row.
+    let texts = captured.lock();
+    assert_eq!(texts[0], "ada\nThing");
+    assert_eq!(texts[1], "bob\nThing");
+    assert_eq!(
+        texts[2],
+        "ada\nuses\nbob",
+        "the triple is the relation's chunk at index 0"
+    );
+    assert_eq!(
+        &texts[3..],
+        &["body zero".to_string(), "body one".to_string()],
+        "one observation chunk per relation_observation row, in idx order"
+    );
+    drop(texts);
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let rows: Vec<(String, i64)> = conn
+        .prepare(
+            "SELECT kind, chunk_index FROM chunk_vector
+             WHERE profile_id=?1 AND owner_kind='relation' ORDER BY chunk_index",
+        )
+        .unwrap()
+        .query_map([profile.id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("relation".to_string(), 0),
+            ("observation".to_string(), 1),
+            ("observation".to_string(), 2),
+        ],
+        "the triple lands at chunk_index 0 and each observation follows"
+    );
 }
 
 #[test]
