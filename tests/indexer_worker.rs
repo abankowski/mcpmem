@@ -242,7 +242,9 @@ fn relation_with_observations_embeds_triple_then_one_chunk_per_observation() {
     graph
         .create_entities(&[entity("ada", "Thing"), entity("bob", "Thing")])
         .unwrap();
-    graph.create_relations(&[relation("ada", "bob", "uses")]).unwrap();
+    graph
+        .create_relations(&[relation("ada", "bob", "uses")])
+        .unwrap();
     // The worker reads relation_observation directly; seed the rows through
     // SQL, not the mutation API (outside this task's file scope).
     {
@@ -278,15 +280,17 @@ fn relation_with_observations_embeds_triple_then_one_chunk_per_observation() {
     for _ in 0..3 {
         claimed += worker.run_once(now_us()).unwrap().claimed;
     }
-    assert_eq!(claimed, 3, "ada, bob and the relation each get one chunk job");
+    assert_eq!(
+        claimed, 3,
+        "ada, bob and the relation each get one chunk job"
+    );
     // The provider receives one batch: the two entity identity chunks, then
     // the relation triple and one observation chunk per row.
     let texts = captured.lock();
     assert_eq!(texts[0], "ada\nThing");
     assert_eq!(texts[1], "bob\nThing");
     assert_eq!(
-        texts[2],
-        "ada\nuses\nbob",
+        texts[2], "ada\nuses\nbob",
         "the triple is the relation's chunk at index 0"
     );
     assert_eq!(
