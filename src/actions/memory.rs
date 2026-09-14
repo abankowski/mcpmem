@@ -108,7 +108,9 @@ fn validate_observation(content: &str) -> Result<()> {
 /// One k:v attribute key: non-empty and bounded by [`MAX_NAME_BYTES`].
 fn validate_attribute_key(key: &str) -> Result<()> {
     if key.is_empty() {
-        return Err(MCSError::InvalidParams("Attribute key must not be empty".into()));
+        return Err(MCSError::InvalidParams(
+            "Attribute key must not be empty".into(),
+        ));
     }
     if key.len() > MAX_NAME_BYTES {
         return Err(MCSError::InvalidParams(format!(
@@ -689,20 +691,12 @@ fn parse_relation_observation_updates(
         let relation_type = relation
             .get("relationType")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                MCSError::InvalidParams("Missing 'relationType' in relation".into())
-            })?;
-        let contents: Vec<crate::types::ObservationInput> = serde_json::from_value(
-            relation
-                .get(field)
-                .cloned()
-                .ok_or_else(|| {
-                    MCSError::InvalidParams(format!("Missing '{field}' in relation"))
-                })?,
-        )
-        .map_err(|e| {
-            MCSError::InvalidParams(format!("Invalid observations: {e}"))
-        })?;
+            .ok_or_else(|| MCSError::InvalidParams("Missing 'relationType' in relation".into()))?;
+        let contents: Vec<crate::types::ObservationInput> =
+            serde_json::from_value(relation.get(field).cloned().ok_or_else(|| {
+                MCSError::InvalidParams(format!("Missing '{field}' in relation"))
+            })?)
+            .map_err(|e| MCSError::InvalidParams(format!("Invalid observations: {e}")))?;
         validate_triple(from, to, relation_type)?;
         if contents.len() > MAX_OBSERVATIONS_PER_ENTITY {
             return Err(MCSError::InvalidParams(format!(
@@ -722,10 +716,7 @@ fn parse_relation_observation_updates(
     Ok(out)
 }
 
-pub fn handle_add_relation_observations(
-    kg: &GraphHandle,
-    args: Option<&Value>,
-) -> Result<Value> {
+pub fn handle_add_relation_observations(kg: &GraphHandle, args: Option<&Value>) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
     let updates = parse_relation_observation_updates(params, "contents")?
         .iter()
@@ -741,9 +732,7 @@ pub fn handle_add_relation_observations(
 
     let MutationResult::RelationObservations(results) = apply_mutation(
         kg,
-        MutationRequest::AddRelationObservations {
-            relations: updates,
-        },
+        MutationRequest::AddRelationObservations { relations: updates },
     )?
     else {
         unreachable!("relation observation mutation result")
@@ -771,9 +760,7 @@ pub fn handle_delete_relation_observations(
 
     apply_mutation(
         kg,
-        MutationRequest::DeleteRelationObservations {
-            relations: updates,
-        },
+        MutationRequest::DeleteRelationObservations { relations: updates },
     )?;
 
     Ok(text_content!("Relation observations deleted successfully"))
@@ -800,9 +787,7 @@ fn parse_attribute_targets(params: &Value) -> Result<Vec<Value>> {
         let owner_kind = target
             .get("ownerKind")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                MCSError::InvalidParams("Missing 'ownerKind' in target".into())
-            })?;
+            .ok_or_else(|| MCSError::InvalidParams("Missing 'ownerKind' in target".into()))?;
         validate_attribute_target(
             owner_kind,
             target.get("entityName").and_then(|v| v.as_str()),
@@ -850,8 +835,7 @@ pub fn handle_set_attributes(kg: &GraphHandle, args: Option<&Value>) -> Result<V
                     .as_str();
                 match kg.get_entity(entity_name)? {
                     Some(entity) => {
-                        let value =
-                            serde_json::to_value(&entity).map_err(MCSError::JsonError)?;
+                        let value = serde_json::to_value(&entity).map_err(MCSError::JsonError)?;
                         Ok(value)
                     }
                     None => Err(MCSError::InvalidParams(format!(
@@ -859,22 +843,28 @@ pub fn handle_set_attributes(kg: &GraphHandle, args: Option<&Value>) -> Result<V
                     ))),
                 }
             } else {
-                let from = target.from.as_ref().expect("validated relation owner").as_str();
-                let to = target.to.as_ref().expect("validated relation owner").as_str();
+                let from = target
+                    .from
+                    .as_ref()
+                    .expect("validated relation owner")
+                    .as_str();
+                let to = target
+                    .to
+                    .as_ref()
+                    .expect("validated relation owner")
+                    .as_str();
                 let relation_type = target
                     .relation_type
                     .as_ref()
                     .expect("validated relation owner")
                     .as_str();
-                let details = kg
-                    .search_relations(Some(from), Some(to), Some(relation_type), None, Some(1))?;
-                let detail = details
-                    .first()
-                    .ok_or_else(|| {
-                        MCSError::InvalidParams(format!(
-                            "Relation '{from}' -> '{to}' ({relation_type}) not found"
-                        ))
-                    })?;
+                let details =
+                    kg.search_relations(Some(from), Some(to), Some(relation_type), None, Some(1))?;
+                let detail = details.first().ok_or_else(|| {
+                    MCSError::InvalidParams(format!(
+                        "Relation '{from}' -> '{to}' ({relation_type}) not found"
+                    ))
+                })?;
                 let value = serde_json::to_value(detail).map_err(MCSError::JsonError)?;
                 Ok(value)
             }
@@ -896,12 +886,7 @@ pub fn handle_delete_attributes(kg: &GraphHandle, args: Option<&Value>) -> Resul
         }
     }
 
-    apply_mutation(
-        kg,
-        MutationRequest::DeleteAttributes {
-            targets,
-        },
-    )?;
+    apply_mutation(kg, MutationRequest::DeleteAttributes { targets })?;
 
     Ok(text_content!("Attributes deleted successfully"))
 }
@@ -1109,8 +1094,8 @@ pub fn handle_search_relations(kg: &GraphHandle, args: Option<&Value>) -> Result
     let rtype = params.get("relationType").and_then(|v| v.as_str());
     let query = params.get("query").and_then(|v| v.as_str());
 
-    let mut results: Vec<crate::types::RelationDetail> = kg
-        .search_relations(from, to, rtype, query, Some(MAX_RELATION_SEARCH_RESULTS))?;
+    let mut results: Vec<crate::types::RelationDetail> =
+        kg.search_relations(from, to, rtype, query, Some(MAX_RELATION_SEARCH_RESULTS))?;
     results.truncate(MAX_RELATION_SEARCH_RESULTS);
     let text = serde_json::to_string(&results).map_err(MCSError::JsonError)?;
     Ok(text_content!(text))

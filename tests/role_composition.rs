@@ -213,15 +213,13 @@ fn call_raw(kg: &GraphHandle, name: &str, arguments: &Value) -> Value {
         "params": {"name": name, "arguments": arguments},
     });
     let v = body_of(
-        dispatch_http_body(
-            &req.to_string(),
-            kg,
-            None,
-            &local_principal(),
-        )
-        .expect("valid JSON body dispatches"),
+        dispatch_http_body(&req.to_string(), kg, None, &local_principal())
+            .expect("valid JSON body dispatches"),
     );
-    assert!(v["error"].is_null(), "{name} must not be a protocol error: {v}");
+    assert!(
+        v["error"].is_null(),
+        "{name} must not be a protocol error: {v}"
+    );
     v
 }
 
@@ -320,7 +318,11 @@ fn relation_observation_tools_round_trip_through_mcp() {
         .find(|r| r["from"].as_str() == Some("alice") && r["to"].as_str() == Some("acme"))
         .expect("the query finds the relation");
     assert_eq!(row["relationType"].as_str(), Some("employs"), "{found}");
-    assert_eq!(row["attributes"]["status"].as_str(), Some("active"), "{found}");
+    assert_eq!(
+        row["attributes"]["status"].as_str(),
+        Some("active"),
+        "{found}"
+    );
     let bodies: Vec<&str> = row["observations"]
         .as_array()
         .unwrap()
@@ -347,8 +349,16 @@ fn relation_observation_tools_round_trip_through_mcp() {
     );
     let row = set["results"][0].clone();
     assert_eq!(row["from"].as_str(), Some("alice"), "{set}");
-    assert_eq!(row["attributes"]["status"].as_str(), Some("active"), "{set}");
-    assert_eq!(row["attributes"]["priority"].as_str(), Some("high"), "{set}");
+    assert_eq!(
+        row["attributes"]["status"].as_str(),
+        Some("active"),
+        "{set}"
+    );
+    assert_eq!(
+        row["attributes"]["priority"].as_str(),
+        Some("high"),
+        "{set}"
+    );
 
     // delete_relation_observations removes exactly the named bodies.
     let text = call_text(
@@ -431,18 +441,34 @@ fn attribute_tools_cover_entities_and_relations() {
         }),
     );
     assert_eq!(set["results"][0]["name"].as_str(), Some("widget"), "{set}");
-    assert_eq!(set["results"][0]["attributes"]["color"].as_str(), Some("red"), "{set}");
-    assert_eq!(set["results"][0]["attributes"]["weight"].as_str(), Some("5"), "{set}");
+    assert_eq!(
+        set["results"][0]["attributes"]["color"].as_str(),
+        Some("red"),
+        "{set}"
+    );
+    assert_eq!(
+        set["results"][0]["attributes"]["weight"].as_str(),
+        Some("5"),
+        "{set}"
+    );
 
     // get_entity and describe_entity include the attributes map.
     let entity = call_payload(&kg, "get_entity", &serde_json::json!({"name": "widget"}));
-    assert_eq!(entity["attributes"]["weight"].as_str(), Some("5"), "{entity}");
+    assert_eq!(
+        entity["attributes"]["weight"].as_str(),
+        Some("5"),
+        "{entity}"
+    );
     let described = call_payload(
         &kg,
         "describe_entity",
         &serde_json::json!({"name": "widget"}),
     );
-    assert_eq!(described["attributes"]["color"].as_str(), Some("red"), "{described}");
+    assert_eq!(
+        described["attributes"]["color"].as_str(),
+        Some("red"),
+        "{described}"
+    );
 
     // delete_attributes removes exactly the named keys.
     let text = call_text(
@@ -455,7 +481,11 @@ fn attribute_tools_cover_entities_and_relations() {
     assert_eq!(text, "Attributes deleted successfully", "{text}");
     let entity = call_payload(&kg, "get_entity", &serde_json::json!({"name": "widget"}));
     assert_eq!(entity["attributes"].get("color"), None, "{entity}");
-    assert_eq!(entity["attributes"]["weight"].as_str(), Some("5"), "{entity}");
+    assert_eq!(
+        entity["attributes"]["weight"].as_str(),
+        Some("5"),
+        "{entity}"
+    );
 
     // upsert_entities persists its attributes too: the new map overwrites
     // the given keys and leaves the rest of the stored map alone. The
@@ -472,7 +502,11 @@ fn attribute_tools_cover_entities_and_relations() {
         }]}),
     );
     let entity = call_payload(&kg, "get_entity", &serde_json::json!({"name": "widget"}));
-    assert_eq!(entity["attributes"]["color"].as_str(), Some("blue"), "{entity}");
+    assert_eq!(
+        entity["attributes"]["color"].as_str(),
+        Some("blue"),
+        "{entity}"
+    );
     assert_eq!(
         entity["attributes"]["weight"].as_str(),
         Some("5"),
@@ -501,7 +535,11 @@ fn attribute_tools_cover_entities_and_relations() {
         }),
     );
     assert_eq!(set["results"][0]["from"].as_str(), Some("widget"), "{set}");
-    assert_eq!(set["results"][0]["attributes"]["price"].as_str(), Some("10"), "{set}");
+    assert_eq!(
+        set["results"][0]["attributes"]["price"].as_str(),
+        Some("10"),
+        "{set}"
+    );
 
     call_text(
         &kg,
@@ -594,9 +632,7 @@ fn attribute_tools_enforce_owner_kind_and_target_exclusivity() {
     // The request cap is part of the shared target validation: one target
     // past MAX_RELATIONS_PER_REQUEST is refused wholesale.
     let too_many = (0..=1000)
-        .map(|_| {
-            serde_json::json!({"ownerKind": "entity", "entityName": "a", "attributes": {}})
-        })
+        .map(|_| serde_json::json!({"ownerKind": "entity", "entityName": "a", "attributes": {}}))
         .collect::<Vec<Value>>();
     let too_many_args = serde_json::json!({"targets": too_many});
     for name in ["set_attributes", "delete_attributes"] {
@@ -644,7 +680,11 @@ fn attribute_tools_enforce_owner_kind_and_target_exclusivity() {
             }]
         }),
     );
-    assert_eq!(set["results"][0]["attributes"]["k"].as_str(), Some("v"), "{set}");
+    assert_eq!(
+        set["results"][0]["attributes"]["k"].as_str(),
+        Some("v"),
+        "{set}"
+    );
 }
 
 /// Attribute writes are the documented offline exception (REQ-ATTR-OFFLINE):
@@ -707,7 +747,10 @@ fn attribute_writes_never_enqueue_index_jobs() {
         }),
     );
     let before = job_count(&conn);
-    assert!(before > 0, "the rebuilding profile must hold job rows for the seeds");
+    assert!(
+        before > 0,
+        "the rebuilding profile must hold job rows for the seeds"
+    );
 
     // Attribute writes (set and delete, entity and relation owners) must not
     // change the queue at all.

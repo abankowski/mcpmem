@@ -1152,9 +1152,7 @@ fn handle_tools_call(
         "delete_relation_observations" => {
             memory::handle_delete_relation_observations(kg, tool_args).map(HandlerResult::Value)
         }
-        "set_attributes" => {
-            memory::handle_set_attributes(kg, tool_args).map(HandlerResult::Value)
-        }
+        "set_attributes" => memory::handle_set_attributes(kg, tool_args).map(HandlerResult::Value),
         "delete_attributes" => {
             memory::handle_delete_attributes(kg, tool_args).map(HandlerResult::Value)
         }
