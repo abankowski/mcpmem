@@ -27,25 +27,46 @@
 
 ```mermaid
 flowchart LR
-  T1 --> T3
-  T1 --> T4
+  T1 --> TC
   T1 --> T5
   T1 --> T6
-  T2 --> T3
-  T2 --> T4
-  T3 --> T7
-  T4 --> T7
-  T7 --> T8
+  T2 --> TC
+  TC --> T7b
+  T7b --> FR[Final review + preflight]
 ```
 
 | Wave | Tasks |
 |---|---|
 | 0 | 1, 2 |
-| 1 | 3, 4, 5, 6 |
-| 2 | 7 |
-| 3 | 8 |
+| 1 | C (core: 3+4 merged), 5, 6, 7a (schemas), 8 (version bump only) |
+| 2 | 7b (handlers + dispatch) |
+| 3 | final whole-branch review, full pre-flight, finish |
 
-Wave 0 tasks are disjoint files (T1: `events.rs` + migration SQL; T2: `types.rs` + `mutation.rs` + `graph.rs`). Wave 1: T3 `crates/mcpmem-core/src/mutation.rs`; T4 `crates/mcpmem-core/src/graph.rs`; T5 `crates/mcpmem-indexer/src/lib.rs`; T6 `src/vector_store.rs`. Wave 2 T7: `src/actions/memory.rs`, `src/server.rs`, `src/tools.rs`, `tools.json`. Wave 3 T8: `Cargo.toml`, `crates/*/Cargo.toml`, `CHANGES.md`. Every wave-1 task depends only on wave 0 and its own file scope — the crate-compile coupling between T3 and T4 is resolved because `types.rs` (wave 0) declares the new `MutationRequest` variants and the `rel_obs_seq` cell lives on `GraphHandle` (graph.rs, wave 1) with `mutation.rs` tests seeding via direct SQL where a write path is not yet wired.
+**Wave-structure rulings (2026-09-14, parallel before ceremony):**
+
+- **T3 + T4 merged into one "core" task.** `mutation.rs` and `graph.rs` are one
+  Rust crate with mutual compile references: T3's `insert_relation_observations`
+  calls `GraphHandle::next_rel_obs_id()` (graph.rs), and T4's wrappers
+  construct `MutationRequest::AddRelationObservations` (mutation.rs). Two
+  worktrees each fail `cargo check` until the other lands — they were never
+  parallel. One implementer owns `{crates/mcpmem-core/src/mutation.rs,
+  crates/mcpmem-core/src/graph.rs}` as one compile unit. Tasks 3 and 4 of the
+  original section remain the spec of this merged task, in order.
+- **T7a split out of T7 into wave 1.** `tools.json` schemas + `tools.rs`
+  registry rows are pure spec transcription — they document the contract and
+  touch no file the core or handlers need. They run in wave 1. T7b (handlers
+  in `memory.rs` + dispatch arms in `server.rs`) stays in wave 2 because its
+  tests exercise the core's behaviors through the tool surface at runtime.
+- **T8 version bump only into wave 1.** `Cargo.toml` × 6 and `CHANGES.md`
+  are text; `check-release-version.sh` requires only that workspace crates
+  agree, not that feature code exists. The T8 full pre-flight step moves to
+  the final wave (it must run on the integrated tree).
+- Wave 0 stays 2-wide (T1 migration, T2 types+sweep); the wave-1 five are
+  file-disjoint: `{mutation.rs, graph.rs}`, `{crates/mcpmem-indexer/src/lib.rs}`,
+  `{src/vector_store.rs}`, `{tools.json, src/tools.rs}`, `{Cargo.toml,
+  crates/*/Cargo.toml, CHANGES.md}`.
+
+Wave 0 tasks are disjoint files (T1: `events.rs` + migration SQL; T2: `types.rs` + `mutation.rs` + `graph.rs`). Wave 1: core `{crates/mcpmem-core/src/mutation.rs, crates/mcpmem-core/src/graph.rs}`, T5 `crates/mcpmem-indexer/src/lib.rs`, T6 `src/vector_store.rs`, T7a `{tools.json, src/tools.rs}`, T8 `{Cargo.toml, crates/*/Cargo.toml, CHANGES.md}`. Wave 2 T7b: `{src/actions/memory.rs, src/server.rs}`. Test-seeding note: `mutation.rs` and `graph.rs` tests seed via direct SQL where the other side's write path is not yet wired; the Task 2 types (wave 0) already declare the `MutationRequest` variants and `GraphHandle` reads/writes live in the same merged core task, so the compile coupling is internal.
 
 ## Task 1: Migration 0011 and inventory pin
 
@@ -229,13 +250,13 @@ Add `use std::collections::BTreeMap;` at the top if absent. After `Relation`, ad
 
 - [ ] **Step 3: Sweep the construction sites**
 
-In `crates/mcpmem-core/src/mutation.rs` and `crates/mcpmem-core/src/graph.rs`, every literal `Entity { ... }` — including every `#[cfg(test)]` site — gains `attributes: None,` after the `observations:` field. Verify with:
+In `crates/mcpmem-core/src/mutation.rs`, `crates/mcpmem-core/src/graph.rs`, `src/bin/bench.rs`, `src/taxonomy.rs` (test module `create_test_entity`), and `src/vector_store.rs` (test module `create_test_entity`), every literal `Entity { ... }` — including every `#[cfg(test)]` site — gains `attributes: None,` after the `observations:` field. (`src/actions/memory.rs:73` is `ExampleEntity`, a different struct; `src/types.rs` is dead code not declared in `lib.rs` — leave both.) Verify with:
 
 ```bash
-cargo check --workspace 2>&1 | tail -40
+cargo check --workspace --all-targets 2>&1 | tail -40
 ```
 
-Expected: no diagnostics. (The compiler is the sweep gate: any missed site is an error naming the line.)
+Expected: no diagnostics. (The compiler is the sweep gate: any missed site is an error naming the line. `--all-targets` is required because the test-module literals in `taxonomy.rs` and `vector_store.rs` compile only under test targets.)
 
 - [ ] **Step 4: Run the serde tests**
 
