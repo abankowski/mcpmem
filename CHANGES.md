@@ -8,6 +8,22 @@ version 5.2.1, commit `d6fe34b`. The license stays Apache-2.0, and
 This entry lists every change since that snapshot. The version line restarts at
 1.0.0, because the upstream crate name belongs to another author.
 
+## 2.1.0 (unreleased)
+
+### Added
+
+- **Relations carry observations.** `add_relation_observations` and
+  `delete_relation_observations` manage them, and `create_relations` accepts
+  an optional `observations` list. Relation observations are embedded as
+  chunks and full-text searchable through `search_relations(query=...)`.
+- **k:v string attributes on entities and relations.** `set_attributes` and
+  `delete_attributes` manage them, and the create/upsert tools accept an
+  optional `attributes` map; get, describe, search and export return them.
+  Attributes are not indexed and not searchable.
+- **`search_relations` exposes the new fields.** Rows include
+  observations and attributes, and `export_graph` includes relation
+  observations and attributes.
+
 ## 2.0.0
 
 ### Breaking changes
