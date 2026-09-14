@@ -87,6 +87,7 @@ fn bench(args: &Args) {
                 .map(|j| format!("observation_{i}_{j}"))
                 .map(Into::into)
                 .collect(),
+            attributes: None,
         })
         .collect();
 
@@ -316,6 +317,7 @@ fn bench(args: &Args) {
             name: first.into(),
             entity_type: "person".into(),
             observations: vec!["existing".into(), "upserted_obs".into()],
+            attributes: None,
         }])
         .expect("upsert")
         .len()

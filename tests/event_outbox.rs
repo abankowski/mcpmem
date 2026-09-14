@@ -24,6 +24,7 @@ fn entity(name: &str) -> Entity {
         name: name.into(),
         entity_type: "test".into(),
         observations: vec!["original".into()],
+        attributes: None,
     }
 }
 
@@ -322,6 +323,7 @@ fn effective_changes_commit_events_and_coalesce_tombstones_without_deliveries() 
     graph
         .upsert_entities(&[Entity {
             observations: vec!["changed".into()],
+            attributes: None,
             ..entity("a")
         }])
         .unwrap();
@@ -666,6 +668,7 @@ fn profile_rebuild_preserves_serving_and_fences_stale_revision_commits() {
     graph
         .upsert_entities(&[Entity {
             observations: vec!["new".into()],
+            attributes: None,
             ..entity("a")
         }])
         .unwrap();
