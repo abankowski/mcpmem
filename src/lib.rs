@@ -51,6 +51,7 @@ pub enum Transport {
 #[derive(Parser, Debug)]
 #[command(name = "MCP Memory Server")]
 #[command(about = "Knowledge graph memory server for MCP — entities, relations, and observations persisted in SQLite with FTS5 search", long_about = None)]
+#[command(version)]
 pub struct Args {
     /// Path to the memory file
     #[arg(short = 'f', long = "memory-file")]

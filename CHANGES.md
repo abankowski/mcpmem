@@ -12,6 +12,12 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Added
 
+- **`--version` on the shipped binaries.** `mcpmem --version` and
+  `mcpmem-maintenance --version` print the build version and exit, so an
+  operator can identify a running build before connecting to it.
+- **`Server` header on the HTTP transport.** Every response carries
+  `Server: mcpmem <version>`; `curl -i http://host:port/` answers the version
+  without an MCP handshake.
 - **Relations carry observations.** `add_relation_observations` and
   `delete_relation_observations` manage them, and `create_relations` accepts
   an optional `observations` list. Relation observations are embedded as
