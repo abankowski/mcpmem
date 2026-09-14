@@ -115,6 +115,7 @@ fn worker_commits_latest_canonical_revision() {
             name: "Exact Name".into(),
             entity_type: "Person".into(),
             observations: vec!["first".into()],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -162,6 +163,7 @@ fn canonical_document_splits_into_chunks() {
             name: "Ada".into(),
             entity_type: "Person".into(),
             observations: vec!["first programmer".into()],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -193,11 +195,13 @@ fn relation_chunk_text_is_the_formatted_triple() {
                 name: "ada".into(),
                 entity_type: "Person".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "bob".into(),
                 entity_type: "Person".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -235,6 +239,7 @@ fn commit_chunks_replaces_owner_rows_and_bumps_generation() {
             name: "Ada".into(),
             entity_type: "Person".into(),
             observations: vec!["first programmer".into()],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -313,11 +318,13 @@ fn commit_chunks_commits_a_relation_owner_and_bumps_the_kind_generation() {
                 name: "ada".into(),
                 entity_type: "Person".into(),
                 observations: vec![],
+                attributes: None,
             },
             Entity {
                 name: "bob".into(),
                 entity_type: "Person".into(),
                 observations: vec![],
+                attributes: None,
             },
         ])
         .unwrap();
@@ -440,6 +447,7 @@ fn commit_chunks_refuses_a_payload_that_does_not_match_the_operation() {
             name: "a".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -487,6 +495,7 @@ fn stale_claim_cannot_commit_after_a_newer_claimant() {
             name: "a".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -554,6 +563,7 @@ fn expired_provider_call_cannot_commit_using_its_claim_timestamp() {
             name: "a".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -584,6 +594,7 @@ fn profile_dimension_mismatch_is_retried_without_a_vector_write() {
             name: "a".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -614,6 +625,7 @@ fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
             name: "poisoned".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -710,6 +722,7 @@ fn worker_normalizes_l2_vectors_before_commit() {
             name: "a".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -797,6 +810,7 @@ fn candidate_rebuild_commits_into_both_profiles_and_activates() {
             name: "alice".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -835,6 +849,7 @@ fn candidate_rebuild_commits_into_both_profiles_and_activates() {
             name: "bob".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     for _ in 0..5 {
@@ -883,6 +898,7 @@ fn active_profile_snapshot_refreshes_after_a_durable_generation_change() {
             name: "alice".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     let conn = rusqlite::Connection::open(&database).unwrap();
@@ -917,6 +933,7 @@ fn active_profile_snapshot_refreshes_after_a_durable_generation_change() {
             name: "bob".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     worker.run_once(now_us()).unwrap();
@@ -1089,6 +1106,7 @@ fn entity(name: &str, entity_type: &str) -> Entity {
         name: name.into(),
         entity_type: entity_type.into(),
         observations: vec![],
+        attributes: None,
     }
 }
 
@@ -1174,6 +1192,7 @@ fn reconcile_adopts_taxonomy_after_the_worker_cycle() {
             name: "alice".into(),
             entity_type: "Person".into(),
             observations: vec![],
+            attributes: None,
         }])
         .unwrap();
     let worker = IndexerWorker::new(&database, FixedProvider, Duration::from_secs(5));

@@ -28,6 +28,7 @@ fn entity(name: &str) -> Entity {
         name: name.into(),
         entity_type: "note".into(),
         observations: vec!["secret observation".into()],
+        attributes: None,
     }
 }
 fn count(conn: &rusqlite::Connection, table: &str) -> i64 {

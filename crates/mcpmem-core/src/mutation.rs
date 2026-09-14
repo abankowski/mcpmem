@@ -121,6 +121,7 @@ impl EntitySnapshot {
             name: self.name.clone(),
             entity_type: self.entity_type.clone(),
             observations: self.observations.clone(),
+            attributes: None,
         }
     }
 }
@@ -1123,6 +1124,7 @@ mod tests {
             name: name.into(),
             entity_type: entity_type.into(),
             observations: vec![],
+            attributes: None,
         }
     }
 
