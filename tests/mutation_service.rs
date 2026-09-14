@@ -281,7 +281,7 @@ fn every_write_path_rolls_back_on_a_final_statement_failure() {
             }],
         },
         MutationRequest::DeleteRelations {
-            relations: vec![relation.clone()],
+            relations: vec![relation],
         },
         MutationRequest::AddObservations {
             observations: vec![ObservationUpdate {
