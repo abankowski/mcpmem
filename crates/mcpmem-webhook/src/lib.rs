@@ -301,13 +301,46 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
             claimed: 1,
             ..DeliveryReport::default()
         };
-        let outcome = SubscriptionRepository::new(&conn)
+        let Some(subscription) = SubscriptionRepository::new(&conn)
             .get(delivery.subscription_id)?
             .filter(|s| s.enabled)
-            .ok_or_else(|| WorkerError::Policy("subscription missing or disabled".into()))
-            .and_then(|subscription| self.deliver(&subscription, &delivery, now));
+        else {
+            // A missing or disabled subscription cannot be delivered and
+            // never will be: dead-letter the claim, as the delivery-time
+            // policy arm does. The row keeps its state visible to the
+            // operator instead of hanging as a leased claim forever.
+            tracing::warn!(
+                subscription_id = %delivery.subscription_id,
+                event_id = %delivery.event.event_id,
+                "webhook discarded: subscription missing or disabled"
+            );
+            if events.retry(
+                &delivery,
+                now_us(),
+                now.saturating_add(1_000_000),
+                "policy: subscription missing or disabled",
+                true,
+            )? {
+                report.dead = 1;
+            }
+            return Ok(report);
+        };
+        tracing::debug!(
+            subscription_id = %delivery.subscription_id,
+            event_id = %delivery.event.event_id,
+            attempts = delivery.attempts,
+            "webhook delivery claimed"
+        );
+        let outcome = self.deliver(&subscription, &delivery, now);
         match outcome {
             Ok(response) if (200..300).contains(&response.status) => {
+                tracing::info!(
+                    subscription_id = %delivery.subscription_id,
+                    endpoint = %subscription.endpoint,
+                    event_id = %delivery.event.event_id,
+                    status = response.status,
+                    "webhook delivered"
+                );
                 if events.complete(&delivery, now_us())? {
                     report.completed = 1;
                 }
@@ -328,8 +361,24 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
                     dead,
                 )? {
                     if dead {
+                        tracing::warn!(
+                            subscription_id = %delivery.subscription_id,
+                            endpoint = %subscription.endpoint,
+                            event_id = %delivery.event.event_id,
+                            status = response.status,
+                            attempts = delivery.attempts,
+                            "webhook dead-lettered"
+                        );
                         report.dead = 1
                     } else {
+                        tracing::warn!(
+                            subscription_id = %delivery.subscription_id,
+                            endpoint = %subscription.endpoint,
+                            event_id = %delivery.event.event_id,
+                            status = response.status,
+                            retry_delay_us = delay,
+                            "webhook returned a retryable status"
+                        );
                         report.retried = 1
                     }
                 }
@@ -337,6 +386,25 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
             Err(error) => {
                 let dead = delivery.attempts >= MAX_ATTEMPTS
                     || matches!(error, WorkerError::Policy(_) | WorkerError::Secret(_));
+                match &error {
+                    // A policy or secret refusal cannot succeed on a retry:
+                    // the endpoint is refused, or the signing key is missing.
+                    // The discard is the message an operator needs.
+                    WorkerError::Policy(_) | WorkerError::Secret(_) => tracing::warn!(
+                        subscription_id = %delivery.subscription_id,
+                        endpoint = %subscription.endpoint,
+                        event_id = %delivery.event.event_id,
+                        %error,
+                        "webhook discarded"
+                    ),
+                    _ => tracing::error!(
+                        subscription_id = %delivery.subscription_id,
+                        endpoint = %subscription.endpoint,
+                        event_id = %delivery.event.event_id,
+                        %error,
+                        "webhook delivery attempt failed"
+                    ),
+                }
                 if events.retry(
                     &delivery,
                     now_us(),

@@ -128,6 +128,12 @@ This entry lists every change since that snapshot. The version line restarts at
   the same payloads, and `secretRef` stays a name. A build without the
   `webhooks` Cargo feature answers 404 and the page hides the section.
 
+- **Delivery observability in the webhook worker.** The worker logs one line
+  per delivery outcome: `info` on a delivered webhook with the HTTP status,
+  `warn` on a retryable status, a dead-letter, or a policy/secret discard
+  (for example a host outside the allowlist), and `error` on a transport
+  failure. Every outcome was silent before, so a misconfigured allowlist or
+  receiver was invisible until eight silent attempts dead-lettered.
 - **Delivery-role warning in the webhook admin UI.** `GET /ui/api/webhooks`
   reports whether this process runs the `webhooks` delivery role, and the UI
   shows a warning when subscriptions are stored but no worker runs to
