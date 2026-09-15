@@ -334,14 +334,20 @@ the proxy's public hostname in the `allowlist`.
    }
    ```
 
-   Register the webhook URL in n8n as `POST https://hooks.example.com` and
-   enable **Respond: using Respond to Webhook** if you want a 200 to the
-   worker (the worker only needs a non-2xx to retry; the default response is
-   fine).
+   In the **Webhook** node set **HTTP Method** to `POST` (the n8n default is
+   `GET`, and the worker always sends POST) and give the node a fixed
+   **Path**, for example `mcpmem`. Activate the workflow: the production URL
+   `https://hooks.example.com/webhook/mcpmem` is registered only while the
+   workflow is active, and the test URL (`/webhook-test/...`) is never
+   registered persistently, so it cannot receive deliveries. Enable
+   **Respond: using Respond to Webhook** if you want a 200 to the worker (the
+   worker needs only a non-2xx to retry; the default response is fine).
 
 2. **mcpmem side.** Identical to the Node-RED recipe: same allowlist, any
-   `secretRef`. Point `webhook_add_subscription` at
-   `https://hooks.example.com` (n8n folds the path into its own URL space).
+   `secretRef`. Point `webhook_add_subscription` at the full production URL
+   from the node, `https://hooks.example.com/webhook/mcpmem`. The worker
+   POSTs to exactly this URL, so the path matters: a bare hostname would
+   deliver to n8n's root, which no webhook listens on.
 
 3. **Verify the signature in the flow.** After the **Webhook** trigger, add
    a **Code node**:
