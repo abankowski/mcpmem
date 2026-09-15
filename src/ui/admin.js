@@ -154,6 +154,11 @@ async function load() {
   await loadRepos();
 }
 
+// The signing-key names this server loaded from [webhooks.secrets]. The
+// worker resolves a subscription's secretRef against these names at delivery
+// time; a name that is not here dead-letters every delivery.
+let configuredSecrets = [];
+
 async function loadWebhooks() {
   const section = document.getElementById("webhooks");
   const status = document.getElementById("webhook-status");
@@ -169,6 +174,7 @@ async function loadWebhooks() {
   }
   if (!data) return;
   section.hidden = false;
+  configuredSecrets = data.configuredSecrets || [];
   renderWebhooks(data.subscriptions);
   document.getElementById("add-webhook").hidden = false;
   // The section exists in every build with the webhooks feature, but the
@@ -390,6 +396,17 @@ function renderWebhooks(subscriptions) {
     const secret = document.createElement("td");
     secret.textContent = w.secretRef;
     secret.className = "mono";
+    if (configuredSecrets.length === 0 || !configuredSecrets.includes(w.secretRef)) {
+      const warn = badge(
+        configuredSecrets.length === 0 ? "no signing key configured" : "not configured"
+      );
+      warn.className += " state-error";
+      warn.title =
+        configuredSecrets.length === 0
+          ? "This server loaded no signing keys from [webhooks.secrets]; deliveries are discarded."
+          : "This server has no signing key named '" + w.secretRef + "'; deliveries are discarded.";
+      secret.append(" ", warn);
+    }
     const state = document.createElement("td");
     state.append(badge(w.enabled ? "enabled" : "disabled"));
     const actions = document.createElement("td");
@@ -432,9 +449,22 @@ function openWebhookForm(w) {
     const input = document.createElement("input");
     input.id = "f-" + key;
     input.value = value;
+    if (key === "secretRef") input.setAttribute("list", "f-secretRef-list");
     row.append(input);
     dialog.append(row);
   }
+  const secretList = document.createElement("datalist");
+  secretList.id = "f-secretRef-list";
+  for (const name of configuredSecrets) {
+    const option = document.createElement("option");
+    option.value = name;
+    secretList.append(option);
+  }
+  const secretHint = document.createElement("p");
+  secretHint.className = "hint";
+  secretHint.textContent =
+    "Secret reference must match a name in [webhooks.secrets]; the worker resolves it at delivery time.";
+  dialog.append(secretList, secretHint);
 
   const opsLabel = document.createElement("label");
   opsLabel.textContent = "Operations (none selected = all): ";

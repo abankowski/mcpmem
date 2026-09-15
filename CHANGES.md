@@ -29,6 +29,15 @@ This entry lists every change since that snapshot. The version line restarts at
 - **`search_relations` exposes the new fields.** Rows include
   observations and attributes, and `export_graph` includes relation
   observations and attributes.
+- **Registration rejects an unknown webhook `secretRef`.** When the server
+  loaded signing keys, `webhook_add_subscription`, `POST /ui/api/webhooks`
+  and `PATCH /ui/api/webhooks/{id}` return a 400 for a name that
+  `[webhooks.secrets]` does not define; a server without keys still accepts
+  any name (store-now shape).
+- **The admin UI flags webhook subscriptions that cannot be signed.** The
+  list marks a row whose `secretRef` has no signing key ("not configured"),
+  and the subscription form lists the configured names and explains the
+  contract.
 
 ## 2.0.0
 

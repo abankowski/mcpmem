@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use mcpmem_core::mutation::ChangeOperation;
@@ -81,6 +81,26 @@ pub fn open_connection() -> Result<Connection> {
     conn.busy_timeout(Duration::from_millis(db.busy_timeout_ms))
         .map_err(mcpmem_core::events::sql_error)?;
     Ok(conn)
+}
+
+/// Make the process-wide subscription store usable from a test, whatever
+/// whose `init` pinned it. The pinned path may point at another test's temp
+/// dir, deleted when that test ended: `Connection::open` cannot recreate a
+/// missing parent directory, so recreate it first, then bootstrap a fresh
+/// database file with the same schema production gets. Idempotent on a live
+/// migrated store.
+#[doc(hidden)]
+pub fn ensure_test_store() -> Result<()> {
+    let db = SUBSCRIPTION_DB.get().ok_or_else(|| {
+        MCSError::MemoryError("webhook subscription store not initialized".into())
+    })?;
+    if let Some(parent) = db.path.parent() {
+        std::fs::create_dir_all(parent).map_err(MCSError::IoError)?;
+    }
+    let conn = open_connection()?;
+    mcpmem_core::schema::initialize_database(&conn)?;
+    mcpmem_core::events::migrate(&conn)?;
+    Ok(())
 }
 
 /// Stands in for DNS resolution when a subscription is registered. It does
@@ -175,6 +195,74 @@ pub fn set_test_kit(kit: Option<Arc<WebhookTestKit>>) {
 /// means the admin Test button cannot deliver.
 pub fn test_kit() -> Option<Arc<WebhookTestKit>> {
     TEST_KIT.lock().clone()
+}
+
+/// Serializes the kit-mutating window of tests that run in parallel in one
+/// binary. `set_test_kit` alone leaves two tests' windows free to interleave,
+/// so one test can observe another's kit. See [`with_test_kit`].
+static TEST_KIT_SERIAL: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Run `f` with the process-wide kit set to `kit`, then reset it to `None`.
+/// The whole window holds a lock shared by every kit-using test in the
+/// binary, so parallel tests never observe one another's kit. The sync form
+/// is for `#[test]` functions; the async form for `#[tokio::test]` — the
+/// await must happen while the lock is held.
+#[doc(hidden)]
+pub fn with_test_kit<T>(kit: Option<Arc<WebhookTestKit>>, f: impl FnOnce() -> T) -> T {
+    let _guard = TEST_KIT_SERIAL.blocking_lock();
+    set_test_kit(kit);
+    let result = f();
+    set_test_kit(None);
+    result
+}
+
+/// The async form of [`with_test_kit`], holding the shared lock across the
+/// awaited work.
+#[doc(hidden)]
+pub async fn with_test_kit_async<T>(
+    kit: Option<Arc<WebhookTestKit>>,
+    f: impl Future<Output = T>,
+) -> T {
+    let _guard = TEST_KIT_SERIAL.lock().await;
+    set_test_kit(kit);
+    let result = f.await;
+    set_test_kit(None);
+    result
+}
+
+/// The names of the signing keys the configured kit holds, sorted. An
+/// absent kit, or one holding no keys, answers an empty list: nothing in
+/// this process constrains a `secretRef` at registration time.
+pub fn configured_secret_refs() -> Vec<String> {
+    let Some(kit) = test_kit() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = kit.secrets.0.keys().cloned().collect();
+    names.sort();
+    names
+}
+
+/// Accept a registration-time `secretRef` against the process-wide kit.
+///
+/// An absent kit, or a kit holding no signing keys, accepts every name: a
+/// store-now deployment records the subscription first, and the delivery
+/// process resolves the name at delivery time. A kit holding keys refuses a
+/// name it does not hold, so a mistyped reference fails at registration —
+/// the failure this guard exists to prevent dead-lettered every delivery
+/// with `secret: secret reference is not configured`.
+///
+/// The refusal names every configured key: the operator's failure mode is a
+/// typo, and the right spellings in the message fix a typo fastest.
+pub fn validate_secret_ref(reference: &str) -> Result<()> {
+    let names = configured_secret_refs();
+    if names.is_empty() || names.iter().any(|name| name == reference) {
+        return Ok(());
+    }
+    Err(MCSError::InvalidParams(format!(
+        "secretRef '{reference}' is not configured; this server has signing keys: {}",
+        names.join(", ")
+    )))
 }
 
 /// Whether the running process starts the webhooks delivery role. The admin
@@ -282,6 +370,7 @@ pub fn handle_webhook_add_subscription(args: Option<&Value>) -> Result<Value> {
         .get("secretRef")
         .and_then(|v| v.as_str())
         .ok_or_else(|| MCSError::InvalidParams("Missing 'secretRef' parameter".into()))?;
+    validate_secret_ref(secret_ref)?;
 
     let event_operations: Vec<ChangeOperation> = opt_list(params, "eventOperations")?;
     let entity_types: Vec<String> = opt_list(params, "entityTypes")?;
@@ -367,5 +456,122 @@ mod tests {
     #[test]
     fn rejects_a_malformed_url() {
         assert!(validate_endpoint_shape("not a url").is_err());
+    }
+
+    /// A kit holding exactly the named signing keys. The names double as
+    /// the key bytes: a test key's content never matters, only its presence
+    /// in the map does. The resolver and connector are never reached — the
+    /// kit's job here is to hold the names.
+    fn kit_with(secret_names: &[&str]) -> Arc<WebhookTestKit> {
+        let secrets = secret_names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_owned(),
+                    mcpmem_webhook::SigningKey::new(name.as_bytes().to_vec())
+                        .expect("a non-empty test key"),
+                )
+            })
+            .collect();
+        Arc::new(WebhookTestKit::for_test(
+            BTreeSet::new(),
+            secrets,
+            Arc::new(PlaceholderResolver),
+            Arc::new(mcpmem_webhook::HttpsConnector::production()),
+            false,
+        ))
+    }
+
+    #[test]
+    fn accepts_a_configured_secret_name() {
+        with_test_kit(Some(kit_with(&["github", "n8n"])), || {
+            assert!(
+                validate_secret_ref("n8n").is_ok(),
+                "a configured name must pass"
+            );
+        });
+    }
+
+    /// The refusal names the available keys, so an operator with a typo sees
+    /// the right spellings in the message.
+    #[test]
+    fn rejects_an_unknown_name_when_the_kit_has_names() {
+        with_test_kit(Some(kit_with(&["n8n", "stripe"])), || {
+            let message = validate_secret_ref("github")
+                .expect_err("an unknown name must be refused")
+                .to_string();
+            assert!(
+                message.contains("secretRef 'github' is not configured"),
+                "{message}"
+            );
+            assert!(message.contains("n8n"), "{message}");
+            assert!(message.contains("stripe"), "{message}");
+        });
+    }
+
+    #[test]
+    fn accepts_any_name_when_the_kit_has_no_secrets() {
+        with_test_kit(Some(kit_with(&[])), || {
+            assert!(
+                validate_secret_ref("anything").is_ok(),
+                "an empty kit accepts any name"
+            );
+        });
+    }
+
+    #[test]
+    fn accepts_any_name_when_the_kit_is_absent() {
+        with_test_kit(None, || {
+            assert!(validate_secret_ref("anything").is_ok());
+        });
+    }
+
+    /// The list the admin API publishes is sorted, so the response shape does
+    /// not depend on the map's iteration order.
+    #[test]
+    fn configured_secret_refs_are_sorted() {
+        with_test_kit(Some(kit_with(&["zeta", "alpha", "mike"])), || {
+            assert_eq!(configured_secret_refs(), vec!["alpha", "mike", "zeta"]);
+        });
+    }
+
+    #[test]
+    fn configured_secret_refs_are_empty_without_a_kit() {
+        with_test_kit(None, || {
+            assert!(configured_secret_refs().is_empty());
+        });
+    }
+
+    /// The guard fires before the row is written: a refused reference must
+    /// leave the store untouched, or every retry would keep failing at
+    /// delivery time with a row the operator thought was fixed.
+    #[test]
+    fn add_subscription_refuses_an_unknown_secret_and_stores_no_row() {
+        // Pin this test's own live temp dir when the process lock is free;
+        // `ensure_test_store` repairs the store either way.
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path().join("memory.db"), 5_000);
+        ensure_test_store().expect("the subscription store is usable");
+        let conn = open_connection().expect("the subscription store opens");
+
+        let result = with_test_kit(Some(kit_with(&["n8n"])), || {
+            handle_webhook_add_subscription(Some(&json!({
+                "endpoint": "https://hooks.example.test/receive",
+                "consumerOrigin": "https://example.test",
+                "secretRef": "stripe",
+            })))
+        });
+
+        assert!(
+            result.is_err(),
+            "an unknown secretRef must be refused, got {result:?}"
+        );
+        let rows = SubscriptionRepository::new(&conn)
+            .list()
+            .expect("the store lists");
+        assert!(
+            rows.iter().all(|row| row.secret_ref != "stripe"),
+            "a refused subscription must not be stored"
+        );
     }
 }
