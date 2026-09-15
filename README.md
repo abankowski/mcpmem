@@ -399,7 +399,8 @@ a stored subscription is never mistaken for a working one.
    deliver to n8n's root, which no webhook listens on.
 
 3. **Verify the signature in the flow.** After the **Webhook** trigger, add
-   a **Code node**:
+   a **Code node** (the delivery arrives as `POST` with
+   `Content-Type: application/json`; the signature covers the raw bytes):
 
    ```js
    const crypto = require('crypto');

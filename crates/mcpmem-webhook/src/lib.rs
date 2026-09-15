@@ -157,6 +157,11 @@ impl HttpsTransport for ReqwestTransport {
             .header("Idempotency-Key", plan.idempotency_key)
             .header("X-Memory-Timestamp", plan.timestamp)
             .header("X-Memory-Signature", plan.signature)
+            // The envelope is JSON; without an explicit header a receiver
+            // sniffs the raw bytes — n8n rendered a 304-byte delivery as
+            // application/octet-stream. The signature still covers the raw
+            // body, exactly as the docs recipes state.
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(request.body)
             .send()
             .map_err(|e| WorkerError::Delivery(e.to_string()))?;
