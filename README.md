@@ -315,6 +315,16 @@ the HTTP status and latency. The test event carries an `eventId` starting
 with `test-` and origin `admin:webhook-test`, so a receiver can recognize
 and ignore it. No outbox row is written and no delivery state changes.
 
+**Observability.** The worker logs one line per delivery outcome: `info`
+with the HTTP status when an event is delivered, `warn` on a retryable
+status, a dead-letter, or a policy/secret discard (for example a host
+outside the allowlist or an unconfigured `secretRef`), and `error` on a
+transport failure; a claimed delivery logs at `debug`. At startup it audits
+every registered subscription against the delivery policy and logs `warn`
+naming the reason when all deliveries would be rejected. The admin UI lists
+the same subscriptions and flags when the `webhooks` role is not running, so
+a stored subscription is never mistaken for a working one.
+
 #### Receiver recipe: Node-RED
 
 1. **Expose Node-RED over HTTPS.** Behind Caddy, one Caddyfile line does it
