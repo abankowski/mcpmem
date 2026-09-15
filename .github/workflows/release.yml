@@ -138,7 +138,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           archive="/tmp/mcpmem-${TAG}-${{ matrix.target }}.tar.gz"
-          tar -C "target/${{ matrix.target }}/release" -czf "${archive}" mcpmem
+          # Every binary the crate declares goes in, not only the server:
+          # cargo-binstall validates the archive against the crate's bin set
+          # and rejects one that lacks mcpmem-maintenance or the benchmark.
+          tar -C "target/${{ matrix.target }}/release" -czf "${archive}" mcpmem mcpmem-maintenance bench
           gh release upload "${TAG}" "${archive}" --clobber
 
   # After a release, `main` names the version that is coming next, never the one
