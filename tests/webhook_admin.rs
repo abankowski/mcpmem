@@ -11,17 +11,57 @@
 //! assert the store is globally empty, and none may depend on another test's
 //! rows.
 
-use std::sync::LazyLock;
+use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode, header};
+use parking_lot::Mutex;
 use tower::ServiceExt;
 
 use mcpmem::http::{HttpState, TestSetup, router};
 use mcpmem::principals::ADMIN_SCOPE;
 use mcpmem::tools::ToolCategory;
+use mcpmem_webhook::{
+    DeliveryConnector, DeliveryResponse, Resolver, SignedRequest, SigningKey, ValidatedEndpoint,
+    WorkerError,
+};
 
 mod support;
+
+/// A resolver that answers every hostname with a public documentation
+/// address, so the delivery-time public-address check passes.
+struct StubResolver;
+
+impl Resolver for StubResolver {
+    fn resolve(&self, _hostname: &str) -> Result<Vec<IpAddr>, WorkerError> {
+        Ok(vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))])
+    }
+}
+
+/// A connector that records the request it saw and answers a fixed status.
+/// The tests assert what the kit actually sent, not only the HTTP mapping.
+struct RecordingConnector {
+    last: Mutex<Option<(String, String)>>,
+    attempts: AtomicU64,
+}
+
+impl DeliveryConnector for RecordingConnector {
+    fn send(
+        &self,
+        _endpoint: &ValidatedEndpoint,
+        request: SignedRequest,
+    ) -> Result<DeliveryResponse, WorkerError> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        *self.last.lock() = Some((request.event_id, request.signature));
+        Ok(DeliveryResponse {
+            status: 200,
+            retry_after_us: None,
+        })
+    }
+}
 
 /// One shared server plus two planted access tokens: `admin` holds the admin
 /// scope, `plain` holds only `graph-read` so the gate's 403 side is testable.
@@ -30,6 +70,9 @@ struct Fixture {
     router: axum::Router,
     admin: String,
     plain: String,
+    /// The connector the shared test kit drives. The test route reads it to
+    /// verify what a test delivery actually sent.
+    stub: Arc<RecordingConnector>,
 }
 
 /// Plant a live access token the way every minted token is stored, so the
@@ -85,11 +128,31 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
                 plant(store, vec!["graph-read".to_owned()]),
             )
         });
+    // The test kit the admin Test button drives: `hooks.example.test` is the
+    // only allowlisted host and `hooks-key` the only signing secret, matching
+    // the endpoints and secret refs the tests plant. The kit is process-wide,
+    // so these tests run serially (the pre-flight runs every suite with
+    // `--test-threads=1`).
+    let stub = Arc::new(RecordingConnector {
+        last: Mutex::new(None),
+        attempts: AtomicU64::new(0),
+    });
+    let kit = mcpmem::actions::webhooks::WebhookTestKit::for_test(
+        ["hooks.example.test".to_owned()].into_iter().collect(),
+        BTreeMap::from([(
+            "hooks-key".to_owned(),
+            SigningKey::new(b"test-signing-key".to_vec()).expect("the key is non-empty"),
+        )]),
+        Arc::new(StubResolver),
+        Arc::clone(&stub) as Arc<dyn DeliveryConnector>,
+    );
+    mcpmem::actions::webhooks::set_test_kit(Some(Arc::new(kit)));
     Fixture {
         _dir: dir,
         router: router(state),
         admin,
         plain,
+        stub,
     }
 });
 
@@ -350,5 +413,155 @@ async fn delete_removes_and_a_second_delete_is_404() {
         second.status(),
         StatusCode::NOT_FOUND,
         "a second delete names no row"
+    );
+}
+
+#[tokio::test]
+async fn test_delivery_requires_admin_scope() {
+    let res = drive(json_call(
+        "post",
+        &FIXTURE.plain,
+        "/ui/api/webhooks/00000000-0000-0000-0000-000000000000/test",
+        None,
+    ))
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "the gate runs before the id is even parsed"
+    );
+}
+
+#[tokio::test]
+async fn test_delivery_unknown_id_is_404() {
+    let res = drive(json_call(
+        "post",
+        &FIXTURE.admin,
+        "/ui/api/webhooks/00000000-0000-0000-0000-000000000000/test",
+        None,
+    ))
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_delivery_sends_a_signed_test_event_and_reports_status() {
+    let created = drive(json_call(
+        "post",
+        &FIXTURE.admin,
+        "/ui/api/webhooks",
+        Some(r#"{"endpoint":"https://hooks.example.test/delivery-probe","consumerOrigin":"probe","secretRef":"hooks-key"}"#),
+    ))
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let id = support::json(created).await["subscriptionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    FIXTURE.stub.attempts.store(0, Ordering::SeqCst);
+    *FIXTURE.stub.last.lock() = None;
+
+    let res = drive(json_call(
+        "post",
+        &FIXTURE.admin,
+        format!("/ui/api/webhooks/{id}/test"),
+        None,
+    ))
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = support::json(res).await;
+    assert_eq!(body["status"].as_u64(), Some(200));
+    assert_eq!(body["ok"].as_bool(), Some(true));
+    assert!(
+        body["latencyUs"].as_u64().is_some(),
+        "the response carries the measured latency"
+    );
+
+    // The connector saw exactly one request, carrying a test-marked event
+    // id and a real signature — the contract the receiver checks.
+    assert_eq!(
+        FIXTURE.stub.attempts.load(Ordering::SeqCst),
+        1,
+        "one delivery was attempted"
+    );
+    let (event_id, signature) = FIXTURE
+        .stub
+        .last
+        .lock()
+        .clone()
+        .expect("the connector recorded the request");
+    assert!(
+        event_id.starts_with("test-"),
+        "the event id marks the event as a test: {event_id}"
+    );
+    assert_eq!(
+        signature.len(),
+        64,
+        "the delivery is signed with the subscription's secret"
+    );
+}
+
+#[tokio::test]
+async fn test_delivery_refuses_a_host_outside_the_allowlist() {
+    let created = drive(json_call(
+        "post",
+        &FIXTURE.admin,
+        "/ui/api/webhooks",
+        Some(r#"{"endpoint":"https://outside.example.test/cb","consumerOrigin":"probe","secretRef":"hooks-key"}"#),
+    ))
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let id = support::json(created).await["subscriptionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let res = drive(json_call(
+        "post",
+        &FIXTURE.admin,
+        format!("/ui/api/webhooks/{id}/test"),
+        None,
+    ))
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = support::json(res).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("not allowlisted"),
+        "{body}"
+    );
+    assert_eq!(
+        FIXTURE.stub.attempts.load(Ordering::SeqCst),
+        0,
+        "nothing was sent"
+    );
+}
+
+#[tokio::test]
+async fn test_delivery_refuses_an_unknown_secret_ref() {
+    let created = drive(json_call(
+        "post",
+        &FIXTURE.admin,
+        "/ui/api/webhooks",
+        Some(r#"{"endpoint":"https://hooks.example.test/cb","consumerOrigin":"probe","secretRef":"missing-ref"}"#),
+    ))
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let id = support::json(created).await["subscriptionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let res = drive(json_call(
+        "post",
+        &FIXTURE.admin,
+        format!("/ui/api/webhooks/{id}/test"),
+        None,
+    ))
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = support::json(res).await;
+    assert!(
+        body["error"].as_str().unwrap().contains("not configured"),
+        "{body}"
     );
 }
