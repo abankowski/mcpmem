@@ -128,6 +128,14 @@ This entry lists every change since that snapshot. The version line restarts at
   the same payloads, and `secretRef` stays a name. A build without the
   `webhooks` Cargo feature answers 404 and the page hides the section.
 
+- **Test delivery from the webhook admin UI.** `POST /ui/api/webhooks/{id}/test`
+  delivers one signed test event to a subscription's endpoint through the
+  worker's own delivery-time policy (allowlist, DNS, public address) and
+  signing, and reports the HTTP status and latency. The `/ui/admin` webhooks
+  table gains a per-row **Test** button. A test writes no outbox row and
+  changes no delivery state; the event carries an `eventId` with the `test-`
+  prefix and origin `admin:webhook-test`, so a receiver can recognize and
+  ignore it.
 - **Scala support in the code indexer.** The tree-sitter grammar set grows
   from 11 to 12; `code_index` now parses `.scala` and `.sc` files into the
   symbol map (packages, classes, objects, traits, enums, functions, vals,

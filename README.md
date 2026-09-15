@@ -276,6 +276,13 @@ So Node-RED on `:1880` and n8n on `:5678` are unreachable directly: put a TLS
 reverse proxy (Caddy, nginx, Traefik) or a tunnel in front of them, and put
 the proxy's public hostname in the `allowlist`.
 
+**Test a subscription from the admin UI.** Each subscription row has a
+**Test** button (`POST /ui/api/webhooks/{id}/test`): it delivers one signed
+test event through the same policy and signing the worker uses, and reports
+the HTTP status and latency. The test event carries an `eventId` starting
+with `test-` and origin `admin:webhook-test`, so a receiver can recognize
+and ignore it. No outbox row is written and no delivery state changes.
+
 #### Receiver recipe: Node-RED
 
 1. **Expose Node-RED over HTTPS.** Behind Caddy, one Caddyfile line does it

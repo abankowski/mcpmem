@@ -63,6 +63,13 @@ async fn inner_main() -> Result<()> {
     // connection. An empty `[webhooks]` section is a valid fail-closed
     // worker: it refuses every delivery until the operator names an
     // allowlisted host and a signing key.
+    // The admin UI's webhook Test button needs the same delivery policy the
+    // worker holds, so the `[webhooks]` section is read once and shared: the
+    // worker role gets the config for its polling loop, and the process-wide
+    // test kit gets the allowlist and signing keys for one-shot deliveries.
+    #[cfg(feature = "webhooks")]
+    let webhook_config = crate::config_file::webhook_worker_config(file.as_ref().map(|(_, f)| f))?;
+
     #[cfg(feature = "webhooks")]
     let services = if config
         .roles
@@ -71,12 +78,23 @@ async fn inner_main() -> Result<()> {
     {
         let worker = runtime::WebhookService::with_config(
             config.memory_file_path.clone(),
-            crate::config_file::webhook_worker_config(file.as_ref().map(|(_, f)| f))?,
+            webhook_config.clone(),
         )?;
         services.with_webhooks(Arc::new(worker))
     } else {
         services
     };
+    // An empty section produces an empty kit: the test button then refuses
+    // every endpoint with the policy error, which is the fail-closed
+    // default.
+    #[cfg(feature = "webhooks")]
+    {
+        let kit = mcpmem::actions::webhooks::WebhookTestKit::production(
+            webhook_config.allowlist,
+            webhook_config.secrets,
+        );
+        mcpmem::actions::webhooks::set_test_kit(Some(Arc::new(kit)));
+    }
     // The registry is published for the whole process, not only for the
     // worker. `semantic_search` embeds the query text on read, and an operator
     // may split the roles across two hosts: one `--role mcp`, one
