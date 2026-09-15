@@ -171,6 +171,23 @@ pub fn test_kit() -> Option<Arc<WebhookTestKit>> {
     TEST_KIT.lock().clone()
 }
 
+/// Whether the running process starts the webhooks delivery role. The admin
+/// UI shows this so a stored subscription is never mistaken for a delivered
+/// one: the admin section is feature-gated, the worker is role-gated, and
+/// the two can disagree when the operator forgets the role.
+static DELIVERY_ROLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record whether the process runs the delivery worker. Production sets this
+/// once at startup from the configured roles.
+pub fn set_delivery_role(running: bool) {
+    DELIVERY_ROLE.store(running, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the delivery worker runs in this process.
+pub fn delivery_role() -> bool {
+    DELIVERY_ROLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A best-effort host for an `https://host[:port][/path]` endpoint, read with
 /// plain string search rather than a URL parser.
 ///
