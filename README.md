@@ -261,6 +261,10 @@ after eight attempts. The full contract is in [`crates/mcpmem-webhook/README.md`
 > nothing is delivered, no error is raised. An allowlisted host and a signing key are what make
 > it act.
 
+The section alone does not start delivery: the `webhooks` role must be in
+`[server] roles`, or subscriptions are stored and nothing is delivered (the
+server warns at startup and the admin UI shows the warning).
+
 #### What the worker will and will not deliver to
 
 The endpoint policy is DNS-verified before **every** delivery:

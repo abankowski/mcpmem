@@ -128,6 +128,11 @@ This entry lists every change since that snapshot. The version line restarts at
   the same payloads, and `secretRef` stays a name. A build without the
   `webhooks` Cargo feature answers 404 and the page hides the section.
 
+- **Delivery-role warning in the webhook admin UI.** `GET /ui/api/webhooks`
+  reports whether this process runs the `webhooks` delivery role, and the UI
+  shows a warning when subscriptions are stored but no worker runs to
+  deliver them. The server also warns at startup when `[webhooks]` is
+  configured without the role — the same guard the `indexer` section has.
 - **Test delivery from the webhook admin UI.** `POST /ui/api/webhooks/{id}/test`
   delivers one signed test event to a subscription's endpoint through the
   worker's own delivery-time policy (allowlist, DNS, public address) and
