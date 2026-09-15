@@ -119,18 +119,39 @@ set on every push.
 
 Prebuilt binaries are attached to every GitHub release, one per target:
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
-and `x86_64-apple-darwin`. Download the one for your platform and unpack it —
-no compilation:
+and `x86_64-apple-darwin`. The release workflow builds them with
+`--all-features`, so each binary already contains the whole feature matrix —
+`code`, `oauth`, `indexer`, `webhooks` and `bedrock`. Nothing more to select at
+install time: what runs is decided at runtime by `roles`, the `--enable-*`
+categories and the `[oauth]` / `[indexer]` / `[webhooks]` configuration, never
+by the binary.
+
+`cargo binstall mcpmem` downloads that same artifact for your platform in one
+command. It is the recommended path when you need `indexer` or `webhooks`,
+because those two are not default features:
+
+```sh
+# Identical in Bash and fish.
+cargo binstall mcpmem
+```
+
+If no matching artifact exists for your platform, binstall falls back to
+compiling from source. Downloading by hand works too — the asset is
+`mcpmem-<tag>-<target>.tar.gz`, where `<tag>` is the release tag such as
+`v2.1.0`:
 
 ```sh
 curl -fL -o mcpmem.tar.gz \
-  "https://github.com/abankowski/mcpmem/releases/latest/download/mcpmem-v1.0.2-aarch64-apple-darwin.tar.gz"
+  "https://github.com/abankowski/mcpmem/releases/download/v2.1.0/mcpmem-v2.1.0-x86_64-unknown-linux-gnu.tar.gz"
 tar -xzf mcpmem.tar.gz && sudo mv mcpmem /usr/local/bin/
 ```
 
-`cargo install mcpmem` stays an option. It always recompiles from crates.io,
-which ships source only, and the options above tell it which features to build
-in.
+`cargo install mcpmem` stays an option, with one difference that matters for
+`indexer` and `webhooks`: it always recompiles from crates.io, which ships
+source only, with the **default** features (`code`, `oauth`) unless you name
+more. A default build has no indexer and no webhook worker, and their roles
+refuse to start — pass `--features indexer,webhooks` explicitly when you
+install from source.
 
 To build from a clone instead of crates.io:
 
