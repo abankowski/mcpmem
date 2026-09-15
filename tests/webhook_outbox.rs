@@ -183,6 +183,69 @@ fn egress_policy_rejects_private_and_malformed_endpoints() {
     );
 }
 
+#[test]
+fn startup_audit_checks_each_subscription_against_the_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.db");
+    graph(&path); // runs every migration, including the subscription table
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for (idx, (host, enabled)) in [
+        ("hooks.example.test", true),
+        ("outside.example.test", true),
+        ("hooks.example.test", false),
+    ]
+    .iter()
+    .enumerate()
+    {
+        SubscriptionRepository::new(&conn)
+            .upsert(WebhookSubscription {
+                subscription_id: uuid::Uuid::new_v4(),
+                endpoint: format!("https://{host}/cb"),
+                event_operations: vec![],
+                entity_types: vec![],
+                ignored_origins: vec![],
+                consumer_origin: format!("probe-{idx}"),
+                secret_ref: format!("ref-{idx}"),
+                enabled: *enabled,
+            })
+            .unwrap();
+    }
+    let connector = TestConnector::default();
+    let worker = mcpmem_webhook::WebhookWorker::new(
+        &path,
+        &connector,
+        TestSecrets,
+        ["hooks.example.test".into()]
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        TestResolver(vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))]),
+    );
+    let audits = worker.audit_subscriptions().unwrap();
+    assert_eq!(audits.len(), 3);
+    let allowed = audits
+        .iter()
+        .find(|a| a.endpoint.contains("hooks"))
+        .unwrap();
+    let refused = audits
+        .iter()
+        .find(|a| a.endpoint.contains("outside"))
+        .unwrap();
+    let disabled = audits.iter().find(|a| !a.enabled).unwrap();
+    assert!(
+        allowed.outcome.is_ok(),
+        "the allowlisted host passes the policy"
+    );
+    let reason = refused.outcome.as_ref().unwrap_err();
+    assert!(
+        reason.contains("not allowlisted"),
+        "the refused host names the reason: {reason}"
+    );
+    assert!(
+        disabled.outcome.as_ref().unwrap_err().contains("disabled"),
+        "a disabled subscription is reported as off, not as broken"
+    );
+}
+
 struct TestResolver(Vec<IpAddr>);
 impl mcpmem_webhook::Resolver for TestResolver {
     fn resolve(&self, _: &str) -> Result<Vec<IpAddr>, mcpmem_webhook::WorkerError> {

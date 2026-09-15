@@ -268,6 +268,25 @@ pub struct WebhookWorker<C, S, R> {
 }
 pub trait WorkerPoll: Send + Sync {
     fn poll(&self, now_us: i64) -> Result<DeliveryReport, WorkerError>;
+    /// One-time startup audit of the registered subscriptions against the
+    /// delivery-time policy. The default reports nothing, so a test fake
+    /// keeps compiling.
+    fn audit_subscriptions(&self) -> Result<Vec<SubscriptionAudit>, WorkerError> {
+        Ok(Vec::new())
+    }
+}
+
+/// The startup audit outcome for one registered subscription.
+#[derive(Clone, Debug)]
+pub struct SubscriptionAudit {
+    pub subscription_id: String,
+    pub endpoint: String,
+    pub secret_ref: String,
+    pub enabled: bool,
+    /// `Err(reason)` when the delivery-time policy would refuse every
+    /// attempt: the host is not allowlisted, the address checks fail, or
+    /// the secret reference is not configured.
+    pub outcome: std::result::Result<(), String>,
 }
 impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R> {
     pub fn new(
@@ -289,6 +308,37 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
     pub const fn with_lease_us(mut self, lease_us: i64) -> Self {
         self.lease_us = lease_us;
         self
+    }
+    /// Audit every registered subscription against the delivery-time policy,
+    /// without delivering anything. The supervisor logs the outcome once at
+    /// startup, so a subscription that can never be delivered is visible
+    /// before the first event arrives.
+    pub fn audit_subscriptions(&self) -> Result<Vec<SubscriptionAudit>, WorkerError> {
+        let conn = Connection::open(&self.database)?;
+        mcpmem_core::schema::initialize_database(&conn)?;
+        let subscriptions = SubscriptionRepository::new(&conn).list()?;
+        Ok(subscriptions.into_iter().map(|s| self.audit(s)).collect())
+    }
+    fn audit(&self, subscription: WebhookSubscription) -> SubscriptionAudit {
+        let outcome = if !subscription.enabled {
+            Err("subscription is disabled".into())
+        } else {
+            validate_endpoint(&subscription.endpoint, &self.allowlist, &self.resolver)
+                .map(|_| ())
+                .and_then(|_| {
+                    self.secrets
+                        .signing_key(&subscription.secret_ref)
+                        .map(|_| ())
+                })
+                .map_err(|e| e.to_string())
+        };
+        SubscriptionAudit {
+            subscription_id: subscription.subscription_id.to_string(),
+            endpoint: subscription.endpoint,
+            secret_ref: subscription.secret_ref,
+            enabled: subscription.enabled,
+            outcome,
+        }
     }
     pub fn run_once(&self, now: i64) -> Result<DeliveryReport, WorkerError> {
         let conn = Connection::open(&self.database)?;

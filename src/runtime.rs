@@ -91,6 +91,44 @@ impl WebhookService {
             config.allowlist,
             mcpmem_webhook::SystemResolver,
         );
+        // Log every registered subscription once at startup. A subscription
+        // the delivery-time policy refuses — a host outside the allowlist,
+        // an unconfigured secret reference — is a warn here, before the
+        // first event can dead-letter silently.
+        match worker.audit_subscriptions() {
+            Ok(audits) => {
+                if audits.is_empty() {
+                    tracing::info!("no webhook subscriptions are registered");
+                }
+                for audit in audits {
+                    match (audit.enabled, audit.outcome) {
+                        (true, Ok(())) => tracing::info!(
+                            subscription_id = %audit.subscription_id,
+                            endpoint = %audit.endpoint,
+                            "webhook subscription ready"
+                        ),
+                        (true, Err(reason)) => tracing::warn!(
+                            subscription_id = %audit.subscription_id,
+                            endpoint = %audit.endpoint,
+                            secret_ref = %audit.secret_ref,
+                            reason = %reason,
+                            "webhook subscription is misconfigured: every delivery will be rejected"
+                        ),
+                        (false, _) => tracing::info!(
+                            subscription_id = %audit.subscription_id,
+                            endpoint = %audit.endpoint,
+                            "webhook subscription registered but disabled"
+                        ),
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "webhook subscription audit failed; the delivery policy is unknown at startup"
+                );
+            }
+        }
         Ok(Self {
             worker: Some(Arc::new(worker)),
         })
