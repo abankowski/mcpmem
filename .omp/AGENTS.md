@@ -3,6 +3,15 @@
 Codebase-specific working agreements. The transferable rules live in
 `~/.omp/agent/AGENTS.md` and always apply.
 
+## README is the public record of features
+
+Every user-facing feature ships with its README section in the same change —
+the README is where a capability is described for the first time. The Second
+Brain graph is private memory and never a substitute for repo documentation;
+a feature that lands in code and CHANGES but nowhere in README is
+undocumented. (Gap this rule closes: webhook delivery logging and the
+startup audit shipped without README coverage on 2026-09-15.)
+
 ## Pre-flight before publishing a PR
 
 The push/publish guard (`require-preflight.py`) looks for the repository's
