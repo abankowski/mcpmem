@@ -86,9 +86,25 @@ async fn inner_main() -> Result<()> {
     };
     // An empty section produces an empty kit: the test button then refuses
     // every endpoint with the policy error, which is the fail-closed
-    // default.
+    // default. The delivery-role flag tells the admin UI whether a stored
+    // subscription can ever be delivered, and a non-empty section without
+    // the role gets the same startup warning the indexer section gets.
     #[cfg(feature = "webhooks")]
     {
+        let runs_webhooks = config
+            .roles
+            .roles()
+            .contains(&runtime::RuntimeRole::Webhooks);
+        mcpmem::actions::webhooks::set_delivery_role(runs_webhooks);
+        if !runs_webhooks
+            && (!webhook_config.allowlist.is_empty() || !webhook_config.secrets.is_empty())
+        {
+            tracing::warn!(
+                "config file section [webhooks] is set, but this process runs no `webhooks` \
+                 role: subscriptions are stored but nothing is delivered. Add --role webhooks, \
+                 or run the `webhooks` role in another process."
+            );
+        }
         let kit = mcpmem::actions::webhooks::WebhookTestKit::production(
             webhook_config.allowlist,
             webhook_config.secrets,

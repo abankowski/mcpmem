@@ -171,7 +171,17 @@ async function loadWebhooks() {
   section.hidden = false;
   renderWebhooks(data.subscriptions);
   document.getElementById("add-webhook").hidden = false;
-  status.textContent = "";
+  // The section exists in every build with the webhooks feature, but the
+  // worker runs only when the `webhooks` role is on. A subscription that
+  // cannot be delivered looks exactly like a working one, so the gap is
+  // stated, not inferred.
+  if (data.deliveryRole === false) {
+    status.textContent =
+      "Delivery role 'webhooks' is not running — subscriptions are stored but nothing is delivered.";
+    status.className = "hint error";
+  } else {
+    status.textContent = "";
+  }
 }
 
 function renderPrincipals(principals) {

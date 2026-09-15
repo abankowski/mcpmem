@@ -1039,8 +1039,12 @@ async fn admin_dismiss_waitlist(
 /// keys the SPA echoes back unchanged.
 #[cfg(feature = "webhooks")]
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WebhookList {
     subscriptions: Vec<WebhookSubscription>,
+    /// Whether this process runs the delivery worker. The UI warns when a
+    /// subscription is stored but nothing can deliver it.
+    delivery_role: bool,
 }
 
 /// The create body: every stored field except the server-generated id.
@@ -1235,7 +1239,14 @@ async fn admin_list_webhooks(State(state): State<HttpState>, headers: HeaderMap)
         Ok(rows) => rows,
         Err(e) => return webhook_store_failure(e),
     };
-    (StatusCode::OK, Json(WebhookList { subscriptions })).into_response()
+    (
+        StatusCode::OK,
+        Json(WebhookList {
+            subscriptions,
+            delivery_role: webhooks_actions::delivery_role(),
+        }),
+    )
+        .into_response()
 }
 
 /// `POST /ui/api/webhooks` — create one subscription. The rules are the MCP

@@ -267,6 +267,11 @@ async fn list_reports_json_with_a_subscriptions_array() {
         body["subscriptions"].as_array().is_some(),
         "the payload is a subscriptions array"
     );
+    assert_eq!(
+        body["deliveryRole"].as_bool(),
+        Some(false),
+        "the fixture runs no delivery role, and the UI must be told exactly that"
+    );
 }
 
 #[tokio::test]
