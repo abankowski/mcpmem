@@ -274,9 +274,11 @@ allowlist = ["hooks.example.com"]
 ```
 
 Then register a subscription through the MCP tool `webhook_add_subscription` (an `endpoint`,
-an allowlisted `https` hostname, and a `secretRef` from the section above). Delivery is signed
-with `X-Memory-Signature` over `<timestamp>.<body>`, retried with backoff, and dead-lettered
-after eight attempts. The full contract is in [`crates/mcpmem-webhook/README.md`](crates/mcpmem-webhook/README.md).
+an allowlisted `https` hostname, and a `secretRef` that is exactly one name from the section
+above). The worker resolves `secretRef` at delivery time; the field never holds key material.
+An unknown name dead-letters the delivery. Delivery is signed with `X-Memory-Signature` over
+`<timestamp>.<body>`, retried with backoff, and dead-lettered after eight attempts. The full
+contract is in [`crates/mcpmem-webhook/README.md`](crates/mcpmem-webhook/README.md).
 
 > **Fail closed by default.** With no `[webhooks]` section, the role runs as an empty worker:
 > nothing is delivered, no error is raised. An allowlisted host and a signing key are what make
@@ -325,6 +327,13 @@ naming the reason when all deliveries would be rejected. The admin UI lists
 the same subscriptions and flags when the `webhooks` role is not running, so
 a stored subscription is never mistaken for a working one.
 
+**Troubleshooting.** A `warn` line `secret: secret reference is not configured`
+means a subscription names a signing key that `[webhooks.secrets]` does not
+define, so the delivery is discarded. Registration rejects an unknown name
+when the server has signing keys, and the admin UI marks the row; a
+subscription created before the guard, or on a host without the section, still
+fails at delivery. Fix the subscription to a configured name, or add the name
+and restart the server.
 #### Receiver recipe: Node-RED
 
 1. **Expose Node-RED over HTTPS.** Behind Caddy, one Caddyfile line does it
@@ -392,8 +401,9 @@ a stored subscription is never mistaken for a working one.
    **Respond: using Respond to Webhook** if you want a 200 to the worker (the
    worker needs only a non-2xx to retry; the default response is fine).
 
-2. **mcpmem side.** Identical to the Node-RED recipe: same allowlist, any
-   `secretRef`. Point `webhook_add_subscription` at the full production URL
+2. **mcpmem side.** Identical to the Node-RED recipe: same allowlist, and a
+   `secretRef` that is exactly a name from `[webhooks.secrets]` — the sample
+   above uses `"my-consumer"`. Point `webhook_add_subscription` at the full production URL
    from the node, `https://hooks.example.com/webhook/mcpmem`. The worker
    POSTs to exactly this URL, so the path matters: a bare hostname would
    deliver to n8n's root, which no webhook listens on.
