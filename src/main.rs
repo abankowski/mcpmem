@@ -108,6 +108,7 @@ async fn inner_main() -> Result<()> {
         let kit = mcpmem::actions::webhooks::WebhookTestKit::production(
             webhook_config.allowlist,
             webhook_config.secrets,
+            webhook_config.allow_private_addresses,
         );
         mcpmem::actions::webhooks::set_test_kit(Some(Arc::new(kit)));
     }

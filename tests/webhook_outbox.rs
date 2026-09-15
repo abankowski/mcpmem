@@ -184,6 +184,56 @@ fn egress_policy_rejects_private_and_malformed_endpoints() {
 }
 
 #[test]
+fn private_resolution_is_refused_by_default_and_allowed_by_the_builder() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private-policy.db");
+    graph(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    SubscriptionRepository::new(&conn)
+        .upsert(WebhookSubscription {
+            subscription_id: uuid::Uuid::new_v4(),
+            endpoint: "https://hooks.example.test/receive".into(),
+            event_operations: vec![],
+            entity_types: vec![],
+            ignored_origins: vec![],
+            consumer_origin: "probe".into(),
+            secret_ref: "ref".into(),
+            enabled: true,
+        })
+        .unwrap();
+    let connector = TestConnector::default();
+    let strict = mcpmem_webhook::WebhookWorker::new(
+        &path,
+        &connector,
+        TestSecrets,
+        allowlist(),
+        TestResolver(vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))]),
+    );
+    let refused = strict.audit_subscriptions().unwrap();
+    assert!(
+        refused[0]
+            .outcome
+            .as_ref()
+            .unwrap_err()
+            .contains("non-public"),
+        "the default policy refuses an allowlisted host that resolves privately"
+    );
+    let relaxed = mcpmem_webhook::WebhookWorker::new(
+        &path,
+        &connector,
+        TestSecrets,
+        allowlist(),
+        TestResolver(vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))]),
+    )
+    .with_allow_private_addresses(true);
+    let allowed = relaxed.audit_subscriptions().unwrap();
+    assert!(
+        allowed[0].outcome.is_ok(),
+        "the opt-out admits the allowlisted private host for split-horizon DNS"
+    );
+}
+
+#[test]
 fn startup_audit_checks_each_subscription_against_the_policy() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("audit.db");

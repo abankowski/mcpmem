@@ -106,6 +106,7 @@ pub struct WebhookTestKit {
     secrets: mcpmem_webhook::StaticSecretProvider,
     resolver: Arc<dyn mcpmem_webhook::Resolver>,
     connector: Arc<dyn mcpmem_webhook::DeliveryConnector>,
+    allow_private: bool,
 }
 
 impl WebhookTestKit {
@@ -114,12 +115,14 @@ impl WebhookTestKit {
     pub fn production(
         allowlist: BTreeSet<String>,
         secrets: BTreeMap<String, mcpmem_webhook::SigningKey>,
+        allow_private: bool,
     ) -> Self {
         Self {
             allowlist,
             secrets: mcpmem_webhook::StaticSecretProvider(secrets),
             resolver: Arc::new(mcpmem_webhook::SystemResolver),
             connector: Arc::new(mcpmem_webhook::HttpsConnector::production()),
+            allow_private,
         }
     }
 
@@ -130,12 +133,14 @@ impl WebhookTestKit {
         secrets: BTreeMap<String, mcpmem_webhook::SigningKey>,
         resolver: Arc<dyn mcpmem_webhook::Resolver>,
         connector: Arc<dyn mcpmem_webhook::DeliveryConnector>,
+        allow_private: bool,
     ) -> Self {
         Self {
             allowlist,
             secrets: mcpmem_webhook::StaticSecretProvider(secrets),
             resolver,
             connector,
+            allow_private,
         }
     }
 
@@ -150,6 +155,7 @@ impl WebhookTestKit {
             &self.secrets,
             &self.allowlist,
             &*self.resolver,
+            self.allow_private,
             subscription,
         )
     }
