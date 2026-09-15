@@ -1042,6 +1042,10 @@ async fn admin_dismiss_waitlist(
 #[serde(rename_all = "camelCase")]
 struct WebhookList {
     subscriptions: Vec<WebhookSubscription>,
+    /// The names of the signing keys this process can deliver with, sorted.
+    /// An empty list is a store-now deployment: a reference is accepted at
+    /// registration time and resolved by the delivery process.
+    configured_secrets: Vec<String>,
     /// Whether this process runs the delivery worker. The UI warns when a
     /// subscription is stored but nothing can deliver it.
     delivery_role: bool,
@@ -1243,6 +1247,7 @@ async fn admin_list_webhooks(State(state): State<HttpState>, headers: HeaderMap)
         StatusCode::OK,
         Json(WebhookList {
             subscriptions,
+            configured_secrets: webhooks_actions::configured_secret_refs(),
             delivery_role: webhooks_actions::delivery_role(),
         }),
     )
@@ -1283,6 +1288,14 @@ async fn admin_create_webhook(
         Ok(()) => {}
         Err(e) => {
             return bad_request(format!("invalid webhook endpoint: {e}"));
+        }
+    }
+    // The registration-time secret check, the same one the MCP add tool
+    // runs: an unknown `secretRef` is refused before the row is written.
+    match webhooks_actions::validate_secret_ref(&subscription.secret_ref) {
+        Ok(()) => {}
+        Err(e) => {
+            return bad_request(format!("invalid webhook subscription: {e}"));
         }
     }
     if let Some(message) = webhook_caps_error(&subscription) {
@@ -1330,6 +1343,17 @@ async fn admin_update_webhook(
         Ok(v) => v,
         Err(_) => return bad_request("the body must be a JSON patch"),
     };
+    // The patched value is validated, never the stored one: a patch that
+    // names no `secretRef` leaves an existing reference alone, whatever the
+    // current kit holds.
+    if let Some(new_ref) = patch.secret_ref.as_deref() {
+        match webhooks_actions::validate_secret_ref(new_ref) {
+            Ok(()) => {}
+            Err(e) => {
+                return bad_request(format!("invalid webhook subscription: {e}"));
+            }
+        }
+    }
     let conn = match webhooks_actions::open_connection() {
         Ok(conn) => conn,
         Err(e) => return webhook_store_failure(e),
@@ -2062,5 +2086,272 @@ mod tests {
         // Drain both bodies so the responses are fully read.
         let _ = response.into_body().collect().await.unwrap();
         let _ = not_found.into_body().collect().await.unwrap();
+    }
+
+    /// Admin-route tests for the webhook subscription API, behind the same
+    /// feature gate as the routes themselves.
+    #[cfg(feature = "webhooks")]
+    mod webhook_admin_tests {
+        use super::*;
+        use crate::principals::ADMIN_SCOPE;
+        use http_body_util::BodyExt;
+        use mcpmem_oauth::store::{Grant, TokenKind};
+        use tower::ServiceExt;
+
+        const NOW_US: i64 = 1_700_000_000_000_000;
+
+        fn oauth_config() -> crate::config::OAuthConfig {
+            crate::config::OAuthConfig {
+                public_url: "https://mem.example.com".into(),
+                oidc_issuer: "https://idp.invalid".into(),
+                oidc_client_id: "mcpmem-test".into(),
+                oidc_client_secret: None,
+                principals: Vec::new(),
+                cimd_allowed_domains: Vec::new(),
+                trust_forwarded_proto: false,
+                approval_waitlist: false,
+                approval_waitlist_ttl_seconds: 24 * 60 * 60,
+                default_new_principal_scopes: vec!["graph-read".to_owned()],
+            }
+        }
+
+        /// A kit holding exactly the named signing keys. The names double as
+        /// the key bytes: a test key's content never matters, only its
+        /// presence in the map does. The resolver and connector are never
+        /// reached — these tests judge registration-time checks, not
+        /// delivery.
+        fn kit_with(secret_names: &[&str]) -> Arc<webhooks_actions::WebhookTestKit> {
+            let secrets = secret_names
+                .iter()
+                .map(|name| {
+                    (
+                        (*name).to_owned(),
+                        mcpmem_webhook::SigningKey::new(name.as_bytes().to_vec())
+                            .expect("a non-empty test key"),
+                    )
+                })
+                .collect();
+            Arc::new(webhooks_actions::WebhookTestKit::for_test(
+                std::collections::BTreeSet::new(),
+                secrets,
+                Arc::new(mcpmem_webhook::SystemResolver),
+                Arc::new(mcpmem_webhook::HttpsConnector::production()),
+                false,
+            ))
+        }
+
+        /// A state with OAuth on and an access token holding the admin scope,
+        /// plus the token to present. The temp dir is returned with the state
+        /// so the database file outlives the test.
+        fn admin_state() -> (HttpState, String, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let state = HttpState::for_test(TestSetup {
+                db_path: dir.path().join("memory.db"),
+                oauth: Some(oauth_config()),
+                auth_token: None,
+                metadata_fetch: None,
+                bearer_scopes: Vec::new(),
+                enabled_categories: ToolCategory::ALL.to_vec(),
+                now_us: Some(Arc::new(|| NOW_US)),
+            });
+            let oauth = state.oauth().expect("oauth is on");
+            let token = "admin-test-token";
+            oauth.with_store(|store| {
+                store
+                    .put_token(
+                        token,
+                        TokenKind::Access,
+                        &Grant {
+                            client_id: "mcpmem-test".into(),
+                            principal: "https://idp.invalid\u{0}admin@example.test".into(),
+                            scopes: vec![ADMIN_SCOPE.to_owned()],
+                            resource: oauth.resource(),
+                            family: "admin-test-family".into(),
+                        },
+                        NOW_US,
+                        NOW_US + 3_600_000_000,
+                    )
+                    .expect("the admin token stores")
+            });
+            (state, token.to_owned(), dir)
+        }
+
+        /// The subscription store is process-wide and may point at a database
+        /// file that outlived its test's temp dir; `ensure_test_store`
+        /// recreates a missing parent directory and bootstraps a fresh file,
+        /// and is a no-op on a live migrated store.
+        fn ensure_store() {
+            webhooks_actions::ensure_test_store().expect("the subscription store is usable");
+        }
+
+        /// Drive one admin-api request through the router and return the
+        /// status plus the parsed JSON body.
+        async fn api_request(
+            state: &HttpState,
+            method: &str,
+            uri: &str,
+            body: &str,
+            token: &str,
+        ) -> (StatusCode, serde_json::Value) {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::from(body.to_owned()))
+                .unwrap();
+            let response = router(state.clone()).oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, value)
+        }
+
+        #[tokio::test]
+        async fn the_list_names_the_configured_secrets_sorted() {
+            let (state, token, _dir) = admin_state();
+            ensure_store();
+            let response =
+                webhooks_actions::with_test_kit_async(Some(kit_with(&["stripe", "n8n"])), async {
+                    api_request(&state, "GET", "/ui/api/webhooks", "", &token).await
+                })
+                .await;
+            assert_eq!(response.0, StatusCode::OK);
+            assert_eq!(
+                response.1.get("configuredSecrets"),
+                Some(&serde_json::json!(["n8n", "stripe"])),
+                "the list must name the configured signing keys, sorted"
+            );
+        }
+
+        /// A server with no kit answers an empty list: the store-now shape
+        /// the SPA uses to offer a free-text reference.
+        #[tokio::test]
+        async fn the_list_answers_an_empty_secret_list_without_a_kit() {
+            let (state, token, _dir) = admin_state();
+            ensure_store();
+            let response = webhooks_actions::with_test_kit_async(None, async {
+                api_request(&state, "GET", "/ui/api/webhooks", "", &token).await
+            })
+            .await;
+            assert_eq!(response.0, StatusCode::OK);
+            assert_eq!(
+                response.1.get("configuredSecrets"),
+                Some(&serde_json::json!([]))
+            );
+        }
+
+        #[tokio::test]
+        async fn create_refuses_an_unknown_secret_name() {
+            let (state, token, _dir) = admin_state();
+            ensure_store();
+            let response = webhooks_actions::with_test_kit_async(
+                Some(kit_with(&["n8n"])),
+                async {
+                    api_request(
+                        &state,
+                        "POST",
+                        "/ui/api/webhooks",
+                        r#"{"endpoint":"https://hooks.example.test/receive","consumerOrigin":"https://example.test","secretRef":"stripe"}"#,
+                        &token,
+                    )
+                    .await
+                },
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            let message = response.1["error"]
+                .as_str()
+                .expect("a refusal carries a JSON error body");
+            assert!(
+                message.contains("secretRef 'stripe' is not configured"),
+                "{message}"
+            );
+            assert!(message.contains("n8n"), "{message}");
+        }
+
+        #[tokio::test]
+        async fn create_accepts_a_configured_secret_name() {
+            let (state, token, _dir) = admin_state();
+            ensure_store();
+            let response = webhooks_actions::with_test_kit_async(
+                Some(kit_with(&["n8n"])),
+                async {
+                    api_request(
+                        &state,
+                        "POST",
+                        "/ui/api/webhooks",
+                        r#"{"endpoint":"https://hooks.example.test/receive","consumerOrigin":"https://example.test","secretRef":"n8n"}"#,
+                        &token,
+                    )
+                    .await
+                },
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::CREATED);
+            assert_eq!(response.1["secretRef"], "n8n");
+        }
+
+        /// The patch validator reads the patched value, never the stored one:
+        /// a new unknown name is refused, and a patch that names no secret is
+        /// accepted whatever the current kit holds.
+        #[tokio::test]
+        async fn update_validates_only_a_new_secret_name() {
+            let (state, token, _dir) = admin_state();
+            ensure_store();
+            let created = webhooks_actions::with_test_kit_async(
+                Some(kit_with(&["n8n"])),
+                async {
+                    api_request(
+                        &state,
+                        "POST",
+                        "/ui/api/webhooks",
+                        r#"{"endpoint":"https://hooks.example.test/receive","consumerOrigin":"https://example.test","secretRef":"n8n"}"#,
+                        &token,
+                    )
+                    .await
+                },
+            )
+            .await;
+            assert_eq!(created.0, StatusCode::CREATED);
+            let id = created.1["subscriptionId"]
+                .as_str()
+                .expect("the create echoes the id")
+                .to_owned();
+
+            let refused = webhooks_actions::with_test_kit_async(Some(kit_with(&["n8n"])), async {
+                api_request(
+                    &state,
+                    "PATCH",
+                    &format!("/ui/api/webhooks/{id}"),
+                    r#"{"secretRef":"stripe"}"#,
+                    &token,
+                )
+                .await
+            })
+            .await;
+            assert_eq!(
+                refused.0,
+                StatusCode::BAD_REQUEST,
+                "a patch naming an unknown secret must be refused"
+            );
+
+            // The new kit does not hold the stored name: a patch that does
+            // not name a secret must pass anyway, proving the stored value
+            // is not re-checked.
+            let kept = webhooks_actions::with_test_kit_async(Some(kit_with(&["github"])), async {
+                api_request(
+                    &state,
+                    "PATCH",
+                    &format!("/ui/api/webhooks/{id}"),
+                    r#"{"consumerOrigin":"https://other.example.test"}"#,
+                    &token,
+                )
+                .await
+            })
+            .await;
+            assert_eq!(kept.0, StatusCode::OK);
+            assert_eq!(kept.1["secretRef"], "n8n");
+        }
     }
 }

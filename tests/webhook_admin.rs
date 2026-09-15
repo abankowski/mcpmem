@@ -24,6 +24,7 @@ use tower::ServiceExt;
 use mcpmem::http::{HttpState, TestSetup, router};
 use mcpmem::principals::ADMIN_SCOPE;
 use mcpmem::tools::ToolCategory;
+use mcpmem_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
 use mcpmem_webhook::{
     DeliveryConnector, DeliveryResponse, Resolver, SignedRequest, SigningKey, ValidatedEndpoint,
     WorkerError,
@@ -542,20 +543,29 @@ async fn test_delivery_refuses_a_host_outside_the_allowlist() {
     );
 }
 
+/// The API now refuses to register an unknown secret ref (the guard's own
+/// test covers that), so the delivery-time refusal path needs a row planted
+/// behind the guard: this is the situation of a subscription created before
+/// the guard, or on a host whose config lacks the name. The worker's test
+/// route must still refuse it.
 #[tokio::test]
 async fn test_delivery_refuses_an_unknown_secret_ref() {
-    let created = drive(json_call(
-        "post",
-        &FIXTURE.admin,
-        "/ui/api/webhooks",
-        Some(r#"{"endpoint":"https://hooks.example.test/cb","consumerOrigin":"probe","secretRef":"missing-ref"}"#),
-    ))
-    .await;
-    assert_eq!(created.status(), StatusCode::CREATED);
-    let id = support::json(created).await["subscriptionId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let db = FIXTURE._dir.path().join("t.mcpmem");
+    let conn = rusqlite::Connection::open(&db).expect("the fixture database opens");
+    let subscription = WebhookSubscription {
+        subscription_id: uuid::Uuid::new_v4(),
+        endpoint: "https://hooks.example.test/cb".to_owned(),
+        event_operations: vec![],
+        entity_types: vec![],
+        ignored_origins: vec![],
+        consumer_origin: "probe".to_owned(),
+        secret_ref: "missing-ref".to_owned(),
+        enabled: true,
+    };
+    let id = subscription.subscription_id.to_string();
+    SubscriptionRepository::new(&conn)
+        .upsert(subscription)
+        .expect("the planted row is valid");
 
     let res = drive(json_call(
         "post",
