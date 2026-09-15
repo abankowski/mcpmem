@@ -135,10 +135,10 @@ because those two are not default features:
 cargo binstall mcpmem
 ```
 
-If no matching artifact exists for your platform, binstall falls back to
-compiling from source. Downloading by hand works too — the asset is
-`mcpmem-<tag>-<target>.tar.gz`, where `<tag>` is the release tag such as
-`v2.1.0`:
+The archive contains every binary the crate declares — the `mcpmem` server,
+the `mcpmem-maintenance` operator tool and the `bench` benchmark — because
+binstall validates the archive against that set. Downloading by hand works too;
+extract `mcpmem` and ignore the rest:
 
 ```sh
 curl -fL -o mcpmem.tar.gz \
