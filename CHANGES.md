@@ -141,6 +141,10 @@ This entry lists every change since that snapshot. The version line restarts at
   failure), and `info` for a disabled subscription. A misconfiguration is
   visible in the first log lines, before any event can dead-letter
   silently.
+- **`Content-Type: application/json` on webhook deliveries.** The worker
+  declared no content type, so a receiver sniffed the JSON envelope as raw
+  bytes (n8n rendered a delivery as `application/octet-stream`). The header
+  is now explicit; the signature still covers the raw body.
 - **Delivery observability in the webhook worker.** The worker logs one line
   per delivery outcome: `info` on a delivered webhook with the HTTP status,
   `warn` on a retryable status, a dead-letter, or a policy/secret discard
