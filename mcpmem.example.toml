@@ -189,6 +189,12 @@
 # allowlist is the fail-closed default: the worker refuses every endpoint that
 # is not on the list, so a subscription cannot point anywhere by accident.
 # allowlist = ["hooks.example.com"]
+#
+# By default every resolved address must be public (SSRF guard). Set this to
+# true when an allowlisted host resolves to a LAN address inside the network —
+# split-horizon DNS with a router hairpin — and is publicly reachable through
+# a port forward.
+# allow-private-addresses = false
 
 # The signing keys, one file per `secret_ref`. The key is read at startup, so
 # changing a key still needs a restart. The file must not be empty: a webhook

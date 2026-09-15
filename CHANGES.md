@@ -128,6 +128,12 @@ This entry lists every change since that snapshot. The version line restarts at
   the same payloads, and `secretRef` stays a name. A build without the
   `webhooks` Cargo feature answers 404 and the page hides the section.
 
+- **`[webhooks] allow-private-addresses`.** A config flag that admits an
+  allowlisted host resolving to a private, loopback or link-local address,
+  for split-horizon DNS topologies (a domain public on the internet,
+  LAN address on the inside, router hairpin NAT). Strict by default; the
+  allowlist, TLS, DNS pinning and the redirect refusal stay in force. The
+  address-policy error now names the flag.
 - **Startup audit of webhook subscriptions.** The worker logs every
   registered subscription once at startup: `info` when it is ready, `warn`
   when the delivery-time policy would reject every attempt (a host outside

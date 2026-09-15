@@ -160,6 +160,10 @@ pub struct FileConfig {
 pub struct WebhooksSection {
     pub allowlist: Option<Vec<String>>,
     pub secrets: Option<BTreeMap<String, String>>,
+    /// `true` relaxes the address-class check: an allowlisted host may
+    /// resolve to a private, loopback or link-local address. Strict by
+    /// default; set it for a split-horizon DNS topology.
+    pub allow_private_addresses: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -624,7 +628,11 @@ pub fn webhook_worker_config(
             .into_iter()
             .collect::<BTreeMap<_, _>>(),
     };
-    Ok(mcpmem_webhook::WebhookConfigFile { allowlist, secrets })
+    Ok(mcpmem_webhook::WebhookConfigFile {
+        allowlist,
+        secrets,
+        allow_private_addresses: section.allow_private_addresses.unwrap_or(false),
+    })
 }
 
 /// The index profile the `[indexer]` section names, already checked. Only

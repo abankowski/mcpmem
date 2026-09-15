@@ -90,7 +90,8 @@ impl WebhookService {
             mcpmem_webhook::StaticSecretProvider(config.secrets),
             config.allowlist,
             mcpmem_webhook::SystemResolver,
-        );
+        )
+        .with_allow_private_addresses(config.allow_private_addresses);
         // Log every registered subscription once at startup. A subscription
         // the delivery-time policy refuses — a host outside the allowlist,
         // an unconfigured secret reference — is a warn here, before the

@@ -72,6 +72,11 @@ impl SecretProvider for StaticSecretProvider {
 pub struct WebhookConfigFile {
     pub allowlist: BTreeSet<String>,
     pub secrets: BTreeMap<String, SigningKey>,
+    /// `true` relaxes the address-class check: an allowlisted host may
+    /// resolve to a private, loopback or link-local address. Strict by
+    /// default (fail-closed against SSRF); an operator with split-horizon
+    /// DNS opts in explicitly.
+    pub allow_private_addresses: bool,
 }
 #[derive(Clone, Debug)]
 pub struct ValidatedEndpoint {
@@ -188,6 +193,29 @@ pub fn validate_endpoint(
     allowlist: &BTreeSet<String>,
     resolver: &dyn Resolver,
 ) -> Result<ValidatedEndpoint, WorkerError> {
+    validate_endpoint_inner(endpoint, allowlist, resolver, false)
+}
+
+/// The strict rules of [`validate_endpoint`], except the resolved addresses
+/// may be private, loopback or link-local. An operator who runs split-horizon
+/// DNS — a domain that is public on the internet but resolves to a LAN
+/// address inside the network (router hairpin NAT) — opts into this per
+/// config file. The allowlist, https, port 443, the per-attempt DNS pinning
+/// and the redirect refusal all stay untouched.
+pub fn validate_endpoint_allowing_private(
+    endpoint: &str,
+    allowlist: &BTreeSet<String>,
+    resolver: &dyn Resolver,
+) -> Result<ValidatedEndpoint, WorkerError> {
+    validate_endpoint_inner(endpoint, allowlist, resolver, true)
+}
+
+fn validate_endpoint_inner(
+    endpoint: &str,
+    allowlist: &BTreeSet<String>,
+    resolver: &dyn Resolver,
+    allow_private: bool,
+) -> Result<ValidatedEndpoint, WorkerError> {
     let url = Url::parse(endpoint).map_err(|e| WorkerError::Policy(e.to_string()))?;
     if url.scheme() != "https"
         || url.port_or_known_default() != Some(443)
@@ -214,14 +242,14 @@ pub fn validate_endpoint(
         .first()
         .copied()
         .ok_or_else(|| WorkerError::Policy("endpoint resolution returned no address".into()))?;
-    if !is_public(ip) {
+    if !allow_private && !is_public(ip) {
         return Err(WorkerError::Policy(
-            "endpoint resolved to non-public address".into(),
+            "endpoint resolved to non-public address; set [webhooks] allow-private-addresses = true to permit a split-horizon DNS topology".into(),
         ));
     }
-    if !addresses.iter().copied().all(is_public) {
+    if !allow_private && !addresses.iter().copied().all(is_public) {
         return Err(WorkerError::Policy(
-            "endpoint resolution contains non-public address".into(),
+            "endpoint resolution mixes public and non-public addresses; set [webhooks] allow-private-addresses = true to permit a split-horizon DNS topology".into(),
         ));
     }
     Ok(ValidatedEndpoint {
@@ -265,6 +293,7 @@ pub struct WebhookWorker<C, S, R> {
     allowlist: BTreeSet<String>,
     resolver: R,
     lease_us: i64,
+    allow_private_addresses: bool,
 }
 pub trait WorkerPoll: Send + Sync {
     fn poll(&self, now_us: i64) -> Result<DeliveryReport, WorkerError>;
@@ -303,11 +332,28 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
             allowlist,
             resolver,
             lease_us: LEASE_US,
+            allow_private_addresses: false,
         }
     }
     pub const fn with_lease_us(mut self, lease_us: i64) -> Self {
         self.lease_us = lease_us;
         self
+    }
+    /// Relax the address-class check for every endpoint this worker
+    /// delivers to. The allowlist, https, port, DNS pinning and redirect
+    /// refusal stay in force; only the "must resolve to a public address"
+    /// requirement is skipped.
+    pub const fn with_allow_private_addresses(mut self, allow: bool) -> Self {
+        self.allow_private_addresses = allow;
+        self
+    }
+    /// Validate the endpoint with this worker's address policy.
+    fn policy_endpoint(&self, endpoint: &str) -> Result<ValidatedEndpoint, WorkerError> {
+        if self.allow_private_addresses {
+            validate_endpoint_allowing_private(endpoint, &self.allowlist, &self.resolver)
+        } else {
+            validate_endpoint(endpoint, &self.allowlist, &self.resolver)
+        }
     }
     /// Audit every registered subscription against the delivery-time policy,
     /// without delivering anything. The supervisor logs the outcome once at
@@ -323,7 +369,7 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
         let outcome = if !subscription.enabled {
             Err("subscription is disabled".into())
         } else {
-            validate_endpoint(&subscription.endpoint, &self.allowlist, &self.resolver)
+            self.policy_endpoint(&subscription.endpoint)
                 .map(|_| ())
                 .and_then(|_| {
                     self.secrets
@@ -478,7 +524,7 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
         delivery: &EventDelivery,
         now: i64,
     ) -> Result<DeliveryResponse, WorkerError> {
-        let endpoint = validate_endpoint(&subscription.endpoint, &self.allowlist, &self.resolver)?;
+        let endpoint = self.policy_endpoint(&subscription.endpoint)?;
         let body = envelope(delivery)?;
         let key = self.secrets.signing_key(&subscription.secret_ref)?;
         let signature = signature(&key, now, &body)?;
@@ -564,9 +610,14 @@ pub fn deliver_test(
     secrets: &dyn SecretProvider,
     allowlist: &BTreeSet<String>,
     resolver: &dyn Resolver,
+    allow_private: bool,
     subscription: &WebhookSubscription,
 ) -> Result<DeliveryResponse, WorkerError> {
-    let endpoint = validate_endpoint(&subscription.endpoint, allowlist, resolver)?;
+    let endpoint = if allow_private {
+        validate_endpoint_allowing_private(&subscription.endpoint, allowlist, resolver)?
+    } else {
+        validate_endpoint(&subscription.endpoint, allowlist, resolver)?
+    };
     let key = secrets.signing_key(&subscription.secret_ref)?;
     let now = now_us();
     let (body, event_id) = test_envelope(now)?;

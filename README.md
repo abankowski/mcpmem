@@ -301,6 +301,13 @@ So Node-RED on `:1880` and n8n on `:5678` are unreachable directly: put a TLS
 reverse proxy (Caddy, nginx, Traefik) or a tunnel in front of them, and put
 the proxy's public hostname in the `allowlist`.
 
+Strict by default: every resolved address must be public. An operator with
+**split-horizon DNS** — a domain that is public on the internet but resolves
+to a LAN address inside the network, reachable through a router hairpin — can
+set `allow-private-addresses = true` in the `[webhooks]` section. The
+allowlist, TLS, the per-attempt DNS pinning and the redirect refusal stay in
+force; only the address-class check is skipped.
+
 **Test a subscription from the admin UI.** Each subscription row has a
 **Test** button (`POST /ui/api/webhooks/{id}/test`): it delivers one signed
 test event through the same policy and signing the worker uses, and reports

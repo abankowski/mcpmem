@@ -7,6 +7,7 @@ const fn empty_config() -> mcpmem_webhook::WebhookConfigFile {
     mcpmem_webhook::WebhookConfigFile {
         allowlist: BTreeSet::new(),
         secrets: BTreeMap::new(),
+        allow_private_addresses: false,
     }
 }
 
