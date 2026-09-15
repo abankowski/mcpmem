@@ -128,6 +128,13 @@ This entry lists every change since that snapshot. The version line restarts at
   the same payloads, and `secretRef` stays a name. A build without the
   `webhooks` Cargo feature answers 404 and the page hides the section.
 
+- **Startup audit of webhook subscriptions.** The worker logs every
+  registered subscription once at startup: `info` when it is ready, `warn`
+  when the delivery-time policy would reject every attempt (a host outside
+  the allowlist, an unconfigured secret reference, an address-check
+  failure), and `info` for a disabled subscription. A misconfiguration is
+  visible in the first log lines, before any event can dead-letter
+  silently.
 - **Delivery observability in the webhook worker.** The worker logs one line
   per delivery outcome: `info` on a delivered webhook with the HTTP status,
   `warn` on a retryable status, a dead-letter, or a policy/secret discard
