@@ -15,6 +15,7 @@
  *   DELETE      /ui/api/waitlist/{id}
  *   GET/POST    /ui/api/webhooks
  *   PATCH/DELETE /ui/api/webhooks/{id}
+ *   POST        /ui/api/webhooks/{id}/test
  * All bodies use camelCase keys: maskedByBuiltin, defaultNewPrincipalScopes,
  * firstSeenUs, lastSeenUs, subscriptionId, eventOperations, consumerOrigin,
  * secretRef. A 401 starts the login flow; a 403 shows the not-an-admin
@@ -382,13 +383,18 @@ function renderWebhooks(subscriptions) {
     const state = document.createElement("td");
     state.append(badge(w.enabled ? "enabled" : "disabled"));
     const actions = document.createElement("td");
+    const test = document.createElement("button");
+    test.textContent = "Test";
+    const result = document.createElement("span");
+    result.className = "hint";
+    test.onclick = () => testWebhook(w, test, result);
     const edit = document.createElement("button");
     edit.textContent = "Edit";
     edit.onclick = () => openWebhookForm(w);
     const del = document.createElement("button");
     del.textContent = "Remove";
     del.onclick = () => removeWebhook(w);
-    actions.append(edit, del);
+    actions.append(test, edit, del, result);
     tr.append(endpoint, origin, filters, secret, state, actions);
     tbody.append(tr);
   }
@@ -502,6 +508,29 @@ async function removeWebhook(w) {
     await load();
   } catch (e) {
     setStatus(e.message);
+  }
+}
+
+// Deliver one signed test event to the subscription's endpoint and show the
+// HTTP status next to the row. The server runs the real delivery policy
+// (allowlist, DNS, public address) and signs with the subscription's secret
+// reference; nothing is written to the delivery queue.
+async function testWebhook(w, button, result) {
+  button.disabled = true;
+  result.textContent = "testing…";
+  try {
+    const data = await api(
+      "/ui/api/webhooks/" + encodeURIComponent(w.subscriptionId) + "/test",
+      { method: "POST" }
+    );
+    const latency = data.latencyUs ? " (" + Math.round(data.latencyUs / 1000) + " ms)" : "";
+    result.textContent = data.ok ? data.status + " OK" + latency : "HTTP " + data.status + latency;
+    if (!data.ok) result.className = "hint error";
+  } catch (e) {
+    result.textContent = e.message;
+    result.className = "hint error";
+  } finally {
+    button.disabled = false;
   }
 }
 

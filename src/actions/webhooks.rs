@@ -14,15 +14,17 @@
 //! one file, the same way [`crate::oauth_routes::OauthState`] already opens
 //! its own connection for the OAuth tables.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use mcpmem_core::mutation::ChangeOperation;
 use mcpmem_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
 use mcpmem_webhook::{Resolver, WorkerError};
+use parking_lot::Mutex;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -93,6 +95,80 @@ impl Resolver for PlaceholderResolver {
     fn resolve(&self, _hostname: &str) -> std::result::Result<Vec<IpAddr>, WorkerError> {
         Ok(vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))])
     }
+}
+
+/// A one-shot test delivery kit for the admin UI. It holds the same policy
+/// the delivery worker holds — allowlist, secrets, resolver, connector — so
+/// a test request is judged by the delivery-time rules, not by the lax
+/// registration-time shape check.
+pub struct WebhookTestKit {
+    allowlist: BTreeSet<String>,
+    secrets: mcpmem_webhook::StaticSecretProvider,
+    resolver: Arc<dyn mcpmem_webhook::Resolver>,
+    connector: Arc<dyn mcpmem_webhook::DeliveryConnector>,
+}
+
+impl WebhookTestKit {
+    /// The production kit: the configured allowlist and secrets, the system
+    /// resolver, and the real HTTPS connector.
+    pub fn production(
+        allowlist: BTreeSet<String>,
+        secrets: BTreeMap<String, mcpmem_webhook::SigningKey>,
+    ) -> Self {
+        Self {
+            allowlist,
+            secrets: mcpmem_webhook::StaticSecretProvider(secrets),
+            resolver: Arc::new(mcpmem_webhook::SystemResolver),
+            connector: Arc::new(mcpmem_webhook::HttpsConnector::production()),
+        }
+    }
+
+    /// A kit with an injected resolver and connector, for tests.
+    #[doc(hidden)]
+    pub fn for_test(
+        allowlist: BTreeSet<String>,
+        secrets: BTreeMap<String, mcpmem_webhook::SigningKey>,
+        resolver: Arc<dyn mcpmem_webhook::Resolver>,
+        connector: Arc<dyn mcpmem_webhook::DeliveryConnector>,
+    ) -> Self {
+        Self {
+            allowlist,
+            secrets: mcpmem_webhook::StaticSecretProvider(secrets),
+            resolver,
+            connector,
+        }
+    }
+
+    /// Deliver one signed test event to the subscription's endpoint and
+    /// return the HTTP response.
+    pub fn deliver(
+        &self,
+        subscription: &WebhookSubscription,
+    ) -> std::result::Result<mcpmem_webhook::DeliveryResponse, WorkerError> {
+        mcpmem_webhook::deliver_test(
+            &*self.connector,
+            &self.secrets,
+            &self.allowlist,
+            &*self.resolver,
+            subscription,
+        )
+    }
+}
+
+/// The process-wide test kit. Production sets it once at startup from the
+/// `[webhooks]` section; a test sets its own kit before building a router.
+static TEST_KIT: Mutex<Option<Arc<WebhookTestKit>>> = Mutex::new(None);
+
+/// Record the kit the admin test endpoint will use. Production calls this
+/// once at startup; a test calls it with an injected kit.
+pub fn set_test_kit(kit: Option<Arc<WebhookTestKit>>) {
+    *TEST_KIT.lock() = kit;
+}
+
+/// The current kit, when the server configured webhook delivery. `None`
+/// means the admin Test button cannot deliver.
+pub fn test_kit() -> Option<Arc<WebhookTestKit>> {
+    TEST_KIT.lock().clone()
 }
 
 /// A best-effort host for an `https://host[:port][/path]` endpoint, read with

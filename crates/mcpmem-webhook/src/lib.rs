@@ -435,3 +435,58 @@ fn signature(key: &SigningKey, timestamp: i64, body: &[u8]) -> Result<String, Wo
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// Deliver one signed test event to a subscription's endpoint. It runs the
+/// delivery-time policy (allowlist, DNS, public address), signs with the
+/// subscription's secret reference, and posts through the connector. It
+/// writes no outbox row and changes no delivery state; the caller reports
+/// the response. The admin UI's Test button uses this seam.
+pub fn deliver_test(
+    connector: &dyn DeliveryConnector,
+    secrets: &dyn SecretProvider,
+    allowlist: &BTreeSet<String>,
+    resolver: &dyn Resolver,
+    subscription: &WebhookSubscription,
+) -> Result<DeliveryResponse, WorkerError> {
+    let endpoint = validate_endpoint(&subscription.endpoint, allowlist, resolver)?;
+    let key = secrets.signing_key(&subscription.secret_ref)?;
+    let now = now_us();
+    let (body, event_id) = test_envelope(now)?;
+    let signature = signature(&key, now, &body)?;
+    connector.send(
+        &endpoint,
+        SignedRequest {
+            body,
+            event_id,
+            timestamp_us: now,
+            signature,
+        },
+    )
+}
+
+/// A test envelope in the same shape as a delivery, marked by the `test-`
+/// prefix in `event_id` and the `admin:webhook-test` origin. A receiver can
+/// recognize the event and ignore it.
+fn test_envelope(now: i64) -> Result<(Vec<u8>, String), WorkerError> {
+    let event_id = format!("test-{now}");
+    let body = serde_json::to_vec(&serde_json::json!({
+        "version": 2,
+        "eventId": event_id,
+        "transactionId": event_id,
+        "entityId": 0,
+        "entityRevision": 0,
+        "operation": "create",
+        "occurredAtUs": now,
+        "origin": "admin:webhook-test",
+        "correlationId": event_id,
+        "causationId": null,
+        "hopCount": 0,
+        "oldName": null,
+        "newName": null,
+    }))
+    .map_err(|e| WorkerError::Delivery(e.to_string()))?;
+    if body.len() > MAX_BODY {
+        return Err(WorkerError::Policy("test envelope exceeds 64KiB".into()));
+    }
+    Ok((body, event_id))
+}

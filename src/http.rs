@@ -57,6 +57,8 @@ use mcpmem_core::mutation::ChangeOperation;
 #[cfg(feature = "webhooks")]
 use mcpmem_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
 #[cfg(feature = "webhooks")]
+use mcpmem_webhook::WorkerError;
+#[cfg(feature = "webhooks")]
 use uuid::Uuid;
 
 /// The graph viewer's static assets, embedded at build time (served from `/ui`).
@@ -1097,6 +1099,7 @@ fn attach_webhook_admin_routes(router: Router<HttpState>) -> Router<HttpState> {
             "/ui/api/webhooks/{id}",
             patch(admin_update_webhook).delete(admin_delete_webhook),
         )
+        .route("/ui/api/webhooks/{id}/test", post(admin_test_webhook))
 }
 
 /// Attach the managed-repo admin routes. Every handler is gated on the
@@ -1111,6 +1114,77 @@ fn attach_repo_admin_routes(router: Router<HttpState>) -> Router<HttpState> {
         )
         .route("/ui/api/repos/{key}/reindex", post(admin_reindex_repo))
         .route("/ui/api/repos/{key}", delete(admin_remove_repo))
+}
+
+/// `POST /ui/api/webhooks/{id}/test` — deliver one signed test event to the
+/// subscription's endpoint and report the HTTP status. The delivery-time
+/// policy runs in full: allowlist, DNS and the public-address check, then a
+/// signature with the subscription's secret reference. No outbox row is
+/// written and no delivery state changes, so a test never disturbs the
+/// worker's queue or its dead-letter accounting.
+#[cfg(feature = "webhooks")]
+async fn admin_test_webhook(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = admin_gate(&state, &headers) {
+        return *response;
+    }
+    let Some(_) = state.oauth.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let id = match Uuid::parse_str(id.as_str()) {
+        Ok(id) => id,
+        // A malformed id names no row, the same answer the principals routes
+        // give for an id their key format cannot parse.
+        Err(_) => return not_found(),
+    };
+    let conn = match webhooks_actions::open_connection() {
+        Ok(conn) => conn,
+        Err(e) => return webhook_store_failure(e),
+    };
+    let subscription = match SubscriptionRepository::new(&conn).get(id) {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(),
+        Err(e) => return webhook_store_failure(e),
+    };
+    let Some(kit) = webhooks_actions::test_kit() else {
+        return bad_request(
+            "webhook test delivery is not configured: the server has no [webhooks] section",
+        );
+    };
+    let started = std::time::Instant::now();
+    // The deliverable makes a real DNS lookup and a real HTTPS request, so it
+    // runs off the async runtime, the same way the worker's own blocking
+    // transport does.
+    let outcome = match tokio::task::spawn_blocking(move || kit.deliver(&subscription)).await {
+        Ok(outcome) => outcome,
+        Err(e) => return webhook_store_failure(format!("test delivery task failed: {e}")),
+    };
+    let latency_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+    match outcome {
+        Ok(response) => {
+            let body = json!({
+                "status": response.status,
+                "ok": (200..300).contains(&response.status),
+                "latencyUs": latency_us,
+            });
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(WorkerError::Policy(message)) => {
+            bad_request(format!("webhook test refused by policy: {message}"))
+        }
+        Err(WorkerError::Secret(message)) => {
+            bad_request(format!("webhook test refused: {message}"))
+        }
+        Err(WorkerError::Delivery(message)) => json_error(
+            StatusCode::BAD_GATEWAY,
+            format!("webhook test delivery failed: {message}"),
+        ),
+        Err(WorkerError::Database(message)) => webhook_store_failure(message),
+        Err(WorkerError::Core(message)) => webhook_store_failure(message),
+    }
 }
 
 /// A 500 whose message names the webhook store, so an operator does not
