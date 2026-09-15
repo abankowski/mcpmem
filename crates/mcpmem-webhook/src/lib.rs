@@ -200,7 +200,7 @@ pub fn validate_endpoint(
             .is_some_and(|host| host.parse::<IpAddr>().is_ok())
     {
         return Err(WorkerError::Policy(
-            "endpoint must be https, port 443, hostname-only, without fragment".into(),
+            "endpoint must be https on port 443, with a hostname (not an IP address), no credentials, no fragment; a URL path is allowed".into(),
         ));
     }
     let hostname = url.host_str().expect("checked hostname");
