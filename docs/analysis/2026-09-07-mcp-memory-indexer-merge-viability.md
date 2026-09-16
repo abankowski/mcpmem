@@ -80,7 +80,7 @@ Add a **transactional outbox**, not callbacks in MCP handlers and not reuse of `
 
 Every effective committed entity change creates immutable rows:
 
-- `change_event`: UUID, transaction/change ID, `create|update|delete`, entity name/type, before/after snapshots or tombstone, changed fields, actor, origin, correlation ID, causation ID, hop count, timestamp. Webhook payloads use an allowlisted projection, never arbitrary observation bodies.
+- `change_event`: UUID, transaction/change ID, `create|update|delete`, entity name/type, before/after snapshots or tombstone, changed fields, actor, origin, correlation ID, causation ID, hop count, timestamp. Webhook payloads use an allowlisted projection, never arbitrary observation bodies. **Superseded (2026-09-16) for the payload:** envelope v3 carries the stored before/after snapshots, observation bodies included, per `docs/analysis/2026-09-16-webhook-envelope-v3-full-snapshots.md`.
 - `webhook_subscription`: endpoint, encrypted/secret reference, event mask, entity-type filter, name/prefix filter, enabled state, producer/origin policy.
 - `event_outbox`: `(event_id, subscription_id)` unique pair, lease, attempts, next attempt, error/dead-letter state.
 - `index_job`: entity identity plus latest graph revision, coalesced by entity; delete is an idempotent vector-delete job.

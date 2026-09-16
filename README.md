@@ -268,6 +268,11 @@ roles = ["mcp", "indexer", "webhooks"]
 # every endpoint.
 allowlist = ["hooks.example.com"]
 
+# Largest event body the worker delivers, in bytes. The default is 1 MiB.
+# An event whose full snapshot exceeds the cap dead-letters with the policy
+# reason; raise it for an unusually large entity or relation.
+# max-body-bytes = 1048576
+
 # One signing key file per secret_ref. Read once at startup.
 [webhooks.secrets]
 "my-consumer" = "/etc/mcpmem/webhook-key"
@@ -277,8 +282,10 @@ Then register a subscription through the MCP tool `webhook_add_subscription` (an
 an allowlisted `https` hostname, and a `secretRef` that is exactly one name from the section
 above). The worker resolves `secretRef` at delivery time; the field never holds key material.
 An unknown name dead-letters the delivery. Delivery is signed with `X-Memory-Signature` over
-`<timestamp>.<body>`, retried with backoff, and dead-lettered after eight attempts. The full
-contract is in [`crates/mcpmem-webhook/README.md`](crates/mcpmem-webhook/README.md).
+`<timestamp>.<body>`, retried with backoff, and dead-lettered after eight attempts. Each event
+carries the full before/after object — entity name, type, observations and kv attributes, or
+the full relation — so a receiver learns exactly what changed, including what a delete removed.
+The full contract is in [`crates/mcpmem-webhook/README.md`](crates/mcpmem-webhook/README.md).
 
 > **Fail closed by default.** With no `[webhooks]` section, the role runs as an empty worker:
 > nothing is delivered, no error is raised. An allowlisted host and a signing key are what make

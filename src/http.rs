@@ -2137,6 +2137,7 @@ mod tests {
                 Arc::new(mcpmem_webhook::SystemResolver),
                 Arc::new(mcpmem_webhook::HttpsConnector::production()),
                 false,
+                mcpmem_webhook::DEFAULT_MAX_BODY,
             ))
         }
 

@@ -8,6 +8,7 @@ const fn empty_config() -> mcpmem_webhook::WebhookConfigFile {
         allowlist: BTreeSet::new(),
         secrets: BTreeMap::new(),
         allow_private_addresses: false,
+        max_body_bytes: mcpmem_webhook::DEFAULT_MAX_BODY,
     }
 }
 

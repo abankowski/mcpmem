@@ -147,6 +147,7 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
         Arc::new(StubResolver),
         Arc::clone(&stub) as Arc<dyn DeliveryConnector>,
         false,
+        mcpmem_webhook::DEFAULT_MAX_BODY,
     );
     mcpmem::actions::webhooks::set_test_kit(Some(Arc::new(kit)));
     Fixture {

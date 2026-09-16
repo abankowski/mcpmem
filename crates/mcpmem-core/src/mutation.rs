@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::errors::{MCSError, Result};
-use crate::graph::{GraphHandle, TxGuard, name_hash};
+use crate::graph::{GraphHandle, TxGuard, attributes_for, name_hash};
 use crate::types::{
     AttributeDelete, AttributeSet, Entity, EntityInput, Observation, ObservationInput, Relation,
-    RelationInput, RelationObservationUpdate,
+    RelationDetail, RelationInput, RelationObservationUpdate,
 };
 
 pub type MutationError = MCSError;
@@ -128,6 +128,10 @@ pub struct EntitySnapshot {
     pub name: String,
     pub entity_type: String,
     pub observations: Vec<Observation>,
+    /// k:v attributes captured with the snapshot at mutation time. Old stored
+    /// events predate this field and deserialize to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<BTreeMap<String, String>>,
 }
 
 impl EntitySnapshot {
@@ -152,8 +156,19 @@ pub enum ChangeOperation {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RelationDelta {
-    pub added: Vec<Relation>,
-    pub removed: Vec<Relation>,
+    pub added: Vec<RelationDetail>,
+    pub removed: Vec<RelationDetail>,
+}
+
+/// Exact change data of one relation observation or attribute write. The
+/// event carries the mirror's own revision; `before` and `after` are full
+/// relation objects, so a receiver can apply the change without a graph read.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationChange {
+    pub revision: i64,
+    pub before: RelationDetail,
+    pub after: RelationDetail,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -167,6 +182,10 @@ pub struct EntityChange {
     pub old_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_name: Option<String>,
+    /// Present on the quiet events emitted for relation observation and
+    /// attribute writes, attached to the relation's `from` endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation_change: Option<RelationChange>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -304,6 +323,16 @@ impl<'a> MutationService<'a> {
             }
             _ => None,
         };
+        // Quiet: attribute writes and relation observation writes persist
+        // events without touching revisions or the index queue
+        // (REQ-ATTR-OFFLINE retained for the revision and the queue).
+        let quiet = matches!(
+            &request,
+            MutationRequest::SetAttributes { .. }
+                | MutationRequest::DeleteAttributes { .. }
+                | MutationRequest::AddRelationObservations { .. }
+                | MutationRequest::DeleteRelationObservations { .. }
+        );
         let names = affected_names(&conn, &request)?;
         let before = capture(&conn, &names)?;
         let result = execute(self.graph, &conn, request)?;
@@ -314,13 +343,13 @@ impl<'a> MutationService<'a> {
             }
             _ => effective_changes(&before, &after),
         };
-        update_counters(&conn, &before, &after, &changes)?;
+        update_counters(&conn, &before, &after, &changes, quiet)?;
         self.graph.sync_seqs(&conn)?;
         let committed = CommittedChangeSet {
             transaction_id: Uuid::new_v4(),
             changes,
         };
-        crate::events::persist_changes(&conn, &committed, &context)?;
+        crate::events::persist_changes(&conn, &committed, &context, quiet)?;
         let outcome = MutationOutcome {
             changes: committed,
             result,
@@ -370,11 +399,13 @@ pub(crate) fn read_entity(conn: &Connection, name: &str) -> Result<Option<Entity
             .map_err(sql_error)?
             .collect::<rusqlite::Result<Vec<Observation>>>()
             .map_err(sql_error)?;
+        let attributes = attributes_for(conn, "entity", entity_id)?;
         Ok(EntitySnapshot {
             entity_id,
             name,
             entity_type,
             observations,
+            attributes: Some(attributes),
         })
     })
     .transpose()
@@ -432,14 +463,36 @@ fn affected_names(conn: &Connection, request: &MutationRequest) -> Result<BTreeS
         | MutationRequest::DeleteObservations { observations } => {
             observations.iter().map(|o| o.entity_name.clone()).collect()
         }
-        // REQ-ATTR-OFFLINE: relation observation and attribute writes are
-        // structurally excluded from the entity event stream. An endpoint
-        // entity here would bump entity_revision, emit a change event, and
-        // re-enqueue its index job on every attribute write.
-        MutationRequest::AddRelationObservations { .. }
-        | MutationRequest::DeleteRelationObservations { .. }
-        | MutationRequest::SetAttributes { .. }
-        | MutationRequest::DeleteAttributes { .. } => BTreeSet::new(),
+        // Attribute writes and relation observation writes persist quiet
+        // events: they emit a change_event and match subscriptions, but they
+        // never bump entity_revision and never enqueue an index job
+        // (REQ-ATTR-OFFLINE retained for the revision and the queue; only the
+        // event stream opens). The affected names are the event anchors: the
+        // entity owner of an entity attribute write, the `from` endpoint of a
+        // relation write.
+        MutationRequest::AddRelationObservations { relations }
+        | MutationRequest::DeleteRelationObservations { relations } => relations
+            .iter()
+            .map(|update| update.relation.from.clone())
+            .collect(),
+        MutationRequest::SetAttributes { targets } => targets
+            .iter()
+            .filter_map(|target| match target.owner_kind.as_str() {
+                "entity" => target.entity_name.as_ref(),
+                "relation" => target.from.as_ref(),
+                _ => None,
+            })
+            .cloned()
+            .collect(),
+        MutationRequest::DeleteAttributes { targets } => targets
+            .iter()
+            .filter_map(|target| match target.owner_kind.as_str() {
+                "entity" => target.entity_name.as_ref(),
+                "relation" => target.from.as_ref(),
+                _ => None,
+            })
+            .cloned()
+            .collect(),
         MutationRequest::MergeEntities { source, target } => {
             [source.clone(), target.clone()].into()
         }
@@ -487,6 +540,60 @@ struct Snapshot {
     entities: BTreeMap<String, EntitySnapshot>,
     relations: BTreeSet<Relation>,
     relation_rows: BTreeMap<Relation, i64>,
+    /// Live mirror revision plus full detail of every incident relation.
+    /// Only relations with a live mirror at capture time appear here; a
+    /// tombstoned mirror is not a relation any more.
+    relation_details: BTreeMap<Relation, (i64, RelationDetail)>,
+}
+
+/// Full detail of one relation triple, read from its live mirror. A missing
+/// mirror returns `None`: the triple does not exist in that state.
+fn mirror_detail(conn: &Connection, relation: &Relation) -> Result<Option<(i64, RelationDetail)>> {
+    let mirror: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT m.id, m.revision FROM taxonomy_relation m
+             JOIN entity f ON f.id = m.from_id AND f.name = ?1 AND f.flags = 0
+             JOIN entity t ON t.id = m.to_id AND t.name = ?2 AND t.flags = 0
+             JOIN type_dict d ON d.id = m.type_id AND d.kind = 1 AND d.name = ?3
+             WHERE m.deleted = 0",
+            params![relation.from, relation.to, relation.relation_type],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    let Some((mirror_id, revision)) = mirror else {
+        return Ok(None);
+    };
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT body, created_us, occurred_us
+             FROM relation_observation WHERE relation_id=?1
+             ORDER BY idx, id",
+        )
+        .map_err(sql_error)?;
+    let observations = stmt
+        .query_map([mirror_id], |row| {
+            Ok(Observation {
+                body: row.get(0)?,
+                created_at_us: Some(row.get(1)?),
+                occurred_at_us: row.get(2)?,
+                origin_entity_name: None,
+            })
+        })
+        .map_err(sql_error)?
+        .collect::<rusqlite::Result<Vec<Observation>>>()
+        .map_err(sql_error)?;
+    let attributes = attributes_for(conn, "relation", mirror_id)?;
+    Ok(Some((
+        revision,
+        RelationDetail {
+            from: relation.from.clone(),
+            to: relation.to.clone(),
+            relation_type: relation.relation_type.clone(),
+            observations,
+            attributes,
+        },
+    )))
 }
 
 fn capture(conn: &Connection, names: &BTreeSet<String>) -> Result<Snapshot> {
@@ -497,7 +604,10 @@ fn capture(conn: &Connection, names: &BTreeSet<String>) -> Result<Snapshot> {
         }
         let mut relation_rows = BTreeMap::new();
         for relation in relations_for(conn, name)? {
-            *relation_rows.entry(relation).or_default() += 1;
+            *relation_rows.entry(relation.clone()).or_default() += 1;
+            if let Some(detail) = mirror_detail(conn, &relation)? {
+                snapshot.relation_details.insert(relation, detail);
+            }
         }
         // Both endpoint queries return every physical row of the same relation.
         // Replace the count rather than adding it twice; keep set semantics for
@@ -509,6 +619,21 @@ fn capture(conn: &Connection, names: &BTreeSet<String>) -> Result<Snapshot> {
 }
 
 fn effective_changes(before: &Snapshot, after: &Snapshot) -> Vec<EntityChange> {
+    /// Full detail of one delta entry: the live detail when the state that
+    /// produced the delta has one, the bare triple otherwise.
+    fn details_for(snapshot: &Snapshot, relation: &Relation) -> RelationDetail {
+        snapshot
+            .relation_details
+            .get(relation)
+            .map(|(_, detail)| detail.clone())
+            .unwrap_or_else(|| RelationDetail {
+                from: relation.from.clone(),
+                to: relation.to.clone(),
+                relation_type: relation.relation_type.clone(),
+                observations: Vec::new(),
+                attributes: BTreeMap::new(),
+            })
+    }
     let mut deltas: BTreeMap<&str, RelationDelta> = BTreeMap::new();
     for (added, relations) in [
         (true, after.relations.difference(&before.relations)),
@@ -520,15 +645,20 @@ fn effective_changes(before: &Snapshot, after: &Snapshot) -> Vec<EntityChange> {
                 .collect::<BTreeSet<_>>()
             {
                 let delta = deltas.entry(name).or_default();
-                if added {
-                    delta.added.push(relation.clone());
+                let detail = if added {
+                    details_for(after, relation)
                 } else {
-                    delta.removed.push(relation.clone());
+                    details_for(before, relation)
+                };
+                if added {
+                    delta.added.push(detail);
+                } else {
+                    delta.removed.push(detail);
                 }
             }
         }
     }
-    before
+    let mut changes: Vec<EntityChange> = before
         .entities
         .keys()
         .chain(after.entities.keys())
@@ -554,9 +684,42 @@ fn effective_changes(before: &Snapshot, after: &Snapshot) -> Vec<EntityChange> {
                 relation_delta: has_delta.then_some(delta),
                 old_name: None,
                 new_name: None,
+                relation_change: None,
             })
         })
-        .collect()
+        .collect();
+    // Relation observation and relation attribute writes change a relation
+    // without changing any entity. Synthesis: one quiet event per changed
+    // relation, attached to the `from` endpoint, carrying the mirror revision
+    // and the exact before/after pair.
+    for (relation, (revision, after_detail)) in &after.relation_details {
+        let Some((_, before_detail)) = before.relation_details.get(relation) else {
+            continue;
+        };
+        if before_detail == after_detail {
+            continue;
+        }
+        let Some(entity) = after.entities.get(&relation.from) else {
+            // Cannot happen for these requests: the affected name set always
+            // includes every `from` endpoint. Stay defensive rather than
+            // fabricating a change for an entity we did not capture.
+            continue;
+        };
+        changes.push(EntityChange {
+            operation: ChangeOperation::Update,
+            before: None,
+            after: Some(entity.clone()),
+            relation_delta: None,
+            old_name: None,
+            new_name: None,
+            relation_change: Some(RelationChange {
+                revision: *revision,
+                before: before_detail.clone(),
+                after: after_detail.clone(),
+            }),
+        });
+    }
+    changes
 }
 
 fn rename_changes(
@@ -576,6 +739,7 @@ fn rename_changes(
         relation_delta: None,
         old_name: Some(old_name.into()),
         new_name: Some(new_name.into()),
+        relation_change: None,
     }]
 }
 
@@ -1313,6 +1477,7 @@ fn update_counters(
     before: &Snapshot,
     after: &Snapshot,
     changes: &[EntityChange],
+    quiet: bool,
 ) -> Result<()> {
     let mut type_deltas: BTreeMap<(i64, &str), i64> = BTreeMap::new();
     for old in before.entities.values() {
@@ -1329,37 +1494,41 @@ fn update_counters(
     }
     // Affected types are the union of the net-delta keys and the types of
     // every entity change. Each affected type gets ONE count/revision update
-    // and ONE enqueue, never one per change.
-    let mut affected_types: BTreeSet<(i64, &str)> = type_deltas.keys().copied().collect();
-    for change in changes {
-        if let Some(before) = &change.before {
-            affected_types.insert((0, before.entity_type.as_str()));
-        }
-        if let Some(after) = &change.after {
-            affected_types.insert((0, after.entity_type.as_str()));
-        }
-        if let Some(delta) = &change.relation_delta {
-            for relation in delta.added.iter().chain(delta.removed.iter()) {
-                affected_types.insert((1, relation.relation_type.as_str()));
+    // and ONE enqueue, never one per change. Quiet writes skip the entire
+    // block: an attribute or relation-observation write must not bump type
+    // revisions nor enqueue taxonomy jobs (REQ-ATTR-OFFLINE).
+    if !quiet {
+        let mut affected_types: BTreeSet<(i64, &str)> = type_deltas.keys().copied().collect();
+        for change in changes {
+            if let Some(before) = &change.before {
+                affected_types.insert((0, before.entity_type.as_str()));
+            }
+            if let Some(after) = &change.after {
+                affected_types.insert((0, after.entity_type.as_str()));
+            }
+            if let Some(delta) = &change.relation_delta {
+                for relation in delta.added.iter().chain(delta.removed.iter()) {
+                    affected_types.insert((1, relation.relation_type.as_str()));
+                }
             }
         }
-    }
-    for (kind, name) in affected_types {
-        let delta = type_deltas.get(&(kind, name)).copied().unwrap_or(0);
-        let revision: i64 = conn
-            .query_row(
-                "UPDATE type_dict SET count=count+?1, revision=revision+1 WHERE kind=?2 AND name=?3 RETURNING revision",
-                params![delta, kind, name],
-                |row| row.get(0),
-            )
-            .map_err(sql_error)?;
-        enqueue_taxonomy_jobs(
-            conn,
-            kind,
-            type_id(conn, name, kind)?,
-            revision,
-            crate::jobs::IndexOperation::Upsert,
-        )?;
+        for (kind, name) in affected_types {
+            let delta = type_deltas.get(&(kind, name)).copied().unwrap_or(0);
+            let revision: i64 = conn
+                .query_row(
+                    "UPDATE type_dict SET count=count+?1, revision=revision+1 WHERE kind=?2 AND name=?3 RETURNING revision",
+                    params![delta, kind, name],
+                    |row| row.get(0),
+                )
+                .map_err(sql_error)?;
+            enqueue_taxonomy_jobs(
+                conn,
+                kind,
+                type_id(conn, name, kind)?,
+                revision,
+                crate::jobs::IndexOperation::Upsert,
+            )?;
+        }
     }
     let observations = |snapshot: &Snapshot| {
         snapshot
