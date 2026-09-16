@@ -34,6 +34,11 @@ This entry lists every change since that snapshot. The version line restarts at
   and `PATCH /ui/api/webhooks/{id}` return a 400 for a name that
   `[webhooks.secrets]` does not define; a server without keys still accepts
   any name (store-now shape).
+- **Webhook delivery logs the full failure cause.** A transport error used
+  to log only the reqwest headline `error sending request for url (...)`.
+  The log line now carries the whole cause chain — TCP, TLS, timeout — and
+  every attempt has a 10-second deadline, so a dead or stalled endpoint no
+  longer stalls the poller while the TCP stack gives up on its own.
 - **The admin UI flags webhook subscriptions that cannot be signed.** The
   list marks a row whose `secretRef` has no signing key ("not configured"),
   and the subscription form lists the configured names and explains the

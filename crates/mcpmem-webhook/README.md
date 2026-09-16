@@ -63,6 +63,12 @@ the server raises no alert.
 
 A receiver must recompute the MAC over both parts to reject a replayed body.
 
+Every delivery attempt has a 10-second deadline. A dead or stalled
+connection fails the attempt and retries like any other transport failure.
+The worker logs the full cause — TCP, TLS, timeout — not only reqwest's
+`error sending request for url (...)` headline, so the log line names the
+reason a delivery failed.
+
 The body is a version 2 JSON envelope, bounded to 64 KiB. It carries
 `eventId`, `transactionId`, `entityId`, `entityRevision`, `operation`,
 `occurredAtUs`, `origin`, `correlationId`, `causationId`, `hopCount`, and, for a
