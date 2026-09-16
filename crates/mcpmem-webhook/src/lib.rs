@@ -14,6 +14,7 @@ use url::Url;
 const LEASE_US: i64 = 30_000_000;
 const MAX_ATTEMPTS: i64 = 8;
 const MAX_BODY: usize = 65_536;
+const REQUEST_DEADLINE_SECS: u64 = 10;
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -150,8 +151,12 @@ impl HttpsTransport for ReqwestTransport {
                 reqwest::redirect::Policy::none()
             })
             .resolve(&plan.host, plan.address)
+            // A dead or stalled endpoint must not stall the outbox poll
+            // forever; one stuck TCP connection used to delay retries by
+            // minutes while the stack gave up on its own.
+            .timeout(std::time::Duration::from_secs(REQUEST_DEADLINE_SECS))
             .build()
-            .map_err(|e| WorkerError::Delivery(e.to_string()))?;
+            .map_err(|e| WorkerError::Delivery(error_chain(&e)))?;
         let response = client
             .post(endpoint.url.clone())
             .header("Idempotency-Key", plan.idempotency_key)
@@ -164,7 +169,7 @@ impl HttpsTransport for ReqwestTransport {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(request.body)
             .send()
-            .map_err(|e| WorkerError::Delivery(e.to_string()))?;
+            .map_err(|e| WorkerError::Delivery(error_chain(&e)))?;
         let retry_after_us = response
             .headers()
             .get(reqwest::header::RETRY_AFTER)
@@ -605,6 +610,20 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The top-level message plus every cause, joined with `": "`, so a delivery
+/// log line names the real failure. A `reqwest` send error prints only
+/// `error sending request for url (...)`; the reason — TCP, TLS, timeout —
+/// lives in the source chain, and `to_string()` alone drops it.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message = format!("{message}: {cause}");
+        source = cause.source();
+    }
+    message
+}
+
 /// Deliver one signed test event to a subscription's endpoint. It runs the
 /// delivery-time policy (allowlist, DNS, public address), signs with the
 /// subscription's secret reference, and posts through the connector. It
@@ -663,4 +682,30 @@ fn test_envelope(now: i64) -> Result<(Vec<u8>, String), WorkerError> {
         return Err(WorkerError::Policy("test envelope exceeds 64KiB".into()));
     }
     Ok((body, event_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_chain;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("outer failure")]
+    struct Outer(#[from] std::io::Error);
+
+    #[test]
+    fn error_chain_joins_every_cause() {
+        let error = Outer(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset",
+        ));
+        assert_eq!(error_chain(&error), "outer failure: connection reset");
+    }
+
+    #[test]
+    fn error_chain_keeps_the_message_without_a_source() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("plain message")]
+        struct Plain;
+        assert_eq!(error_chain(&Plain), "plain message");
+    }
 }
