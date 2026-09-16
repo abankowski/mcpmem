@@ -321,7 +321,9 @@ and ignore it. No outbox row is written and no delivery state changes.
 with the HTTP status when an event is delivered, `warn` on a retryable
 status, a dead-letter, or a policy/secret discard (for example a host
 outside the allowlist or an unconfigured `secretRef`), and `error` on a
-transport failure; a claimed delivery logs at `debug`. At startup it audits
+transport failure, with the full cause chain — TCP, TLS, timeout — because
+the reqwest headline `error sending request for url (...)` alone never
+names the reason; a claimed delivery logs at `debug`. At startup it audits
 every registered subscription against the delivery policy and logs `warn`
 naming the reason when all deliveries would be rejected. The admin UI lists
 the same subscriptions and flags when the `webhooks` role is not running, so
@@ -353,28 +355,38 @@ and restart the server.
    `endpoint = "https://hooks.example.com/mcpmem"`,
    `secretRef = "my-consumer"`.
 
-3. **The Node-RED flow.** One **HTTP in** node (`POST`, URL `/mcpmem`) and
+3. **The Node-RED flow.** One **HTTP in** node (`POST`, URL `/mcpmem`)
+   with the **Do not parse request body** option on — otherwise Express
+   parses the JSON into an object and the signature can never match — and
    one **function** node that verifies the signature before the flow
    continues:
 
    ```js
    const crypto = global.get('crypto') || require('crypto');
-   const timestamp = msg.headers['x-memory-timestamp'];
-   const received  = msg.headers['x-memory-signature'];
-   // The MAC covers the raw body. `msg.req.body` is that raw string; a flow
-   // that instead reads `msg.payload` may already hold a parsed object, and
-   // HMAC over a re-serialized JSON object will NOT match.
+   const ts = parseInt(msg.headers['x-memory-timestamp'], 10);
+   const received = msg.headers['x-memory-signature'];
+   // msg.req.body is a Buffer: the exact request bytes the MAC covered.
+   // With "Do not parse request body" off it is the parsed JSON object,
+   // and HMAC over a re-serialized object never matches.
    const body = msg.req.body;
 
+   // The MAC covers "<timestamp>.<body>". The worker signs at delivery
+   // time, so a genuine delivery is never minutes old — this rejects
+   // stale replays and header garbage alike.
+   if (!Number.isFinite(ts) || Math.abs(Date.now() * 1000 - ts) > 5 * 60 * 1e6) {
+     throw new Error('stale timestamp');
+   }
    const expected = crypto
      .createHmac('sha256', process.env.WEBHOOK_KEY)
-     .update(timestamp + '.' + body)
+     .update(ts + '.')
+     .update(body)
      .digest('hex');
 
-   if (received !== expected) {
+   if (received.length !== expected.length ||
+       !crypto.timingSafeEqual(Buffer.from(received, 'hex'), Buffer.from(expected, 'hex'))) {
      throw new Error('bad signature');
    }
-   msg.payload = JSON.parse(body); // the event envelope
+   msg.payload = JSON.parse(body.toString('utf8')); // the event envelope
    return msg;
    ```
 
@@ -399,7 +411,9 @@ and restart the server.
    workflow is active, and the test URL (`/webhook-test/...`) is never
    registered persistently, so it cannot receive deliveries. Enable
    **Respond: using Respond to Webhook** if you want a 200 to the worker (the
-   worker needs only a non-2xx to retry; the default response is fine).
+   worker needs only a non-2xx to retry; the default response is fine). Add
+   the **Raw Body** option as well: without it n8n hands the flow a parsed
+   JSON object, and the signature check below can never match.
 
 2. **mcpmem side.** Identical to the Node-RED recipe: same allowlist, and a
    `secretRef` that is exactly a name from `[webhooks.secrets]` — the sample
@@ -409,35 +423,118 @@ and restart the server.
    deliver to n8n's root, which no webhook listens on.
 
 3. **Verify the signature in the flow.** After the **Webhook** trigger, add
-   a **Code node** (the delivery arrives as `POST` with
-   `Content-Type: application/json`; the signature covers the raw bytes):
+   a **Code node**:
 
    ```js
    const crypto = require('crypto');
-   const headers = $input.all()[0].body.headers; // n8n exposes raw headers here
-   // The MAC covers the raw request body as a string. n8n keeps it at
-   // body.body in raw form; a flow that reads a parsed object instead will
-   // never produce a matching signature.
-   const body = $input.all()[0].body.body;
 
+   const item = $input.all()[0];
+   const headers = item.json.headers;
+   // With Raw Body on, n8n keeps the exact request bytes as base64 in
+   // binary.data. item.json.body is the parsed object, and re-serializing
+   // it changes whitespace and key order, so it can never verify.
+   const rawBody = Buffer.from(item.binary.data.data, 'base64');
+   const received = headers['x-memory-signature'] || '';
+   const ts = parseInt(headers['x-memory-timestamp'], 10);
+
+   // The MAC covers "<timestamp>.<body>". The worker signs at delivery
+   // time, so a genuine delivery is never minutes old — this rejects
+   // stale replays and header garbage alike.
+   if (!Number.isFinite(ts) || Math.abs(Date.now() * 1000 - ts) > 5 * 60 * 1e6) {
+     throw new Error('stale timestamp');
+   }
    const expected = crypto
      .createHmac('sha256', 'exact-webhook-key-contents')
-     .update(headers['x-memory-timestamp'] + '.' + body)
+     .update(ts + '.')
+     .update(rawBody)
      .digest('hex');
 
-   if (headers['x-memory-signature'] !== expected) {
+   if (received.length !== expected.length ||
+       !crypto.timingSafeEqual(Buffer.from(received, 'hex'), Buffer.from(expected, 'hex'))) {
      throw new Error('bad signature');
    }
-   return $input.all()[0];
+   return item;
    ```
 
-   Paste your key file's contents where the example says. A retry from the
-   worker carries a fresh timestamp, so the signature check is replay-safe on
-   its own; `Idempotency-Key` (the event id) is available if you want
-   cross-node deduplication too.
+   Paste your key file's contents where the example says. Self-hosted n8n
+   denies `require('crypto')` by default: start it with
+   `NODE_FUNCTION_ALLOW_BUILTIN=crypto`
+   ([n8n docs](https://docs.n8n.io/hosting/configuration/configuration-examples/modules-in-code-node/));
+   on n8n Cloud it is already allowed. With external Task Runners, set the
+   variable on the Task Runner instead of the main container.
+   `Idempotency-Key` (the event id) is in `headers['idempotency-key']` if
+   you want cross-node deduplication too.
 
 Both recipes make the same three decisions: get a public HTTPS URL, name it
-in `allowlist`, and treat every unsigned POST as invalid.
+in `allowlist`, and treat every unsigned POST as invalid. The signature is
+an HMAC-SHA256 of `<X-Memory-Timestamp>.<body>` with your signing key, hex
+and lowercase, so a receiver needs nothing but a header check: recompute
+the MAC over the raw bytes, compare timing-safe, and reject a stale
+timestamp. There is no fixed credential to steal, and a captured request
+replayed later fails the freshness window. `Idempotency-Key` (the event id)
+handles cross-node deduplication.
+
+#### Sample payload and a spoofed-request test
+
+A delivery body is a version 2 JSON envelope, bounded to 64 KiB, with no
+observation content — the receiver reads the graph for entity state. A
+`create` event looks exactly like this (save it as `body.json` for the test
+below):
+
+```json
+{
+  "version": 2,
+  "eventId": "1c4f4e1e-8f6e-4a5b-9d2a-3f0a1b2c3d4e",
+  "transactionId": "7a3e5c9f-2d4b-4e6a-8c1f-9b0a2c3d4e5f",
+  "entityId": 42,
+  "entityRevision": 3,
+  "operation": "create",
+  "occurredAtUs": 1789000000000000,
+  "origin": "claude",
+  "correlationId": "5f8a7c2e-9b4d-4f1a-8e6c-3d2b1a9f0e4d",
+  "causationId": null,
+  "hopCount": 0,
+  "oldName": null,
+  "newName": null
+}
+```
+
+`oldName` and `newName` are non-null only for `rename` events; every other
+operation carries nulls. You can paste this into an n8n test run or a
+Node-RED **Inject** node to exercise a flow's shape — but the flows above
+reject it until it is signed, which is the point. To hand-test the receiver
+without mcpmem running, sign the exact file and POST it (Bash and fish are
+identical):
+
+```sh
+ts=$(date +%s)000000                    # microseconds since the epoch, now
+{ printf '%s.' "$ts"; cat body.json; } | openssl dgst -sha256 -hmac "$(cat /etc/mcpmem/webhook-key)" | awk '{print $2}'
+```
+
+Then send it with the computed signature in place of `<sig>`:
+
+```sh
+sig=<sig>
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://hooks.example.com/webhook/mcpmem \
+  -H 'Content-Type: application/json' \
+  -H "X-Memory-Timestamp: $ts" \
+  -H "X-Memory-Signature: $sig" \
+  --data-binary @body.json
+```
+
+A 2xx means the receiver accepted the signed event; anything else (or no
+response at all) is the verification guard refusing it — the thrown error
+names the reason in the receiver's log. The **Test** button on a
+subscription row in the admin UI already does the whole signed round-trip
+against the real endpoint, with an `eventId` starting `test-` and origin
+`admin:webhook-test` — use it for the first end-to-end check, and the
+manual POST only when you want to exercise the receiver without mcpmem.
+
+Any other tool is the same check: recompute HMAC-SHA256 with your signing
+key over `<X-Memory-Timestamp>.<raw body>`, compare the lowercase hex with
+`X-Memory-Signature` using a timing-safe comparison, and reject a missing
+header, a mismatch, or a timestamp older than a few minutes. A POST that
+fails any of those is not from mcpmem.
 
 ## Quick start
 
