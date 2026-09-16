@@ -69,7 +69,7 @@ fn lookup_type_id(conn: &Connection, type_name: &str, kind: i64) -> Option<i64> 
 /// Load the k:v attribute map of one owner from the `attribute` table.
 /// REQ-ATTR-READ: the read models populate attributes here, on the result
 /// path — the write snapshot (`EntitySnapshot`) stays free of them.
-fn attributes_for(
+pub(crate) fn attributes_for(
     conn: &Connection,
     owner_kind: &str,
     owner_id: i64,

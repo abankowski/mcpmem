@@ -260,3 +260,85 @@ fn merge_copies_source_provenance_without_rewriting_equal_target_bodies() {
         "internal origin ids must never be serialized publicly"
     );
 }
+
+/// Legacy stored events predate the snapshot `attributes` field and the full
+/// `RelationDetail` delta entries. Both must still deserialize: a snapshot
+/// without `attributes`, and a `relation_delta` whose entries are bare
+/// 3-field relation objects, have no observations or attributes.
+#[test]
+fn legacy_events_without_attributes_and_with_bare_relation_deltas_still_deserialize() {
+    let legacy_event_payload = json!({
+        "eventId": "00000000-0000-0000-0000-000000000002",
+        "transactionId": "00000000-0000-0000-0000-000000000003",
+        "entityId": 9,
+        "entityRevision": 1,
+        "occurredAtUs": 10,
+        "change": {
+            "operation": "update",
+            "before": {
+                "entityId": 9,
+                "name": "historical",
+                "entityType": "test",
+                "observations": ["historical"]
+            },
+            "after": {
+                "entityId": 9,
+                "name": "historical",
+                "entityType": "test",
+                "observations": ["historical"]
+            },
+            "relationDelta": {
+                "added": [
+                    {"from": "a", "to": "b", "relationType": "knows"},
+                    {"from": "a", "to": "c", "relationType": "knows",
+                     "observations": [], "attributes": {}}
+                ],
+                "removed": [
+                    {"from": "b", "to": "a", "relationType": "knows"}
+                ]
+            }
+        },
+        "provenance": serde_json::to_value(MutationContext::local()).unwrap()
+    });
+    let legacy_event: ChangeEvent = serde_json::from_value(legacy_event_payload).unwrap();
+    let snapshot = legacy_event.change.after.expect("after snapshot");
+    assert_eq!(
+        snapshot.attributes, None,
+        "a legacy snapshot without attributes deserializes to None"
+    );
+    let delta = legacy_event.change.relation_delta.expect("relation delta");
+    assert_eq!(
+        delta.added,
+        vec![
+            mcpmem::types::RelationDetail {
+                from: "a".into(),
+                to: "b".into(),
+                relation_type: "knows".into(),
+                observations: vec![],
+                attributes: std::collections::BTreeMap::new(),
+            },
+            mcpmem::types::RelationDetail {
+                from: "a".into(),
+                to: "c".into(),
+                relation_type: "knows".into(),
+                observations: vec![],
+                attributes: std::collections::BTreeMap::new(),
+            },
+        ],
+        "bare legacy triples gain empty observations and attributes"
+    );
+    assert_eq!(
+        delta.removed,
+        vec![mcpmem::types::RelationDetail {
+            from: "b".into(),
+            to: "a".into(),
+            relation_type: "knows".into(),
+            observations: vec![],
+            attributes: std::collections::BTreeMap::new(),
+        }]
+    );
+    assert!(
+        legacy_event.change.relation_change.is_none(),
+        "a legacy event has no relation change payload"
+    );
+}
