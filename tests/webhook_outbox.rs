@@ -333,7 +333,7 @@ impl mcpmem_webhook::DeliveryConnector for &TestConnector {
 }
 
 #[test]
-fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
+fn worker_signs_a_full_snapshot_envelope_without_a_secret_reference() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let graph = graph(&path);
@@ -376,7 +376,7 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
     let request = connector.request.lock().unwrap().clone().unwrap();
     let body = String::from_utf8(request.body.clone()).unwrap();
     let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(envelope["version"], 2);
+    assert_eq!(envelope["version"], 3);
     assert_eq!(envelope["operation"], "rename");
     assert_eq!(envelope["oldName"], "old");
     assert_eq!(envelope["newName"], "new");
@@ -396,13 +396,40 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
     assert_eq!(envelope["origin"], "producer");
     assert_eq!(envelope["causationId"], serde_json::Value::Null);
     assert_eq!(envelope["hopCount"], 0);
-    assert!(envelope.get("before").is_none(), "no entity snapshot");
-    assert!(envelope.get("after").is_none(), "no entity snapshot");
+    // The v3 envelope carries the full snapshots the receiver needs to
+    // mirror without a graph read: a rename ships both sides, observation
+    // bodies included.
+    assert_eq!(envelope["kind"], "entity");
     assert!(
-        envelope.get("observations").is_none(),
-        "no observation bodies"
+        envelope.get("relation").is_none(),
+        "an entity event has no relation block"
     );
-    assert!(!body.contains("secret observation"));
+    let entity_block = &envelope["entity"];
+    assert_eq!(entity_block["before"]["name"], "old");
+    assert_eq!(entity_block["after"]["name"], "new");
+    assert_eq!(entity_block["before"]["entityType"], "note");
+    let before_observations: Vec<&str> = entity_block["before"]["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(before_observations, vec!["secret observation"]);
+    let after_observations: Vec<&str> = entity_block["after"]["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(after_observations, vec!["secret observation"]);
+    assert!(
+        entity_block["before"]["attributes"].is_object(),
+        "the before snapshot carries the attributes captured at mutation time"
+    );
+    assert!(
+        entity_block["after"]["attributes"].is_object(),
+        "the after snapshot carries the attributes captured at mutation time"
+    );
     assert!(!body.contains("vault://not-in-body"));
     assert_eq!(request.event_id.len(), 36);
     let endpoint = connector.endpoint.lock().unwrap().clone().unwrap();
@@ -444,6 +471,7 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
     let non_rename_request = connector.request.lock().unwrap().clone().unwrap();
     let non_rename: serde_json::Value = serde_json::from_slice(&non_rename_request.body).unwrap();
     assert_eq!(non_rename["operation"], "create");
+    assert_eq!(non_rename["kind"], "entity");
     assert_eq!(
         non_rename.get("oldName"),
         Some(&serde_json::Value::Null),
@@ -453,6 +481,336 @@ fn worker_signs_a_redacted_envelope_without_observations_or_secret_reference() {
         non_rename.get("newName"),
         Some(&serde_json::Value::Null),
         "non-rename envelope explicitly includes newName: null"
+    );
+}
+
+/// A delete event names what disappeared: `after` is null and `before` is
+/// the complete last-known object, because the entity is gone by the time a
+/// receiver could read the graph.
+#[test]
+fn delete_envelope_carries_the_full_last_known_snapshot_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("delete.db");
+    let graph = graph(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    graph.create_entities(&[entity("doomed")]).unwrap();
+    SubscriptionRepository::new(&conn)
+        .upsert(subscription(uuid::Uuid::new_v4()))
+        .unwrap();
+    let mut context = MutationContext::local();
+    context.origin = "producer".into();
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::DeleteEntities {
+                names: vec!["doomed".into()],
+            },
+            context,
+        )
+        .unwrap();
+    let connector = TestConnector::default();
+    let report =
+        mcpmem_webhook::WebhookWorker::new(&path, &connector, TestSecrets, allowlist(), resolver())
+            .run_once(i64::MAX / 2)
+            .unwrap();
+    assert_eq!(report.completed, 1);
+    let request = connector.request.lock().unwrap().clone().unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(envelope["version"], 3);
+    assert_eq!(envelope["kind"], "entity");
+    assert_eq!(envelope["operation"], "delete");
+    let entity_block = &envelope["entity"];
+    assert_eq!(entity_block["before"]["name"], "doomed");
+    assert_eq!(entity_block["before"]["entityType"], "note");
+    let observations: Vec<&str> = entity_block["before"]["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(observations, vec!["secret observation"]);
+    assert!(
+        entity_block["before"]["attributes"].is_object(),
+        "the delete envelope ships the last-known attributes"
+    );
+    assert_eq!(entity_block["after"], serde_json::Value::Null);
+}
+
+/// A create event ships no before side: null means "did not exist in that
+/// state", and the full object rides in `after`.
+#[test]
+fn create_envelope_carries_the_full_snapshot_as_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("create.db");
+    let graph = graph(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    SubscriptionRepository::new(&conn)
+        .upsert(subscription(uuid::Uuid::new_v4()))
+        .unwrap();
+    let mut context = MutationContext::local();
+    context.origin = "producer".into();
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::CreateEntities {
+                entities: vec![entity("fresh")],
+            },
+            context,
+        )
+        .unwrap();
+    let connector = TestConnector::default();
+    let report =
+        mcpmem_webhook::WebhookWorker::new(&path, &connector, TestSecrets, allowlist(), resolver())
+            .run_once(i64::MAX / 2)
+            .unwrap();
+    assert_eq!(report.completed, 1);
+    let request = connector.request.lock().unwrap().clone().unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(envelope["version"], 3);
+    assert_eq!(envelope["kind"], "entity");
+    assert_eq!(envelope["operation"], "create");
+    let entity_block = &envelope["entity"];
+    assert_eq!(entity_block["before"], serde_json::Value::Null);
+    assert_eq!(entity_block["after"]["name"], "fresh");
+    assert_eq!(entity_block["after"]["entityType"], "note");
+    let observations: Vec<&str> = entity_block["after"]["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(observations, vec!["secret observation"]);
+    assert!(
+        entity_block["after"]["attributes"].is_object(),
+        "the created snapshot carries the captured attributes"
+    );
+}
+
+/// Relation observation writes emit their own event kind: the envelope
+/// exposes only the `relation` block, with the mirror revision and the exact
+/// before/after observation pair, and no `entity` block at all.
+#[test]
+fn relation_observation_write_delivers_a_relation_kind_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("relation.db");
+    let graph = graph(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    graph
+        .create_entities(&[entity("Ada"), entity("Bob")])
+        .unwrap();
+    // The relation exists before any subscription is registered, so no
+    // outbox row follows the entity update events it emits.
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::CreateRelations {
+                relations: vec![mcpmem_core::types::RelationInput {
+                    from: "Ada".into(),
+                    to: "Bob".into(),
+                    relation_type: "pracuje".into(),
+                    observations: vec![],
+                    attributes: None,
+                }],
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+    SubscriptionRepository::new(&conn)
+        .upsert(subscription(uuid::Uuid::new_v4()))
+        .unwrap();
+    let mut context = MutationContext::local();
+    context.origin = "producer".into();
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::AddRelationObservations {
+                relations: vec![mcpmem_core::types::RelationObservationUpdate {
+                    relation: mcpmem_core::types::Relation {
+                        from: "Ada".into(),
+                        to: "Bob".into(),
+                        relation_type: "pracuje".into(),
+                    },
+                    contents: vec![mcpmem_core::types::ObservationInput::from(
+                        "met at the conference",
+                    )],
+                }],
+            },
+            context,
+        )
+        .unwrap();
+    let connector = TestConnector::default();
+    let report =
+        mcpmem_webhook::WebhookWorker::new(&path, &connector, TestSecrets, allowlist(), resolver())
+            .run_once(i64::MAX / 2)
+            .unwrap();
+    assert_eq!(report.completed, 1);
+    let request = connector.request.lock().unwrap().clone().unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(envelope["version"], 3);
+    assert_eq!(envelope["kind"], "relation");
+    assert!(
+        envelope.get("entity").is_none(),
+        "a relation event has no entity block"
+    );
+    assert_eq!(envelope["operation"], "update");
+    let relation = &envelope["relation"];
+    assert_eq!(relation["from"], "Ada");
+    assert_eq!(relation["to"], "Bob");
+    assert_eq!(relation["relationType"], "pracuje");
+    assert_eq!(relation["relationRevision"].as_i64(), Some(2));
+    let before: Vec<&str> = relation["before"]["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        before.len(),
+        0,
+        "before the write the relation has no observations"
+    );
+    let after: Vec<&str> = relation["after"]["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["body"].as_str().unwrap())
+        .collect();
+    assert_eq!(after, vec!["met at the conference"]);
+    assert!(relation["before"]["attributes"].is_object());
+    assert!(relation["after"]["attributes"].is_object());
+}
+
+/// A change_event row stored before v3 has no `attributes` on its
+/// snapshots, no `relationChange`, and bare-triple delta entries. It must
+/// still deliver, as an entity-kind envelope, with the absent fields read
+/// as unknown.
+#[test]
+fn an_old_format_stored_event_delivers_as_an_entity_kind_envelope() {
+    use mcpmem_core::events::EventRepository;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-event.db");
+    graph(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let subscription_id = uuid::Uuid::new_v4();
+    SubscriptionRepository::new(&conn)
+        .upsert(subscription(subscription_id))
+        .unwrap();
+    let event_id = uuid::Uuid::new_v4();
+    let transaction_id = uuid::Uuid::new_v4();
+    let correlation_id = uuid::Uuid::new_v4();
+    let payload = serde_json::to_string(&serde_json::json!({
+        "eventId": event_id.to_string(),
+        "transactionId": transaction_id.to_string(),
+        "entityId": 901,
+        "entityRevision": 7,
+        "occurredAtUs": 1,
+        "change": {
+            "operation": "update",
+            "before": {
+                "entityId": 901,
+                "name": "legacy",
+                "entityType": "note",
+                "observations": []
+            },
+            "after": {
+                "entityId": 901,
+                "name": "legacy",
+                "entityType": "note",
+                "observations": []
+            },
+            "relationDelta": {
+                "added": [
+                    { "from": "legacy", "to": "peer", "relationType": "knows" }
+                ],
+                "removed": []
+            },
+            "oldName": null,
+            "newName": null
+        },
+        "provenance": {
+            "actor": "legacy",
+            "origin": "producer",
+            "correlationId": correlation_id.to_string(),
+            "causationId": null,
+            "hopCount": 0,
+            "idempotencyKey": null
+        }
+    }))
+    .unwrap();
+    conn.execute(
+        "INSERT INTO change_event VALUES(?1,?2,?3,?4,?5,?6)",
+        rusqlite::params![
+            event_id.to_string(),
+            transaction_id.to_string(),
+            901,
+            7,
+            1,
+            payload
+        ],
+    )
+    .unwrap();
+    EventRepository::new(&conn)
+        .enqueue_delivery(event_id, subscription_id)
+        .unwrap();
+    let connector = TestConnector::default();
+    let report =
+        mcpmem_webhook::WebhookWorker::new(&path, &connector, TestSecrets, allowlist(), resolver())
+            .run_once(i64::MAX / 2)
+            .unwrap();
+    assert_eq!(report.completed, 1);
+    let request = connector.request.lock().unwrap().clone().unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(envelope["version"], 3);
+    assert_eq!(envelope["kind"], "entity");
+    assert_eq!(envelope["entity"]["before"]["name"], "legacy");
+    assert!(
+        envelope["entity"]["before"].get("attributes").is_none(),
+        "an old row has no attributes to ship"
+    );
+    let added = envelope["entity"]["relationDelta"]["added"]
+        .as_array()
+        .unwrap();
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0]["from"], "legacy");
+    assert_eq!(added[0]["relationType"], "knows");
+}
+
+/// A worker configured with a tiny cap dead-letters an event whose envelope
+/// exceeds it: a partially delivered envelope would break the signature
+/// contract, so the policy error is terminal and names the cap.
+#[test]
+fn an_oversized_envelope_dead_letters_with_the_policy_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cap.db");
+    let graph = graph(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    SubscriptionRepository::new(&conn)
+        .upsert(subscription(uuid::Uuid::new_v4()))
+        .unwrap();
+    let mut context = MutationContext::local();
+    context.origin = "producer".into();
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::CreateEntities {
+                entities: vec![entity("large")],
+            },
+            context,
+        )
+        .unwrap();
+    let now = mcpmem_core::events::now_us();
+    let connector = TestConnector::default();
+    let report =
+        mcpmem_webhook::WebhookWorker::new(&path, &connector, TestSecrets, allowlist(), resolver())
+            .with_max_body_bytes(64)
+            .run_once(now)
+            .unwrap();
+    assert_eq!(report.dead, 1);
+    let state = conn
+        .query_row::<String, _, _>("SELECT state FROM event_outbox", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(state, "dead");
+    let reason = conn
+        .query_row::<String, _, _>("SELECT last_error FROM event_outbox", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        reason.contains("cap"),
+        "the dead-letter reason names the cap: {reason}"
     );
 }
 

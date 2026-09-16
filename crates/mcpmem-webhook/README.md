@@ -69,11 +69,29 @@ The worker logs the full cause — TCP, TLS, timeout — not only reqwest's
 `error sending request for url (...)` headline, so the log line names the
 reason a delivery failed.
 
-The body is a version 2 JSON envelope, bounded to 64 KiB. It carries
-`eventId`, `transactionId`, `entityId`, `entityRevision`, `operation`,
-`occurredAtUs`, `origin`, `correlationId`, `causationId`, `hopCount`, and, for a
-rename, `oldName` and `newName`. It carries no observation content: the
-receiver reads the graph for the entity state.
+The body is a version 3 JSON envelope, bounded to a configurable cap (1 MiB by
+default). It carries `eventId`, `transactionId`, `entityId`, `entityRevision`,
+`operation`, `occurredAtUs`, `origin`, `correlationId`, `causationId`,
+`hopCount`, `oldName`/`newName` (non-null only for a rename), and `kind`
+(`entity` or `relation`). The `kind` block carries the full object:
+
+- `entity.before` and `entity.after` are complete snapshots — name, entity
+  type, observations and kv attributes. `before` is null for a create;
+  `after` is null for a delete, and `before` is the last-known state of the
+  deleted object. `relationDelta` entries are full relation objects, not
+  bare triples.
+- `relation` appears only on the events emitted for relation observation and
+  attribute writes. It carries the triple, the mirror's own
+  `relationRevision`, and the exact `before`/`after` pair, so a receiver can
+  see which observation or attribute was added, changed or removed.
+
+An event is self-contained: apply `entity.after` (or `relation.after`) to
+converge, or diff `before` against `after` for the exact change. Events
+stored before this release deliver with null attributes and no relation
+detail; treat null attributes on historical events as unknown. An event
+whose envelope exceeds the cap dead-letters with the policy reason — never a
+partial delivery. Raise the cap with `max-body-bytes` in the `[webhooks]`
+configuration section.
 
 ## The endpoint policy
 

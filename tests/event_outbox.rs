@@ -1400,3 +1400,271 @@ fn deleted_entity_observation_does_not_match_fts() {
         "deleted entity observation still matches: {matches:?}"
     );
 }
+
+// ── Quiet event stream (wave 3: relation observation and attribute writes) ─
+
+fn mirror(conn: &Connection, from: &str, to: &str, relation_type: &str) -> (i64, i64) {
+    conn.query_row(
+        "SELECT m.id, m.revision FROM taxonomy_relation m
+         JOIN entity f ON f.id = m.from_id AND f.name = ?1
+         JOIN entity t ON t.id = m.to_id AND t.name = ?2
+         JOIN type_dict d ON d.id = m.type_id AND d.name = ?3 AND d.kind = 1",
+        rusqlite::params![from, to, relation_type],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap()
+}
+
+fn latest_event(conn: &Connection, entity_name: &str) -> mcpmem_core::events::ChangeEvent {
+    let entity_id: i64 = conn
+        .query_row(
+            "SELECT id FROM entity WHERE name=?1",
+            [entity_name],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: String = conn
+        .query_row(
+            "SELECT payload FROM change_event WHERE entity_id=?1 ORDER BY rowid DESC LIMIT 1",
+            [entity_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&payload).unwrap()
+}
+
+fn subscription() -> WebhookSubscription {
+    WebhookSubscription {
+        subscription_id: uuid::Uuid::new_v4(),
+        endpoint: "https://hooks.example.test/receive".into(),
+        event_operations: vec![],
+        entity_types: vec!["test".into()],
+        ignored_origins: vec![],
+        consumer_origin: "consumer-a".into(),
+        secret_ref: "vault://webhook/a".into(),
+        enabled: true,
+    }
+}
+
+fn entity_revision(conn: &Connection, entity_name: &str) -> i64 {
+    conn.query_row(
+        "SELECT revision FROM entity_revision r
+         JOIN entity e ON e.id = r.entity_id WHERE e.name=?1",
+        [entity_name],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn relation_observation_write_persists_quiet_event_and_matches_subscriptions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = graph(&path);
+    let conn = Connection::open(&path).unwrap();
+    graph.create_entities(&[entity("a"), entity("b")]).unwrap();
+    graph
+        .create_relations(&[relation_input("a", "b", "uses")])
+        .unwrap();
+    let sub = subscription();
+    SubscriptionRepository::new(&conn).upsert(sub).unwrap();
+    let revision_before = entity_revision(&conn, "a");
+    let mirror_before = mirror(&conn, "a", "b", "uses");
+    let events_before: i64 = count(&conn, "change_event");
+
+    graph
+        .add_relation_observations("a", "b", "uses", &["contract #12".into()])
+        .unwrap();
+
+    assert_eq!(
+        count(&conn, "change_event"),
+        events_before + 1,
+        "the relation observation write emits exactly one quiet event"
+    );
+    assert_eq!(
+        entity_revision(&conn, "a"),
+        revision_before,
+        "the from endpoint entity_revision is not bumped"
+    );
+    let (mirror_id, mirror_after) = mirror(&conn, "a", "b", "uses");
+    assert_eq!(mirror_id, mirror_before.0);
+    assert_eq!(
+        mirror_after,
+        mirror_before.1 + 1,
+        "the mirror revision bumps"
+    );
+    let event = latest_event(&conn, "a");
+    let change = event
+        .change
+        .relation_change
+        .expect("relation change payload");
+    assert_eq!(
+        change.revision, mirror_after,
+        "the event carries the mirror revision after the write"
+    );
+    assert!(
+        change.before.observations.is_empty(),
+        "before lacks the new body"
+    );
+    let bodies: Vec<String> = change
+        .after
+        .observations
+        .iter()
+        .map(|observation| observation.body.clone())
+        .collect();
+    assert_eq!(bodies, ["contract #12"], "after carries the new body");
+    assert_eq!(
+        count(&conn, "event_outbox"),
+        1,
+        "a matching subscription receives the quiet event"
+    );
+}
+
+#[test]
+fn relation_observation_delete_persists_quiet_event_dropping_the_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = graph(&path);
+    let conn = Connection::open(&path).unwrap();
+    graph.create_entities(&[entity("a"), entity("b")]).unwrap();
+    graph
+        .create_relations(&[relation_input("a", "b", "uses")])
+        .unwrap();
+    graph
+        .add_relation_observations("a", "b", "uses", &["contract #12".into()])
+        .unwrap();
+    let events_before: i64 = count(&conn, "change_event");
+
+    graph
+        .delete_relation_observations("a", "b", "uses", &["contract #12".into()])
+        .unwrap();
+
+    assert_eq!(
+        count(&conn, "change_event"),
+        events_before + 1,
+        "the relation observation delete emits exactly one quiet event"
+    );
+    let event = latest_event(&conn, "a");
+    let change = event
+        .change
+        .relation_change
+        .expect("relation change payload");
+    let bodies: Vec<String> = change
+        .before
+        .observations
+        .iter()
+        .map(|observation| observation.body.clone())
+        .collect();
+    assert_eq!(bodies, ["contract #12"], "before carries the deleted body");
+    assert!(
+        change.after.observations.is_empty(),
+        "after lacks the deleted body"
+    );
+}
+
+#[test]
+fn relation_attribute_write_persists_quiet_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = graph(&path);
+    let conn = Connection::open(&path).unwrap();
+    graph.create_entities(&[entity("a"), entity("b")]).unwrap();
+    graph
+        .create_relations(&[relation_input("a", "b", "uses")])
+        .unwrap();
+    let (mirror_id, mirror_before) = mirror(&conn, "a", "b", "uses");
+    let events_before: i64 = count(&conn, "change_event");
+
+    graph
+        .set_attributes(&[mcpmem_core::types::AttributeSet {
+            owner_kind: "relation".into(),
+            entity_name: None,
+            from: Some("a".into()),
+            to: Some("b".into()),
+            relation_type: Some("uses".into()),
+            attributes: std::collections::BTreeMap::from([("since".into(), "2020".into())]),
+        }])
+        .unwrap();
+
+    assert_eq!(
+        count(&conn, "change_event"),
+        events_before + 1,
+        "a relation attribute write emits exactly one quiet event"
+    );
+    let (mirror_id_after, mirror_revision) = mirror(&conn, "a", "b", "uses");
+    assert_eq!(
+        (mirror_id_after, mirror_revision),
+        (mirror_id, mirror_before),
+        "attribute writes do not bump the mirror revision"
+    );
+    let event = latest_event(&conn, "a");
+    let change = event
+        .change
+        .relation_change
+        .expect("relation change payload");
+    assert_eq!(change.revision, mirror_before);
+    assert_eq!(
+        change.before.attributes,
+        std::collections::BTreeMap::new(),
+        "before lacks the new key"
+    );
+    assert_eq!(
+        change.after.attributes,
+        std::collections::BTreeMap::from([("since".into(), "2020".into())]),
+        "after carries the new key"
+    );
+}
+
+#[test]
+fn noop_relation_writes_emit_no_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = graph(&path);
+    let conn = Connection::open(&path).unwrap();
+    graph.create_entities(&[entity("a"), entity("b")]).unwrap();
+    graph
+        .create_relations(&[relation_input("a", "b", "uses")])
+        .unwrap();
+    graph
+        .add_relation_observations("a", "b", "uses", &["x".into()])
+        .unwrap();
+    graph
+        .delete_relation_observations("a", "b", "uses", &["x".into()])
+        .unwrap();
+    let events_before: i64 = count(&conn, "change_event");
+
+    // The same body twice: the second delete removes nothing.
+    graph
+        .delete_relation_observations("a", "b", "uses", &["x".into()])
+        .unwrap();
+    assert_eq!(
+        count(&conn, "change_event"),
+        events_before,
+        "a delete that removes no row emits no event"
+    );
+    // An empty append changes nothing.
+    graph
+        .add_relation_observations("a", "b", "uses", &[])
+        .unwrap();
+    assert_eq!(
+        count(&conn, "change_event"),
+        events_before,
+        "an empty append emits no event"
+    );
+    // An empty attribute set changes nothing.
+    graph
+        .set_attributes(&[mcpmem_core::types::AttributeSet {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            attributes: std::collections::BTreeMap::new(),
+        }])
+        .unwrap();
+    assert_eq!(
+        count(&conn, "change_event"),
+        events_before,
+        "an empty attribute set emits no event"
+    );
+}

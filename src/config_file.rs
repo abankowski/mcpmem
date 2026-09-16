@@ -164,6 +164,10 @@ pub struct WebhooksSection {
     /// resolve to a private, loopback or link-local address. Strict by
     /// default; set it for a split-horizon DNS topology.
     pub allow_private_addresses: Option<bool>,
+    /// The largest webhook envelope the worker delivers, in bytes. An event
+    /// whose envelope exceeds the cap dead-letters with the policy reason.
+    /// Defaults to 1 MiB.
+    pub max_body_bytes: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -632,6 +636,9 @@ pub fn webhook_worker_config(
         allowlist,
         secrets,
         allow_private_addresses: section.allow_private_addresses.unwrap_or(false),
+        max_body_bytes: section
+            .max_body_bytes
+            .unwrap_or(mcpmem_webhook::DEFAULT_MAX_BODY),
     })
 }
 

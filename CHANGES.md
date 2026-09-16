@@ -43,6 +43,27 @@ This entry lists every change since that snapshot. The version line restarts at
   list marks a row whose `secretRef` has no signing key ("not configured"),
   and the subscription form lists the configured names and explains the
   contract.
+- **Webhook deliveries carry the full object (envelope v3).** Every event
+  now includes the `before` and `after` snapshots — entity name, type,
+  observations and kv attributes — plus full relation objects in the
+  relation delta. A delete event carries the complete last-known object in
+  `before`, so a consumer learns exactly what disappeared; a create event
+  carries it in `after`; any other event can be diffed for the exact
+  observations and attributes added, changed or removed. Relation
+  observation and attribute writes now emit their own `relation`-kind events
+  with the mirror's revision and an exact before/after pair. This replaces
+  the version-2 envelope that named only the entity identity.
+- **kv and relation-observation writes reach the outbox without churn.**
+  Attribute and relation-observation writes emit change events (and match
+  subscriptions) while leaving `entity_revision` and the index queues
+  untouched — the REQ-ATTR-OFFLINE economics hold. Migration `0013` drops
+  the `UNIQUE(entity_id, entity_revision)` constraint on `change_event`,
+  because consecutive quiet events on one entity share a structural
+  revision.
+- **Webhook body cap is configurable.** `max-body-bytes` in the
+  `[webhooks]` section raises or lowers the envelope cap (1 MiB default). An
+  event whose full snapshot exceeds the cap dead-letters with the policy
+  reason instead of failing delivery with a truncated body.
 
 ## 2.0.0
 

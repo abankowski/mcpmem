@@ -1,7 +1,9 @@
 //! Bounded, lease-fenced webhook delivery. Network implementation is injected.
 use hmac::{Hmac, Mac};
 use mcpmem_core::events::{EventDelivery, EventRepository, now_us};
+use mcpmem_core::mutation::{EntitySnapshot, RelationDelta};
 use mcpmem_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
+use mcpmem_core::types::RelationDetail;
 use rusqlite::Connection;
 use serde::Serialize;
 use sha2::Sha256;
@@ -13,7 +15,12 @@ use url::Url;
 
 const LEASE_US: i64 = 30_000_000;
 const MAX_ATTEMPTS: i64 = 8;
-const MAX_BODY: usize = 65_536;
+/// The default envelope body cap in bytes. `WebhookConfigFile.max_body_bytes`
+/// and `WebhookWorker::new` both start here; an operator may raise it in the
+/// `[webhooks]` section for an entity or relation whose full snapshot exceeds
+/// it. An event whose envelope is larger than the cap dead-letters with the
+/// policy reason, never a partial delivery.
+pub const DEFAULT_MAX_BODY: usize = 1_048_576;
 const REQUEST_DEADLINE_SECS: u64 = 10;
 
 #[derive(Debug, Error)]
@@ -69,7 +76,7 @@ impl SecretProvider for StaticSecretProvider {
 /// allowlist names the HTTPS hostnames the worker may deliver to; a `secret`
 /// reference maps to an already-loaded signing key. Empty is the fail-closed
 /// default: no allowed host and no key means the worker refuses everything.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct WebhookConfigFile {
     pub allowlist: BTreeSet<String>,
     pub secrets: BTreeMap<String, SigningKey>,
@@ -78,6 +85,22 @@ pub struct WebhookConfigFile {
     /// default (fail-closed against SSRF); an operator with split-horizon
     /// DNS opts in explicitly.
     pub allow_private_addresses: bool,
+    /// The largest envelope body this worker delivers, in bytes. An event
+    /// whose envelope exceeds the cap dead-letters with the policy reason;
+    /// the operator raises it in the `[webhooks]` section. The default is
+    /// 1 MiB. A zero cap would refuse every delivery, so `Default` must
+    /// never produce one.
+    pub max_body_bytes: usize,
+}
+impl Default for WebhookConfigFile {
+    fn default() -> Self {
+        Self {
+            allowlist: BTreeSet::new(),
+            secrets: BTreeMap::new(),
+            allow_private_addresses: false,
+            max_body_bytes: DEFAULT_MAX_BODY,
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ValidatedEndpoint {
@@ -304,6 +327,7 @@ pub struct WebhookWorker<C, S, R> {
     resolver: R,
     lease_us: i64,
     allow_private_addresses: bool,
+    max_body_bytes: usize,
 }
 pub trait WorkerPoll: Send + Sync {
     fn poll(&self, now_us: i64) -> Result<DeliveryReport, WorkerError>;
@@ -343,10 +367,18 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
             resolver,
             lease_us: LEASE_US,
             allow_private_addresses: false,
+            max_body_bytes: DEFAULT_MAX_BODY,
         }
     }
     pub const fn with_lease_us(mut self, lease_us: i64) -> Self {
         self.lease_us = lease_us;
+        self
+    }
+    /// Cap the envelope body this worker delivers, in bytes. An event whose
+    /// envelope exceeds the cap dead-letters with the policy reason. Defaults
+    /// to [`DEFAULT_MAX_BODY`].
+    pub const fn with_max_body_bytes(mut self, max_body_bytes: usize) -> Self {
+        self.max_body_bytes = max_body_bytes;
         self
     }
     /// Relax the address-class check for every endpoint this worker
@@ -535,7 +567,7 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WebhookWorker<C, S, R
         now: i64,
     ) -> Result<DeliveryResponse, WorkerError> {
         let endpoint = self.policy_endpoint(&subscription.endpoint)?;
-        let body = envelope(delivery)?;
+        let body = envelope(delivery, self.max_body_bytes)?;
         let key = self.secrets.signing_key(&subscription.secret_ref)?;
         let signature = signature(&key, now, &body)?;
         self.connector.send(
@@ -570,11 +602,44 @@ struct Envelope<'a> {
     hop_count: u8,
     old_name: Option<&'a str>,
     new_name: Option<&'a str>,
+    /// `"entity"` for an entity change, `"relation"` for a relation
+    /// observation or attribute write. Exactly one kind block is present.
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entity: Option<EntityBlock<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relation: Option<RelationBlock<'a>>,
 }
-fn envelope(delivery: &EventDelivery) -> Result<Vec<u8>, WorkerError> {
+
+/// Full snapshots of the changed entity. `before` is null for a create,
+/// `after` is null for a delete; `relation_delta` entries carry full
+/// relation objects, not bare triples.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EntityBlock<'a> {
+    before: Option<&'a EntitySnapshot>,
+    after: Option<&'a EntitySnapshot>,
+    relation_delta: Option<&'a RelationDelta>,
+}
+
+/// The exact before/after pair of one relation observation or attribute
+/// write, with the mirror's own revision.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelationBlock<'a> {
+    from: &'a str,
+    to: &'a str,
+    relation_type: &'a str,
+    relation_revision: i64,
+    before: &'a RelationDetail,
+    after: &'a RelationDetail,
+}
+
+fn envelope(delivery: &EventDelivery, max_body_bytes: usize) -> Result<Vec<u8>, WorkerError> {
     let event = &delivery.event;
+    let is_relation = event.change.relation_change.is_some();
     let body = serde_json::to_vec(&Envelope {
-        version: 2,
+        version: 3,
         event_id: event.event_id.to_string(),
         transaction_id: event.transaction_id.to_string(),
         entity_id: event.entity_id,
@@ -591,10 +656,34 @@ fn envelope(delivery: &EventDelivery) -> Result<Vec<u8>, WorkerError> {
         new_name: (event.change.operation == mcpmem_core::mutation::ChangeOperation::Rename)
             .then_some(event.change.new_name.as_deref())
             .flatten(),
+        kind: if is_relation { "relation" } else { "entity" },
+        entity: if is_relation {
+            None
+        } else {
+            Some(EntityBlock {
+                before: event.change.before.as_ref(),
+                after: event.change.after.as_ref(),
+                relation_delta: event.change.relation_delta.as_ref(),
+            })
+        },
+        relation: event
+            .change
+            .relation_change
+            .as_ref()
+            .map(|relation| RelationBlock {
+                from: &relation.before.from,
+                to: &relation.before.to,
+                relation_type: &relation.before.relation_type,
+                relation_revision: relation.revision,
+                before: &relation.before,
+                after: &relation.after,
+            }),
     })
     .map_err(mcpmem_core::errors::MCSError::from)?;
-    if body.len() > MAX_BODY {
-        return Err(WorkerError::Policy("envelope exceeds 64KiB".into()));
+    if body.len() > max_body_bytes {
+        return Err(WorkerError::Policy(format!(
+            "envelope exceeds the configured body cap of {max_body_bytes} bytes"
+        )));
     }
     Ok(body)
 }
@@ -635,6 +724,7 @@ pub fn deliver_test(
     allowlist: &BTreeSet<String>,
     resolver: &dyn Resolver,
     allow_private: bool,
+    max_body_bytes: usize,
     subscription: &WebhookSubscription,
 ) -> Result<DeliveryResponse, WorkerError> {
     let endpoint = if allow_private {
@@ -644,7 +734,7 @@ pub fn deliver_test(
     };
     let key = secrets.signing_key(&subscription.secret_ref)?;
     let now = now_us();
-    let (body, event_id) = test_envelope(now)?;
+    let (body, event_id) = test_envelope(now, max_body_bytes)?;
     let signature = signature(&key, now, &body)?;
     connector.send(
         &endpoint,
@@ -660,10 +750,10 @@ pub fn deliver_test(
 /// A test envelope in the same shape as a delivery, marked by the `test-`
 /// prefix in `event_id` and the `admin:webhook-test` origin. A receiver can
 /// recognize the event and ignore it.
-fn test_envelope(now: i64) -> Result<(Vec<u8>, String), WorkerError> {
+fn test_envelope(now: i64, max_body_bytes: usize) -> Result<(Vec<u8>, String), WorkerError> {
     let event_id = format!("test-{now}");
     let body = serde_json::to_vec(&serde_json::json!({
-        "version": 2,
+        "version": 3,
         "eventId": event_id,
         "transactionId": event_id,
         "entityId": 0,
@@ -676,10 +766,27 @@ fn test_envelope(now: i64) -> Result<(Vec<u8>, String), WorkerError> {
         "hopCount": 0,
         "oldName": null,
         "newName": null,
+        "kind": "entity",
+        "entity": {
+            "before": null,
+            "after": {
+                "entityId": 0,
+                "name": "webhook-test",
+                "entityType": "note",
+                "observations": [],
+                "attributes": {}
+            },
+            "relationDelta": {
+                "added": [],
+                "removed": []
+            }
+        }
     }))
     .map_err(|e| WorkerError::Delivery(e.to_string()))?;
-    if body.len() > MAX_BODY {
-        return Err(WorkerError::Policy("test envelope exceeds 64KiB".into()));
+    if body.len() > max_body_bytes {
+        return Err(WorkerError::Policy(format!(
+            "test envelope exceeds the configured body cap of {max_body_bytes} bytes"
+        )));
     }
     Ok((body, event_id))
 }

@@ -127,6 +127,7 @@ pub struct WebhookTestKit {
     resolver: Arc<dyn mcpmem_webhook::Resolver>,
     connector: Arc<dyn mcpmem_webhook::DeliveryConnector>,
     allow_private: bool,
+    max_body_bytes: usize,
 }
 
 impl WebhookTestKit {
@@ -136,6 +137,7 @@ impl WebhookTestKit {
         allowlist: BTreeSet<String>,
         secrets: BTreeMap<String, mcpmem_webhook::SigningKey>,
         allow_private: bool,
+        max_body_bytes: usize,
     ) -> Self {
         Self {
             allowlist,
@@ -143,6 +145,7 @@ impl WebhookTestKit {
             resolver: Arc::new(mcpmem_webhook::SystemResolver),
             connector: Arc::new(mcpmem_webhook::HttpsConnector::production()),
             allow_private,
+            max_body_bytes,
         }
     }
 
@@ -154,6 +157,7 @@ impl WebhookTestKit {
         resolver: Arc<dyn mcpmem_webhook::Resolver>,
         connector: Arc<dyn mcpmem_webhook::DeliveryConnector>,
         allow_private: bool,
+        max_body_bytes: usize,
     ) -> Self {
         Self {
             allowlist,
@@ -161,6 +165,7 @@ impl WebhookTestKit {
             resolver,
             connector,
             allow_private,
+            max_body_bytes,
         }
     }
 
@@ -176,6 +181,7 @@ impl WebhookTestKit {
             &self.allowlist,
             &*self.resolver,
             self.allow_private,
+            self.max_body_bytes,
             subscription,
         )
     }
@@ -479,6 +485,7 @@ mod tests {
             Arc::new(PlaceholderResolver),
             Arc::new(mcpmem_webhook::HttpsConnector::production()),
             false,
+            mcpmem_webhook::DEFAULT_MAX_BODY,
         ))
     }
 

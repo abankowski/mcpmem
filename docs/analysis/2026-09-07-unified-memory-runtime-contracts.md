@@ -165,7 +165,13 @@ The request body is UTF-8 JSON, maximum 64 KiB, with stable envelope version:
 ```
 
 Observation bodies, secret references, credentials, and arbitrary before/after
-snapshots are excluded. Delivery sends `Content-Type: application/json`,
+snapshots are excluded. **Superseded (2026-09-16) for observation bodies and
+snapshots:** envelope v3 carries full before/after entity and relation
+snapshots, including observation bodies and kv attributes, per
+`docs/analysis/2026-09-16-webhook-envelope-v3-full-snapshots.md`. Secret
+references, credentials and arbitrary payload fields stay excluded; the
+signed, allowlisted endpoint governs who receives observation content.
+Delivery sends `Content-Type: application/json`,
 `Idempotency-Key: <eventId>`, `X-Memory-Webhook-Version: 1`,
 `X-Memory-Event-Id`, `X-Memory-Delivery-Id`, `X-Memory-Subscription-Id`,
 `X-Memory-Timestamp` (Unix seconds), `X-Memory-Key-Id`, and

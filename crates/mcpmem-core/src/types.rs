@@ -307,13 +307,19 @@ pub struct AttributeDelete {
 /// Read model returned by `search_relations`. Serialize-only: the server
 /// always fills both `observations` and `attributes`, so callers see them
 /// present in the output.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Deserialize-side defaults make old stored event payloads (bare 3-field
+/// relation objects) round-trip: migrated databases may hold `relation_delta`
+/// entries written before observations and attributes existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelationDetail {
     pub from: String,
     pub to: String,
     pub relation_type: String,
+    #[serde(default)]
     pub observations: Vec<Observation>,
+    #[serde(default)]
     pub attributes: BTreeMap<String, String>,
 }
 

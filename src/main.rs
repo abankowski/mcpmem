@@ -109,6 +109,7 @@ async fn inner_main() -> Result<()> {
             webhook_config.allowlist,
             webhook_config.secrets,
             webhook_config.allow_private_addresses,
+            webhook_config.max_body_bytes,
         );
         mcpmem::actions::webhooks::set_test_kit(Some(Arc::new(kit)));
     }

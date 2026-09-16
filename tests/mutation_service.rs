@@ -89,11 +89,18 @@ fn committed_changes_keep_tombstones_and_only_effective_updates() {
         )
         .unwrap();
     assert_eq!(related.changes.len(), 2);
+    let expected_detail = mcpmem::types::RelationDetail {
+        from: relation.from.clone(),
+        to: relation.to.clone(),
+        relation_type: relation.relation_type,
+        observations: vec![],
+        attributes: std::collections::BTreeMap::new(),
+    };
     for change in &related.changes {
         assert_eq!(change.operation, ChangeOperation::Update);
         assert_eq!(
             change.relation_delta.as_ref().unwrap().added.as_slice(),
-            std::slice::from_ref(&relation)
+            std::slice::from_ref(&expected_detail)
         );
     }
     let deleted = service
@@ -559,10 +566,20 @@ fn legacy_duplicate_relation_rows_use_physical_counters_and_set_deltas() {
         0
     );
     assert_eq!(committed.changes.len(), 2);
+    let expected_detail = mcpmem::types::RelationDetail {
+        from: relation.from.clone(),
+        to: relation.to.clone(),
+        relation_type: relation.relation_type,
+        observations: vec![],
+        attributes: std::collections::BTreeMap::new(),
+    };
     for change in committed.changes {
         let delta = change.relation_delta.unwrap();
         assert!(delta.added.is_empty());
-        assert_eq!(delta.removed.as_slice(), std::slice::from_ref(&relation));
+        assert_eq!(
+            delta.removed.as_slice(),
+            std::slice::from_ref(&expected_detail)
+        );
     }
 }
 
@@ -1325,5 +1342,241 @@ fn create_and_upsert_persist_entity_attributes() {
             ("m".into(), "o".into()),
         ])),
         "upsert collides source-wins and keeps untouched keys"
+    );
+}
+
+// ── Quiet event stream (wave 3: full snapshots and exact change data) ────
+
+fn latest_event(probe: &Connection, entity_name: &str) -> mcpmem_core::events::ChangeEvent {
+    let entity_id: i64 = probe
+        .query_row(
+            "SELECT id FROM entity WHERE name=?1",
+            [entity_name],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: String = probe
+        .query_row(
+            "SELECT payload FROM change_event WHERE entity_id=?1 ORDER BY rowid DESC LIMIT 1",
+            [entity_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&payload).unwrap()
+}
+
+fn entity_revision(probe: &Connection, entity_name: &str) -> i64 {
+    probe
+        .query_row(
+            "SELECT revision FROM entity_revision r
+             JOIN entity e ON e.id = r.entity_id WHERE e.name=?1",
+            [entity_name],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn entity_attribute_write_persists_one_quiet_event_without_bumping_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("a")]).unwrap();
+    let probe = Connection::open(&path).unwrap();
+    let revision_before = entity_revision(&probe, "a");
+    let jobs_before: i64 = probe
+        .query_row("SELECT COUNT(*) FROM chunk_index_job", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+    let events_before: i64 = probe
+        .query_row("SELECT COUNT(*) FROM change_event", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+
+    graph
+        .set_attributes(&[mcpmem::types::AttributeSet {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            attributes: std::collections::BTreeMap::from([("k".into(), "v".into())]),
+        }])
+        .unwrap();
+
+    assert_eq!(
+        probe
+            .query_row("SELECT COUNT(*) FROM change_event", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        events_before + 1,
+        "the attribute write emits exactly one quiet event"
+    );
+    assert_eq!(
+        entity_revision(&probe, "a"),
+        revision_before,
+        "the quiet event must not bump entity_revision"
+    );
+    assert_eq!(
+        probe
+            .query_row("SELECT COUNT(*) FROM chunk_index_job", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        jobs_before,
+        "the quiet event must not enqueue an index job"
+    );
+    let event = latest_event(&probe, "a");
+    let before = event.change.before.unwrap();
+    let after = event.change.after.unwrap();
+    assert_eq!(
+        before.attributes,
+        Some(std::collections::BTreeMap::new()),
+        "before carries no attribute keys"
+    );
+    assert_eq!(
+        after.attributes,
+        Some(std::collections::BTreeMap::from([("k".into(), "v".into())])),
+        "after carries the new key"
+    );
+}
+
+#[test]
+fn entity_attribute_delete_persists_quiet_event_with_key_only_in_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("a")]).unwrap();
+    graph
+        .set_attributes(&[mcpmem::types::AttributeSet {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            attributes: std::collections::BTreeMap::from([("k".into(), "v".into())]),
+        }])
+        .unwrap();
+    let probe = Connection::open(&path).unwrap();
+    let revision_before = entity_revision(&probe, "a");
+    let events_before: i64 = probe
+        .query_row("SELECT COUNT(*) FROM change_event", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+
+    graph
+        .delete_attributes(&[mcpmem::types::AttributeDelete {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            keys: vec!["k".into()],
+        }])
+        .unwrap();
+
+    assert_eq!(
+        probe
+            .query_row("SELECT COUNT(*) FROM change_event", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        events_before + 1,
+        "the attribute delete emits exactly one quiet event"
+    );
+    assert_eq!(
+        entity_revision(&probe, "a"),
+        revision_before,
+        "the quiet event must not bump entity_revision"
+    );
+    let event = latest_event(&probe, "a");
+    let before = event.change.before.unwrap();
+    let after = event.change.after.unwrap();
+    assert_eq!(
+        before.attributes,
+        Some(std::collections::BTreeMap::from([("k".into(), "v".into())])),
+        "before carries the deleted key"
+    );
+    assert_eq!(
+        after.attributes,
+        Some(std::collections::BTreeMap::new()),
+        "after lacks the deleted key"
+    );
+}
+
+#[test]
+fn identical_attribute_write_is_eventless() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("a")]).unwrap();
+    let attribute = mcpmem::types::AttributeSet {
+        owner_kind: "entity".into(),
+        entity_name: Some("a".into()),
+        from: None,
+        to: None,
+        relation_type: None,
+        attributes: std::collections::BTreeMap::from([("k".into(), "v".into())]),
+    };
+    graph
+        .set_attributes(std::slice::from_ref(&attribute))
+        .unwrap();
+    let probe = Connection::open(&path).unwrap();
+    let events_before: i64 = probe
+        .query_row("SELECT COUNT(*) FROM change_event", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+
+    graph.set_attributes(&[attribute]).unwrap();
+
+    assert_eq!(
+        probe
+            .query_row("SELECT COUNT(*) FROM change_event", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        events_before,
+        "an identical value write is a no-op and emits no event"
+    );
+    // An empty attribute set is likewise a no-op.
+    graph
+        .set_attributes(&[mcpmem::types::AttributeSet {
+            owner_kind: "entity".into(),
+            entity_name: Some("a".into()),
+            from: None,
+            to: None,
+            relation_type: None,
+            attributes: std::collections::BTreeMap::new(),
+        }])
+        .unwrap();
+    assert_eq!(
+        probe
+            .query_row("SELECT COUNT(*) FROM change_event", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        events_before,
+        "an empty attribute set emits no event"
     );
 }

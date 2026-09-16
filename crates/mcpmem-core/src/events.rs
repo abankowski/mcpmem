@@ -42,7 +42,7 @@ pub fn request_fingerprint(method: &str, normalized_path: &str, raw_body: &[u8])
 /// to this crate, and `cargo package` copies only the files under one crate
 /// root, so an `include_str!` from another crate ships a crate that cannot
 /// compile. That is how the `v1.0.0-rc.1` release failed.
-pub const MIGRATIONS: [(i64, &str); 12] = [
+pub const MIGRATIONS: [(i64, &str); 13] = [
     (1, include_str!("../migrations/0001_change_events.sql")),
     (
         2,
@@ -66,6 +66,10 @@ pub const MIGRATIONS: [(i64, &str); 12] = [
     (
         12,
         include_str!("../migrations/0012_rel_obs_fts_delete_fix.sql"),
+    ),
+    (
+        13,
+        include_str!("../migrations/0013_quiet_events_share_revision.sql"),
     ),
 ];
 
@@ -132,6 +136,10 @@ mod migration_inventory {
                 (
                     12,
                     "2a713d3eb83bc75449063b94cf7089b2361b3b92612065407ee063f9468f8a2c".to_string()
+                ),
+                (
+                    13,
+                    "ad6117ba4176acbd113696338b026e9753d5a7bfd61868accc9309be60e48268".to_string()
                 ),
             ],
             "a migration was added, removed, renumbered or edited"
@@ -207,6 +215,7 @@ pub(crate) fn persist_changes(
     conn: &Connection,
     changes: &CommittedChangeSet,
     context: &MutationContext,
+    quiet: bool,
 ) -> Result<()> {
     for change in &changes.changes {
         let snapshot = change
@@ -215,7 +224,35 @@ pub(crate) fn persist_changes(
             .or(change.before.as_ref())
             .ok_or_else(|| MCSError::MemoryError("empty entity change".into()))?;
         let deleted = change.after.is_none();
-        let revision: i64 = conn.query_row("INSERT INTO entity_revision VALUES(?1,1,?2) ON CONFLICT(entity_id) DO UPDATE SET revision=revision+1, deleted=excluded.deleted RETURNING revision", params![snapshot.entity_id, deleted], |r| r.get(0)).map_err(sql_error)?;
+        // Quiet changes (attribute writes, relation observation writes) carry
+        // the current structural revision without bumping it; consecutive
+        // quiet events on one entity may share a revision. The event row and
+        // the subscription outbox row are the point; the revision bump and
+        // the index enqueue stay off (REQ-ATTR-OFFLINE).
+        let quiet_change = quiet || change.relation_change.is_some();
+        let revision: i64 = if quiet_change {
+            let current: Option<i64> = conn
+                .query_row(
+                    "SELECT revision FROM entity_revision WHERE entity_id=?1",
+                    [snapshot.entity_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(sql_error)?;
+            match current {
+                Some(revision) => revision,
+                None => {
+                    conn.execute(
+                        "INSERT INTO entity_revision(entity_id, revision, deleted) VALUES(?1, 1, 0)",
+                        [snapshot.entity_id],
+                    )
+                    .map_err(sql_error)?;
+                    1
+                }
+            }
+        } else {
+            conn.query_row("INSERT INTO entity_revision VALUES(?1,1,?2) ON CONFLICT(entity_id) DO UPDATE SET revision=revision+1, deleted=excluded.deleted RETURNING revision", params![snapshot.entity_id, deleted], |r| r.get(0)).map_err(sql_error)?
+        };
         let event = ChangeEvent {
             event_id: Uuid::new_v4(),
             transaction_id: changes.transaction_id,
@@ -237,7 +274,9 @@ pub(crate) fn persist_changes(
             ],
         )
         .map_err(sql_error)?;
-        crate::jobs::enqueue_change(conn, snapshot.entity_id, revision, deleted)?;
+        if !quiet_change {
+            crate::jobs::enqueue_change(conn, snapshot.entity_id, revision, deleted)?;
+        }
         crate::subscriptions::SubscriptionRepository::new(conn).enqueue_matching(&event)?;
     }
     Ok(())
