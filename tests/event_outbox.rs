@@ -237,6 +237,131 @@ fn initializer_preserves_legacy_graph_without_migration_ledger() {
     );
 }
 
+/// Construct a populated version-13 database without opening it through the
+/// current graph initializer. The current initializer can apply migration 14
+/// before the registry has checked the proposed legacy owner.
+fn version_thirteen_graph(path: &Path) -> Connection {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE entity(id INTEGER PRIMARY KEY, name_hash INTEGER NOT NULL, name TEXT NOT NULL, type_id INTEGER NOT NULL,
+            obs_count INTEGER NOT NULL DEFAULT 0, out_deg INTEGER NOT NULL DEFAULT 0, in_deg INTEGER NOT NULL DEFAULT 0,
+            created_us INTEGER NOT NULL, updated_us INTEGER NOT NULL, flags INTEGER NOT NULL DEFAULT 0) STRICT;
+         CREATE TABLE observation(id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, idx INTEGER NOT NULL, body TEXT NOT NULL, created_us INTEGER NOT NULL) STRICT;
+         CREATE TABLE relation(from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, type_id INTEGER NOT NULL, created_us INTEGER NOT NULL) STRICT;
+         CREATE TABLE type_dict(id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0) STRICT;
+         CREATE TABLE graph_stat(key TEXT NOT NULL PRIMARY KEY, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;
+         INSERT INTO graph_stat VALUES('entities',1),('relations',0),('observations',1),('entity_seq',1),('obs_seq',1);
+         CREATE VIRTUAL TABLE obs_fts USING fts5(body, content='observation', content_rowid='id',
+             tokenize='unicode61 remove_diacritics 2');
+         CREATE TRIGGER obs_fts_bd BEFORE DELETE ON observation BEGIN
+           INSERT INTO obs_fts(obs_fts, rowid, body) VALUES ('delete', old.id, old.body);
+         END;
+         CREATE TABLE schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;",
+    )
+    .unwrap();
+    for &(version, sql) in mcpmem_core::events::MIGRATIONS.iter().filter(|(version, _)| *version <= 13) {
+        conn.execute_batch(sql).unwrap();
+        conn.execute(
+            "INSERT INTO schema_migration VALUES(?1,?2,1)",
+            rusqlite::params![version, mcpmem_core::events::sha256(sql.as_bytes())],
+        )
+        .unwrap();
+    }
+    conn.execute("INSERT INTO type_dict(id,kind,name,count) VALUES(1,0,'test',1)", [])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO entity(id,name_hash,name,type_id,obs_count,created_us,updated_us) VALUES(1,?1,'same-name',1,1,1,1)",
+        [mcpmem_core::graph::name_hash("same-name")],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO observation(id,entity_id,idx,body,created_us) VALUES(1,1,0,'original',1)",
+        [],
+    )
+    .unwrap();
+    assert_eq!(count(&conn, "schema_migration"), 13);
+    assert_eq!(count(&conn, "entity"), 1);
+    conn
+}
+
+#[test]
+fn legacy_owner_validation_precedes_the_workspace_marker_on_a_populated_graph() {
+    use mcpmem::workspace::{WorkspaceAccess, WorkspaceRegistry};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("version-13.sqlite");
+    let conn = version_thirteen_graph(&path);
+    for owner in [None, Some("human:unknown")] {
+        assert!(WorkspaceRegistry::open(&path, owner).is_err());
+        assert_eq!(count(&conn, "schema_migration"), 13);
+        assert_eq!(count(&conn, "entity"), 1);
+    }
+
+    let registry = WorkspaceRegistry::open(&path, Some("machine:local")).unwrap();
+    let legacy = registry
+        .resolve("machine:local", None, WorkspaceAccess::Read)
+        .unwrap();
+    assert_eq!(legacy.graph_path, path);
+    assert_eq!(
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        14
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM entity WHERE flags=0", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_original_entity(&graph(&path), "same-name");
+}
+
+#[test]
+fn workspace_marker_revokes_legacy_oauth_credentials_without_removing_graph_rows() {
+    use mcpmem::workspace::WorkspaceRegistry;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy-sessions.sqlite");
+    let conn = version_thirteen_graph(&path);
+    conn.execute_batch(
+        "INSERT INTO oauth_token(token_digest,kind,family,client_id,principal,scopes,resource,created_us,expires_us)
+         VALUES('token',0,'family','client','old-name','graph-read','resource',1,9999999);
+         INSERT INTO oauth_code(code_digest,client_id,redirect_uri,code_challenge,resource,scopes,principal,family,created_us,expires_us)
+         VALUES('code','client','uri','challenge','resource','graph-read','old-name','family',1,9999999);
+         INSERT INTO oauth_login(state,client_id,redirect_uri,code_challenge,resource,scopes,upstream_verifier,nonce,csrf,created_us,expires_us)
+         VALUES('state','client','uri','challenge','resource','graph-read','verifier','nonce','csrf',1,9999999);",
+    )
+    .unwrap();
+    drop(WorkspaceRegistry::open(&path, Some("machine:local")).unwrap());
+    assert_eq!(
+        conn.query_row("SELECT revoked FROM oauth_token WHERE token_digest='token'", [], |row| row.get::<_, i64>(0)).unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT spent FROM oauth_code WHERE code_digest='code'", [], |row| row.get::<_, i64>(0)).unwrap(),
+        1
+    );
+    assert_eq!(count(&conn, "oauth_login"), 0);
+    assert_eq!(count(&conn, "entity"), 1);
+}
+
+#[test]
+fn migration_runner_refuses_a_database_marked_newer_than_it_knows() {
+    use mcpmem::workspace::WorkspaceRegistry;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("future-version.sqlite");
+    let conn = version_thirteen_graph(&path);
+    drop(WorkspaceRegistry::open(&path, Some("machine:local")).unwrap());
+    conn.execute(
+        "INSERT INTO schema_migration VALUES(15,'future-checksum',1)",
+        [],
+    )
+    .unwrap();
+    let error = mcpmem_core::events::migrate(&conn).unwrap_err();
+    assert!(error.to_string().contains("database schema is newer than this binary"), "{error}");
+    assert_eq!(count(&conn, "entity"), 1);
+}
+
 #[test]
 fn initializer_is_idempotent_and_preserves_historical_checksums_and_connection_tuning() {
     let conn = Connection::open_in_memory().unwrap();

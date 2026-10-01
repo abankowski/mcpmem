@@ -10,6 +10,8 @@ pub use mcpmem_core::storage::{Durability, SqliteTuning};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub memory_file_path: String,
+    /// Existing owner required only while the first workspace registry is created.
+    pub legacy_owner_id: Option<String>,
     pub transport: Transport,
     pub bind_addr: String,
     pub durability: Durability,
@@ -388,6 +390,7 @@ impl Config {
 
         Ok(Config {
             memory_file_path,
+            legacy_owner_id: args.legacy_owner_id.clone(),
             transport: args.transport,
             bind_addr: args.bind.clone(),
             durability,
@@ -418,6 +421,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             memory_file_path: "memory.mcpmem".to_string(),
+            legacy_owner_id: None,
             transport: Transport::Stdio,
             bind_addr: "127.0.0.1:8080".to_string(),
             durability: Durability::Async,
