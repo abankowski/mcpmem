@@ -23,6 +23,7 @@ use crate::taxonomy;
 use crate::tools;
 use crate::vector_actions;
 use crate::vector_store::{VectorConfig, VectorStore};
+use crate::workspace::WorkspaceRegistry;
 
 /// Outcome of processing a request: either a pre-escaped JSON Value (small
 /// payloads) or a pre-serialized JSON *string* of the `result` field (avoids
@@ -370,6 +371,7 @@ fn to_value(resp: JsonRpcResponse) -> Value {
 
 pub struct MCPServer {
     config: Arc<Config>,
+    registry: Arc<WorkspaceRegistry>,
     kg: Arc<GraphHandle>,
     /// `Some` when vector support is enabled (`--vectors`); drives the extra
     /// `vector_*` / `hybrid_search` tools. `None` for a pure knowledge-graph server.
@@ -396,6 +398,18 @@ impl MCPServer {
             std::sync::atomic::Ordering::Relaxed,
         );
         let path = Path::new(&config.memory_file_path);
+        let registry = Arc::new(
+            WorkspaceRegistry::open_with_principals(
+                path,
+                config.legacy_owner_id.as_deref(),
+                config
+                    .oauth
+                    .as_ref()
+                    .map_or(&[][..], |oauth| oauth.principals.as_slice()),
+                config.auth_token.is_some(),
+            )
+            .map_err(|error| MCSError::InvalidParams(error.to_string()))?,
+        );
         let lru_cache = NonZeroUsize::new(config.lru_cache_size)
             .unwrap_or_else(|| NonZeroUsize::new(10000).expect("10000 > 0"));
         let kg = Arc::new(GraphHandle::new(
@@ -464,6 +478,7 @@ impl MCPServer {
 
         Ok(Self {
             config: Arc::new(config),
+            registry,
             kg,
             vs,
         })
@@ -479,6 +494,10 @@ impl MCPServer {
     /// Expose the shared graph handle (used to drive the HTTP transport).
     pub fn graph(&self) -> Arc<GraphHandle> {
         Arc::clone(&self.kg)
+    }
+    /// The registry used for graph selection and ownership checks.
+    pub fn workspace_registry(&self) -> Arc<WorkspaceRegistry> {
+        Arc::clone(&self.registry)
     }
 
     /// The shared vector store, if vector support is enabled.

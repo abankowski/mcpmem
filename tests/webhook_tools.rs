@@ -28,6 +28,7 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
     let dir = tempfile::tempdir().unwrap();
     let config = Config {
         memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
+        legacy_owner_id: Some("machine:local".into()),
         enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
         ..Config::default()
     };

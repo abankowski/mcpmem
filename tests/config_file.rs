@@ -218,7 +218,10 @@ fn an_explicit_legacy_owner_flag_beats_the_file() {
 #[test]
 fn a_workspace_owner_must_use_the_documented_config_key() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = write_config(dir.path(), "[workspaces]\nlegacy-owner = \"machine:local\"\n");
+    let path = write_config(
+        dir.path(),
+        "[workspaces]\nlegacy-owner = \"machine:local\"\n",
+    );
     let error = FileConfig::load(&path).expect_err("an unknown workspace key must fail");
     assert!(error.to_string().contains("legacy-owner"), "{error}");
 }

@@ -259,7 +259,10 @@ fn version_thirteen_graph(path: &Path) -> Connection {
          CREATE TABLE schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;",
     )
     .unwrap();
-    for &(version, sql) in mcpmem_core::events::MIGRATIONS.iter().filter(|(version, _)| *version <= 13) {
+    for &(version, sql) in mcpmem_core::events::MIGRATIONS
+        .iter()
+        .filter(|(version, _)| *version <= 13)
+    {
         conn.execute_batch(sql).unwrap();
         conn.execute(
             "INSERT INTO schema_migration VALUES(?1,?2,1)",
@@ -267,8 +270,11 @@ fn version_thirteen_graph(path: &Path) -> Connection {
         )
         .unwrap();
     }
-    conn.execute("INSERT INTO type_dict(id,kind,name,count) VALUES(1,0,'test',1)", [])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO type_dict(id,kind,name,count) VALUES(1,0,'test',1)",
+        [],
+    )
+    .unwrap();
     conn.execute(
         "INSERT INTO entity(id,name_hash,name,type_id,obs_count,created_us,updated_us) VALUES(1,?1,'same-name',1,1,1,1)",
         [mcpmem_core::graph::name_hash("same-name")],
@@ -303,16 +309,65 @@ fn legacy_owner_validation_precedes_the_workspace_marker_on_a_populated_graph() 
         .unwrap();
     assert_eq!(legacy.graph_path, path);
     assert_eq!(
-        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
         14
     );
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM entity WHERE flags=0", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
+        conn.query_row("SELECT count(*) FROM entity WHERE flags=0", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
         1
     );
     assert_original_entity(&graph(&path), "same-name");
+}
+
+#[test]
+fn server_refuses_a_populated_version_thirteen_graph_before_marking_it_without_an_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server-version-13.sqlite");
+    let conn = version_thirteen_graph(&path);
+    conn.execute_batch(
+        "INSERT INTO oauth_token(token_digest,kind,family,client_id,principal,scopes,resource,created_us,expires_us)
+         VALUES('old-token',0,'family','client','old-name','graph-read','resource',1,9999999);",
+    )
+    .unwrap();
+    let config = mcpmem::config::Config {
+        memory_file_path: path.to_string_lossy().into_owned(),
+        legacy_owner_id: None,
+        ..mcpmem::config::Config::default()
+    };
+    let failure =
+        mcpmem::server::MCPServer::new(config, mcpmem::vector_store::VectorConfig::new(384)).err();
+    assert!(
+        failure.is_some(),
+        "startup must refuse a missing legacy owner"
+    );
+    assert_eq!(
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        13,
+        "owner refusal must precede migration 14"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT revoked FROM oauth_token WHERE token_digest='old-token'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0,
+        "owner refusal must not revoke an old session"
+    );
+    assert_eq!(count(&conn, "entity"), 1);
 }
 
 #[test]
@@ -333,11 +388,21 @@ fn workspace_marker_revokes_legacy_oauth_credentials_without_removing_graph_rows
     .unwrap();
     drop(WorkspaceRegistry::open(&path, Some("machine:local")).unwrap());
     assert_eq!(
-        conn.query_row("SELECT revoked FROM oauth_token WHERE token_digest='token'", [], |row| row.get::<_, i64>(0)).unwrap(),
+        conn.query_row(
+            "SELECT revoked FROM oauth_token WHERE token_digest='token'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
         1
     );
     assert_eq!(
-        conn.query_row("SELECT spent FROM oauth_code WHERE code_digest='code'", [], |row| row.get::<_, i64>(0)).unwrap(),
+        conn.query_row(
+            "SELECT spent FROM oauth_code WHERE code_digest='code'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
         1
     );
     assert_eq!(count(&conn, "oauth_login"), 0);
@@ -358,7 +423,12 @@ fn migration_runner_refuses_a_database_marked_newer_than_it_knows() {
     )
     .unwrap();
     let error = mcpmem_core::events::migrate(&conn).unwrap_err();
-    assert!(error.to_string().contains("database schema is newer than this binary"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("database schema is newer than this binary"),
+        "{error}"
+    );
     assert_eq!(count(&conn, "entity"), 1);
 }
 

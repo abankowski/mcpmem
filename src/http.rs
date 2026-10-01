@@ -179,6 +179,9 @@ impl HttpState {
         } = setup;
         let config = crate::config::Config {
             memory_file_path: db_path.to_string_lossy().into_owned(),
+            legacy_owner_id: Some("machine:local".into()),
+            oauth: oauth.clone(),
+            auth_token: auth_token.clone(),
             enabled_categories: enabled_categories.clone(),
             ..crate::config::Config::default()
         };
@@ -2004,6 +2007,7 @@ mod tests {
     fn ui_state(dir: &tempfile::TempDir, scopes: &[ToolCategory]) -> HttpState {
         let config = Config {
             memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
+            legacy_owner_id: Some("machine:local".into()),
             enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
             ..Config::default()
         };

@@ -255,9 +255,17 @@ impl Drop for Client {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        for ext in ["", "-wal", "-shm"] {
+        for ext in [
+            "",
+            "-wal",
+            "-shm",
+            ".workspaces.sqlite",
+            ".workspaces.sqlite-wal",
+            ".workspaces.sqlite-shm",
+        ] {
             let _ = std::fs::remove_file(format!("{}{}", self.db_path, ext));
         }
+        let _ = std::fs::remove_dir_all(format!("{}.workspaces", self.db_path));
         // Per-project code databases live in `<db_path>.code/`.
         let _ = std::fs::remove_dir_all(format!("{}.code", self.db_path));
         let _ = std::fs::remove_dir_all(&self.src_dir);
@@ -302,9 +310,17 @@ impl Client {
 fn setup() -> Client {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let db_path = format!("/tmp/code_e2e_{n}.db");
-    for ext in ["", "-wal", "-shm"] {
+    for ext in [
+        "",
+        "-wal",
+        "-shm",
+        ".workspaces.sqlite",
+        ".workspaces.sqlite-wal",
+        ".workspaces.sqlite-shm",
+    ] {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
+    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
     let src_dir = std::env::temp_dir().join(format!("code_e2e_src_{n}"));
     let _ = std::fs::remove_dir_all(&src_dir);
     std::fs::create_dir_all(&src_dir).unwrap();
@@ -321,6 +337,8 @@ fn setup() -> Client {
         .args([
             "-f",
             &db_path,
+            "--legacy-owner-id",
+            "machine:local",
             "--enable-code",
             "--transport",
             "stdio",
@@ -528,15 +546,25 @@ fn code_tools_present_when_enabled() {
     // Code tools are advertised once the `code` category is enabled.
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let db_path = format!("/tmp/code_e2e_default_{n}.db");
-    for ext in ["", "-wal", "-shm"] {
+    for ext in [
+        "",
+        "-wal",
+        "-shm",
+        ".workspaces.sqlite",
+        ".workspaces.sqlite-wal",
+        ".workspaces.sqlite-shm",
+    ] {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
+    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
     let bin =
         std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut child = Command::new(&bin)
         .args([
             "-f",
             &db_path,
+            "--legacy-owner-id",
+            "machine:local",
             "--enable-code",
             "--transport",
             "stdio",
@@ -576,9 +604,17 @@ fn code_tools_present_when_enabled() {
     }
     let _ = child.kill();
     let _ = child.wait();
-    for ext in ["", "-wal", "-shm"] {
+    for ext in [
+        "",
+        "-wal",
+        "-shm",
+        ".workspaces.sqlite",
+        ".workspaces.sqlite-wal",
+        ".workspaces.sqlite-shm",
+    ] {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
+    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
 }
 
 // ── New Language Integration Tests ──────────────────────────────────────
