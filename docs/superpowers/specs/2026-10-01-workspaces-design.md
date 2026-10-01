@@ -27,7 +27,7 @@ The Second Brain memory records an earlier requirement to put sensitive personal
 |---|---|---|
 | Workspace ID, name, visibility, owner, grants, defaults, machine IDs and token digests | Workspace registry, a separate SQLite file beside the configured memory file | MCP, viewer, runtime roles |
 | Entity, relation, FTS, event, subscription, job and vector data | One SQLite file per workspace | Graph handle, vector store, indexer, webhook worker |
-| Verified human identity | OIDC `(issuer, subject)` through the existing principal resolver | Workspace registry and OAuth grants |
+| Verified human identity | OIDC `(issuer, subject)` and one new shared resolver for file-backed and runtime principals | Workspace registry and OAuth grants |
 | Effective workspace access | One registry authorization function per request | MCP graph tools, vector tools, viewer and subscription tools |
 | Tool-category scope | Existing category registry and OAuth scope checks | MCP and viewer |
 | Selected viewer workspace | Viewer state, not the user's stored default | All viewer data requests |
@@ -67,7 +67,7 @@ CREATE TABLE workspace_registry_version (
 ) STRICT;
 ```
 
-The existing OAuth principal store remains in the legacy graph file. New graph files contain empty base OAuth tables because they share the core schema. Only the legacy file serves authentication records. The registry validates human IDs through the existing resolver for built-in and runtime principals. It recognizes `machine:local` and the configured `machine:static` as built-in accounts. It never treats an unconfigured static account as registered.
+The existing OAuth principal store remains in the legacy graph file. New graph files contain empty base OAuth tables because they share the core schema. Only the legacy file serves authentication records. Extract a shared resolver from the private login resolver in `src/oauth_routes.rs:1313-1340`. It must validate the stable human ID against file-backed and runtime principals. The registry uses that resolver for owners and grants. It recognizes `machine:local` and the configured `machine:static` as built-in accounts. It never treats an unconfigured static account as registered.
 
 The server selects one workspace before it creates a graph handle for a request. It checks the caller's category scope and workspace access before it opens the selected file. A bounded handle cache uses workspace IDs as keys. Workers enumerate registered files with bounded work per cycle. The indexer and vector publisher operate on one selected graph at a time. Each graph retains its own durable jobs and profiles. The webhook worker reads subscriptions and events from the same graph file.
 
@@ -132,7 +132,7 @@ Existing admin webhook routes must resolve a workspace and require both their cu
 - A known public workspace with no write grant returns an access error on writes. A missing tool scope keeps its current insufficient-scope error.
 - A malformed UUID, unknown grant target, invalid role, and invalid list cursor return input errors.
 - Workspace create records an owner and a usable graph together from the caller's view. Registry failure must not publish a graph file.
-- A revoked credential or graph grant blocks the next request. Worker delivery can continue only for subscriptions managed by the current owner within that workspace.
+- A revoked credential or graph grant blocks the next request. Subscription rows have no manager field. Only a workspace owner can create or remove new subscriptions. Existing subscriptions stay active after migration. Their original manager is unknown, so a former writer's route can continue to receive events until the owner removes it. The owner explicitly accepted this risk on 2026-10-01.
 
 Do not add a cross-workspace relation API. `export_graph`, relation traversal, text search, semantic search, hybrid search, graph statistics, FTS, and vector caches use only the selected graph file. A code-project repository is not a graph workspace and remains outside this selector.
 
@@ -158,6 +158,14 @@ sqlite3 -readonly "$DB" 'SELECT COUNT(*) AS live_entities FROM entity WHERE flag
 ```
 
 A zero count means this check cannot prove preservation of live legacy data. Confirm the configured owner against the registered principal IDs before the first start. Do not infer ownership from the count or from a display name.
+
+Inspect active legacy endpoints before deployment. The command is identical in bash and fish with the `DB` values above:
+
+```sh
+sqlite3 -readonly "$DB" 'SELECT subscription_id, endpoint FROM webhook_subscription WHERE enabled = 1 ORDER BY subscription_id;'
+```
+
+Show this list to the new owner. Do not claim that legacy subscriptions belong to that owner or that grant revocation disables them.
 
 ## Acceptance map
 
