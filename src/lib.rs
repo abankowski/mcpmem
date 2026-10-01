@@ -10,6 +10,7 @@ pub mod code_vec;
 pub mod code_vec_registry;
 pub mod config;
 pub mod config_file;
+pub mod workspace;
 pub use mcpmem_core::errors;
 pub mod http;
 #[cfg(feature = "indexer")]
@@ -57,6 +58,9 @@ pub struct Args {
     #[arg(short = 'f', long = "memory-file")]
     pub memory_file: Option<String>,
 
+    /// Existing identity that owns the graph during the first workspace migration.
+    #[arg(long = "legacy-owner-id")]
+    pub legacy_owner_id: Option<String>,
     /// TOML configuration file. Falls back to the `MCP_MEMORY_CONFIG` env var.
     /// A command-line flag always wins over the file, and so does any
     /// environment variable the same setting reads.

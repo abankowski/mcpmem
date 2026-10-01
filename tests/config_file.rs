@@ -198,6 +198,31 @@ fn an_empty_scopes_list_in_the_file_clears_the_default() {
     );
 }
 
+#[test]
+fn the_legacy_workspace_owner_reaches_the_server_config() {
+    let args = merge(&[], "[workspaces]\nlegacy-owner-id = \"machine:local\"\n");
+    assert_eq!(args.legacy_owner_id.as_deref(), Some("machine:local"));
+    let config = Config::from_args(&args).expect("config");
+    assert_eq!(config.legacy_owner_id.as_deref(), Some("machine:local"));
+}
+
+#[test]
+fn an_explicit_legacy_owner_flag_beats_the_file() {
+    let args = merge(
+        &["--legacy-owner-id", "human:configured"],
+        "[workspaces]\nlegacy-owner-id = \"machine:local\"\n",
+    );
+    assert_eq!(args.legacy_owner_id.as_deref(), Some("human:configured"));
+}
+
+#[test]
+fn a_workspace_owner_must_use_the_documented_config_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_config(dir.path(), "[workspaces]\nlegacy-owner = \"machine:local\"\n");
+    let error = FileConfig::load(&path).expect_err("an unknown workspace key must fail");
+    assert!(error.to_string().contains("legacy-owner"), "{error}");
+}
+
 // --- precedence against the environment, with an injected probe -------------
 
 #[test]
