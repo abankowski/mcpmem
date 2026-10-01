@@ -68,7 +68,7 @@ DELETE FROM oauth_login;
 
 ### Task 2: Stable human and machine identities
 
-**Files:** Modify `src/principals.rs`, `src/oauth_routes.rs`, `src/authz.rs`, `src/workspace.rs`, `crates/mcpmem-oauth/src/store.rs`, `tests/oauth_flow.rs`, `tests/principal_admin.rs`. Create `tests/workspace_identity.rs`.
+**Files:** Modify `src/principals.rs`, `src/oauth_routes.rs`, `src/authz.rs`, `src/workspace.rs`, `src/http.rs` identity and deletion paths, `crates/mcpmem-oauth/src/store.rs`, `tests/oauth_flow.rs`, `tests/principal_admin.rs`, `tests/oauth_upstream.rs`, `tests/oauth_consent.rs`, and `tests/oauth_discovery.rs`. Create `tests/workspace_identity.rs`. The HTTP viewer routes remain in Task 5.
 
 **Interfaces:** Export `human_id(iss: &str, sub: &str) -> String` and `registered_human(id: &str) -> Result<bool, WorkspaceError>` from a shared principal resolver. Preserve built-in precedence over runtime principals. Keep `Principal.id` as the stable ID. Registry methods `create_machine(name, scopes) -> Result<(String, String), WorkspaceError>`, `list_machines() -> Result<Vec<MachineView>, WorkspaceError>`, `revoke_machine(id) -> Result<bool, WorkspaceError>`, and `authenticate_machine(token) -> Result<Option<Principal>, WorkspaceError>` use random 256-bit credentials and a stored digest. Do not expose a digest to MCP.
 
@@ -83,7 +83,7 @@ assert!(registry.resolve(&id, Some(&workspace_id), WorkspaceAccess::Read).is_ok(
 ```
 
 - [ ] **Step 2: Run the focused identity and OAuth tests.** Confirm that the new identity tests fail for the expected absent stable-ID behavior.
-- [ ] **Step 3: Extract the shared human resolver.** Decode the existing OAuth principal ID after `human:`. Consult file-backed principals before runtime rows. Record the stable ID on new login, code, and token records. Update revocation by stable ID. Bind each issued machine bearer to its own scopes; do not let machines obtain `admin`. Refuse a principal deletion when it owns a graph.
+- [ ] **Step 3: Extract the shared human resolver.** Decode the existing OAuth principal ID after `human:`. Consult file-backed principals before runtime rows. Record the stable ID on new login, code, and token records. Update revocation by stable ID. Bind each issued machine bearer to its own scopes; do not let machines obtain `admin`. Check workspace ownership before principal deletion. Make the HTTP bearer resolver authenticate machine credentials.
 - [ ] **Step 4: Run focused identity, OAuth, principal-admin and scope tests.** Run them serially, because the existing OAuth fixture uses shared state.
 - [ ] **Step 5: Controller reviews the task diff and commits exact paths.** Record rejected name-based lookup as the alternative in the commit message.
 
