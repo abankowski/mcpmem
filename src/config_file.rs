@@ -137,6 +137,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub server: ServerSection,
     #[serde(default)]
+    pub workspaces: WorkspacesSection,
+    #[serde(default)]
     pub storage: StorageSection,
     #[serde(default)]
     pub tools: ToolsSection,
@@ -150,6 +152,12 @@ pub struct FileConfig {
     pub indexer: IndexerSection,
     #[serde(default)]
     pub webhooks: WebhooksSection,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct WorkspacesSection {
+    pub legacy_owner_id: Option<String>,
 }
 
 /// HTTP delivery configuration for the `webhooks` role. An empty section is
@@ -320,6 +328,11 @@ impl FileConfig {
             &mut args.memory_file,
             server.memory_file.clone().map(Some),
             cli.absent("memory_file") && env(env_keys::MEMORY_FILE),
+        );
+        assign(
+            &mut args.legacy_owner_id,
+            self.workspaces.legacy_owner_id.clone().map(Some),
+            cli.absent("legacy_owner_id"),
         );
         assign(
             &mut args.transport,
