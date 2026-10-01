@@ -44,20 +44,18 @@ Tasks 1–5 share live Rust interfaces. Run them in order with one integration o
 
 **Interfaces:** Export `WorkspaceRegistry`, `WorkspaceRecord`, `WorkspaceView`, `WorkspacePage`, `WorkspaceError`, and `WorkspaceAccess` from `src/workspace.rs`. Expose `open(memory_path: &Path, legacy_owner: Option<&str>) -> Result<Self, WorkspaceError>`, `create(principal_id: &str, name: &str, visibility: Visibility, init: impl FnOnce(&Path) -> Result<(), WorkspaceError>) -> Result<WorkspaceView, WorkspaceError>`, `resolve(principal_id: &str, requested: Option<&str>, access: WorkspaceAccess) -> Result<WorkspaceRecord, WorkspaceError>`, `list(principal_id: &str, cursor: Option<&str>, limit: usize) -> Result<WorkspacePage, WorkspaceError>`, `all_paths() -> Result<Vec<(String, PathBuf)>, WorkspaceError>`, `set_default`, `grant`, `revoke`, `set_visibility`, and `grants`. Store registered graph paths; never form a graph path from an input ID.
 
-- [ ] **Step 1: Add a failing migration and registry integration test.** Use a non-empty `entity` fixture. Assert that migration 14 preserves the entity and increases `schema_migration` to 14. Assert that an absent or unknown owner refuses first bootstrap. Assert that two created graph files can hold entities of the same name without a shared row. Add a separate assertion that a version-13 migration runner rejects the marked file.
+- [ ] **Step 1: Add a failing migration and registry integration test.** Build a non-empty version-13 database with the historical migration fixture in `tests/event_outbox.rs`. Do not open it through the new `GraphHandle::new` before owner validation. Assert that migration 14 preserves the entity and increases `schema_migration` to 14. Assert that absent or unknown owners refuse first bootstrap. Assert that two created graph files hold same-name entities without shared rows. A version-13 binary must reject the marked file.
 
-```rust
-let legacy = temp.path().join("memory.db");
-let graph = GraphHandle::new(&legacy, durability, tuning, cache_size, 2)?;
-graph.create_entities(&[entity("same-name", "Person")])?;
-assert!(WorkspaceRegistry::open(&legacy, None).is_err());
-let registry = WorkspaceRegistry::open(&legacy, Some("machine:local"))?;
-assert_eq!(registry.resolve("machine:local", None, WorkspaceAccess::Read)?.graph_path, legacy);
-assert_eq!(live_entity_count(&legacy)?, 1);
+```sql
+-- The historical fixture inserts this row before the workspace migration.
+INSERT INTO entity(id, name_hash, name, type_id, created_us, updated_us)
+VALUES(1, 0, 'same-name', 1, 1, 1);
+-- After registry bootstrap, this count stays one in the legacy file.
+SELECT COUNT(*) FROM entity WHERE flags = 0;
 ```
 
 - [ ] **Step 2: Run the focused tests before code.** Run `cargo test --test workspace_registry -- --test-threads=1` and the migration test in `event_outbox`. The new behavior must fail because the registry and marker do not exist. A compile error from an absent new module is an acceptable first red; a fixture setup error is not.
-- [ ] **Step 3: Add the marker and registry.** Migration 14 revokes existing OAuth tokens and codes and expires old login rows. It contains no graph table rewrite. `WorkspaceRegistry::open` creates the sidecar with the exact five tables from the spec and enables foreign keys. It validates the owner before the first registration. It marks the legacy graph before publishing the first registry row. It refuses a registry version newer than this binary. It uses SQL transactions for ACL and default updates.
+- [ ] **Step 3: Add the marker and registry.** Validate the configured owner before any call to `GraphHandle::new` or core migration 14. Migration 14 revokes existing OAuth tokens and codes and expires old login rows. It contains no graph table rewrite. `WorkspaceRegistry::open` creates the sidecar with the five tables in the spec and enables foreign keys. It marks the legacy graph before it publishes the first registry row. It refuses a newer registry version. Use SQL transactions for ACL and defaults.
 
 ```sql
 UPDATE oauth_token SET revoked = 1 WHERE revoked = 0;
