@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rusqlite::{Connection, OptionalExtension, OpenFlags, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
@@ -135,7 +135,10 @@ impl WorkspaceRegistry {
             file_humans,
             static_enabled,
         };
-        let conn = registry.conn.lock().expect("workspace registry lock poisoned");
+        let conn = registry
+            .conn
+            .lock()
+            .expect("workspace registry lock poisoned");
         let has_version: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='workspace_registry_version')",
             [],
@@ -143,34 +146,74 @@ impl WorkspaceRegistry {
         )?;
         if has_version {
             let version: Option<i64> = conn.query_row(
-                "SELECT max(version) FROM workspace_registry_version", [], |row| row.get(0),
+                "SELECT max(version) FROM workspace_registry_version",
+                [],
+                |row| row.get(0),
             )?;
             if version.is_some_and(|version| version > REGISTRY_VERSION) {
-                return Err(WorkspaceError::Graph("registry schema is newer than this binary".into()));
+                return Err(WorkspaceError::Graph(
+                    "registry schema is newer than this binary".into(),
+                ));
             }
             if version.is_some_and(|version| version != REGISTRY_VERSION) {
-                return Err(WorkspaceError::Graph("unsupported registry schema version".into()));
+                return Err(WorkspaceError::Graph(
+                    "unsupported registry schema version".into(),
+                ));
             }
             if version == Some(REGISTRY_VERSION) {
-                let owner: Option<String> = conn.query_row(
-                    "SELECT owner_id FROM workspace WHERE graph_path=?1",
-                    [memory_path.to_string_lossy().as_ref()], |row| row.get(0),
-                ).optional()?;
-                if let Some(owner) = owner {
-                    drop(conn);
-                    if !registry.registered(&owner)? {
-                        return Err(WorkspaceError::InvalidInput("the saved legacy owner is not registered".into()));
-                    }
-                    let graph = Connection::open(memory_path)?;
-                    mcpmem_core::schema::initialize_database(&graph)
-                        .map_err(|error| WorkspaceError::Graph(error.to_string()))?;
-                    return Ok(registry);
+                let mut stmt = conn.prepare("SELECT owner_id,graph_path FROM workspace")?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        PathBuf::from(row.get::<_, String>(1)?),
+                    ))
+                })?;
+                let saved = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+                if !saved.iter().any(|(_, path)| path == memory_path) {
+                    return Err(WorkspaceError::Graph(
+                        "registry has no legacy workspace".into(),
+                    ));
                 }
-                return Err(WorkspaceError::Graph("registry has no legacy workspace".into()));
+                drop(conn);
+                for (owner, path) in &saved {
+                    if !registry.registered(owner)? {
+                        return Err(WorkspaceError::InvalidInput(format!(
+                            "the saved owner of '{}' is not registered",
+                            path.display()
+                        )));
+                    }
+                    if !path.is_file() {
+                        return Err(WorkspaceError::Graph(format!(
+                            "registered graph file is missing: {}",
+                            path.display()
+                        )));
+                    }
+                    let graph =
+                        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                    let marker: Option<i64> = graph.query_row(
+                        "SELECT max(version) FROM schema_migration",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    if marker != Some(14) {
+                        return Err(WorkspaceError::Graph(format!(
+                            "registered graph has no workspace marker: {}",
+                            path.display()
+                        )));
+                    }
+                }
+                let graph =
+                    Connection::open_with_flags(memory_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+                mcpmem_core::schema::initialize_database(&graph)
+                    .map_err(|error| WorkspaceError::Graph(error.to_string()))?;
+                return Ok(registry);
             }
         } else if exists {
             let table_count: i64 = conn.query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='workspace'", [], |row| row.get(0),
+                "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='workspace'",
+                [],
+                |row| row.get(0),
             )?;
             if table_count != 0 {
                 return Err(WorkspaceError::Graph("incomplete registry schema".into()));
@@ -179,10 +222,14 @@ impl WorkspaceRegistry {
         drop(conn);
 
         let owner = legacy_owner.ok_or_else(|| {
-            WorkspaceError::InvalidInput("[workspaces] legacy-owner-id is required for first migration".into())
+            WorkspaceError::InvalidInput(
+                "[workspaces] legacy-owner-id is required for first migration".into(),
+            )
         })?;
         if !registry.registered(owner)? {
-            return Err(WorkspaceError::InvalidInput("legacy-owner-id is not a registered identity".into()));
+            return Err(WorkspaceError::InvalidInput(
+                "legacy-owner-id is not a registered identity".into(),
+            ));
         }
         // No graph initializer has run before this point. A failed registry write
         // leaves a marked file, not a graph a previous binary can open.
@@ -191,7 +238,10 @@ impl WorkspaceRegistry {
             .map_err(|error| WorkspaceError::Graph(error.to_string()))?;
         drop(graph);
 
-        let mut conn = registry.conn.lock().expect("workspace registry lock poisoned");
+        let mut conn = registry
+            .conn
+            .lock()
+            .expect("workspace registry lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS workspace (
@@ -217,15 +267,28 @@ impl WorkspaceRegistry {
             ) STRICT;
             CREATE TABLE IF NOT EXISTS workspace_registry_version (version INTEGER PRIMARY KEY) STRICT;",
         )?;
-        tx.execute("INSERT OR IGNORE INTO workspace_registry_version VALUES(?1)", [REGISTRY_VERSION])?;
-        let prior: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM workspace)", [], |row| row.get(0))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO workspace_registry_version VALUES(?1)",
+            [REGISTRY_VERSION],
+        )?;
+        let prior: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM workspace)", [], |row| {
+            row.get(0)
+        })?;
         if !prior {
             let id = Uuid::new_v4().to_string();
             tx.execute(
                 "INSERT INTO workspace VALUES(?1,'Legacy','private',?2,?3,?4)",
-                params![id, owner, memory_path.to_string_lossy(), mcpmem_core::events::now_us()],
+                params![
+                    id,
+                    owner,
+                    memory_path.to_string_lossy(),
+                    mcpmem_core::events::now_us()
+                ],
             )?;
-            tx.execute("INSERT INTO workspace_default VALUES(?1,?2)", params![owner, id])?;
+            tx.execute(
+                "INSERT INTO workspace_default VALUES(?1,?2)",
+                params![owner, id],
+            )?;
         }
         tx.commit()?;
         drop(conn);
@@ -249,7 +312,8 @@ impl WorkspaceRegistry {
             if !self.legacy_path.exists() {
                 return Ok(false);
             }
-            let conn = Connection::open_with_flags(&self.legacy_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let conn =
+                Connection::open_with_flags(&self.legacy_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
             let exists: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='runtime_principal')",
                 [], |row| row.get(0),
@@ -259,8 +323,9 @@ impl WorkspaceRegistry {
             }
             return Ok(conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM runtime_principal WHERE iss=?1 AND sub=?2)",
-                params![iss, sub], |row| row.get(0),
-            )?)
+                params![iss, sub],
+                |row| row.get(0),
+            )?);
         }
         if principal.starts_with("machine:") {
             let conn = self.conn.lock().expect("workspace registry lock poisoned");
@@ -273,7 +338,8 @@ impl WorkspaceRegistry {
             }
             return Ok(conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM machine_account WHERE principal_id=?1 AND revoked=0)",
-                [principal], |row| row.get(0),
+                [principal],
+                |row| row.get(0),
             )?);
         }
         Ok(false)
@@ -287,7 +353,9 @@ impl WorkspaceRegistry {
         init: impl FnOnce(&Path) -> Result<(), WorkspaceError>,
     ) -> Result<WorkspaceView, WorkspaceError> {
         if !self.registered(principal_id)? || name.trim().is_empty() {
-            return Err(WorkspaceError::InvalidInput("a registered owner and a non-empty name are required".into()));
+            return Err(WorkspaceError::InvalidInput(
+                "a registered owner and a non-empty name are required".into(),
+            ));
         }
         let id = Uuid::new_v4().to_string();
         std::fs::create_dir_all(&self.graph_dir)?;
@@ -301,14 +369,25 @@ impl WorkspaceRegistry {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO workspace VALUES(?1,?2,?3,?4,?5,?6)",
-            params![id, name, visibility.as_str(), principal_id, path.to_string_lossy(), mcpmem_core::events::now_us()],
+            params![
+                id,
+                name,
+                visibility.as_str(),
+                principal_id,
+                path.to_string_lossy(),
+                mcpmem_core::events::now_us()
+            ],
         )?;
         let has_default: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM workspace_default WHERE principal_id=?1)",
-            [principal_id], |row| row.get(0),
+            [principal_id],
+            |row| row.get(0),
         )?;
         if !has_default {
-            tx.execute("INSERT INTO workspace_default VALUES(?1,?2)", params![principal_id, id])?;
+            tx.execute(
+                "INSERT INTO workspace_default VALUES(?1,?2)",
+                params![principal_id, id],
+            )?;
         }
         tx.commit()?;
         Ok(WorkspaceView {
@@ -338,14 +417,21 @@ impl WorkspaceRegistry {
         ).optional().map_err(Into::into)
     }
 
-    fn role(conn: &Connection, record: &WorkspaceRecord, principal: &str) -> Result<Option<&'static str>, WorkspaceError> {
+    fn role(
+        conn: &Connection,
+        record: &WorkspaceRecord,
+        principal: &str,
+    ) -> Result<Option<&'static str>, WorkspaceError> {
         if record.owner_id == principal {
             return Ok(Some("owner"));
         }
-        let grant: Option<String> = conn.query_row(
-            "SELECT role FROM workspace_grant WHERE workspace_id=?1 AND principal_id=?2",
-            params![record.workspace_id, principal], |row| row.get(0),
-        ).optional()?;
+        let grant: Option<String> = conn
+            .query_row(
+                "SELECT role FROM workspace_grant WHERE workspace_id=?1 AND principal_id=?2",
+                params![record.workspace_id, principal],
+                |row| row.get(0),
+            )
+            .optional()?;
         Ok(match grant.as_deref() {
             Some("writer") => Some("writer"),
             Some("reader") => Some("reader"),
@@ -365,17 +451,31 @@ impl WorkspaceRegistry {
         }
         let conn = self.conn.lock().expect("workspace registry lock poisoned");
         let id = if let Some(requested) = requested {
-            Uuid::parse_str(requested).map_err(|_| WorkspaceError::InvalidInput("workspaceId must be a UUID".into()))?.to_string()
+            Uuid::parse_str(requested)
+                .map_err(|_| WorkspaceError::InvalidInput("workspaceId must be a UUID".into()))?
+                .to_string()
         } else {
-            conn.query_row("SELECT workspace_id FROM workspace_default WHERE principal_id=?1", [principal_id], |row| row.get::<_, String>(0))
-                .optional()?
-                .ok_or(WorkspaceError::SelectionRequired)?
+            conn.query_row(
+                "SELECT workspace_id FROM workspace_default WHERE principal_id=?1",
+                [principal_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(WorkspaceError::SelectionRequired)?
         };
         let record = Self::record(&conn, &id)?.ok_or_else(|| {
-            if requested.is_none() { WorkspaceError::SelectionRequired } else { WorkspaceError::NotFound }
+            if requested.is_none() {
+                WorkspaceError::SelectionRequired
+            } else {
+                WorkspaceError::NotFound
+            }
         })?;
         let role = Self::role(&conn, &record, principal_id)?.ok_or_else(|| {
-            if requested.is_none() { WorkspaceError::SelectionRequired } else { WorkspaceError::NotFound }
+            if requested.is_none() {
+                WorkspaceError::SelectionRequired
+            } else {
+                WorkspaceError::NotFound
+            }
         })?;
         if (access == WorkspaceAccess::Write && !matches!(role, "owner" | "writer"))
             || (access == WorkspaceAccess::Owner && role != "owner")
@@ -385,15 +485,23 @@ impl WorkspaceRegistry {
         Ok(record)
     }
 
-    pub fn list(&self, principal_id: &str, cursor: Option<&str>, limit: usize) -> Result<WorkspacePage, WorkspaceError> {
+    pub fn list(
+        &self,
+        principal_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<WorkspacePage, WorkspaceError> {
         if !self.registered(principal_id)? {
             return Err(WorkspaceError::AccessDenied);
         }
         let after = match cursor {
             None => String::new(),
             Some(cursor) => {
-                let raw = cursor.strip_prefix("v1.").ok_or_else(|| WorkspaceError::InvalidInput("invalid list cursor".into()))?;
-                let id = Uuid::parse_str(raw).map_err(|_| WorkspaceError::InvalidInput("invalid list cursor".into()))?;
+                let raw = cursor
+                    .strip_prefix("v1.")
+                    .ok_or_else(|| WorkspaceError::InvalidInput("invalid list cursor".into()))?;
+                let id = Uuid::parse_str(raw)
+                    .map_err(|_| WorkspaceError::InvalidInput("invalid list cursor".into()))?;
                 if id.simple().to_string() != raw {
                     return Err(WorkspaceError::InvalidInput("invalid list cursor".into()));
                 }
@@ -401,9 +509,13 @@ impl WorkspaceRegistry {
             }
         };
         let conn = self.conn.lock().expect("workspace registry lock poisoned");
-        let default: Option<String> = conn.query_row(
-            "SELECT workspace_id FROM workspace_default WHERE principal_id=?1", [principal_id], |row| row.get(0),
-        ).optional()?;
+        let default: Option<String> = conn
+            .query_row(
+                "SELECT workspace_id FROM workspace_default WHERE principal_id=?1",
+                [principal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
         let mut stmt = conn.prepare(
             "SELECT workspace_id,name,visibility,owner_id,graph_path,created_us FROM workspace
              WHERE workspace_id>?1 AND (
@@ -412,19 +524,29 @@ impl WorkspaceRegistry {
                 )
              ) ORDER BY workspace_id LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![after, principal_id, (limit.clamp(1, 100) + 1) as i64], |row| {
-            let visibility: String = row.get(2)?;
-            Ok(WorkspaceRecord {
-                workspace_id: row.get(0)?, name: row.get(1)?,
-                visibility: if visibility == "public" { Visibility::Public } else { Visibility::Private },
-                owner_id: row.get(3)?, graph_path: PathBuf::from(row.get::<_, String>(4)?),
-                created_us: row.get(5)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![after, principal_id, (limit.clamp(1, 100) + 1) as i64],
+            |row| {
+                let visibility: String = row.get(2)?;
+                Ok(WorkspaceRecord {
+                    workspace_id: row.get(0)?,
+                    name: row.get(1)?,
+                    visibility: if visibility == "public" {
+                        Visibility::Public
+                    } else {
+                        Visibility::Private
+                    },
+                    owner_id: row.get(3)?,
+                    graph_path: PathBuf::from(row.get::<_, String>(4)?),
+                    created_us: row.get(5)?,
+                })
+            },
+        )?;
         let mut workspaces = Vec::new();
         for row in rows {
             let record = row?;
-            let role = Self::role(&conn, &record, principal_id)?.expect("list query enforces access");
+            let role =
+                Self::role(&conn, &record, principal_id)?.expect("list query enforces access");
             workspaces.push(WorkspaceView {
                 is_default: default.as_deref() == Some(record.workspace_id.as_str()),
                 workspace_id: record.workspace_id,
@@ -442,17 +564,27 @@ impl WorkspaceRegistry {
         } else {
             None
         };
-        Ok(WorkspacePage { workspaces, next_cursor })
+        Ok(WorkspacePage {
+            workspaces,
+            next_cursor,
+        })
     }
 
     pub fn all_paths(&self) -> Result<Vec<(String, PathBuf)>, WorkspaceError> {
         let conn = self.conn.lock().expect("workspace registry lock poisoned");
-        let mut stmt = conn.prepare("SELECT workspace_id,graph_path FROM workspace ORDER BY workspace_id")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?))))?;
+        let mut stmt =
+            conn.prepare("SELECT workspace_id,graph_path FROM workspace ORDER BY workspace_id")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?)))
+        })?;
         rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
 
-    pub fn set_default(&self, principal_id: &str, workspace_id: &str) -> Result<(), WorkspaceError> {
+    pub fn set_default(
+        &self,
+        principal_id: &str,
+        workspace_id: &str,
+    ) -> Result<(), WorkspaceError> {
         if !self.registered(principal_id)? {
             return Err(WorkspaceError::NotFound);
         }
@@ -473,69 +605,112 @@ impl WorkspaceRegistry {
         Ok(())
     }
 
-    pub fn grant(&self, owner: &str, workspace_id: &str, principal_id: &str, role: &str) -> Result<(), WorkspaceError> {
-        self.resolve(owner, Some(workspace_id), WorkspaceAccess::Owner)?;
+    pub fn grant(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        principal_id: &str,
+        role: &str,
+    ) -> Result<(), WorkspaceError> {
+        let record = self.resolve(owner, Some(workspace_id), WorkspaceAccess::Owner)?;
         if !matches!(role, "reader" | "writer") || !self.registered(principal_id)? {
-            return Err(WorkspaceError::InvalidInput("grant needs a registered identity and reader or writer role".into()));
+            return Err(WorkspaceError::InvalidInput(
+                "grant needs a registered identity and reader or writer role".into(),
+            ));
         }
         if owner == principal_id {
-            return Err(WorkspaceError::InvalidInput("owner access cannot be replaced by a grant".into()));
+            return Err(WorkspaceError::InvalidInput(
+                "owner access cannot be replaced by a grant".into(),
+            ));
         }
         let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO workspace_grant VALUES(?1,?2,?3) ON CONFLICT(workspace_id,principal_id) DO UPDATE SET role=excluded.role",
-            params![workspace_id, principal_id, role],
+            params![record.workspace_id, principal_id, role],
         )?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn revoke(&self, owner: &str, workspace_id: &str, principal_id: &str) -> Result<bool, WorkspaceError> {
-        self.resolve(owner, Some(workspace_id), WorkspaceAccess::Owner)?;
+    pub fn revoke(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        principal_id: &str,
+    ) -> Result<bool, WorkspaceError> {
+        let record = self.resolve(owner, Some(workspace_id), WorkspaceAccess::Owner)?;
         if owner == principal_id {
-            return Err(WorkspaceError::InvalidInput("owner cannot revoke ownership".into()));
+            return Err(WorkspaceError::InvalidInput(
+                "owner cannot revoke ownership".into(),
+            ));
         }
         let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let revoked = tx.execute("DELETE FROM workspace_grant WHERE workspace_id=?1 AND principal_id=?2", params![workspace_id, principal_id])? != 0;
+        let revoked = tx.execute(
+            "DELETE FROM workspace_grant WHERE workspace_id=?1 AND principal_id=?2",
+            params![record.workspace_id, principal_id],
+        )? != 0;
         if revoked {
-            tx.execute("DELETE FROM workspace_default WHERE principal_id=?1 AND workspace_id=?2", params![principal_id, workspace_id])?;
+            tx.execute(
+                "DELETE FROM workspace_default WHERE principal_id=?1 AND workspace_id=?2",
+                params![principal_id, record.workspace_id],
+            )?;
         }
         tx.commit()?;
         Ok(revoked)
     }
 
-    pub fn set_visibility(&self, owner: &str, workspace_id: &str, visibility: Visibility) -> Result<WorkspaceView, WorkspaceError> {
+    pub fn set_visibility(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        visibility: Visibility,
+    ) -> Result<WorkspaceView, WorkspaceError> {
         let record = self.resolve(owner, Some(workspace_id), WorkspaceAccess::Owner)?;
         let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("UPDATE workspace SET visibility=?1 WHERE workspace_id=?2", params![visibility.as_str(), workspace_id])?;
+        tx.execute(
+            "UPDATE workspace SET visibility=?1 WHERE workspace_id=?2",
+            params![visibility.as_str(), record.workspace_id],
+        )?;
         if visibility == Visibility::Private {
             tx.execute(
                 "DELETE FROM workspace_default WHERE workspace_id=?1 AND principal_id<>?2 AND NOT EXISTS (
                     SELECT 1 FROM workspace_grant WHERE workspace_grant.workspace_id=workspace_default.workspace_id
                     AND workspace_grant.principal_id=workspace_default.principal_id
                 )",
-                params![workspace_id, owner],
+                params![record.workspace_id, owner],
             )?;
         }
         tx.commit()?;
+        let is_default = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_default WHERE principal_id=?1 AND workspace_id=?2)",
+            params![owner, record.workspace_id], |row| row.get(0),
+        )?;
         Ok(WorkspaceView {
-            workspace_id: record.workspace_id, name: record.name,
-            visibility, role: "owner".into(),
-            is_default: conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM workspace_default WHERE principal_id=?1 AND workspace_id=?2)",
-                params![owner, workspace_id], |row| row.get(0),
-            )?,
+            workspace_id: record.workspace_id,
+            name: record.name,
+            visibility,
+            role: "owner".into(),
+            is_default,
         })
     }
 
-    pub fn grants(&self, owner: &str, workspace_id: &str) -> Result<Vec<WorkspaceGrant>, WorkspaceError> {
-        self.resolve(owner, Some(workspace_id), WorkspaceAccess::Owner)?;
+    pub fn grants(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<Vec<WorkspaceGrant>, WorkspaceError> {
+        let record = self.resolve(owner, Some(workspace_id), WorkspaceAccess::Owner)?;
         let conn = self.conn.lock().expect("workspace registry lock poisoned");
         let mut stmt = conn.prepare("SELECT principal_id,role FROM workspace_grant WHERE workspace_id=?1 ORDER BY principal_id")?;
-        let rows = stmt.query_map([workspace_id], |row| Ok(WorkspaceGrant { principal_id: row.get(0)?, role: row.get(1)? }))?;
+        let rows = stmt.query_map([record.workspace_id], |row| {
+            Ok(WorkspaceGrant {
+                principal_id: row.get(0)?,
+                role: row.get(1)?,
+            })
+        })?;
         rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
 }

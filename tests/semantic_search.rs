@@ -22,6 +22,7 @@ const DIMS: u32 = 8;
 fn vector_server(dir: &tempfile::TempDir) -> (Arc<GraphHandle>, Arc<VectorStore>) {
     let config = Config {
         memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
+        legacy_owner_id: Some("machine:local".into()),
         enabled_categories: vec![
             ToolCategory::GraphRead,
             ToolCategory::GraphWrite,

@@ -14,6 +14,7 @@ use std::sync::Arc;
 fn test_graph(dir: &tempfile::TempDir) -> Arc<GraphHandle> {
     let config = Config {
         memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
+        legacy_owner_id: Some("machine:local".into()),
         enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
         ..Config::default()
     };
