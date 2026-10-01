@@ -28,9 +28,9 @@
 
 | Task | Owns the files and interfaces | Depends on |
 |---|---|---|
-| 1 | `src/workspace.rs`, `src/lib.rs`, `src/config.rs`, `src/config_file.rs`, `crates/mcpmem-core/src/events.rs`, migration 14, `tests/workspace_registry.rs`, `tests/event_outbox.rs`, `tests/config_file.rs` | Approved spec |
+| 1 | `src/workspace.rs`, `src/server.rs` startup, `src/lib.rs`, `src/config.rs`, `src/config_file.rs`, `crates/mcpmem-core/src/events.rs`, migration 14, `tests/workspace_registry.rs`, `tests/event_outbox.rs`, `tests/config_file.rs` | Approved spec |
 | 2 | `src/principals.rs`, `src/oauth_routes.rs`, `src/authz.rs`, OAuth crate grant code, `src/workspace.rs` identity methods, `tests/oauth_flow.rs`, `tests/principal_admin.rs`, `tests/workspace_identity.rs` | Task 1 registry |
-| 3 | `src/server.rs`, `src/tools.rs`, `tools.json`, `vector_tools.json`, `webhooks_tools.json`, `src/workspace.rs` graph cache, `tests/workspace_mcp.rs`, `tests/scope_gating.rs` | Tasks 1 and 2 |
+| 3 | `src/server.rs` tool dispatch, `src/tools.rs`, `tools.json`, `vector_tools.json`, `webhooks_tools.json`, `src/workspace.rs` graph cache, `tests/workspace_mcp.rs`, `tests/scope_gating.rs` | Tasks 1 and 2 |
 | 4 | `src/actions/webhooks.rs`, `src/runtime.rs`, `src/main.rs`, `src/server.rs` runtime assembly, `tests/workspace_workers.rs`, `tests/webhook_tools.rs`, `tests/role_composition.rs` | Task 3 selection |
 | 5 | `src/http.rs`, `src/server.rs` HTTP dispatcher entry, `tests/workspace_http.rs`, `tests/ui_http.rs`, `tests/vector_http.rs`, `tests/webhook_admin.rs` | Tasks 3 and 4 |
 | 6 | `src/ui/index.html`, `src/ui/graph.js`, `src/ui/graph.css`, viewer integration tests in `tests/workspace_http.rs` | Task 5 HTTP contract |
@@ -40,11 +40,11 @@ Tasks 1–5 share live Rust interfaces. Run them in order with one integration o
 
 ### Task 1: Registry, legacy owner, and downgrade guard
 
-**Files:** Create `src/workspace.rs`, `crates/mcpmem-core/migrations/0014_workspace_marker.sql`, `tests/workspace_registry.rs`. Modify `src/lib.rs`, `src/config.rs`, `src/config_file.rs`, `crates/mcpmem-core/src/events.rs`, `tests/event_outbox.rs`, `tests/config_file.rs`.
+**Files:** Create `src/workspace.rs`, `crates/mcpmem-core/migrations/0014_workspace_marker.sql`, `tests/workspace_registry.rs`. Modify `src/server.rs` startup, `src/lib.rs`, `src/config.rs`, `src/config_file.rs`, `crates/mcpmem-core/src/events.rs`, `tests/event_outbox.rs`, `tests/config_file.rs`.
 
 **Interfaces:** Export `WorkspaceRegistry`, `WorkspaceRecord`, `WorkspaceView`, `WorkspacePage`, `WorkspaceError`, and `WorkspaceAccess` from `src/workspace.rs`. Expose `open(memory_path: &Path, legacy_owner: Option<&str>) -> Result<Self, WorkspaceError>`, `create(principal_id: &str, name: &str, visibility: Visibility, init: impl FnOnce(&Path) -> Result<(), WorkspaceError>) -> Result<WorkspaceView, WorkspaceError>`, `resolve(principal_id: &str, requested: Option<&str>, access: WorkspaceAccess) -> Result<WorkspaceRecord, WorkspaceError>`, `list(principal_id: &str, cursor: Option<&str>, limit: usize) -> Result<WorkspacePage, WorkspaceError>`, `all_paths() -> Result<Vec<(String, PathBuf)>, WorkspaceError>`, `set_default`, `grant`, `revoke`, `set_visibility`, and `grants`. Store registered graph paths; never form a graph path from an input ID.
 
-- [ ] **Step 1: Add a failing migration and registry integration test.** Build a non-empty version-13 database with the historical migration fixture in `tests/event_outbox.rs`. Do not open it through the new `GraphHandle::new` before owner validation. Assert that migration 14 preserves the entity and increases `schema_migration` to 14. Assert that absent or unknown owners refuse first bootstrap. Assert that two created graph files hold same-name entities without shared rows. A version-13 binary must reject the marked file.
+- [ ] **Step 1: Add failing registry and startup tests.** Build a non-empty version-13 database in `tests/event_outbox.rs`. Do not open it through the new `GraphHandle::new` before owner validation. Assert that a normal `MCPServer::new` call with no owner rejects startup without migration. Check that a missing registered graph refuses startup. Remove a saved workspace owner and check startup refusal. Test uppercase UUIDs for grants and visibility. Verify entity preservation and isolated same-name rows. A real version-13 binary must reject the marker before release.
 
 ```sql
 -- The historical fixture inserts this row before the workspace migration.
@@ -55,7 +55,7 @@ SELECT COUNT(*) FROM entity WHERE flags = 0;
 ```
 
 - [ ] **Step 2: Run the focused tests before code.** Run `cargo test --test workspace_registry -- --test-threads=1` and the migration test in `event_outbox`. The new behavior must fail because the registry and marker do not exist. A compile error from an absent new module is an acceptable first red; a fixture setup error is not.
-- [ ] **Step 3: Add the marker and registry.** Validate the configured owner before any call to `GraphHandle::new` or core migration 14. Migration 14 revokes existing OAuth tokens and codes and expires old login rows. It contains no graph table rewrite. `WorkspaceRegistry::open` creates the sidecar with the five tables in the spec and enables foreign keys. It marks the legacy graph before it publishes the first registry row. It refuses a newer registry version. Use SQL transactions for ACL and defaults.
+- [ ] **Step 3: Add the marker and registry.** Validate the configured owner before any call to `GraphHandle::new` or core migration 14. `MCPServer::new` must call `WorkspaceRegistry::open_with_principals` first. Migration 14 revokes existing OAuth tokens and codes and expires old login rows. It contains no graph table rewrite. The registry creates the five tables in the spec. Reject a missing registered graph. Validate every saved owner on restart. Canonicalize UUIDs before ACL updates. Use SQL transactions for ACL and defaults.
 
 ```sql
 UPDATE oauth_token SET revoked = 1 WHERE revoked = 0;
