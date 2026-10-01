@@ -14,9 +14,17 @@ impl Drop for McpClient {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        for ext in ["", "-wal", "-shm"] {
+        for ext in [
+            "",
+            "-wal",
+            "-shm",
+            ".workspaces.sqlite",
+            ".workspaces.sqlite-wal",
+            ".workspaces.sqlite-shm",
+        ] {
             let _ = std::fs::remove_file(format!("{}{}", self.db_path, ext));
         }
+        let _ = std::fs::remove_dir_all(format!("{}.workspaces", self.db_path));
     }
 }
 
@@ -27,10 +35,17 @@ fn spawn_server() -> McpClient {
 fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient {
     let n = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
     let db_path = format!("/tmp/test_e2e_{n}.db");
-    for ext in ["", "-wal", "-shm"] {
-        let p = format!("{db_path}{ext}");
-        let _ = std::fs::remove_file(&p);
+    for ext in [
+        "",
+        "-wal",
+        "-shm",
+        ".workspaces.sqlite",
+        ".workspaces.sqlite-wal",
+        ".workspaces.sqlite-shm",
+    ] {
+        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
+    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
 
     let bin =
         std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
@@ -38,6 +53,8 @@ fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient
     command
         .arg("-f")
         .arg(&db_path)
+        .arg("--legacy-owner-id")
+        .arg("machine:local")
         .arg("--transport")
         .arg("stdio")
         .arg("--log-level")
@@ -966,12 +983,25 @@ fn e2e_strict_ordering_with_concurrency_one() {
 
     let n = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
     let db_path = format!("/tmp/test_e2e_{n}.db");
+    for ext in [
+        "",
+        "-wal",
+        "-shm",
+        ".workspaces.sqlite",
+        ".workspaces.sqlite-wal",
+        ".workspaces.sqlite-shm",
+    ] {
+        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
+    }
+    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
     let bin =
         std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut child = Command::new(&bin)
         .args([
             "-f",
             &db_path,
+            "--legacy-owner-id",
+            "machine:local",
             "--transport",
             "stdio",
             "--log-level",
@@ -1022,7 +1052,15 @@ fn e2e_strict_ordering_with_concurrency_one() {
 
     let _ = child.kill();
     let _ = child.wait();
-    for ext in ["", "-wal", "-shm"] {
+    for ext in [
+        "",
+        "-wal",
+        "-shm",
+        ".workspaces.sqlite",
+        ".workspaces.sqlite-wal",
+        ".workspaces.sqlite-shm",
+    ] {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
+    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
 }

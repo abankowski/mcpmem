@@ -175,6 +175,7 @@ async fn supervises_selected_roles_and_stops_with_mcp() {
 fn test_graph(dir: &tempfile::TempDir) -> Arc<GraphHandle> {
     let config = Config {
         memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
+        legacy_owner_id: Some("machine:local".into()),
         enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
         ..Config::default()
     };
@@ -188,6 +189,7 @@ fn test_graph(dir: &tempfile::TempDir) -> Arc<GraphHandle> {
 fn test_graph_at(database: &std::path::Path) -> Arc<GraphHandle> {
     let config = Config {
         memory_file_path: database.to_string_lossy().into_owned(),
+        legacy_owner_id: Some("machine:local".into()),
         enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
         ..Config::default()
     };

@@ -29,14 +29,20 @@ impl Drop for HttpServer {
     }
 }
 
-/// Remove everything one server put on disk: the database and its sidecars,
-/// the code-index directory, and the captured output.
+/// Remove the graph file, registry, workspace directory, code index, and output
+/// for this test server's own database path.
 fn remove_server_files(db_path: &str, log_path: &str) {
-    for ext in ["", "-wal", "-shm"] {
+    for ext in [
+        "",
+        "-wal",
+        "-shm",
+        ".workspaces.sqlite",
+        ".workspaces.sqlite-wal",
+        ".workspaces.sqlite-shm",
+    ] {
         let _ = std::fs::remove_file(format!("{db_path}{ext}"));
     }
-    // The `code` category opens `<db>.code/<project>.code.db`, and creates that
-    // directory at startup whether or not a project is ever indexed.
+    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
     let _ = std::fs::remove_dir_all(format!("{db_path}.code"));
     let _ = std::fs::remove_file(log_path);
 }
@@ -151,6 +157,8 @@ fn try_spawn_http_server(
     let mut cmd = Command::new(&bin);
     cmd.arg("-f")
         .arg(&db_path)
+        .arg("--legacy-owner-id")
+        .arg("machine:local")
         .arg("--transport")
         .arg("http")
         .arg("--bind")
