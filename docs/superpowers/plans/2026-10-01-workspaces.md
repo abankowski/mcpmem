@@ -146,7 +146,7 @@ assert!(!ids(page).contains(&private_id));
 ```
 
 - [ ] **Step 2: Run focused HTTP tests before code.** Confirm that the old routes select the wrong graph or lack a graph list.
-- [ ] **Step 3: Change HTTP state and routes.** Store the registry and handle cache in HTTP state. Resolve one graph for each viewer request after category scope validation. Reject open HTTP before accepting requests. Pass the selected graph to the existing payload builders. Return one not-found shape for unknown and inaccessible private IDs. Keep the current admin gate in addition to owner authorization.
+- [ ] **Step 3: Change HTTP state and routes.** Store the registry and handle cache in HTTP state. Resolve one graph for each viewer request after category scope validation. Pass the selected graph to the existing payload builders. Return one not-found shape for unknown and inaccessible private IDs. Keep the current admin gate in addition to owner authorization. Task 2 already refused open HTTP startup; verify that rule instead of adding a second guard.
 - [ ] **Step 4: Run HTTP, OAuth, viewer, vector, and webhook admin tests.** Replace open-HTTP success expectations with the approved credential requirement. Do not weaken the existing scope gate.
 - [ ] **Step 5: Controller reviews the task diff and commits exact paths.** Record the HTTP compatibility break in the commit message.
 
