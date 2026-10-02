@@ -6,6 +6,13 @@
   <title>mcpmem — principals</title>
   <link rel="stylesheet" href="/ui/nav.css">
   <link rel="stylesheet" href="/ui/admin.css">
+  <style>
+    #webhook-workspace {
+      width: 36ch; max-width: 100%; padding: .35rem .5rem;
+      color: var(--text); background: var(--panel);
+      border: 1px solid var(--border); border-radius: .35rem;
+    }
+  </style>
 </head>
 <body>
   <nav id="sitenav" aria-label="Sections">
@@ -36,6 +43,10 @@
       </section>
       <section id="webhooks" hidden>
         <h2>Webhook subscriptions</h2>
+        <label for="webhook-workspace">Owner workspace ID</label>
+        <input id="webhook-workspace" type="text" class="mono" autocomplete="off"
+          placeholder="Blank uses saved default" aria-describedby="webhook-status">
+        <button id="load-webhooks" type="button">Load subscriptions</button>
         <p class="hint" id="webhook-status"></p>
         <button id="add-webhook" hidden>Add subscription</button>
         <table>

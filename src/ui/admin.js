@@ -130,7 +130,10 @@ async function api(path, options = {}) {
   }
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(res.status + " " + text);
+    const error = new Error(res.status + " " + text);
+    error.status = res.status;
+    error.contentType = res.headers.get("Content-Type") || "";
+    throw error;
   }
   return res.status === 204 ? null : res.json();
 }
@@ -156,37 +159,68 @@ async function load() {
 
 // The signing-key names this server loaded from [webhooks.secrets]. The
 // worker resolves a subscription's secretRef against these names at delivery
-// time; a name that is not here dead-letters every delivery.
+// time; a missing name causes each delivery to fail.
 let configuredSecrets = [];
+let webhookSelectionGeneration = 0;
+let webhookListRequestGeneration = 0;
+
+function webhookWorkspaceId() {
+  return document.getElementById("webhook-workspace").value.trim();
+}
+
+function webhookUrl(path) {
+  const workspaceId = webhookWorkspaceId();
+  return workspaceId ? path + "?workspaceId=" + encodeURIComponent(workspaceId) : path;
+}
+
+function showWebhookError(error) {
+  const status = document.getElementById("webhook-status");
+  if (error.status === 400 && error.message.includes("workspace selection required")) {
+    status.textContent = "Select an owner workspace ID or set a saved default through MCP.";
+  } else if (error.status === 404) {
+    status.textContent = "Workspace unavailable or you are not its owner. Check the owner workspace ID.";
+  } else {
+    status.textContent = "Webhooks failed: " + error.message;
+  }
+  status.className = "hint error";
+}
 
 async function loadWebhooks() {
+  const generation = webhookSelectionGeneration;
+  const requestGeneration = ++webhookListRequestGeneration;
+  const isCurrent = () => generation === webhookSelectionGeneration &&
+    requestGeneration === webhookListRequestGeneration;
   const section = document.getElementById("webhooks");
-  const status = document.getElementById("webhook-status");
+  renderWebhooks([]);
   let data;
   try {
-    data = await api("/ui/api/webhooks");
+    data = await api(webhookUrl("/ui/api/webhooks"));
   } catch (e) {
-    // A build without the webhooks feature has no such route; the section
-    // stays hidden instead of showing a table that cannot load.
-    if (e.message.startsWith("404")) return;
-    status.textContent = "Webhooks failed: " + e.message;
+    if (!isCurrent()) return;
+    // A build without webhooks has no route. A JSON 404 is an owner error.
+    if (e.status === 404 && !e.contentType.includes("application/json")) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    document.getElementById("add-webhook").hidden = false;
+    showWebhookError(e);
     return;
   }
-  if (!data) return;
+  if (!data || !isCurrent()) return;
   section.hidden = false;
   configuredSecrets = data.configuredSecrets || [];
   renderWebhooks(data.subscriptions);
   document.getElementById("add-webhook").hidden = false;
-  // The section exists in every build with the webhooks feature, but the
-  // worker runs only when the `webhooks` role is on. A subscription that
-  // cannot be delivered looks exactly like a working one, so the gap is
-  // stated, not inferred.
+  const status = document.getElementById("webhook-status");
+  // Stored subscriptions need the worker role to deliver events.
   if (data.deliveryRole === false) {
     status.textContent =
       "Delivery role 'webhooks' is not running — subscriptions are stored but nothing is delivered.";
     status.className = "hint error";
   } else {
     status.textContent = "";
+    status.className = "hint";
   }
 }
 
@@ -433,6 +467,7 @@ function listInput(text) {
 }
 
 function openWebhookForm(w) {
+  const formWorkspaceId = webhookWorkspaceId();
   const dialog = document.getElementById("form");
   dialog.textContent = "";
   const h = document.createElement("h2");
@@ -506,6 +541,10 @@ function openWebhookForm(w) {
   const save = document.createElement("button");
   save.textContent = "Save";
   save.onclick = async () => {
+    if (webhookWorkspaceId() !== formWorkspaceId) {
+      showWebhookError(new Error("Workspace changed. Reopen the subscription form."));
+      return;
+    }
     const read = (k) => document.getElementById("f-" + k).value.trim();
     const body = {
       endpoint: read("endpoint"),
@@ -518,20 +557,21 @@ function openWebhookForm(w) {
     };
     try {
       if (w) {
-        await api("/ui/api/webhooks/" + encodeURIComponent(w.subscriptionId), {
+        await api(webhookUrl("/ui/api/webhooks/" + encodeURIComponent(w.subscriptionId)), {
           method: "PATCH",
           body: JSON.stringify(body),
         });
       } else {
-        await api("/ui/api/webhooks", {
+        await api(webhookUrl("/ui/api/webhooks"), {
           method: "POST",
           body: JSON.stringify(body),
         });
       }
+      if (!accessToken) return;
       dialog.close();
-      await load();
+      await loadWebhooks();
     } catch (e) {
-      setStatus(e.message);
+      showWebhookError(e);
     }
   };
   const cancel = document.createElement("button");
@@ -544,10 +584,10 @@ function openWebhookForm(w) {
 async function removeWebhook(w) {
   if (!confirm("Remove subscription " + w.endpoint + "?")) return;
   try {
-    await api("/ui/api/webhooks/" + encodeURIComponent(w.subscriptionId), { method: "DELETE" });
-    await load();
+    await api(webhookUrl("/ui/api/webhooks/" + encodeURIComponent(w.subscriptionId)), { method: "DELETE" });
+    if (accessToken) await loadWebhooks();
   } catch (e) {
-    setStatus(e.message);
+    showWebhookError(e);
   }
 }
 
@@ -560,15 +600,17 @@ async function testWebhook(w, button, result) {
   result.textContent = "testing…";
   try {
     const data = await api(
-      "/ui/api/webhooks/" + encodeURIComponent(w.subscriptionId) + "/test",
+      webhookUrl("/ui/api/webhooks/" + encodeURIComponent(w.subscriptionId) + "/test"),
       { method: "POST" }
     );
+    if (!data) { result.textContent = ""; return; }
     const latency = data.latencyUs ? " (" + Math.round(data.latencyUs / 1000) + " ms)" : "";
     result.textContent = data.ok ? data.status + " OK" + latency : "HTTP " + data.status + latency;
     if (!data.ok) result.className = "hint error";
   } catch (e) {
     result.textContent = e.message;
     result.className = "hint error";
+    showWebhookError(e);
   } finally {
     button.disabled = false;
   }
@@ -763,6 +805,19 @@ function setStatus(text) {
 
 document.getElementById("add").onclick = () => openForm(null);
 document.getElementById("add-webhook").onclick = () => openWebhookForm(null);
+document.getElementById("webhook-workspace").addEventListener("input", () => {
+  webhookSelectionGeneration++;
+  renderWebhooks([]);
+  configuredSecrets = [];
+  const status = document.getElementById("webhook-status");
+  status.textContent = "";
+  status.className = "hint";
+});
+document.getElementById("webhook-workspace").addEventListener("change", loadWebhooks);
+document.getElementById("webhook-workspace").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") loadWebhooks();
+});
+document.getElementById("load-webhooks").addEventListener("click", loadWebhooks);
 document.getElementById("add-repo").onclick = () => openRepoForm();
 
 (async function boot() {
