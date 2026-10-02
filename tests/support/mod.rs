@@ -369,9 +369,12 @@ pub async fn oauth_server_without_categories() -> Server {
     .await
 }
 
-/// OAuth off and no static token: the fully open server.
-pub async fn open_server() -> Server {
-    server(None, Scopes::all(), None).await
+/// The token for HTTP tests with OAuth disabled.
+pub const STATIC_BEARER: &str = "fixture-static-bearer";
+
+/// Keep OAuth off without admitting anonymous HTTP requests.
+pub async fn static_server() -> Server {
+    server_with_static_token(None, STATIC_BEARER, Scopes::all(), None).await
 }
 
 pub async fn json(res: Response<axum::body::Body>) -> serde_json::Value {

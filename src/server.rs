@@ -527,6 +527,10 @@ impl MCPServer {
 
     /// MCP Streamable HTTP transport (POST/GET `/mcp`, JSON or SSE responses).
     pub async fn run_http(&self, addr: &str) -> Result<()> {
+        crate::config::Config::require_http_auth(
+            self.config.oauth.is_some(),
+            self.config.auth_token.as_deref(),
+        )?;
         // The graph handle above already migrated the schema, so the four
         // `oauth_*` tables exist by the time the store opens. It is built
         // before the maintenance task because that task sweeps it.

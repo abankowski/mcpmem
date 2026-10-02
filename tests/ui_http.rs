@@ -13,6 +13,8 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+const TEST_BEARER: &str = "viewer-test-bearer";
+
 struct HttpServer {
     child: Child,
     port: u16,
@@ -230,6 +232,27 @@ fn try_spawn_http_server(
     }
 }
 
+#[test]
+fn http_refuses_startup_without_oauth_or_bearer() {
+    let failed = match try_spawn_http_server(&["--enable-all"], None) {
+        Ok(_server) => panic!("HTTP served without OAuth or a bearer credential"),
+        Err(failed) => failed,
+    };
+    assert!(
+        failed.exit.is_some(),
+        "HTTP must exit without a listener: {failed}"
+    );
+    assert!(
+        !failed.lost_port_race(),
+        "this was a port collision: {failed}"
+    );
+    let reason = failed.output.to_ascii_lowercase();
+    assert!(
+        reason.contains("oauth") && reason.contains("bearer"),
+        "the startup error must name both supported credentials: {failed}"
+    );
+}
+
 /// Send one HTTP request over a fresh connection; return (status, headers, body).
 /// Panics if the connection is refused (use [`try_request`] to tolerate that).
 fn request(
@@ -297,7 +320,7 @@ fn get(port: u16, path: &str, bearer: Option<&str>) -> (u16, String, String) {
     request(port, "GET", path, None, bearer)
 }
 
-/// Populate a tiny graph over authed/unauthed HTTP so `/ui/graph` has content.
+/// Populate a tiny graph through an authenticated HTTP request.
 fn seed_graph(port: u16, bearer: Option<&str>) {
     let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_entities","arguments":{"entities":[{"name":"Alice","entityType":"person","observations":[{"body":"likes hiking"}]},{"name":"Acme","entityType":"company","observations":[]}]}},"id":2}"#;
     let (status, _, _) = request(port, "POST", "/mcp", Some(create), bearer);
@@ -310,7 +333,7 @@ fn seed_graph(port: u16, bearer: Option<&str>) {
 
 #[test]
 fn test_ui_shell_served_as_html() {
-    let srv = spawn_http_server(&["--enable-all"], None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
     let (status, headers, body) = get(srv.port, "/ui", None);
     assert_eq!(status, 200, "GET /ui should return the viewer page");
     assert!(
@@ -348,7 +371,7 @@ fn test_ui_shell_served_as_html() {
 
 #[test]
 fn test_ui_assets_served_with_content_types() {
-    let srv = spawn_http_server(&["--enable-all"], None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
 
     let (status, headers, body) = get(srv.port, "/ui/graph.css", None);
     assert_eq!(status, 200, "GET /ui/graph.css should succeed");
@@ -384,11 +407,11 @@ fn test_ui_assets_served_with_content_types() {
 
 #[test]
 fn test_ui_expand_returns_neighborhood() {
-    let srv = spawn_http_server(&["--enable-all"], None);
-    seed_graph(srv.port, None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    seed_graph(srv.port, Some(TEST_BEARER));
 
     // Expanding Alice must return her plus her neighbour Acme and the edge.
-    let (status, headers, body) = get(srv.port, "/ui/expand?name=Alice", None);
+    let (status, headers, body) = get(srv.port, "/ui/expand?name=Alice", Some(TEST_BEARER));
     assert_eq!(status, 200, "GET /ui/expand should succeed: {body}");
     assert!(
         headers
@@ -418,31 +441,31 @@ fn test_ui_expand_returns_neighborhood() {
 
 #[test]
 fn test_ui_expand_unknown_entity_is_404() {
-    let srv = spawn_http_server(&["--enable-all"], None);
-    let (status, _, _) = get(srv.port, "/ui/expand?name=DoesNotExist", None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    let (status, _, _) = get(srv.port, "/ui/expand?name=DoesNotExist", Some(TEST_BEARER));
     assert_eq!(status, 404, "expanding a missing entity should be 404");
 }
 
 #[test]
 fn test_ui_expand_requires_name_and_permission() {
     // Missing name → 400 (client error).
-    let srv = spawn_http_server(&["--enable-all"], None);
-    let (status, _, _) = get(srv.port, "/ui/expand", None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    let (status, _, _) = get(srv.port, "/ui/expand", Some(TEST_BEARER));
     assert_eq!(status, 400, "expand without a name should be 400");
     drop(srv);
 
     // Read disabled → 403, same gate as /ui/graph.
-    let srv = spawn_http_server(&["--enable-graph-write"], None);
-    let (status, _, _) = get(srv.port, "/ui/expand?name=Alice", None);
+    let srv = spawn_http_server(&["--enable-graph-write"], Some(TEST_BEARER));
+    let (status, _, _) = get(srv.port, "/ui/expand?name=Alice", Some(TEST_BEARER));
     assert_eq!(status, 403, "graph-read disabled must forbid /ui/expand");
 }
 
 #[test]
 fn test_ui_graph_returns_entities_and_relations() {
-    let srv = spawn_http_server(&["--enable-all"], None);
-    seed_graph(srv.port, None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    seed_graph(srv.port, Some(TEST_BEARER));
 
-    let (status, headers, body) = get(srv.port, "/ui/graph", None);
+    let (status, headers, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
     assert_eq!(status, 200, "GET /ui/graph should succeed: {body}");
     assert!(
         headers
@@ -483,10 +506,10 @@ fn test_ui_graph_returns_entities_and_relations() {
 
 #[test]
 fn test_ui_graph_entity_type_filter() {
-    let srv = spawn_http_server(&["--enable-all"], None);
-    seed_graph(srv.port, None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    seed_graph(srv.port, Some(TEST_BEARER));
 
-    let (status, _, body) = get(srv.port, "/ui/graph?entityType=company", None);
+    let (status, _, body) = get(srv.port, "/ui/graph?entityType=company", Some(TEST_BEARER));
     assert_eq!(status, 200, "filtered graph should succeed: {body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let names: Vec<&str> = v["entities"]
@@ -505,8 +528,8 @@ fn test_ui_graph_entity_type_filter() {
 #[test]
 fn test_ui_graph_requires_graph_read() {
     // Write enabled but read disabled: the viewer's data endpoint is forbidden.
-    let srv = spawn_http_server(&["--enable-graph-write"], None);
-    let (status, _, body) = get(srv.port, "/ui/graph", None);
+    let srv = spawn_http_server(&["--enable-graph-write"], Some(TEST_BEARER));
+    let (status, _, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
     assert_eq!(status, 403, "graph-read disabled must forbid /ui/graph");
     assert!(
         body.contains("graph-read"),
@@ -522,8 +545,11 @@ fn test_ui_graph_requires_graph_read() {
 /// answers 200.
 #[test]
 fn test_ui_graph_honours_static_bearer_scopes_not_enabled_categories() {
-    let srv = spawn_http_server(&["--enable-all", "--static-bearer-scopes", "vectors"], None);
-    let (status, headers, body) = get(srv.port, "/ui/graph", None);
+    let srv = spawn_http_server(
+        &["--enable-all", "--static-bearer-scopes", "vectors"],
+        Some(TEST_BEARER),
+    );
+    let (status, headers, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
     assert_eq!(
         status, 403,
         "a credential without graph-read must be refused: {body}"
@@ -580,17 +606,17 @@ fn seed_many(port: u16, n: usize) {
         r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"entities":[{}]}}}},"id":9}}"#,
         ents.join(",")
     );
-    let (status, _, _) = request(port, "POST", "/mcp", Some(&body), None);
+    let (status, _, _) = request(port, "POST", "/mcp", Some(&body), Some(TEST_BEARER));
     assert_eq!(status, 200, "seed_many should succeed");
 }
 
 #[test]
 fn test_ui_graph_pagination_cursor() {
-    let srv = spawn_http_server(&["--enable-all"], None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
     seed_many(srv.port, 25);
 
     // First page: 10 of 25, more to come.
-    let (_, _, body) = get(srv.port, "/ui/graph?limit=10&offset=0", None);
+    let (_, _, body) = get(srv.port, "/ui/graph?limit=10&offset=0", Some(TEST_BEARER));
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["entities"].as_array().unwrap().len(), 10);
     assert_eq!(v["page"]["offset"], 0);
@@ -599,7 +625,7 @@ fn test_ui_graph_pagination_cursor() {
     assert_eq!(v["stats"]["entities"], 25);
 
     // Last page: offset 20 leaves 5, no more.
-    let (_, _, body) = get(srv.port, "/ui/graph?limit=10&offset=20", None);
+    let (_, _, body) = get(srv.port, "/ui/graph?limit=10&offset=20", Some(TEST_BEARER));
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["entities"].as_array().unwrap().len(), 5);
     assert_eq!(v["page"]["hasMore"], false);
@@ -607,10 +633,14 @@ fn test_ui_graph_pagination_cursor() {
 
 #[test]
 fn test_ui_search_paginated_nodes_only() {
-    let srv = spawn_http_server(&["--enable-all"], None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
     seed_many(srv.port, 25);
 
-    let (status, headers, body) = get(srv.port, "/ui/search?q=person&limit=10&offset=0", None);
+    let (status, headers, body) = get(
+        srv.port,
+        "/ui/search?q=person&limit=10&offset=0",
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 200, "search should succeed: {body}");
     assert!(
         headers
@@ -629,7 +659,11 @@ fn test_ui_search_paginated_nodes_only() {
     assert_eq!(v["relations"].as_array().unwrap().len(), 0);
 
     // Second page paginates the same query.
-    let (_, _, body) = get(srv.port, "/ui/search?q=person&limit=10&offset=20", None);
+    let (_, _, body) = get(
+        srv.port,
+        "/ui/search?q=person&limit=10&offset=20",
+        Some(TEST_BEARER),
+    );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["entities"].as_array().unwrap().len(), 5);
     assert_eq!(v["page"]["hasMore"], false);
@@ -637,11 +671,11 @@ fn test_ui_search_paginated_nodes_only() {
 
 #[test]
 fn test_ui_search_prefix_and_permission() {
-    let srv = spawn_http_server(&["--enable-all"], None);
-    seed_graph(srv.port, None); // Alice (person), Acme (company)
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    seed_graph(srv.port, Some(TEST_BEARER)); // Alice (person), Acme (company)
 
     // A prefix ("Ac") matches "Acme" — search-as-you-type behaviour.
-    let (status, _, body) = get(srv.port, "/ui/search?q=Ac", None);
+    let (status, _, body) = get(srv.port, "/ui/search?q=Ac", Some(TEST_BEARER));
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let names: Vec<&str> = v["entities"]
@@ -657,17 +691,17 @@ fn test_ui_search_prefix_and_permission() {
     drop(srv);
 
     // Same graph-read gate as the rest of the viewer.
-    let srv = spawn_http_server(&["--enable-graph-write"], None);
-    let (status, _, _) = get(srv.port, "/ui/search?q=x", None);
+    let srv = spawn_http_server(&["--enable-graph-write"], Some(TEST_BEARER));
+    let (status, _, _) = get(srv.port, "/ui/search?q=x", Some(TEST_BEARER));
     assert_eq!(status, 403, "search must require graph-read");
 }
 
 #[test]
 fn test_ui_graph_omits_observation_bodies() {
-    let srv = spawn_http_server(&["--enable-all"], None);
-    seed_graph(srv.port, None); // Alice has one observation ("likes hiking")
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    seed_graph(srv.port, Some(TEST_BEARER)); // Alice has one observation ("likes hiking")
 
-    let (status, _, body) = get(srv.port, "/ui/graph", None);
+    let (status, _, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
     assert_eq!(status, 200, "graph should succeed: {body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let alice = v["entities"]
@@ -689,10 +723,10 @@ fn test_ui_graph_omits_observation_bodies() {
 
 #[test]
 fn test_ui_node_lazy_loads_observations() {
-    let srv = spawn_http_server(&["--enable-all"], None);
-    seed_graph(srv.port, None);
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    seed_graph(srv.port, Some(TEST_BEARER));
 
-    let (status, headers, body) = get(srv.port, "/ui/node?name=Alice", None);
+    let (status, headers, body) = get(srv.port, "/ui/node?name=Alice", Some(TEST_BEARER));
     assert_eq!(status, 200, "node fetch should succeed: {body}");
     assert!(
         headers
@@ -718,13 +752,13 @@ fn test_ui_node_lazy_loads_observations() {
     );
 
     // Unknown entity → 404.
-    let (status, _, _) = get(srv.port, "/ui/node?name=DoesNotExist", None);
+    let (status, _, _) = get(srv.port, "/ui/node?name=DoesNotExist", Some(TEST_BEARER));
     assert_eq!(status, 404, "unknown entity should be 404");
 }
 
 #[test]
 fn test_ui_node_requires_graph_read() {
-    let srv = spawn_http_server(&["--enable-graph-write"], None);
-    let (status, _, _) = get(srv.port, "/ui/node?name=Alice", None);
+    let srv = spawn_http_server(&["--enable-graph-write"], Some(TEST_BEARER));
+    let (status, _, _) = get(srv.port, "/ui/node?name=Alice", Some(TEST_BEARER));
     assert_eq!(status, 403, "graph-read disabled must forbid /ui/node");
 }

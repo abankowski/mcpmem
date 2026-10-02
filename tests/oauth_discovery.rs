@@ -191,23 +191,21 @@ async fn a_prefixed_server_does_not_answer_the_unprefixed_suffix() {
     }
 }
 
-/// With neither OAuth nor a static token, the server is open: a request with no
-/// credential is dispatched, not refused.
-#[tokio::test]
-async fn a_server_with_no_auth_configured_stays_open() {
-    let server = support::open_server().await;
-    let res = server.request(tools_list()).await;
-    assert_eq!(res.status(), StatusCode::OK);
-}
-
 /// A test router must reach the tools, not just the transport. The category
 /// flags the dispatcher consults are process-wide and are published when the
 /// server is built, so a router whose state says `graph-read` is enabled has to
 /// advertise the `graph-read` tools.
 #[tokio::test]
 async fn a_test_router_advertises_the_tools_of_its_enabled_categories() {
-    let server = support::open_server().await;
-    let res = server.request(tools_list()).await;
+    let server = support::static_server().await;
+    let mut request = tools_list();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", support::STATIC_BEARER)
+            .parse()
+            .unwrap(),
+    );
+    let res = server.request(request).await;
     assert_eq!(res.status(), StatusCode::OK);
     let body: serde_json::Value = support::json(res).await;
     let names: Vec<&str> = body["result"]["tools"]
@@ -224,7 +222,7 @@ async fn a_test_router_advertises_the_tools_of_its_enabled_categories() {
 /// document exists at either shape of either path.
 #[tokio::test]
 async fn the_discovery_documents_are_absent_when_oauth_is_off() {
-    let server = support::open_server().await;
+    let server = support::static_server().await;
     for path in [
         "/.well-known/oauth-protected-resource",
         "/.well-known/oauth-protected-resource/mcp",

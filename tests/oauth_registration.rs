@@ -146,7 +146,7 @@ async fn the_advertised_registration_endpoint_is_the_one_that_answers() {
 /// as the discovery documents are, so a client finds no way in at all.
 #[tokio::test]
 async fn the_registration_endpoint_is_absent_when_oauth_is_off() {
-    let server = support::open_server().await;
+    let server = support::static_server().await;
     let res = server.request(post_register(CLAUDE)).await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

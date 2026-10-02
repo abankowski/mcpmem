@@ -1231,44 +1231,6 @@ async fn the_maintenance_removes_expired_rows_and_keeps_live_ones() {
     );
 }
 
-// ── The paths OAuth must not have broken ────────────────────────────────────
-
-/// With neither OAuth nor a static token the server stays open, which is the
-/// behaviour every deployment that predates this work has. The static bearer
-/// half runs against the real binary, in `tests/ui_http.rs`.
-///
-/// It asserts the scopes rather than the status, because the status cannot
-/// see the thing that changed. A principal holding nothing at all also gets
-/// 200 here: `tools/list` filters by scope and answers an empty array. What
-/// deviation 2 decided is *which* scopes the open caller holds — the
-/// configured `bearer_scopes`, not every category — and only the list shows
-/// it.
-#[tokio::test]
-async fn an_open_server_grants_the_configured_scopes_with_no_credential() {
-    let server = support::open_server().await;
-    let res = server
-        .request(
-            Request::post("/mcp")
-                .header("content-type", "application/json")
-                .body(Body::from(TOOLS_LIST))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let body = json_body(res).await;
-    let names: Vec<&str> = body["result"]["tools"]
-        .as_array()
-        .expect("tools/list answers an array of tools")
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
-    // `support::open_server` configures every category on the bearer list, so
-    // the open caller holds both halves of the graph.
-    assert!(names.contains(&"read_graph"), "{names:?}");
-    assert!(names.contains(&"delete_entities"), "{names:?}");
-}
-
 /// The static bearer token this server configures beside OAuth.
 const STATIC_TOKEN: &str = "a-static-bearer-token";
 
