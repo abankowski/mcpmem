@@ -20,7 +20,8 @@ Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops
 
 - 🧠 **Real memory, not a scratchpad.** A typed knowledge graph — entities, directed relations,
   and free-form observations — with FTS5 full-text search and graph traversal (paths, neighbors,
-  subgraphs, centrality). Survives restarts; portable as a single file.
+  subgraphs, centrality). Survives restarts; portable as SQLite files (one per
+  [workspace](#workspaces-isolated-knowledge-graphs)).
 - ⚡ **Fast and embedded.** Pure Rust on SQLite in WAL mode. Microsecond reads,
   batched writes, no external services, no network round-trips, no daemons.
 - 🔎 **Semantic + hybrid search.** With the `indexer` feature and a serving
@@ -48,7 +49,7 @@ flowchart TB
   Embed["Embedding provider<br/>Ollama · OpenAI-compatible · Amazon Bedrock"]
   Hooks["Webhook receivers<br/>signed HTTPS · retries · dead-letter"]
 
-  subgraph mem["mcpmem — one binary · one SQLite file"]
+  subgraph mem["mcpmem — one binary · SQLite per graph"]
     direction TB
     Tr["stdio · Streamable HTTP<br/>TLS + bearer-token auth"]
     Mcp["mcp role — MCP tool dispatch"]
@@ -545,16 +546,22 @@ fails any of those is not from mcpmem.
 
 ## Quick start
 
+The first start with a **new** database binds it to one workspace and needs an owner identity:
+pass `--legacy-owner-id machine:local` for a local stdio deployment (see
+[Workspaces](#workspaces-isolated-knowledge-graphs)). Later starts read the saved mapping and
+need no flag.
+
 ```sh
 # Knowledge-graph memory (read + write)
-mcpmem --transport stdio --enable-graph-read --enable-graph-write
+mcpmem --transport stdio --legacy-owner-id machine:local \
+  --enable-graph-read --enable-graph-write
 
 # Memory + semantic vector search
-mcpmem --transport stdio --enable-graph-read --enable-graph-write \
-  --enable-vectors --embedding-dims 384
+mcpmem --transport stdio --legacy-owner-id machine:local \
+  --enable-graph-read --enable-graph-write --enable-vectors --embedding-dims 384
 
 # Everything on — memory + vectors + code intelligence
-mcpmem --transport stdio --enable-all
+mcpmem --transport stdio --legacy-owner-id machine:local --enable-all
 ```
 
 ### Use it from Claude Desktop / Claude Code
@@ -564,7 +571,7 @@ mcpmem --transport stdio --enable-all
   "mcpServers": {
     "memory": {
       "command": "mcpmem",
-      "args": ["--enable-all"]
+      "args": ["--legacy-owner-id", "machine:local", "--enable-all"]
     }
   }
 }
@@ -684,7 +691,9 @@ mcpmem --enable-all --transport http --bind 0.0.0.0:8080 --auth-token "s3cr3t"
 ```
 
 On HTTP the token is sent as `Authorization: Bearer <token>`; comparison is constant-time.
-Binding a non-loopback address **without** a token exposes the entire graph to the network.
+An `http` transport **refuses to start without OAuth or a bearer credential** — this token,
+or `--oidc-issuer` below. Binding an open, unauthenticated graph is no longer possible; see
+[Workspaces](#workspaces-isolated-knowledge-graphs).
 
 By default the token grants every enabled tool category. Narrow it with
 `--static-bearer-scopes`, a comma-separated list of category slugs
@@ -724,6 +733,11 @@ mcpmem --enable-all --transport http --bind 0.0.0.0:8443 \
   --principals-file ./principals.json \
   --tls-cert ./cert.pem --tls-key ./key.pem
 ```
+
+On a fresh data directory, the first start also needs `--legacy-owner-id`
+naming a registered identity — `machine:local` for a local operator — because
+the migration binds the memory file to one workspace owner (see
+[Workspaces](#workspaces-isolated-knowledge-graphs)). Later starts need no flag.
 
 Register the redirect URI `https://mem.example.com/oauth/callback` at the
 provider, and list the humans who may authorize — identity is `iss` plus `sub`,
@@ -859,6 +873,10 @@ mcpmem --enable-graph-read --enable-graph-write \
   --tls-cert ./cert.pem --tls-key ./key.pem
 ```
 
+On the very first start, add `--legacy-owner-id machine:local` (or the stable
+ID of a human in `principals.json`): the workspace migration binds the memory
+file to one owner (see [Workspaces](#workspaces-isolated-knowledge-graphs)).
+
 `--oidc-issuer` needs `--transport http`, `--public-url`, `--oidc-client-id`,
 `--principals-file`, and TLS. It also needs the `mcp` runtime role, which is the
 default. Each missing one is its own startup refusal. An OAuth flag without
@@ -952,9 +970,11 @@ Deployment, connector setup, revocation, and what each refusal means:
 The `http` transport can be served over TLS (rustls, `ring` provider). Provide a PEM certificate
 chain and private key via `--tls-cert` / `--tls-key` (both required together, or startup is
 refused); the `MCP_TLS_CERT` / `MCP_TLS_KEY` environment variables are accepted as fallbacks.
+TLS encrypts the channel but is not a credential, so without OAuth the server still needs a
+bearer token to start (see [Workspaces](#workspaces-isolated-knowledge-graphs)).
 
 ```sh
-mcpmem --enable-all --transport http --bind 0.0.0.0:8080 \
+mcpmem --enable-all --transport http --bind 0.0.0.0:8080 --auth-token "s3cr3t" \
   --tls-cert ./cert.pem --tls-key ./key.pem
 ```
 
@@ -973,6 +993,10 @@ The `http` transport serves a **Neo4j-Browser-style knowledge-graph viewer** —
   entities (FTS5, prefix / search-as-you-type) — both paginated, so large graphs stay responsive.
 - A **node inspector** (type, observations, relationships — click a relationship to jump), plus
   **Isolate** / **Dismiss** actions, a label filter, and Esc-to-deselect.
+- A **workspace dropdown** in the toolbar: it lists every
+  [workspace](#workspaces-isolated-knowledge-graphs) the signed-in identity can access
+  (one or many), starts on the saved default, and switches the view between graphs without
+  ever touching the stored default.
 
 It is served as static assets — `index.html`, `graph.css`, `graph.js` and the
 shared `nav.css` topbar stylesheet (the administration SPA shares the bar) —
@@ -985,10 +1009,11 @@ behaviour.
 |-------|---------|
 | `GET /ui` | The viewer page (app shell + `/ui/nav.css` + `/ui/graph.css` + `/ui/graph.js`; carries no graph data, so it needs no auth). |
 | `GET /ui/nav.css` | The shared site-navigation stylesheet, linked by both browser shells. |
-| `GET /ui/graph` | A page of the graph: `{ entities, relations, entityTypes, stats, page }`. Entities carry `obsCount` (not the observation bodies — those are lazy-loaded). Query params: `entityType` (filter), `offset`, `limit` (≤ 1,000), `token`. |
-| `GET /ui/search` | A page of FTS5 matches (matched nodes only): same shape as `/ui/graph`. Query params: `q` (prefix-matched), `entityType`, `offset`, `limit` (≤ 1,000), `token`. |
-| `GET /ui/node` | One entity with its observation **bodies**, lazy-loaded by the inspector on select. Query params: `name` (required), `token`. |
-| `GET /ui/expand` | One node's neighbourhood `{ entities, relations }` for double-click traversal. Query params: `name` (required), `depth` (1–3), `direction` (`outgoing`/`incoming`/`both`), `token`. |
+| `GET /ui/graph` | A page of the graph: `{ entities, relations, entityTypes, stats, page }`. Entities carry `obsCount` (not the observation bodies — those are lazy-loaded). Query params: `workspaceId` (selected workspace), `entityType` (filter), `offset`, `limit` (≤ 1,000), `token`. |
+| `GET /ui/search` | A page of FTS5 matches (matched nodes only): same shape as `/ui/graph`. Query params: `workspaceId`, `q` (prefix-matched), `entityType`, `offset`, `limit` (≤ 1,000), `token`. |
+| `GET /ui/node` | One entity with its observation **bodies**, lazy-loaded by the inspector on select. Query params: `workspaceId`, `name` (required), `token`. |
+| `GET /ui/expand` | One node's neighbourhood `{ entities, relations }` for double-click traversal. Query params: `workspaceId`, `name` (required), `depth` (1–3), `direction` (`outgoing`/`incoming`/`both`), `token`. |
+| `GET /ui/workspaces` | The caller's accessible workspaces for the dropdown: `{ workspaces, nextCursor }`, the same page shape as the MCP `list_workspaces` tool. Query params: `cursor`, `limit` (≤ 100), `token`. Private graphs of other callers never appear. |
 
 Every data response carries a `page` cursor — `{ offset, limit, returned, hasMore }` — that drives
 the Prev / Next controls without a second round-trip. The list endpoints omit observation bodies
@@ -996,6 +1021,13 @@ the Prev / Next controls without a second round-trip. The list endpoints omit ob
 selected node via `/ui/node`. Responses are gzip/brotli-compressed when the client advertises it,
 and the canvas uses a **Barnes-Hut** (O(_n_ log _n_)) force layout with viewport culling so large
 pages and hub expansions stay at interactive frame rates.
+
+The dropdown selection is session-only. Every data request carries the selected `workspaceId`,
+resolved server-side against the caller's read access; the viewer never calls
+`set_default_workspace`. With no saved default it shows no graph until you pick one. A switch
+clears the canvas, inspector, search, type filter and pager, aborts in-flight requests, and
+discards late responses. When a grant is revoked mid-session, the next request fails, the viewer
+clears itself and refreshes the list with the workspace marked unavailable.
 
 The viewer reads the graph, so `/ui/graph`, `/ui/search`, `/ui/node`, and `/ui/expand` require
 **`--enable-graph-read`** (or `--enable-all`); without it they return `403` and the page says so.
@@ -1008,8 +1040,149 @@ server; otherwise pass a token as `Authorization: Bearer <token>`, as a
 and the page forwards it as a header.
 
 ```sh
-mcpmem --enable-graph-read --transport http --bind 127.0.0.1:8080
-# then open http://127.0.0.1:8080/ui in a browser
+mcpmem --enable-graph-read --transport http --bind 127.0.0.1:8080 \
+  --auth-token "s3cr3t" --legacy-owner-id machine:local
+# then open http://127.0.0.1:8080/ui#token=s3cr3t in a browser
+```
+
+## Workspaces (isolated knowledge graphs)
+
+A **workspace** is one complete knowledge graph — entities, relations, observations, indexes,
+events, and webhook subscriptions — in its own SQLite file. Workspaces give MCP ownership and
+access control to the graph: each workspace has an owner, a visibility, optional grants, and a
+per-identity default selection.
+
+The feature is on by default; every server opens the workspace registry at startup, and every
+graph, vector, and webhook tool resolves one workspace per call. The file you pass with
+`--memory-file` becomes the legacy workspace, so existing data stays in place. The registry
+lives at `<memory-file>.workspaces.sqlite`, new graph files under
+`<memory-file>.workspaces/<workspace-id>.sqlite`, and code-project databases do **not** become
+workspaces. Design and rollout decisions:
+[`docs/superpowers/specs/2026-10-01-workspaces-design.md`](docs/superpowers/specs/2026-10-01-workspaces-design.md).
+
+### Creating and listing workspaces
+
+`create_workspace` takes a `name` and a `visibility` — `"private"` or `"public"` — and makes the
+caller the owner:
+
+```sh
+create_workspace {"name": "Research", "visibility": "private"}
+```
+
+The result is a `WorkspaceView`: `workspaceId, name, visibility, role, isDefault`. The first
+workspace a caller creates becomes that caller's saved default; a later one never replaces it.
+`list_workspaces` pages through every workspace the caller can access — owned, granted, and
+public — sorted by immutable workspace ID, with an opaque `cursor` and `limit` (default and
+maximum 100); `nextCursor` is `null` after the last page. `get_workspace` reads one; only the
+owner sees the `ownerId`.
+
+### Ownership and stable identities
+
+Each workspace has one owner, identified by a **stable ID**, never a display name:
+
+| Identity | Form |
+|---|---|
+| human (OIDC) | `human:` + base64url of `issuer` NUL `subject`, from the verified issuer and subject |
+| local stdio | `machine:local` |
+| static bearer token | `machine:static` |
+| machine accounts created over MCP | `machine:<uuid>` |
+
+`create_machine_account` issues a machine credential with tool-category scopes
+(`graph-read`, `graph-write`, `vectors`, `code`) and shows the random bearer token **exactly
+once**; the registry stores only its digest. `list_machine_accounts` and
+`revoke_machine_account` manage the accounts, and revocation stops the credential on its next
+request. Machine credentials can never hold `admin`; only an `admin` human or trusted local
+stdio may manage machine accounts. A principal that owns a workspace cannot be removed: the
+admin UI and MCP refuse the deletion.
+
+### Access, roles, and public reads
+
+| Caller | Private read | Private write | Change grants/visibility | Public read |
+|---|---|---|---|---|
+| Owner | Yes | Yes | Yes | Yes |
+| Writer (granted) | Yes | Yes | No | Yes |
+| Reader (granted) | Yes | No | No | Yes |
+| Any other authenticated identity | No | No | No | Yes |
+| Anonymous HTTP | No | No | No | No |
+
+`grant_workspace_access` grants `reader` or `writer` access to a registered identity;
+`revoke_workspace_access` removes the grant; `list_workspace_grants` lists them. Only the
+**owner** grants, revokes, changes visibility (`set_workspace_visibility`), and manages webhook
+subscriptions. A public graph is readable by **any authenticated identity** and grants
+no writes; an unrelated caller reading a public graph gets role `"public"`. A known public
+workspace with no write grant returns an access error on writes.
+
+An unknown workspace ID and an inaccessible *private* workspace ID return the **same not-found
+result** — the response leaks neither the name nor the owner.
+
+### Defaults and explicit overrides
+
+Every graph, vector, and webhook tool accepts an optional `workspaceId`. Omission uses the
+caller's saved default; **an explicit ID never changes that default**. `set_default_workspace`
+saves the default for the calling identity. When a grant or machine account is revoked, or a
+public graph becomes private, affected defaults are cleared in the same transaction; nothing
+selects another workspace automatically. A call without `workspaceId` and without a valid
+default fails with `workspace selection required` — it never silently picks a public graph. A
+newly authenticated identity must select one explicitly or set a default over MCP.
+
+### Selecting a workspace in the viewer
+
+The `/ui` viewer's workspace dropdown lists every graph the signed-in identity can access,
+starts on the saved default, and shows no graph until selection when there is none. A switch
+changes only this browser session — it never calls `set_default_workspace` — and every
+`/ui/graph`, `/ui/search`, `/ui/node`, and `/ui/expand` request carries the selected
+`workspaceId`.
+
+### Admin webhook selection
+
+Like the MCP webhook tools, the admin webhook routes need both the current admin gate and
+ownership of the selected workspace. The admin page's webhook controls have their own **owner
+workspace ID** field: a blank field uses the owner's saved default, an explicit ID is appended
+to every webhook request, and access or selection errors are shown beside the field. The page
+works with an `admin`-only token — it never depends on the `graph-read`-gated
+`/ui/workspaces` list.
+
+### HTTP startup requires OAuth or a bearer credential
+
+The `http` transport now **refuses to start** without OAuth or a bearer credential, instead of
+binding an open, unauthenticated listener:
+
+```text
+HTTP requires OAuth via --oidc-issuer or a bearer via --auth-token,
+--auth-token-file or MCP_MEMORY_AUTH_TOKEN
+```
+
+The old open-HTTP mode, which admitted anonymous requests as a machine identity, is gone; an
+anonymous HTTP caller has no identity and can read nothing. Local stdio keeps its
+`machine:local` identity and needs no credential.
+
+### First migration and rollout
+
+The first start after this change binds the existing memory file to one legacy workspace. It
+needs `[workspaces] legacy-owner-id` (or `--legacy-owner-id`) naming an existing stable human or
+machine ID: that identity becomes the legacy workspace's owner and initial default. Startup
+refuses an absent or unregistered value. Later starts read the saved mapping and need no key.
+
+Migration applies marker **schema version 14** to every graph file. It revokes existing OAuth
+tokens and codes and deletes login rows, so every OAuth client must sign in again; it moves no
+graph data. A pre-workspace binary refuses a marked file. Stop every old server process first,
+back up the graph files **and** the registry as one set, and roll back only with a
+workspace-aware binary.
+
+Existing webhook subscriptions stay active after migration. Their rows have no manager field,
+so a former writer's endpoint can keep receiving events until the new owner removes the
+subscription. Before the first start, count the live entities and list the active endpoints on
+the actual database. Set `DB` to the path from the server config; the command is identical in
+Bash and fish:
+
+```sh
+# entity count — a zero count cannot prove data preservation
+sqlite3 -readonly "$DB" 'SELECT COUNT(*) AS live_entities FROM entity WHERE flags = 0;'
+```
+
+```sh
+# active legacy endpoints — show this list to the new owner
+sqlite3 -readonly "$DB" 'SELECT subscription_id, endpoint FROM webhook_subscription WHERE enabled = 1 ORDER BY subscription_id;'
 ```
 
 ## Code intelligence (`--enable-code`)
@@ -1144,8 +1317,8 @@ mcpmem --config /etc/mcpmem/mcpmem.toml
 
 [`mcpmem.example.toml`](mcpmem.example.toml) in the repository root lists every key, all commented
 out. A key in `[server]`, `[storage]`, `[tools]` or `[vectors]` shows its default. A key in
-`[security]`, `[oauth]` or `[indexer]` has no default, so it shows an example value instead. Copy
-the file and uncomment what you need.
+`[security]`, `[oauth]`, `[indexer]` or `[workspaces]` has no default, so it shows an example
+value instead. Copy the file and uncomment what you need.
 
 - **Precedence, highest first:** a command-line flag, then an environment variable where the
   setting reads one, then the file, then the built-in default. A flag wins even when you pass it
@@ -1161,8 +1334,9 @@ the file and uncomment what you need.
 - **The file never holds a secret.** It names the file that holds one — `auth-token-file`,
   `client-secret-file`, `openai-api-key-file` — so the config stays safe to commit.
 - **Sections map to the tables below:** `[server]`, `[storage]`, `[tools]`, `[vectors]`,
-  `[security]`, `[oauth]`, `[indexer]`. A key drops the prefix that its section already implies.
-  The three prefixes are `--enable-`, `--oidc-` and `--oauth-`. A repeatable flag becomes
+  `[security]`, `[oauth]`, `[indexer]`, `[workspaces]`. A key drops the prefix that its section
+  already implies. The three prefixes are `--enable-`, `--oidc-` and `--oauth-`. A repeatable
+  flag becomes
   a plural key. So `--enable-graph-read` is `[tools] graph-read`, `--embedding-dims` is
   `[vectors] embedding-dims`, `--role` is `[server] roles`, and `--cimd-allowed-domain` is
   `[oauth] cimd-allowed-domains`.
@@ -1210,6 +1384,7 @@ rather than an error, so one file can serve several deployments.
 | `--read-pool-size` | `4` | Read-only SQLite connections. `0` auto-scales to the CPU count |
 | `--durability` | `MCP_MEMORY_DURABILITY`, else `async` | SQLite synchronous mode: `async` or `sync`. See [Durability](#durability) |
 | `--config` | `MCP_MEMORY_CONFIG` | TOML configuration file |
+| `--legacy-owner-id` | — | Stable identity that owns the memory file during the first workspace migration. Required only while no workspace registry exists, then ignored. See [Workspaces](#workspaces-isolated-knowledge-graphs) |
 
 ### Tool categories
 
@@ -1452,6 +1627,12 @@ bench --help
 `entity_exists`, `graph_stats`, `search_relations`, `describe_entity`, `degree`, `find_path`,
 `find_all_paths`, `extract_subgraph`, `get_neighbors`, `list_entity_types`, `list_relation_types`,
 `suggest_taxonomy`, `export_graph`.
+
+**Workspace management:** `create_workspace`, `list_workspaces`, `get_workspace`,
+`set_workspace_visibility`, `grant_workspace_access`, `revoke_workspace_access`,
+`list_workspace_grants`, `set_default_workspace`, `create_machine_account`,
+`list_machine_accounts`, `revoke_machine_account`. See
+[Workspaces](#workspaces-isolated-knowledge-graphs).
 
 ### Vector (`--enable-vectors`)
 

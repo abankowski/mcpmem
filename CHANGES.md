@@ -10,6 +10,19 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ## 2.1.0 (unreleased)
 
+### Breaking changes
+
+- **Open HTTP can no longer serve graph data.** An `http` transport with the
+  `mcp` role refuses to start unless OAuth (`--oidc-issuer`) or a bearer
+  credential (`--auth-token`, `--auth-token-file`, `MCP_MEMORY_AUTH_TOKEN`)
+  is configured. Anonymous HTTP requests have no identity and can read
+  nothing, so the old bind-an-unauthenticated-listener deployment is gone.
+- **Existing OAuth sessions end at the workspace migration.** Migration `0014`
+  revokes every OAuth token and code and deletes the login rows, so every
+  connector must go through the login flow again. This happens once, at the
+  first start after the upgrade, and is a prerequisite for stable human
+  workspace ownership.
+
 ### Added
 
 - **`--version` on the shipped binaries.** `mcpmem --version` and
@@ -64,6 +77,40 @@ This entry lists every change since that snapshot. The version line restarts at
   `[webhooks]` section raises or lowers the envelope cap (1 MiB default). An
   event whose full snapshot exceeds the cap dead-letters with the policy
   reason instead of failing delivery with a truncated body.
+- **Isolated knowledge workspaces.** Each workspace owns one knowledge graph
+  in its own SQLite file, with an owner, a visibility, per-identity grants
+  and defaults. The file named by `--memory-file` becomes the legacy
+  workspace, so existing data stays in place; the registry and new graphs
+  live beside it. `create_workspace`, `list_workspaces`, `get_workspace`,
+  `set_workspace_visibility`, `grant_workspace_access`,
+  `revoke_workspace_access`, `list_workspace_grants` and
+  `set_default_workspace` manage workspaces over MCP.
+- **`workspaceId` selects the graph on every graph, vector and webhook
+  tool.** The optional field resolves one workspace per call; omission uses
+  the caller's saved default, and an explicit ID never changes that default.
+  A call with no default fails with `workspace selection required` instead of
+  silently picking a graph. An unknown workspace ID and an inaccessible
+  private workspace ID return the same not-found result.
+- **Public graphs are readable by any authenticated identity** and grant no
+  writes; anonymous HTTP has no identity, which is why the HTTP transport now
+  requires a credential to start. Graph access is checked in addition to the
+  existing tool-category scopes.
+- **Machine accounts.** `create_machine_account`, `list_machine_accounts`
+  and `revoke_machine_account` manage separate `machine:<uuid>` credentials
+  with tool-category scopes and one-time tokens. Only an `admin` human or
+  trusted local stdio may manage them.
+- **The `/ui` viewer has a workspace dropdown** fed by `GET /ui/workspaces`.
+  A switch is session-only — it never changes the stored default — and the
+  data routes resolve the selected `workspaceId`. The admin webhook page
+  gained an owner workspace ID field for the same purpose.
+- **Webhook subscriptions live in their workspace's graph file**, and only
+  the workspace owner may create or remove them. Subscriptions active before
+  the migration stay active afterwards; their original manager is unknown, so
+  report the active endpoint list to the new owner.
+- **`[workspaces] legacy-owner-id`** (or `--legacy-owner-id`) binds the
+  existing memory file to its owner on the first migration and is required
+  only then. Migration `0014` marks every graph file with the workspace
+  schema version, and a pre-workspace binary refuses a marked file.
 
 ## 2.0.0
 
