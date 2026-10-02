@@ -960,7 +960,7 @@ async fn a_callback_without_a_code_is_refused_as_a_bad_request() {
 /// Both routes answer 404 when OAuth is off, like every other OAuth route.
 #[tokio::test]
 async fn the_upstream_routes_are_absent_from_a_server_without_oauth() {
-    let server = support::open_server().await;
+    let server = support::static_server().await;
     for path in ["/oauth/authorize", "/oauth/callback"] {
         let res = server
             .request(Request::get(path).body(Body::empty()).unwrap())

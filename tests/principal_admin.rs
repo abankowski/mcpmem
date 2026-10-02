@@ -356,6 +356,40 @@ async fn create_update_delete_round_trip_and_delete_revokes() {
         matches!(outcome, mcpmem_oauth::store::RefreshOutcome::Unknown),
         "deleting the principal revoked its token family"
     );
+
+    // A code exchange racing deletion can write a token after family revocation.
+    // Even a stored, unexpired token must not authenticate an absent human.
+    let late_token = mcpmem_oauth::new_token();
+    support::flow::with_store(&server, |store| {
+        store
+            .put_token(
+                &late_token,
+                mcpmem_oauth::store::TokenKind::Access,
+                &mcpmem_oauth::store::Grant {
+                    client_id: "raced-client".into(),
+                    principal: principal_id.clone(),
+                    scopes: vec!["graph-read".into()],
+                    resource: format!("{}/mcp", support::PUBLIC_URL),
+                    family: mcpmem_oauth::new_token(),
+                },
+                now,
+                now + 60 * 60 * 1_000_000,
+            )
+            .unwrap();
+    });
+    assert!(server.oauth().validate(&late_token).is_some());
+    let refused = server
+        .request(
+            Request::post("/mcp")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, bearer(&late_token))
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -438,6 +472,283 @@ async fn deleting_a_workspace_owner_is_refused_before_its_token_is_revoked() {
             .is_ok(),
         "a refused deletion must preserve the workspace owner"
     );
+}
+
+#[tokio::test]
+async fn deleting_a_non_owner_human_removes_private_grants_and_default_before_recreation() {
+    use mcpmem::workspace::{Visibility, WorkspaceAccess, WorkspaceRegistry};
+
+    let (server, admin_token) = admin_server().await;
+    let create = || {
+        Request::post("/ui/api/principals")
+            .header(header::AUTHORIZATION, bearer(&admin_token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"name":"guest","iss":"https://idp.example","sub":"guest-1","scopes":["graph-read"]}"#,
+            ))
+            .unwrap()
+    };
+    let first = server.request(create()).await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let deletion_id = support::json(first).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stable_id = mcpmem::principals::human_id("https://idp.example", "guest-1");
+    let registry = WorkspaceRegistry::open(&server.memory_db_path(), None).unwrap();
+    let graph = registry
+        .create(
+            "machine:local",
+            "private grant",
+            Visibility::Private,
+            |_| Ok(()),
+        )
+        .unwrap();
+    registry
+        .grant("machine:local", &graph.workspace_id, &stable_id, "reader")
+        .unwrap();
+    registry
+        .set_default(&stable_id, &graph.workspace_id)
+        .unwrap();
+    assert_eq!(
+        registry
+            .resolve(&stable_id, None, WorkspaceAccess::Read)
+            .unwrap()
+            .workspace_id,
+        graph.workspace_id
+    );
+
+    let deleted = server
+        .request(
+            Request::delete(format!("/ui/api/principals/{deletion_id}"))
+                .header(header::AUTHORIZATION, bearer(&admin_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let sidecar = format!("{}.workspaces.sqlite", server.memory_db_path().display());
+    let counts: (i64, i64) = rusqlite::Connection::open(sidecar)
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT count(*) FROM workspace_grant WHERE principal_id=?1),
+                    (SELECT count(*) FROM workspace_default WHERE principal_id=?1)",
+            [&stable_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        counts,
+        (0, 0),
+        "deletion must remove the private grant and default"
+    );
+
+    let second = server.request(create()).await;
+    assert_eq!(second.status(), StatusCode::CREATED);
+    assert_eq!(support::json(second).await["id"], deletion_id);
+    let listed = registry.list(&stable_id, None, 100).unwrap().workspaces;
+    assert!(
+        listed
+            .iter()
+            .all(|workspace| workspace.workspace_id != graph.workspace_id),
+        "recreation must not restore private grants: {listed:?}"
+    );
+    assert!(
+        registry
+            .resolve(&stable_id, None, WorkspaceAccess::Read)
+            .is_err()
+    );
+    assert!(
+        registry
+            .resolve(&stable_id, Some(&graph.workspace_id), WorkspaceAccess::Read)
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_human_invalidates_issued_codes_and_pending_consent() {
+    let idp = support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default()).await;
+    let mut config = support::oauth_config(&idp.issuer);
+    config.principals[0].sub = "admin-subject".into();
+    config.principals[0]
+        .scopes
+        .push(mcpmem::principals::ADMIN_SCOPE.into());
+    let server = support::server(Some(config), support::Scopes::all(), None).await;
+    let admin_token = support::flow::plant_admin_token(&server);
+    let created = server
+        .request(
+            Request::post("/ui/api/principals")
+                .header(header::AUTHORIZATION, bearer(&admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "code holder",
+                        "iss": &idp.issuer,
+                        "sub": "sub-1",
+                        "scopes": ["graph-read"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let deletion_id = support::json(created).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stable_id = mcpmem::principals::human_id(&idp.issuer, "sub-1");
+    let redirect = format!("{}/cb", support::PUBLIC_URL);
+    let client_id = support::flow::register(&server, "pending-code-client", &redirect).await;
+    let mut logins = Vec::new();
+    for _ in 0..2 {
+        let params = authorize_params(&client_id);
+        let started = server
+            .request(
+                Request::get(format!(
+                    "/oauth/authorize?{}",
+                    support::flow::query_string(&as_pairs(&params))
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await;
+        assert_eq!(started.status(), StatusCode::FOUND);
+        let back = idp.login(&support::header(&started, "location")).await;
+        let callback = server
+            .request(
+                Request::get(format!(
+                    "/oauth/callback?code={}&state={}",
+                    back.code, back.state
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await;
+        assert_eq!(callback.status(), StatusCode::OK);
+        let page = support::flow::body_text(callback).await;
+        let csrf = page
+            .split_once("name=\"csrf\" value=\"")
+            .expect("the consent page provides a CSRF value")
+            .1
+            .split('"')
+            .next()
+            .unwrap()
+            .to_owned();
+        logins.push((back.state, csrf));
+    }
+    let (first_state, first_csrf) = logins.remove(0);
+    let (pending_state, pending_csrf) = logins.remove(0);
+    let approved = server
+        .request(
+            Request::post("/oauth/consent")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(support::flow::query_string(&[
+                    ("csrf", &first_csrf),
+                    ("state", &first_state),
+                    ("scope", "graph-read"),
+                ])))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(approved.status(), StatusCode::FOUND);
+    let code = support::flow::code_from(&support::header(&approved, "location"));
+    let (code_owner, code_expires, pending_count): (String, i64, i64) =
+        support::flow::with_store(&server, |store| {
+            let code_row = store
+                .connection()
+                .query_row(
+                    "SELECT principal,expires_us FROM oauth_code WHERE code_digest=?1",
+                    [mcpmem_oauth::digest(&code)],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            let pending = store
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM oauth_login WHERE principal=?1",
+                    [&stable_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (code_row.0, code_row.1, pending)
+        });
+    assert_eq!(code_owner, stable_id);
+    assert!(code_expires > (server.oauth().now_us)(), "the code is live");
+    assert_eq!(pending_count, 1, "another consent form is still open");
+
+    let deleted = server
+        .request(
+            Request::delete(format!("/ui/api/principals/{deletion_id}"))
+                .header(header::AUTHORIZATION, bearer(&admin_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let exchange = server
+        .request(
+            Request::post("/oauth/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(support::flow::query_string(&[
+                    ("grant_type", "authorization_code"),
+                    ("code", &code),
+                    ("redirect_uri", &redirect),
+                    ("client_id", &client_id),
+                    ("code_verifier", support::flow::CODE_VERIFIER),
+                ])))
+                .unwrap(),
+        )
+        .await;
+    let exchange_status = exchange.status();
+    let exchange_body = support::json(exchange).await;
+    if exchange_status == StatusCode::OK {
+        let access = exchange_body["access_token"].as_str().unwrap();
+        let mcp = server
+            .request(
+                Request::post("/mcp")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, bearer(access))
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(mcp.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        exchange_status,
+        StatusCode::BAD_REQUEST,
+        "the deleted human's code must not be redeemable: {exchange_body}"
+    );
+    let pending = server
+        .request(
+            Request::post("/oauth/consent")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(support::flow::query_string(&[
+                    ("csrf", &pending_csrf),
+                    ("state", &pending_state),
+                    ("scope", "graph-read"),
+                ])))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(pending.status(), StatusCode::BAD_REQUEST);
+    let (codes, logins): (i64, i64) = support::flow::with_store(&server, |store| {
+        let count = |table: &str| {
+            store
+                .connection()
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE principal=?1"),
+                    [&stable_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        (count("oauth_code"), count("oauth_login"))
+    });
+    assert_eq!((codes, logins), (0, 0));
 }
 
 /// The create endpoint trims like the file loader does: an untrimmed `iss`

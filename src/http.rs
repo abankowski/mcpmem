@@ -130,9 +130,8 @@ pub struct TestSetup {
     /// operator's allow-list — so a test that drives the authorization
     /// endpoint with a metadata-document identifier names one here.
     pub metadata_fetch: Option<Arc<dyn mcpmem_oauth::registration::Fetch>>,
-    /// Scopes the presented credential holds. With no static token configured
-    /// these are the scopes of the anonymous principal an open server
-    /// dispatches with, and the `/ui` gate reads them.
+    /// Scopes held by the configured static bearer token.
+    /// An HTTP request without a credential never inherits these scopes.
     pub bearer_scopes: Vec<ToolCategory>,
     /// Categories this server exposes. These are the advertised OAuth scopes,
     /// and they publish the process-wide category flags.
@@ -312,11 +311,15 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
         tls_cert,
         tls_key,
     } = config;
-    let auth = match (auth_token.is_some(), oauth.is_some()) {
-        (true, true) => "static bearer + oauth",
-        (true, false) => "static bearer",
-        (false, true) => "oauth",
-        (false, false) => "off",
+    crate::config::Config::require_http_auth(oauth.is_some(), auth_token.as_deref())?;
+    let auth = if oauth.is_some() {
+        if auth_token.is_some() {
+            "static bearer + oauth"
+        } else {
+            "oauth"
+        }
+    } else {
+        "static bearer"
     };
     let state = HttpState {
         kg,
@@ -396,12 +399,8 @@ fn wants_sse(headers: &HeaderMap) -> bool {
 /// The order is OAuth, configured static bearer, then a registered machine.
 /// Each credential keeps its own scopes and principal ID.
 ///
-/// With OAuth on and no static token, a request without a credential is not
-/// allowed: an OAuth server refuses anonymous access even before it can
-/// verify an issued token. With neither configured the server stays open,
-/// which is the behaviour every existing deployment has — and the open
-/// caller holds `bearer_scopes`, so `--static-bearer-scopes` narrows `/mcp`
-/// and `/ui` alike rather than one of the two.
+/// A presented token must match one of these credentials. A missing or unknown
+/// token is unauthorized; open HTTP never gets a machine identity.
 fn principal_of(state: &HttpState, headers: &HeaderMap) -> Option<Principal> {
     let presented = headers
         .get(header::AUTHORIZATION)
@@ -411,6 +410,9 @@ fn principal_of(state: &HttpState, headers: &HeaderMap) -> Option<Principal> {
     if let (Some(oauth), Some(token)) = (state.oauth.as_ref(), presented)
         && let Some(grant) = oauth.validate(token)
     {
+        if !oauth.human_registered(&grant.principal) {
+            return None;
+        }
         return Some(crate::authz::oauth_principal(
             &grant.principal,
             grant.scopes.into_iter().collect(),
@@ -430,9 +432,6 @@ fn principal_of(state: &HttpState, headers: &HeaderMap) -> Option<Principal> {
                 return None;
             }
         }
-    }
-    if state.auth_token.is_none() && state.oauth.is_none() {
-        return Some(crate::authz::bearer_principal(&state.bearer_scopes));
     }
     None
 }
@@ -904,8 +903,8 @@ async fn admin_update_principal(
         .into_response()
 }
 
-/// `DELETE /ui/api/principals/{id}` — delete one runtime principal and
-/// revoke every live token family that names it.
+/// `DELETE /ui/api/principals/{id}` — remove a runtime principal, its workspace
+/// access, its pending OAuth grants and its live token families.
 ///
 /// The admin path keeps its bare ID segment. Convert it to the stable human
 /// ID before the owner check or token revocation.
@@ -932,9 +931,11 @@ async fn admin_delete_principal(
         Err(e) => return store_failure(e),
     };
     let stable_id = crate::principals::human_id(&iss, &sub);
-    match state.registry.owns_workspace(&stable_id) {
-        Ok(true) => return conflict("a workspace owner cannot be deleted"),
-        Ok(false) => {}
+    match state.registry.clear_human_access(&stable_id) {
+        Ok(()) => {}
+        Err(crate::workspace::WorkspaceError::AccessDenied) => {
+            return conflict("a workspace owner cannot be deleted");
+        }
         Err(error) => {
             return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -942,10 +943,8 @@ async fn admin_delete_principal(
             );
         }
     }
-    // Revoke before the row goes: a swallowed revoke error would leave a
-    // deleted principal's tokens live, and token validation never
-    // cross-checks the principals store. On a revoke failure the row stays
-    // intact, so the delete is retryable.
+    // Revoke active tokens, codes and authenticated pending logins before the
+    // runtime row goes. A failed revoke leaves the row in place for a retry.
     let revoked = match oauth.revoke_principal(&stable_id) {
         Ok(n) => n,
         Err(e) => return oauth_store_failure(e),
@@ -953,7 +952,11 @@ async fn admin_delete_principal(
     if let Err(e) = oauth.with_principals(|s| s.delete(&iss, &sub)) {
         return store_failure(e);
     }
-    tracing::info!(name = %row.name, revoked, "deleted principal and revoked token families");
+    tracing::info!(
+        name = %row.name,
+        revoked,
+        "deleted principal; removed workspace access, pending grants and token families"
+    );
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -2023,15 +2026,25 @@ mod tests {
     use crate::server::MCPServer;
     use crate::tools::ToolCategory;
 
-    /// A viewer state with no bearer token and the given scopes on the
-    /// credential. The category flags are process-wide atomics, so this goes
-    /// through the same entry point `src/main.rs` uses — and it enables both
-    /// graph categories, because clearing `graph-write` here would race the
-    /// dispatch-gate test in `src/server.rs`, which runs in this same binary.
+    const UI_TEST_BEARER: &str = "unit-ui-token";
+
+    fn ui_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {UI_TEST_BEARER}").parse().unwrap(),
+        );
+        headers
+    }
+
+    /// A viewer state with a static bearer and the given credential scopes.
+    /// The caller must present the token before the scope gate runs.
+    /// Both graph categories remain on to avoid a race with the server tests.
     fn ui_state(dir: &tempfile::TempDir, scopes: &[ToolCategory]) -> HttpState {
         let config = Config {
             memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
             legacy_owner_id: Some("machine:local".into()),
+            auth_token: Some(Arc::from(UI_TEST_BEARER)),
             enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
             ..Config::default()
         };
@@ -2042,7 +2055,7 @@ mod tests {
             kg,
             registry,
             vs: None,
-            auth_token: None,
+            auth_token: Some(Arc::from(UI_TEST_BEARER)),
             bearer_scopes: Arc::from(scopes),
             enabled_categories: Arc::from(&[ToolCategory::GraphRead, ToolCategory::GraphWrite][..]),
             oauth: None,
@@ -2056,7 +2069,7 @@ mod tests {
     async fn ui_graph_refuses_a_credential_without_the_graph_read_scope() {
         let dir = tempfile::tempdir().unwrap();
         let state = ui_state(&dir, &[ToolCategory::Vectors]);
-        let resp = ui_graph_handler(State(state), HeaderMap::new(), Query(HashMap::new())).await;
+        let resp = ui_graph_handler(State(state), ui_headers(), Query(HashMap::new())).await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
@@ -2065,7 +2078,7 @@ mod tests {
     async fn ui_graph_serves_a_credential_holding_the_graph_read_scope() {
         let dir = tempfile::tempdir().unwrap();
         let state = ui_state(&dir, &[ToolCategory::GraphRead]);
-        let resp = ui_graph_handler(State(state), HeaderMap::new(), Query(HashMap::new())).await;
+        let resp = ui_graph_handler(State(state), ui_headers(), Query(HashMap::new())).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -2082,6 +2095,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/ui/graph")
+                    .header(header::AUTHORIZATION, "Bearer unit-ui-token")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

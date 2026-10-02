@@ -15,9 +15,8 @@ pub struct Config {
     pub transport: Transport,
     pub bind_addr: String,
     pub durability: Durability,
-    /// Optional bearer token required on the `tcp` and `http` transports. When
-    /// `None`, those transports accept unauthenticated connections (stdio is
-    /// always local and never authenticated).
+    /// Optional HTTP static bearer token. HTTP also accepts OAuth credentials.
+    /// A server with neither credential cannot start; stdio stays local.
     pub auth_token: Option<Arc<str>>,
     pub mmap_size: i64,
     /// `PRAGMA page_size` in bytes (fresh DB only).
@@ -181,6 +180,23 @@ impl Config {
             busy_timeout_ms: self.busy_timeout_ms,
             ..SqliteTuning::default()
         }
+    }
+
+    /// Refuse an HTTP listener without a usable authentication method.
+    pub(crate) fn require_http_auth(oauth: bool, bearer: Option<&str>) -> Result<()> {
+        if bearer == Some("") {
+            return Err(MCSError::InvalidParams(
+                "the configured HTTP bearer token must not be empty".into(),
+            ));
+        }
+        if !oauth && bearer.is_none() {
+            return Err(MCSError::InvalidParams(
+                "HTTP requires OAuth via --oidc-issuer or a bearer via --auth-token, \
+                 --auth-token-file or MCP_MEMORY_AUTH_TOKEN"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn from_args(args: &super::Args) -> Result<Self> {
@@ -388,7 +404,7 @@ impl Config {
             None
         };
 
-        Ok(Config {
+        let config = Config {
             memory_file_path,
             legacy_owner_id: args.legacy_owner_id.clone(),
             transport: args.transport,
@@ -413,7 +429,16 @@ impl Config {
             legacy_observations: args.legacy_observations,
             oauth,
             bearer_scopes,
-        })
+        };
+        if config.transport == crate::Transport::Http
+            && config
+                .roles
+                .roles()
+                .contains(&crate::runtime::RuntimeRole::Mcp)
+        {
+            Self::require_http_auth(config.oauth.is_some(), config.auth_token.as_deref())?;
+        }
+        Ok(config)
     }
 }
 
