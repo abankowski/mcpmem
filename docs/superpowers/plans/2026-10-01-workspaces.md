@@ -33,7 +33,7 @@
 | 3 | `src/server.rs` tool dispatch, `src/tools.rs`, `tools.json`, `vector_tools.json`, `webhooks_tools.json`, `src/workspace.rs` graph cache, `tests/workspace_mcp.rs`, `tests/scope_gating.rs` | Tasks 1 and 2 |
 | 4 | `src/actions/webhooks.rs`, `src/runtime.rs`, `src/main.rs`, `src/server.rs` runtime assembly, `tests/workspace_workers.rs`, `tests/webhook_tools.rs`, `tests/role_composition.rs` | Task 3 selection |
 | 5 | `src/http.rs`, `src/server.rs` HTTP dispatcher entry, `tests/workspace_http.rs`, `tests/ui_http.rs`, `tests/vector_http.rs`, `tests/webhook_admin.rs` | Tasks 3 and 4 |
-| 6 | `src/ui/index.html`, `src/ui/graph.js`, `src/ui/graph.css`, viewer integration tests in `tests/workspace_http.rs` | Task 5 HTTP contract |
+| 6 | `src/ui/index.html`, `src/ui/graph.js`, `src/ui/graph.css`, `src/ui/admin.html`, `src/ui/admin.js`, viewer integration tests in `tests/workspace_http.rs` | Task 5 HTTP contract |
 | 7 | `README.md`, `CHANGES.md`, affected existing fixtures and contract tests | Tasks 1–6 |
 
 Tasks 1–5 share live Rust interfaces. Run them in order with one integration owner. Task 6 can run in a separate worktree after Task 5 fixes the HTTP shape; do not share an edit tree with another code editor. The controller integrates and reviews each task before the next dependent task starts. Task 7 owns the full pre-flight and the final end-to-end smoke check.
@@ -152,9 +152,9 @@ assert!(!ids(page).contains(&private_id));
 
 ### Task 6: `/ui` dropdown and request generation
 
-**Files:** Modify `src/ui/index.html`, `src/ui/graph.js`, `src/ui/graph.css`, `tests/workspace_http.rs`.
+**Files:** Modify `src/ui/index.html`, `src/ui/graph.js`, `src/ui/graph.css`, `src/ui/admin.html`, `src/ui/admin.js`, and `tests/workspace_http.rs`.
 
-**Interfaces:** The viewer reads `/ui/workspaces` with the current bearer. Its `workspaceId` state initializes from the result with `isDefault: true`. The dropdown emits explicit IDs on `/ui/graph`, `/ui/search`, `/ui/node`, and `/ui/expand`. It does not call `set_default_workspace`. Fetch each cursor page until `nextCursor` is `null`.
+**Interfaces:** The viewer reads `/ui/workspaces` with the current bearer. Its `workspaceId` state initializes from the result with `isDefault: true`. The dropdown emits explicit IDs on `/ui/graph`, `/ui/search`, `/ui/node`, and `/ui/expand`. It does not call `set_default_workspace`. Fetch each cursor page until `nextCursor` is `null`. The separate admin page accepts an owner workspace ID for its webhook controls and sends it in every webhook request. A blank admin ID uses the saved default. The admin token requests only `admin`, so the page must not depend on the `graph-read`-gated `/ui/workspaces` list.
 
 - [ ] **Step 1: Write a red viewer scenario.** Run the actual `/ui` page against a two-workspace server. Verify that the dropdown has both accessible graph names. Switch while a node or search request is in flight. Assert that the canvas and inspector show no data from the first graph after the switch. Check that an MCP call without an ID still uses the saved default.
 
@@ -170,8 +170,9 @@ function selectWorkspace(id) {
 
 - [ ] **Step 2: Observe the red viewer scenario before code.** The old toolbar has no selector and the old requests have no `workspaceId`.
 - [ ] **Step 3: Add the labeled dropdown and safe state transition.** Place it before the label filter. Populate the options from paginated `/ui/workspaces`. On switch, clear nodes, links, inspector, query, filters, and pager. Abort active fetches and compare the generation after each `await` before any state update. Give a revoked selection a visible error and refresh the dropdown.
-- [ ] **Step 4: Run the browser scenario and viewer tests.** Confirm session-only selection and both graph names. Reject stale results and revoked access.
-- [ ] **Step 5: Controller reviews the viewer diff and commits exact paths.** Include a screenshot or concrete browser observation in the report.
+- [ ] **Step 4: Keep webhook administration usable.** Add a labeled workspace ID field to the admin webhook section. If the caller enters an ID, append it to every webhook request. Show selection and access errors beside the field; do not hide the webhook section on those errors. Keep the field independent from the viewer session.
+- [ ] **Step 5: Run browser scenarios and viewer tests.** Confirm session-only viewer selection and both graph names. Reject stale results and revoked access. Confirm that the admin page can use an explicit owner ID with an admin-only token and reports a missing default without hiding its controls.
+- [ ] **Step 6: Controller reviews the UI diff and commits exact paths.** Include a screenshot or concrete browser observation in the report.
 
 ### Task 7: Documentation, full verification, and release review
 
