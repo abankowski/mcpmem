@@ -160,7 +160,9 @@ fn try_spawn_http_server(
     cmd.arg("-f")
         .arg(&db_path)
         .arg("--legacy-owner-id")
-        .arg("machine:local")
+        // The static bearer seeds and reads every graph in this file, so the
+        // legacy workspace is owned by `machine:static`, not `machine:local`.
+        .arg("machine:static")
         .arg("--transport")
         .arg("http")
         .arg("--bind")

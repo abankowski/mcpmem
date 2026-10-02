@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
@@ -77,7 +77,17 @@ pub fn open_connection() -> Result<Connection> {
     let db = SUBSCRIPTION_DB.get().ok_or_else(|| {
         MCSError::MemoryError("webhook subscription store not initialized".into())
     })?;
-    let conn = Connection::open(&db.path).map_err(mcpmem_core::events::sql_error)?;
+    open_connection_at(&db.path)
+}
+
+/// Open a short-lived connection to `path`'s subscription tables. The MCP
+/// handlers pass the selected workspace's graph file, so each workspace keeps
+/// its own subscriptions; the worker reads the same per-workspace table.
+pub fn open_connection_at(path: &Path) -> Result<Connection> {
+    let db = SUBSCRIPTION_DB.get().ok_or_else(|| {
+        MCSError::MemoryError("webhook subscription store not initialized".into())
+    })?;
+    let conn = Connection::open(path).map_err(mcpmem_core::events::sql_error)?;
     conn.busy_timeout(Duration::from_millis(db.busy_timeout_ms))
         .map_err(mcpmem_core::events::sql_error)?;
     Ok(conn)
@@ -350,10 +360,10 @@ fn opt_list<T: serde::de::DeserializeOwned>(params: &Value, field: &str) -> Resu
     Ok(items)
 }
 
-/// Register a webhook subscription. Stores `endpoint`, the event/entity
-/// filters, and `secretRef` — never secret material — and returns the
-/// generated `subscriptionId`.
-pub fn handle_webhook_add_subscription(args: Option<&Value>) -> Result<Value> {
+/// Register a webhook subscription on the selected workspace's graph file.
+/// Stores `endpoint`, the event/entity filters, and `secretRef` — never
+/// secret material — and returns the generated `subscriptionId`.
+pub fn handle_webhook_add_subscription(args: Option<&Value>, graph_path: &Path) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
 
     let endpoint = params
@@ -398,7 +408,7 @@ pub fn handle_webhook_add_subscription(args: Option<&Value>) -> Result<Value> {
     };
     let subscription_id = subscription.subscription_id;
 
-    let conn = open_connection()?;
+    let conn = open_connection_at(graph_path)?;
     SubscriptionRepository::new(&conn).upsert(subscription)?;
 
     let text = serde_json::to_string(&json!({ "subscriptionId": subscription_id }))
@@ -406,9 +416,13 @@ pub fn handle_webhook_add_subscription(args: Option<&Value>) -> Result<Value> {
     Ok(text_content!(text))
 }
 
-/// Delete a webhook subscription by id. Deleting an id that does not exist is
-/// not an error: `deleted` reports whether a row was actually removed.
-pub fn handle_webhook_delete_subscription(args: Option<&Value>) -> Result<Value> {
+/// Delete a webhook subscription by id from the selected workspace's graph
+/// file. Deleting an id that does not exist is not an error: `deleted`
+/// reports whether a row was actually removed.
+pub fn handle_webhook_delete_subscription(
+    args: Option<&Value>,
+    graph_path: &Path,
+) -> Result<Value> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
     let subscription_id = params
         .get("subscriptionId")
@@ -417,7 +431,7 @@ pub fn handle_webhook_delete_subscription(args: Option<&Value>) -> Result<Value>
     let id = Uuid::parse_str(subscription_id)
         .map_err(|e| MCSError::InvalidParams(format!("Invalid 'subscriptionId': {e}")))?;
 
-    let conn = open_connection()?;
+    let conn = open_connection_at(graph_path)?;
     let deleted = SubscriptionRepository::new(&conn).delete(id)?;
 
     let text = serde_json::to_string(&json!({ "subscriptionId": id, "deleted": deleted }))
@@ -562,11 +576,14 @@ mod tests {
         let conn = open_connection().expect("the subscription store opens");
 
         let result = with_test_kit(Some(kit_with(&["n8n"])), || {
-            handle_webhook_add_subscription(Some(&json!({
-                "endpoint": "https://hooks.example.test/receive",
-                "consumerOrigin": "https://example.test",
-                "secretRef": "stripe",
-            })))
+            handle_webhook_add_subscription(
+                Some(&json!({
+                    "endpoint": "https://hooks.example.test/receive",
+                    "consumerOrigin": "https://example.test",
+                    "secretRef": "stripe",
+                })),
+                &dir.path().join("memory.db"),
+            )
         });
 
         assert!(

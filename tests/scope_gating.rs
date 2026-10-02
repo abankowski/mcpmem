@@ -2,25 +2,61 @@
 
 use mcpmem::authz::{Principal, allows_tool, bearer_principal, local_principal, missing_scope};
 use mcpmem::config::Config;
-use mcpmem::kg::GraphHandle;
 use mcpmem::server::{HttpOutcome, MCPServer, dispatch_http_body};
 use mcpmem::tools::ToolCategory;
+use mcpmem::workspace::{WorkspaceHandles, WorkspaceRegistry};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// A graph whose `graph-read` and `graph-write` categories are both enabled.
-/// Those flags are process-wide, so this goes through the same entry point
-/// `src/main.rs` uses rather than setting the atomics directly.
-fn test_graph(dir: &tempfile::TempDir) -> Arc<GraphHandle> {
+/// A graph whose `graph-read` and `graph-write` categories are both enabled,
+/// together with the registry and handle cache of the same server (workspace
+/// selection resolves through them). Those flags are process-wide, so this
+/// goes through the same entry point `src/main.rs` uses rather than setting
+/// the atomics directly.
+///
+/// The fixture also configures the static bearer as a real account: a
+/// registered `machine:static` with a writer grant on the legacy workspace
+/// and that workspace saved as its default. That models a deployment where
+/// the token holder is a first-class identity; the scope-gating tests below
+/// exercise scope refusal, not workspace selection, so their write controls
+/// must not fail with a selection error.
+struct TestServer {
+    registry: Arc<WorkspaceRegistry>,
+    handles: Arc<WorkspaceHandles>,
+}
+
+fn test_graph(dir: &tempfile::TempDir) -> TestServer {
     let config = Config {
         memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
         legacy_owner_id: Some("machine:local".into()),
+        auth_token: Some("scope-test-bearer".into()),
         enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
         ..Config::default()
     };
-    MCPServer::new_kg(config)
-        .expect("test server builds")
-        .graph()
+    let server = MCPServer::new_kg(config).expect("test server builds");
+    let registry = server.workspace_registry();
+    let legacy = registry
+        .all_paths()
+        .expect("registered paths")
+        .into_iter()
+        .find(|(_, path)| path.ends_with("memory.db"))
+        .expect("the legacy workspace")
+        .0;
+    registry
+        .grant("machine:local", &legacy, "machine:static", "writer")
+        .expect("static bearer is a registered identity");
+    registry
+        .set_default("machine:static", &legacy)
+        .expect("static bearer default saves");
+    TestServer {
+        registry: server.workspace_registry(),
+        handles: server.workspace_handles(),
+    }
+}
+
+/// Dispatch a body against the test server, keeping the workspace context.
+fn dispatch(s: &TestServer, principal: &Principal, body: &str) -> Result<HttpOutcome, String> {
+    dispatch_http_body(body, principal, &s.registry, &s.handles)
 }
 
 fn body_of(outcome: HttpOutcome) -> Value {
@@ -137,7 +173,7 @@ fn missing_scope_and_allows_tool_agree_on_every_known_tool() {
 #[test]
 fn a_denied_notification_does_not_refuse_the_batch() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = test_graph(&dir);
+    let s = test_graph(&dir);
     let p = bearer_principal(&[ToolCategory::GraphRead]);
     let body = r#"[
         {"jsonrpc":"2.0","method":"tools/call",
@@ -146,7 +182,7 @@ fn a_denied_notification_does_not_refuse_the_batch() {
          "params":{"name":"upsert_entities","arguments":{"entities":[]}}},
         {"jsonrpc":"2.0","id":2,"method":"tools/list"}
     ]"#;
-    let v = body_of(dispatch_http_body(body, &kg, None, &p).unwrap());
+    let v = body_of(dispatch(&s, &p, body).unwrap());
     let items = v.as_array().expect("a batch answers with an array");
     assert_eq!(items.len(), 1, "only the request is answered: {v}");
     assert_eq!(items[0]["id"], 2, "{v}");
@@ -170,11 +206,11 @@ fn an_unknown_tool_is_never_allowed() {
 #[test]
 fn dispatch_denies_a_write_tool_for_a_read_only_principal() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = test_graph(&dir);
+    let s = test_graph(&dir);
     let p = bearer_principal(&[ToolCategory::GraphRead]);
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"delete_entities","arguments":{"entityNames":["a"]}}}"#;
-    match dispatch_http_body(body, &kg, None, &p).unwrap() {
+    match dispatch(&s, &p, body).unwrap() {
         HttpOutcome::InsufficientScope(scopes) => assert_eq!(scopes, vec!["graph-write"]),
         other => panic!("expected a scope refusal, got {other:?}"),
     }
@@ -183,11 +219,11 @@ fn dispatch_denies_a_write_tool_for_a_read_only_principal() {
 #[test]
 fn dispatch_allows_a_write_tool_for_a_full_scope_principal() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = test_graph(&dir);
+    let s = test_graph(&dir);
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"create_entities","arguments":{"entities":[
             {"name":"alpha","entityType":"thing","observations":[]}]}}}"#;
-    let v = body_of(dispatch_http_body(body, &kg, None, &local_principal()).unwrap());
+    let v = body_of(dispatch(&s, &local_principal(), body).unwrap());
     assert!(v["error"].is_null(), "full scope must not be refused: {v}");
     assert_ne!(v["result"]["isError"], Value::Bool(true), "{v}");
 }
@@ -198,7 +234,7 @@ fn dispatch_allows_a_write_tool_for_a_full_scope_principal() {
 #[test]
 fn a_batch_with_one_denied_call_applies_none_of_it() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = test_graph(&dir);
+    let s = test_graph(&dir);
     let p = bearer_principal(&[ToolCategory::GraphRead, ToolCategory::GraphWrite]);
     let body = r#"[
         {"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -207,14 +243,14 @@ fn a_batch_with_one_denied_call_applies_none_of_it() {
         {"jsonrpc":"2.0","id":2,"method":"tools/call",
          "params":{"name":"hybrid_search","arguments":{"queryText":"x"}}}
     ]"#;
-    match dispatch_http_body(body, &kg, None, &p).unwrap() {
+    match dispatch(&s, &p, body).unwrap() {
         HttpOutcome::InsufficientScope(scopes) => assert_eq!(scopes, vec!["vectors"]),
         other => panic!("expected a scope refusal, got {other:?}"),
     }
 
     let check = r#"{"jsonrpc":"2.0","id":9,"method":"tools/call",
         "params":{"name":"read_graph","arguments":{}}}"#;
-    let v = body_of(dispatch_http_body(check, &kg, None, &local_principal()).unwrap());
+    let v = body_of(dispatch(&s, &local_principal(), check).unwrap());
     assert!(
         !v.to_string().contains("beta"),
         "the refused batch must not have created 'beta': {v}"
@@ -225,8 +261,8 @@ fn a_batch_with_one_denied_call_applies_none_of_it() {
     let allowed = r#"[{"jsonrpc":"2.0","id":1,"method":"tools/call",
          "params":{"name":"create_entities","arguments":{"entities":[
             {"name":"beta","entityType":"thing","observations":[]}]}}}]"#;
-    body_of(dispatch_http_body(allowed, &kg, None, &p).unwrap());
-    let v = body_of(dispatch_http_body(check, &kg, None, &local_principal()).unwrap());
+    body_of(dispatch(&s, &p, allowed).unwrap());
+    let v = body_of(dispatch(&s, &local_principal(), check).unwrap());
     assert!(v.to_string().contains("beta"), "control failed: {v}");
 }
 
@@ -234,7 +270,7 @@ fn a_batch_with_one_denied_call_applies_none_of_it() {
 #[test]
 fn a_denied_batch_names_every_missing_scope_once() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = test_graph(&dir);
+    let s = test_graph(&dir);
     let p = bearer_principal(&[ToolCategory::GraphRead]);
     let body = r#"[
         {"jsonrpc":"2.0","id":1,"method":"tools/call",
@@ -246,7 +282,7 @@ fn a_denied_batch_names_every_missing_scope_once() {
         {"jsonrpc":"2.0","id":4,"method":"tools/call",
          "params":{"name":"read_graph","arguments":{}}}
     ]"#;
-    match dispatch_http_body(body, &kg, None, &p).unwrap() {
+    match dispatch(&s, &p, body).unwrap() {
         HttpOutcome::InsufficientScope(scopes) => {
             assert_eq!(scopes, vec!["graph-write", "vectors"]);
         }
@@ -255,9 +291,9 @@ fn a_denied_batch_names_every_missing_scope_once() {
 }
 
 /// The tool names `tools/list` advertises to `principal`.
-fn listed_tool_names(kg: &GraphHandle, principal: &Principal) -> Vec<String> {
+fn listed_tool_names(s: &TestServer, principal: &Principal) -> Vec<String> {
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
-    body_of(dispatch_http_body(body, kg, None, principal).unwrap())["result"]["tools"]
+    body_of(dispatch(s, principal, body).unwrap())["result"]["tools"]
         .as_array()
         .expect("tools array")
         .iter()
@@ -268,10 +304,10 @@ fn listed_tool_names(kg: &GraphHandle, principal: &Principal) -> Vec<String> {
 #[test]
 fn tools_list_hides_what_the_principal_may_not_call() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = test_graph(&dir);
+    let s = test_graph(&dir);
     let p = bearer_principal(&[ToolCategory::GraphRead]);
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
-    let v = body_of(dispatch_http_body(body, &kg, None, &p).unwrap());
+    let v = body_of(dispatch(&s, &p, body).unwrap());
     let names: Vec<&str> = v["result"]["tools"]
         .as_array()
         .unwrap()
@@ -290,10 +326,10 @@ fn tools_list_hides_what_the_principal_may_not_call() {
 #[test]
 fn management_tools_follow_their_category_scope() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = test_graph(&dir);
+    let s = test_graph(&dir);
 
     let reader = bearer_principal(&[ToolCategory::GraphRead]);
-    let names = listed_tool_names(&kg, &reader);
+    let names = listed_tool_names(&s, &reader);
     assert!(
         names.iter().any(|n| n == "list_workspaces"),
         "a graph-read caller must see list_workspaces: {names:?}"
@@ -304,7 +340,7 @@ fn management_tools_follow_their_category_scope() {
     );
 
     let writer = bearer_principal(&[ToolCategory::GraphRead, ToolCategory::GraphWrite]);
-    let names = listed_tool_names(&kg, &writer);
+    let names = listed_tool_names(&s, &writer);
     assert!(
         names.iter().any(|n| n == "create_workspace"),
         "a graph-write caller must see create_workspace: {names:?}"
@@ -314,7 +350,7 @@ fn management_tools_follow_their_category_scope() {
         "a non-admin machine must not see the machine tools: {names:?}"
     );
 
-    let names = listed_tool_names(&kg, &local_principal());
+    let names = listed_tool_names(&s, &local_principal());
     assert!(
         names.iter().any(|n| n == "create_machine_account"),
         "local stdio must see the machine tools: {names:?}"
@@ -330,10 +366,10 @@ fn management_tools_follow_their_category_scope() {
 #[test]
 fn an_unknown_tool_is_still_method_not_found() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = test_graph(&dir);
+    let s = test_graph(&dir);
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
         "params":{"name":"no_such_tool","arguments":{}}}"#;
-    let v = body_of(dispatch_http_body(body, &kg, None, &local_principal()).unwrap());
+    let v = body_of(dispatch(&s, &local_principal(), body).unwrap());
     assert_eq!(v["error"]["code"], -32601, "{v}");
 }
 
@@ -341,11 +377,11 @@ fn an_unknown_tool_is_still_method_not_found() {
 #[test]
 fn a_notification_only_body_is_accepted() {
     let dir = tempfile::tempdir().unwrap();
-    let kg = test_graph(&dir);
+    let s = test_graph(&dir);
     let body = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     let p = bearer_principal(&[ToolCategory::GraphRead]);
     assert!(matches!(
-        dispatch_http_body(body, &kg, None, &p).unwrap(),
+        dispatch(&s, &p, body).unwrap(),
         HttpOutcome::Accepted
     ));
 }
