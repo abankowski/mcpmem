@@ -164,14 +164,24 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
     )
     .expect("the fixture registry reopens");
     let workspace_id = registry
-        .create(&principal_id, "admin-workspace", Visibility::Private, |_| Ok(()))
+        .create(
+            &principal_id,
+            "admin-workspace",
+            Visibility::Private,
+            |_| Ok(()),
+        )
         .expect("the admin workspace is created")
         .workspace_id;
     let (machine_id, _token) = registry
         .create_machine("other-owner", &["graph-read".to_owned()])
         .expect("the machine owner is created");
     let other_workspace_id = registry
-        .create(&machine_id, "machine-workspace", Visibility::Private, |_| Ok(()))
+        .create(
+            &machine_id,
+            "machine-workspace",
+            Visibility::Private,
+            |_| Ok(()),
+        )
         .expect("the machine workspace is created")
         .workspace_id;
     // The test kit the admin Test button drives: `hooks.example.test` is the
@@ -609,10 +619,10 @@ async fn test_delivery_refuses_an_unknown_secret_ref() {
     // (red phase) the admin routes still read the process store on the
     // legacy file, so this test is red for exactly that routing gap; it
     // turns green when Task 5 resolves the workspace before the store opens.
-    let db = FIXTURE
-        ._dir
-        .path()
-        .join(format!("t.mcpmem.workspaces/{}.sqlite", FIXTURE.workspace_id));
+    let db = FIXTURE._dir.path().join(format!(
+        "t.mcpmem.workspaces/{}.sqlite",
+        FIXTURE.workspace_id
+    ));
     let conn = rusqlite::Connection::open(&db).expect("the workspace database opens");
     let subscription = WebhookSubscription {
         subscription_id: uuid::Uuid::new_v4(),

@@ -72,8 +72,10 @@ async fn viewer() -> Viewer {
         scopes: vec!["graph-read".into(), "graph-write".into()],
     });
     let srv = support::server(Some(config.clone()), support::Scopes::all(), None).await;
-    let owner_id = mcpmem::principals::human_id(&config.principals[0].iss, &config.principals[0].sub);
-    let reader_id = mcpmem::principals::human_id(&config.principals[1].iss, &config.principals[1].sub);
+    let owner_id =
+        mcpmem::principals::human_id(&config.principals[0].iss, &config.principals[0].sub);
+    let reader_id =
+        mcpmem::principals::human_id(&config.principals[1].iss, &config.principals[1].sub);
     let (owner, reader) = srv.oauth().with_store(|store| {
         (
             plant(
@@ -259,7 +261,11 @@ async fn viewer_read_on_an_inaccessible_graph_is_not_found() {
         &format!("/ui/graph?workspaceId={}", fx.private_id),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "a private graph the reader cannot access is not-found");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a private graph the reader cannot access is not-found"
+    );
 
     let (status, _) = get(
         &fx.srv,
@@ -313,7 +319,11 @@ async fn revoking_a_grant_changes_the_next_viewer_response() {
         &format!("/ui/graph?workspaceId={}", fx.private_id),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "a granted reader can read the graph: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a granted reader can read the graph: {body}"
+    );
     assert!(
         body.contains("Alice"),
         "the granted read answers with the private graph's rows: {body}"
@@ -532,7 +542,11 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
         &format!("/ui/expand?workspaceId={}&name=Alice", fx.private_id),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "expand in the private graph: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "expand in the private graph: {body}"
+    );
     assert!(
         body.contains("Acme"),
         "the neighbourhood is the private graph's: {body}"

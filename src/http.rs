@@ -942,8 +942,23 @@ async fn admin_delete_principal(
         Err(e) => return store_failure(e),
     };
     let stable_id = crate::principals::human_id(&iss, &sub);
-    match state.registry.clear_human_access(&stable_id) {
-        Ok(()) => {}
+    // Hold the sidecar write lock across the owner check, OAuth revocation,
+    // runtime row deletion, and access cleanup. Acquire OAuth and runtime
+    // store locks only after the registry lock; neither store calls back into
+    // the registry here. A failed store operation rolls back access cleanup.
+    // A registry commit error after the runtime delete cannot restore that
+    // row across the two SQLite files. Return the registry error in that case.
+    let revoked = match state.registry.with_human_access_cleanup(&stable_id, || {
+        let revoked = oauth
+            .revoke_principal(&stable_id)
+            .map_err(|error| Box::new(oauth_store_failure(error)))?;
+        oauth
+            .with_principals(|s| s.delete(&iss, &sub))
+            .map_err(|error| Box::new(store_failure(error)))?;
+        Ok::<_, Box<Response>>(revoked)
+    }) {
+        Ok(Ok(revoked)) => revoked,
+        Ok(Err(response)) => return *response,
         Err(crate::workspace::WorkspaceError::AccessDenied) => {
             return conflict("a workspace owner cannot be deleted");
         }
@@ -953,23 +968,7 @@ async fn admin_delete_principal(
                 format!("workspace registry: {error}"),
             );
         }
-    }
-    // Revoke active tokens, codes and authenticated pending logins before the
-    // runtime row goes. A failed revoke leaves the row in place for a retry.
-    let revoked = match oauth.revoke_principal(&stable_id) {
-        Ok(n) => n,
-        Err(e) => return oauth_store_failure(e),
     };
-    if let Err(e) = oauth.with_principals(|s| s.delete(&iss, &sub)) {
-        return store_failure(e);
-    }
-    // A concurrent owner grant can commit between the first access sweep and
-    // this row delete: its registration check passed while the row still
-    // existed. Any later grant fails that check, because the row is gone now,
-    // so one more sweep under the registry lock closes every ordering.
-    if let Err(e) = state.registry.clear_human_access(&stable_id) {
-        return store_failure(e);
-    }
     tracing::info!(
         name = %row.name,
         revoked,
