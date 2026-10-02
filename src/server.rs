@@ -1,8 +1,6 @@
 use serde_json::{Value, json};
 use std::num::NonZeroUsize;
-use std::path::Path;
-#[cfg(feature = "code")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -413,10 +411,22 @@ impl MCPServer {
             config.legacy_observations,
             std::sync::atomic::Ordering::Relaxed,
         );
-        let path = Path::new(&config.memory_file_path);
+        // Normalize the memory path once, before the registry and the graph
+        // open it. The registry stores absolute paths, and the legacy-id
+        // lookup below compares the memory path against them; with a relative
+        // `-f` path the comparison must not see two different spellings of
+        // one file.
+        let path = {
+            let raw = Path::new(&config.memory_file_path);
+            if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                std::env::current_dir()?.join(raw)
+            }
+        };
         let registry = Arc::new(
             WorkspaceRegistry::open_with_principals(
-                path,
+                &path,
                 config.legacy_owner_id.as_deref(),
                 config
                     .oauth
@@ -429,7 +439,7 @@ impl MCPServer {
         let lru_cache = NonZeroUsize::new(config.lru_cache_size)
             .unwrap_or_else(|| NonZeroUsize::new(10000).expect("10000 > 0"));
         let kg = Arc::new(GraphHandle::new(
-            path,
+            &path,
             config.durability,
             config.sqlite_tuning(),
             lru_cache,
@@ -437,7 +447,7 @@ impl MCPServer {
         )?);
 
         let vs = if config.vectors_enabled {
-            Some(Arc::new(VectorStore::with_config(path, &vec_config)?))
+            Some(Arc::new(VectorStore::with_config(&path, &vec_config)?))
         } else {
             None
         };
@@ -450,7 +460,7 @@ impl MCPServer {
             .all_paths()
             .map_err(|error| MCSError::InvalidParams(error.to_string()))?
             .into_iter()
-            .find(|(_, graph_path)| graph_path == path)
+            .find(|(_, graph_path)| graph_path == &path)
             .map(|(id, _)| id)
             .ok_or_else(|| {
                 MCSError::InvalidParams("the registry has no legacy workspace".into())
@@ -993,32 +1003,28 @@ fn in_scope(tool: &Value, principal: &Principal) -> bool {
 }
 
 /// `false` for a vector tool this process cannot run. Only `semantic_search`
-/// carries a profile-specific condition. It needs a serving profile and a
-/// provider that can embed for that profile kind.
+/// carries an availability condition: it is advertised when this process has
+/// an embedding provider configured. Which workspace can actually serve a
+/// call is validated per call against the selected workspace's serving
+/// profile — the legacy store's profile alone must not hide the tool when a
+/// registered workspace holds the profile.
 #[inline]
-fn vector_tool_listed(tool: &Value, vs: Option<&VectorStore>) -> bool {
+fn vector_tool_listed(tool: &Value, _vs: Option<&VectorStore>) -> bool {
     match tool.get("name").and_then(Value::as_str) {
-        Some(tools::SEMANTIC_SEARCH) => semantic_search_available(vs),
+        Some(tools::SEMANTIC_SEARCH) => provider_configured(),
         _ => true,
     }
 }
 
-/// Whether `semantic_search` can work with this store. The tool needs the
-/// `indexer` feature, a serving profile and a provider for the profile kind.
-/// A profile read error hides the tool, because the handler cannot work.
+/// Whether an embedding provider is configured for this process. The
+/// per-call handler decides whether the selected workspace's profile can
+/// actually embed; listing only needs to know the tool could work somewhere.
 #[cfg(feature = "indexer")]
-fn semantic_search_available(vs: Option<&VectorStore>) -> bool {
-    if !crate::indexer_provider::is_configured() {
-        return false;
-    }
-    let Some(profile) = vs.and_then(|store| store.serving_profile().ok().flatten()) else {
-        return false;
-    };
-    crate::indexer_provider::get()
-        .is_some_and(|provider| provider.supports_provider_kind(&profile.provider_kind))
+fn provider_configured() -> bool {
+    crate::indexer_provider::is_configured()
 }
 #[cfg(not(feature = "indexer"))]
-const fn semantic_search_available(_vs: Option<&VectorStore>) -> bool {
+const fn provider_configured() -> bool {
     false
 }
 
@@ -1049,9 +1055,17 @@ fn resolve_for_call(
     registry: &WorkspaceRegistry,
     access: WorkspaceAccess,
 ) -> std::result::Result<WorkspaceRecord, Value> {
-    let requested = tool_args
-        .and_then(|a| a.get("workspaceId"))
-        .and_then(Value::as_str);
+    // An explicit `workspaceId` of the wrong type is an input error. It must
+    // not read as "absent": a malformed selector must never fall back to the
+    // caller's default, where a write could land unseen.
+    let requested = match tool_args.and_then(|a| a.get("workspaceId")) {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| tool_error("'workspaceId' must be a string when present"))?,
+        ),
+    };
     registry
         .resolve(&principal.id, requested, access)
         .map_err(|e| tool_error(&e.to_string()))
@@ -1102,8 +1116,18 @@ fn handle_tools_call(
     let tool_args = adapted_args.as_ref().or(tool_args);
 
     // Workspace-management tools operate on the registry itself; they have no
-    // graph selection of their own.
+    // graph selection of their own. They follow the same process-wide
+    // category gate as the graph tools: reads need graph-read, mutations
+    // need graph-write, regardless of what scopes the caller holds.
     if tools::is_management_tool_name(tool_name) {
+        let category_enabled = if tools::is_write_tool(tool_name) {
+            graph_write_enabled()
+        } else {
+            graph_read_enabled()
+        };
+        if !category_enabled {
+            return Err(MCSError::MethodNotFound(tool_name.to_string()));
+        }
         let result = handle_management_tool(tool_name, tool_args, principal, registry, handles);
         return Ok(result.unwrap_or_else(|e| {
             error!("Tool '{tool_name}' error: {e}");
@@ -1471,12 +1495,28 @@ fn handle_management_tool(
         }
         "list_workspaces" => {
             let params = tool_args.unwrap_or(&Value::Null);
-            let cursor = params.get("cursor").and_then(Value::as_str);
+            // A typed cursor is an input error, not "no cursor": an opaque
+            // selector must never silently restart from the first page.
+            let cursor =
+                match params.get("cursor") {
+                    None => None,
+                    Some(value) => Some(value.as_str().ok_or_else(|| {
+                        MCSError::InvalidParams("'cursor' must be a string".into())
+                    })?),
+                };
             let limit = match params.get("limit") {
                 None => 100,
-                Some(value) => value.as_u64().ok_or_else(|| {
-                    MCSError::InvalidParams("'limit' must be a positive integer".into())
-                })? as usize,
+                Some(value) => {
+                    let limit = value.as_u64().ok_or_else(|| {
+                        MCSError::InvalidParams("'limit' must be a positive integer".into())
+                    })?;
+                    if limit == 0 {
+                        return Err(MCSError::InvalidParams(
+                            "'limit' must be a positive integer".into(),
+                        ));
+                    }
+                    limit as usize
+                }
             };
             let page = registry
                 .list(&principal.id, cursor, limit)

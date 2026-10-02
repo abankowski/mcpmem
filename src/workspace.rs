@@ -1056,15 +1056,19 @@ impl WorkspaceHandles {
             )),
             None => None,
         };
+        // Evict least-recently-used non-pinned entries until under the bound.
+        // The pinned legacy entry must not block eviction: skip past it and
+        // keep looking, so the cache can never exceed `BOUND` entries.
         while cache.entries.len() >= Self::BOUND {
-            let Some(id) = cache.recency.pop_front() else {
-                break;
-            };
-            if cache.pinned.contains(&id) {
-                cache.recency.push_front(id);
-                break;
+            match cache.recency.pop_front() {
+                Some(id) if cache.pinned.contains(&id) => {
+                    cache.recency.push_back(id);
+                }
+                Some(id) => {
+                    cache.entries.remove(&id);
+                }
+                None => break,
             }
-            cache.entries.remove(&id);
         }
         let entry = WorkspaceEntry {
             kg: Arc::clone(&kg),
@@ -1110,4 +1114,99 @@ fn appended_path(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The handle cache is bounded: after more workspaces than the bound are
+    /// opened, the pinned legacy entry survives and the entry count stays at
+    /// most [`WorkspaceHandles::BOUND`].
+    #[test]
+    fn handle_cache_stays_within_bound_and_keeps_the_legacy_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = dir.path().join("memory.sqlite");
+        let registry =
+            WorkspaceRegistry::open(&memory, Some("machine:local")).expect("registry opens");
+        let (legacy_id, _) = registry
+            .all_paths()
+            .expect("registered paths")
+            .into_iter()
+            .find(|(_, graph_path)| graph_path == &memory)
+            .expect("the legacy workspace");
+        let legacy_kg = Arc::new(
+            GraphHandle::new(
+                &memory,
+                Durability::Sync,
+                SqliteTuning::default(),
+                NonZeroUsize::new(32).unwrap(),
+                2,
+            )
+            .expect("legacy graph opens"),
+        );
+        let handles = WorkspaceHandles::new(
+            &legacy_id,
+            Arc::clone(&legacy_kg),
+            None,
+            HandleSpec {
+                durability: Durability::Sync,
+                tuning: SqliteTuning::default(),
+                lru_cache_size: NonZeroUsize::new(32).unwrap(),
+                read_pool_size: 2,
+                vector_dims: None,
+            },
+        );
+
+        for index in 0..40 {
+            let view = registry
+                .create(
+                    "machine:local",
+                    &format!("ws-{index}"),
+                    Visibility::Private,
+                    |_| Ok(()),
+                )
+                .expect("workspace creation succeeds");
+            let record = registry
+                .resolve(
+                    "machine:local",
+                    Some(&view.workspace_id),
+                    WorkspaceAccess::Read,
+                )
+                .expect("the new workspace resolves");
+            handles.get(&record).expect("the entry opens");
+        }
+
+        let cache = handles.inner.lock().expect("cache lock");
+        assert!(
+            cache.entries.len() <= WorkspaceHandles::BOUND,
+            "the cache exceeded its bound: {} entries",
+            cache.entries.len()
+        );
+        assert!(
+            cache.entries.contains_key(&legacy_id),
+            "the pinned legacy entry must survive every eviction"
+        );
+        let recency_len = cache.recency.len();
+        drop(cache);
+        assert!(
+            recency_len <= WorkspaceHandles::BOUND,
+            "the recency queue must stay bounded too: {recency_len}"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &legacy_kg,
+                &handles
+                    .inner
+                    .lock()
+                    .expect("cache lock")
+                    .entries
+                    .get(&legacy_id)
+                    .expect("legacy entry")
+                    .kg
+                    .clone()
+            ),
+            "the cached legacy handle must be the server's own handle, not a re-open"
+        );
+    }
 }
