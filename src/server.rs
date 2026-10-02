@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "code")]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
