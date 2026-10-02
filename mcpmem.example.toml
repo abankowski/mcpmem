@@ -12,9 +12,10 @@
 #
 # Every key below is commented out, so this file changes nothing until you
 # uncomment a line. A key in [server], [storage], [tools] or [vectors] shows its
-# default. A key in [security] or [oauth] has no default, so it shows an example
-# value instead. The [indexer] section holds both kinds, and each comment says
-# which one it is. An unknown key or section is a startup error, not a warning.
+# default. A key in [security], [oauth] or [workspaces] has no default, so it
+# shows an example value instead. The [indexer] section holds both kinds, and
+# each comment says which one it is. An unknown key or section is a startup
+# error, not a warning.
 #
 # This file never holds a secret. It names the file that holds one.
 
@@ -178,6 +179,14 @@
 
 # "cosine", "inner-product" or "l2-squared". Shows its default.
 # metric = "cosine"
+
+
+[workspaces]
+# Stable identity that owns the memory file during the first workspace
+# migration. It must be a registered human or machine ID. Required only while
+# no workspace registry exists; later starts read the saved mapping and ignore
+# this key. No default.
+# legacy-owner-id = "human:..."
 
 
 [webhooks]
