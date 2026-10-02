@@ -1,6 +1,6 @@
 //! Per-principal tool gating: a caller may only reach the tools its scopes name.
 
-use mcpmem::authz::{allows_tool, bearer_principal, local_principal, missing_scope};
+use mcpmem::authz::{Principal, allows_tool, bearer_principal, local_principal, missing_scope};
 use mcpmem::config::Config;
 use mcpmem::kg::GraphHandle;
 use mcpmem::server::{HttpOutcome, MCPServer, dispatch_http_body};
@@ -30,13 +30,54 @@ fn body_of(outcome: HttpOutcome) -> Value {
     }
 }
 
-/// Every name the registry knows: knowledge-graph, vector and code tools.
+/// Workspace-management tool names from the approved spec (§"MCP contract").
+/// They land in `src/tools.rs` with Task 3; until then the registry does not
+/// know them, which is exactly what the red assertions below check: `scope_of`
+/// must answer for each one before `allows_tool` may.
+const MANAGEMENT_TOOL_NAMES: &[&str] = &[
+    "create_workspace",
+    "list_workspaces",
+    "get_workspace",
+    "set_workspace_visibility",
+    "list_workspace_grants",
+    "grant_workspace_access",
+    "revoke_workspace_access",
+    "set_default_workspace",
+    "create_machine_account",
+    "list_machine_accounts",
+    "revoke_machine_account",
+];
+
+/// The scope each Task-3 name must carry, pinned from the spec: every read is
+/// `graph-read`, every mutation is `graph-write`, and the webhook tools keep
+/// the `graph-write` category `src/tools.rs` already gives them.
+fn expected_scope_of(name: &str) -> Option<&'static str> {
+    match name {
+        "webhook_add_subscription" | "webhook_delete_subscription" => Some("graph-write"),
+        "list_workspaces" | "get_workspace" | "list_workspace_grants" | "set_default_workspace" => {
+            Some("graph-read")
+        }
+        "create_workspace"
+        | "set_workspace_visibility"
+        | "grant_workspace_access"
+        | "revoke_workspace_access"
+        | "create_machine_account"
+        | "list_machine_accounts"
+        | "revoke_machine_account" => Some("graph-write"),
+        _ => None,
+    }
+}
+
+/// Every name the registry knows: knowledge-graph, vector, code and webhook
+/// tools, plus the workspace-management names Task 3 adds.
 fn every_tool_name() -> Vec<&'static str> {
     mcpmem::tools::ALL_TOOLS
         .iter()
         .map(|t| t.name)
         .chain(mcpmem::tools::VECTOR_TOOL_NAMES.iter().copied())
         .chain(mcpmem::tools::CODE_TOOL_NAMES.iter().copied())
+        .chain(mcpmem::tools::WEBHOOK_TOOL_NAMES.iter().copied())
+        .chain(MANAGEMENT_TOOL_NAMES.iter().copied())
         .collect()
 }
 
@@ -63,6 +104,12 @@ fn missing_scope_and_allows_tool_agree_on_every_known_tool() {
     for p in &principals {
         for name in every_tool_name() {
             let scope = mcpmem::tools::scope_of(name).expect("known tool has a scope");
+            // The Task-3 names keep the category the spec pins; before they
+            // are registered `scope_of` is None and the expect above fails,
+            // which is the red this test exists to show.
+            if let Some(expected) = expected_scope_of(name) {
+                assert_eq!(scope, expected, "{name} must keep its approved category");
+            }
             // Single owner: for a known tool the two are the same decision.
             assert_eq!(
                 allows_tool(p, name),
@@ -108,9 +155,11 @@ fn a_denied_notification_does_not_refuse_the_batch() {
 #[test]
 fn a_local_principal_may_call_every_known_tool() {
     let p = local_principal();
-    assert!(allows_tool(&p, "read_graph"));
-    assert!(allows_tool(&p, "delete_entities"));
-    assert!(allows_tool(&p, "hybrid_search"));
+    // RED until Task 3: the management names are unknown to the registry, so
+    // `allows_tool` answers false for them and this loop fails.
+    for name in every_tool_name() {
+        assert!(allows_tool(&p, name), "{name}");
+    }
 }
 
 #[test]
@@ -205,6 +254,17 @@ fn a_denied_batch_names_every_missing_scope_once() {
     }
 }
 
+/// The tool names `tools/list` advertises to `principal`.
+fn listed_tool_names(kg: &GraphHandle, principal: &Principal) -> Vec<String> {
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    body_of(dispatch_http_body(body, kg, None, principal).unwrap())["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name").to_owned())
+        .collect()
+}
+
 #[test]
 fn tools_list_hides_what_the_principal_may_not_call() {
     let dir = tempfile::tempdir().unwrap();
@@ -220,6 +280,49 @@ fn tools_list_hides_what_the_principal_may_not_call() {
         .collect();
     assert!(names.contains(&"read_graph"));
     assert!(!names.contains(&"delete_entities"));
+}
+
+/// The Task-3 management tools appear in `tools/list` by their category: a
+/// `graph-read` caller sees the read side, a `graph-write` caller sees the
+/// mutations, and the machine-account tools need an admin human or local
+/// stdio even with `graph-write`. RED until Task 3 registers the names, so
+/// the "must see" assertions fail for exactly that reason.
+#[test]
+fn management_tools_follow_their_category_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let kg = test_graph(&dir);
+
+    let reader = bearer_principal(&[ToolCategory::GraphRead]);
+    let names = listed_tool_names(&kg, &reader);
+    assert!(
+        names.iter().any(|n| n == "list_workspaces"),
+        "a graph-read caller must see list_workspaces: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "create_workspace"),
+        "a graph-read caller must not see create_workspace: {names:?}"
+    );
+
+    let writer = bearer_principal(&[ToolCategory::GraphRead, ToolCategory::GraphWrite]);
+    let names = listed_tool_names(&kg, &writer);
+    assert!(
+        names.iter().any(|n| n == "create_workspace"),
+        "a graph-write caller must see create_workspace: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "create_machine_account"),
+        "a non-admin machine must not see the machine tools: {names:?}"
+    );
+
+    let names = listed_tool_names(&kg, &local_principal());
+    assert!(
+        names.iter().any(|n| n == "create_machine_account"),
+        "local stdio must see the machine tools: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "revoke_machine_account"),
+        "local stdio must see revoke_machine_account: {names:?}"
+    );
 }
 
 /// Gating must not swallow the unknown-tool case: an unknown name is still a
