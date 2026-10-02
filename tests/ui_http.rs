@@ -338,9 +338,10 @@ fn get(port: u16, path: &str, bearer: Option<&str>) -> (u16, String, String) {
 /// object directly (`result.workspace`), so the helper reads that shape.
 fn workspace_of(body: &str) -> serde_json::Value {
     let v: serde_json::Value = serde_json::from_str(body).expect("jsonrpc body");
-    let result = v.get("result").unwrap_or_else(|| panic!("no result: {body}"));
-    result["workspace"]
-        .clone()
+    let result = v
+        .get("result")
+        .unwrap_or_else(|| panic!("no result: {body}"));
+    result["workspace"].clone()
 }
 
 /// Register one private workspace for `bearer` over MCP and return its id.
@@ -508,7 +509,11 @@ fn test_ui_expand_requires_name_and_permission() {
     // Missing name → 400 (client error).
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
-    let (status, _, _) = get(srv.port, &format!("/ui/expand?workspaceId={ws}"), Some(TEST_BEARER));
+    let (status, _, _) = get(
+        srv.port,
+        &format!("/ui/expand?workspaceId={ws}"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 400, "expand without a name should be 400");
     drop(srv);
 
@@ -675,7 +680,11 @@ fn test_ui_graph_auth_gate() {
     );
 
     // Correct token via the Authorization header → 200.
-    let (status, _, _) = get(srv.port, &format!("/ui/graph?workspaceId={ws}"), Some("s3cret"));
+    let (status, _, _) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}"),
+        Some("s3cret"),
+    );
     assert_eq!(status, 200, "bearer header token should be accepted");
 
     // The shell itself carries no data, so it is reachable without a token.
@@ -709,7 +718,11 @@ fn test_ui_graph_unknown_workspace_id_is_not_found() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
     // The positive selector works: the fixture's own workspace reads.
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
-    let (status, _, _) = get(srv.port, &format!("/ui/graph?workspaceId={ws}"), Some(TEST_BEARER));
+    let (status, _, _) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 200, "the owned workspace id should read");
 
     let (status, _, _) = get(
@@ -719,7 +732,11 @@ fn test_ui_graph_unknown_workspace_id_is_not_found() {
     );
     assert_eq!(status, 404, "an unknown workspace id must be not-found");
 
-    let (status, _, _) = get(srv.port, "/ui/graph?workspaceId=not-a-uuid", Some(TEST_BEARER));
+    let (status, _, _) = get(
+        srv.port,
+        "/ui/graph?workspaceId=not-a-uuid",
+        Some(TEST_BEARER),
+    );
     assert_eq!(
         status, 400,
         "a malformed workspace id is an input error, not a graph lookup"

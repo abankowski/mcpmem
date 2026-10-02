@@ -393,7 +393,7 @@ async fn create_update_delete_round_trip_and_delete_revokes() {
 }
 
 #[tokio::test]
-async fn deleting_a_workspace_owner_is_refused_before_its_token_is_revoked() {
+async fn runtime_human_owner_created_first_refuses_admin_deletion() {
     let (server, admin_token) = admin_server().await;
     let created = server
         .request(
@@ -414,14 +414,25 @@ async fn deleting_a_workspace_owner_is_refused_before_its_token_is_revoked() {
     let owner_id = mcpmem::principals::human_id("https://idp.example", "owner-1");
     let registry =
         mcpmem::workspace::WorkspaceRegistry::open(&server.memory_db_path(), None).unwrap();
-    let workspace = registry
-        .create(
-            &owner_id,
-            "owned graph",
-            mcpmem::workspace::Visibility::Private,
-            |_| Ok(()),
-        )
-        .unwrap();
+    let entered_init = std::sync::Barrier::new(2);
+    let resume_init = std::sync::Barrier::new(2);
+    let workspace = std::thread::scope(|scope| {
+        let creation = scope.spawn(|| {
+            registry.create(
+                &owner_id,
+                "owned graph",
+                mcpmem::workspace::Visibility::Private,
+                |_| {
+                    entered_init.wait();
+                    resume_init.wait();
+                    Ok(())
+                },
+            )
+        });
+        entered_init.wait();
+        resume_init.wait();
+        creation.join().unwrap().unwrap()
+    });
     assert!(
         registry
             .resolve(
@@ -463,6 +474,10 @@ async fn deleting_a_workspace_owner_is_refused_before_its_token_is_revoked() {
     assert_eq!(deleted.status(), StatusCode::CONFLICT);
     assert_graph_tools_available(&server, &owner_token).await;
     assert!(
+        registry.registered_human(&owner_id).unwrap(),
+        "the refused deletion must leave the human registered"
+    );
+    assert!(
         registry
             .resolve(
                 &owner_id,
@@ -472,6 +487,98 @@ async fn deleting_a_workspace_owner_is_refused_before_its_token_is_revoked() {
             .is_ok(),
         "a refused deletion must preserve the workspace owner"
     );
+    let reopened =
+        mcpmem::workspace::WorkspaceRegistry::open(&server.memory_db_path(), None).unwrap();
+    assert!(
+        reopened
+            .resolve(
+                &owner_id,
+                Some(&workspace.workspace_id),
+                mcpmem::workspace::WorkspaceAccess::Owner
+            )
+            .is_ok(),
+        "the owner must remain valid on startup"
+    );
+}
+
+#[tokio::test]
+async fn runtime_human_owner_deleted_during_init_cannot_be_committed() {
+    use std::sync::{Arc, Barrier};
+
+    use mcpmem::workspace::{Visibility, WorkspaceAccess, WorkspaceError, WorkspaceRegistry};
+
+    let (server, admin_token) = admin_server().await;
+    let created = server
+        .request(
+            Request::post("/ui/api/principals")
+                .header(header::AUTHORIZATION, bearer(&admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"raced owner","iss":"https://idp.example","sub":"owner-race","scopes":["graph-read"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let deletion_id = support::json(created).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let owner_id = mcpmem::principals::human_id("https://idp.example", "owner-race");
+    let path = server.memory_db_path();
+    let registry = Arc::new(WorkspaceRegistry::open(&path, None).unwrap());
+    let entered_init = Arc::new(Barrier::new(2));
+    let resume_init = Arc::new(Barrier::new(2));
+    let create_registry = Arc::clone(&registry);
+    let create_owner_id = owner_id.clone();
+    let create_entered = Arc::clone(&entered_init);
+    let create_resume = Arc::clone(&resume_init);
+    let creation = tokio::task::spawn_blocking(move || {
+        create_registry.create(
+            &create_owner_id,
+            "must not exist",
+            Visibility::Private,
+            |_| {
+                create_entered.wait();
+                create_resume.wait();
+                Ok(())
+            },
+        )
+    });
+    entered_init.wait();
+    let deleted = server
+        .request(
+            Request::delete(format!("/ui/api/principals/{deletion_id}"))
+                .header(header::AUTHORIZATION, bearer(&admin_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    resume_init.wait();
+    let created = creation.await.unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert!(
+        matches!(&created, Err(WorkspaceError::InvalidInput(_))),
+        "a deleted human must not become a workspace owner: {created:?}"
+    );
+    assert!(!registry.registered_human(&owner_id).unwrap());
+
+    let sidecar = format!("{}.workspaces.sqlite", path.display());
+    let (owners, defaults): (i64, i64) = rusqlite::Connection::open(sidecar)
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT count(*) FROM workspace WHERE owner_id=?1),
+                    (SELECT count(*) FROM workspace_default WHERE principal_id=?1)",
+            [&owner_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((owners, defaults), (0, 0));
+    let reopened = WorkspaceRegistry::open(&path, None).expect("the registry must reopen");
+    assert!(matches!(
+        reopened.resolve(&owner_id, None, WorkspaceAccess::Owner),
+        Err(WorkspaceError::NotFound)
+    ));
 }
 
 #[tokio::test]

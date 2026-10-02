@@ -1824,6 +1824,8 @@ async fn admin_update_principal(
 }
 ```
 
+Superseded on 2026-10-02: The code example below revokes a mutable display name and has no workspace owner check. The workspace plan in `docs/superpowers/plans/2026-10-01-workspaces.md` uses a stable human ID. The registry holds a write transaction through the owner check and principal removal. It checks human registration again before each workspace mutation commits. Check both create/delete orders with `cargo test --features oauth --test principal_admin runtime_human_owner -- --test-threads=1` (the same command in bash and fish).
+
 Delete (revoke BEFORE deleting the row — a revoke failure must leave the row intact and retryable; token validation never cross-checks the principals store, so a swallowed revoke error would leave a deleted admin's tokens live while the handler reports 204):
 
 ```rust

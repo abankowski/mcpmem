@@ -378,7 +378,6 @@ impl WorkspaceRegistry {
     }
 
     /// Keep a machine active until a registry mutation commits.
-    /// Check under the mutation transaction, after the human pre-check releases other stores.
     fn machine_active_in(conn: &Connection, principal_id: &str) -> Result<bool, WorkspaceError> {
         if !principal_id.starts_with("machine:")
             || principal_id == LOCAL_ID
@@ -392,6 +391,20 @@ impl WorkspaceRegistry {
             |row| row.get(0),
         )
         .map_err(Into::into)
+    }
+
+    /// Recheck identity while the registry write transaction is held.
+    /// The human lookup opens the principals database without taking this mutex.
+    fn registered_for_write_in(
+        &self,
+        conn: &Connection,
+        principal_id: &str,
+    ) -> Result<bool, WorkspaceError> {
+        if principal_id.starts_with("human:") {
+            self.registered_human(principal_id)
+        } else {
+            Self::machine_active_in(conn, principal_id)
+        }
     }
 
     pub fn create(
@@ -416,7 +429,7 @@ impl WorkspaceRegistry {
         drop(graph);
         let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !Self::machine_active_in(&tx, principal_id)? {
+        if !self.registered_for_write_in(&tx, principal_id)? {
             return Err(WorkspaceError::InvalidInput(
                 "a registered owner and a non-empty name are required".into(),
             ));
@@ -678,7 +691,7 @@ impl WorkspaceRegistry {
             .to_string();
         let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !Self::machine_active_in(&tx, principal_id)? {
+        if !self.registered_for_write_in(&tx, principal_id)? {
             return Err(WorkspaceError::NotFound);
         }
         let record = Self::record(&tx, &id)?.ok_or(WorkspaceError::NotFound)?;
@@ -739,7 +752,7 @@ impl WorkspaceRegistry {
         }
         let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !Self::machine_active_in(&tx, principal_id)? {
+        if !self.registered_for_write_in(&tx, principal_id)? {
             return Err(WorkspaceError::InvalidInput(
                 "grant needs a registered identity and reader or writer role".into(),
             ));
@@ -833,8 +846,14 @@ impl WorkspaceRegistry {
         rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
 
-    /// Remove a human's saved access. Refuse owners before changing any row.
-    pub(crate) fn clear_human_access(&self, principal_id: &str) -> Result<(), WorkspaceError> {
+    /// Check ownership and clear a human's access while `action` runs.
+    /// The callback must not acquire this registry mutex. If it fails, the
+    /// access changes roll back; otherwise the transaction commits after it.
+    pub(crate) fn with_human_access_cleanup<T, E>(
+        &self,
+        principal_id: &str,
+        action: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<T, E>, WorkspaceError> {
         let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let is_owner: bool = tx.query_row(
@@ -853,8 +872,12 @@ impl WorkspaceRegistry {
             "DELETE FROM workspace_grant WHERE principal_id=?1",
             [principal_id],
         )?;
+        let value = match action() {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
         tx.commit()?;
-        Ok(())
+        Ok(Ok(value))
     }
 
     /// Issue a random credential once. The registry retains only its digest.
