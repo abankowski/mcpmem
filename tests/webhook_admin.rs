@@ -24,6 +24,7 @@ use tower::ServiceExt;
 use mcpmem::http::{HttpState, TestSetup, router};
 use mcpmem::principals::ADMIN_SCOPE;
 use mcpmem::tools::ToolCategory;
+use mcpmem::workspace::{Visibility, WorkspaceRegistry};
 use mcpmem_core::subscriptions::{SubscriptionRepository, WebhookSubscription};
 use mcpmem_webhook::{
     DeliveryConnector, DeliveryResponse, Resolver, SignedRequest, SigningKey, ValidatedEndpoint,
@@ -66,11 +67,23 @@ impl DeliveryConnector for RecordingConnector {
 
 /// One shared server plus two planted access tokens: `admin` holds the admin
 /// scope, `plain` holds only `graph-read` so the gate's 403 side is testable.
+///
+/// The admin human owns one workspace (`workspace_id`) — every CRUD request
+/// below selects it explicitly, because the admin routes resolve one
+/// workspace per request and require ownership. The registry grants nothing
+/// else: `for_test` binds the legacy default to `machine:local`, so the admin
+/// and plain principals start with no default and no grants. A second
+/// workspace owned by a machine (`other_workspace_id`) backs the
+/// ownership-refusal test.
 struct Fixture {
     _dir: tempfile::TempDir,
     router: axum::Router,
     admin: String,
     plain: String,
+    /// The workspace the admin human owns and administers.
+    workspace_id: String,
+    /// A registered private workspace the admin human does not own.
+    other_workspace_id: String,
     /// The connector the shared test kit drives. The test route reads it to
     /// verify what a test delivery actually sent.
     stub: Arc<RecordingConnector>,
@@ -113,6 +126,9 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
     config.principals[0].scopes.push(ADMIN_SCOPE.into());
     let principal_id =
         mcpmem::principals::human_id(&config.principals[0].iss, &config.principals[0].sub);
+    // Captured before `config` moves into the test setup: the registry the
+    // fixture reopens below must know the same file-backed humans.
+    let file_principals = config.principals.clone();
     let state = HttpState::for_test(TestSetup {
         db_path,
         oauth: Some(config),
@@ -131,6 +147,33 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
                 plant(store, &principal_id, vec!["graph-read".to_owned()]),
             )
         });
+    // The admin routes resolve one workspace per request and require
+    // ownership. The registry grants the admin human nothing by itself
+    // (`for_test` binds the legacy default to `machine:local`), so the
+    // fixture creates the workspace the admin owns and, for the refusal
+    // test, a second one owned by a fresh machine account. The second open
+    // re-reads the registry `for_test` already created; the file humans come
+    // from the same principals config, so the human-owned `create` passes
+    // the registration check.
+    let db_registry = dir.path().join("t.mcpmem");
+    let registry = WorkspaceRegistry::open_with_principals(
+        &db_registry,
+        Some("machine:local"),
+        file_principals.as_slice(),
+        false,
+    )
+    .expect("the fixture registry reopens");
+    let workspace_id = registry
+        .create(&principal_id, "admin-workspace", Visibility::Private, |_| Ok(()))
+        .expect("the admin workspace is created")
+        .workspace_id;
+    let (machine_id, _token) = registry
+        .create_machine("other-owner", &["graph-read".to_owned()])
+        .expect("the machine owner is created");
+    let other_workspace_id = registry
+        .create(&machine_id, "machine-workspace", Visibility::Private, |_| Ok(()))
+        .expect("the machine workspace is created")
+        .workspace_id;
     // The test kit the admin Test button drives: `hooks.example.test` is the
     // only allowlisted host and `hooks-key` the only signing secret, matching
     // the endpoints and secret refs the tests plant. The kit is process-wide,
@@ -157,6 +200,8 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
         router: router(state),
         admin,
         plain,
+        workspace_id,
+        other_workspace_id,
         stub,
     }
 });
@@ -174,6 +219,12 @@ async fn drive(req: Request<Body>) -> Response<Body> {
 
 fn bearer(token: &str) -> String {
     format!("Bearer {token}")
+}
+
+/// Select the admin-owned workspace explicitly on every admin request: the
+/// routes resolve one workspace per request and require ownership of it.
+fn with_ws(path: &str) -> String {
+    format!("{path}?workspaceId={}", FIXTURE.workspace_id)
 }
 
 fn get(token: &str, path: impl Into<String>) -> Request<Body> {
@@ -221,7 +272,7 @@ async fn create_subscription(tag: &str) -> String {
     let res = drive(json_call(
         "post",
         &FIXTURE.admin,
-        "/ui/api/webhooks",
+        with_ws("/ui/api/webhooks"),
         Some(body.as_str()),
     ))
     .await;
@@ -239,7 +290,7 @@ async fn create_subscription(tag: &str) -> String {
 #[tokio::test]
 async fn anonymous_caller_is_challenged_not_refused() {
     let res = drive(
-        Request::get("/ui/api/webhooks")
+        Request::get(with_ws("/ui/api/webhooks"))
             .body(Body::empty())
             .unwrap(),
     )
@@ -259,13 +310,13 @@ async fn anonymous_caller_is_challenged_not_refused() {
 
 #[tokio::test]
 async fn a_token_without_admin_scope_is_refused() {
-    let res = drive(get(&FIXTURE.plain, "/ui/api/webhooks")).await;
+    let res = drive(get(&FIXTURE.plain, with_ws("/ui/api/webhooks"))).await;
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
 async fn list_reports_json_with_a_subscriptions_array() {
-    let res = drive(get(&FIXTURE.admin, "/ui/api/webhooks")).await;
+    let res = drive(get(&FIXTURE.admin, with_ws("/ui/api/webhooks"))).await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = support::json(res).await;
     assert!(
@@ -283,7 +334,7 @@ async fn list_reports_json_with_a_subscriptions_array() {
 async fn create_and_list_a_subscription() {
     let tag = "create-list";
     let id = create_subscription(tag).await;
-    let res = drive(get(&FIXTURE.admin, "/ui/api/webhooks")).await;
+    let res = drive(get(&FIXTURE.admin, with_ws("/ui/api/webhooks"))).await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = support::json(res).await;
     let row = body["subscriptions"]
@@ -309,7 +360,7 @@ async fn create_refuses_a_malformed_endpoint() {
         json_call(
             "post",
             &FIXTURE.admin,
-            "/ui/api/webhooks",
+            with_ws("/ui/api/webhooks"),
             Some(
                 r#"{"endpoint":"http://hooks.example.test/cb","consumerOrigin":"app","secretRef":"k1"}"#,
             ),
@@ -324,7 +375,7 @@ async fn create_requires_the_origin_field() {
     let res = drive(json_call(
         "post",
         &FIXTURE.admin,
-        "/ui/api/webhooks",
+        with_ws("/ui/api/webhooks"),
         Some(r#"{"endpoint":"https://hooks.example.test/cb"}"#),
     ))
     .await;
@@ -338,7 +389,7 @@ async fn patch_updates_fields_and_toggles_enabled() {
     let res = drive(json_call(
         "patch",
         &FIXTURE.admin,
-        format!("/ui/api/webhooks/{id}"),
+        with_ws(&format!("/ui/api/webhooks/{id}")),
         Some(r#"{"enabled":false,"eventOperations":["rename"]}"#),
     ))
     .await;
@@ -356,12 +407,12 @@ async fn patch_updates_fields_and_toggles_enabled() {
     let refused = drive(json_call(
         "patch",
         &FIXTURE.admin,
-        format!("/ui/api/webhooks/{id}"),
+        with_ws(&format!("/ui/api/webhooks/{id}")),
         Some(r#"{"endpoint":"ftp://nope"}"#),
     ))
     .await;
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-    let again = drive(get(&FIXTURE.admin, "/ui/api/webhooks")).await;
+    let again = drive(get(&FIXTURE.admin, with_ws("/ui/api/webhooks"))).await;
     let listed = support::json(again).await;
     let row = listed["subscriptions"]
         .as_array()
@@ -381,7 +432,7 @@ async fn patch_an_unknown_id_is_404() {
     let res = drive(json_call(
         "patch",
         &FIXTURE.admin,
-        "/ui/api/webhooks/00000000-0000-0000-0000-000000000000",
+        with_ws("/ui/api/webhooks/00000000-0000-0000-0000-000000000000"),
         Some(r#"{"enabled":false}"#),
     ))
     .await;
@@ -395,13 +446,13 @@ async fn delete_removes_and_a_second_delete_is_404() {
     let first = drive(json_call(
         "delete",
         &FIXTURE.admin,
-        format!("/ui/api/webhooks/{id}"),
+        with_ws(&format!("/ui/api/webhooks/{id}")),
         None,
     ))
     .await;
     assert_eq!(first.status(), StatusCode::NO_CONTENT);
 
-    let listed = drive(get(&FIXTURE.admin, "/ui/api/webhooks")).await;
+    let listed = drive(get(&FIXTURE.admin, with_ws("/ui/api/webhooks"))).await;
     let body = support::json(listed).await;
     assert!(
         !body["subscriptions"]
@@ -415,7 +466,7 @@ async fn delete_removes_and_a_second_delete_is_404() {
     let second = drive(json_call(
         "delete",
         &FIXTURE.admin,
-        format!("/ui/api/webhooks/{id}"),
+        with_ws(&format!("/ui/api/webhooks/{id}")),
         None,
     ))
     .await;
@@ -431,7 +482,7 @@ async fn test_delivery_requires_admin_scope() {
     let res = drive(json_call(
         "post",
         &FIXTURE.plain,
-        "/ui/api/webhooks/00000000-0000-0000-0000-000000000000/test",
+        with_ws("/ui/api/webhooks/00000000-0000-0000-0000-000000000000/test"),
         None,
     ))
     .await;
@@ -447,7 +498,7 @@ async fn test_delivery_unknown_id_is_404() {
     let res = drive(json_call(
         "post",
         &FIXTURE.admin,
-        "/ui/api/webhooks/00000000-0000-0000-0000-000000000000/test",
+        with_ws("/ui/api/webhooks/00000000-0000-0000-0000-000000000000/test"),
         None,
     ))
     .await;
@@ -459,7 +510,7 @@ async fn test_delivery_sends_a_signed_test_event_and_reports_status() {
     let created = drive(json_call(
         "post",
         &FIXTURE.admin,
-        "/ui/api/webhooks",
+        with_ws("/ui/api/webhooks"),
         Some(r#"{"endpoint":"https://hooks.example.test/delivery-probe","consumerOrigin":"probe","secretRef":"hooks-key"}"#),
     ))
     .await;
@@ -474,7 +525,7 @@ async fn test_delivery_sends_a_signed_test_event_and_reports_status() {
     let res = drive(json_call(
         "post",
         &FIXTURE.admin,
-        format!("/ui/api/webhooks/{id}/test"),
+        with_ws(&format!("/ui/api/webhooks/{id}/test")),
         None,
     ))
     .await;
@@ -516,7 +567,7 @@ async fn test_delivery_refuses_a_host_outside_the_allowlist() {
     let created = drive(json_call(
         "post",
         &FIXTURE.admin,
-        "/ui/api/webhooks",
+        with_ws("/ui/api/webhooks"),
         Some(r#"{"endpoint":"https://outside.example.test/cb","consumerOrigin":"probe","secretRef":"hooks-key"}"#),
     ))
     .await;
@@ -529,7 +580,7 @@ async fn test_delivery_refuses_a_host_outside_the_allowlist() {
     let res = drive(json_call(
         "post",
         &FIXTURE.admin,
-        format!("/ui/api/webhooks/{id}/test"),
+        with_ws(&format!("/ui/api/webhooks/{id}/test")),
         None,
     ))
     .await;
@@ -553,8 +604,16 @@ async fn test_delivery_refuses_a_host_outside_the_allowlist() {
 /// route must still refuse it.
 #[tokio::test]
 async fn test_delivery_refuses_an_unknown_secret_ref() {
-    let db = FIXTURE._dir.path().join("t.mcpmem");
-    let conn = rusqlite::Connection::open(&db).expect("the fixture database opens");
+    // The row is planted in the admin workspace's own subscription store —
+    // the file the routes will read once they resolve a workspace. Today
+    // (red phase) the admin routes still read the process store on the
+    // legacy file, so this test is red for exactly that routing gap; it
+    // turns green when Task 5 resolves the workspace before the store opens.
+    let db = FIXTURE
+        ._dir
+        .path()
+        .join(format!("t.mcpmem.workspaces/{}.sqlite", FIXTURE.workspace_id));
+    let conn = rusqlite::Connection::open(&db).expect("the workspace database opens");
     let subscription = WebhookSubscription {
         subscription_id: uuid::Uuid::new_v4(),
         endpoint: "https://hooks.example.test/cb".to_owned(),
@@ -573,7 +632,7 @@ async fn test_delivery_refuses_an_unknown_secret_ref() {
     let res = drive(json_call(
         "post",
         &FIXTURE.admin,
-        format!("/ui/api/webhooks/{id}/test"),
+        with_ws(&format!("/ui/api/webhooks/{id}/test")),
         None,
     ))
     .await;
@@ -582,5 +641,50 @@ async fn test_delivery_refuses_an_unknown_secret_ref() {
     assert!(
         body["error"].as_str().unwrap().contains("not configured"),
         "{body}"
+    );
+}
+
+/// RED: the admin routes resolve no workspace yet, so the `workspaceId` below
+/// is ignored and the admin gate alone decides. Once Task 5 lands, the routes
+/// must require ownership of the selected workspace: the machine-owned graph
+/// is registered and private, and nothing grants the admin human access to
+/// it, so every route answers the same not-found as an id that does not
+/// exist — the shape leaks neither the workspace's existence nor its owner.
+#[tokio::test]
+async fn admin_without_ownership_cannot_edit_another_graphs_webhooks() {
+    let other = format!(
+        "/ui/api/webhooks?workspaceId={}",
+        FIXTURE.other_workspace_id
+    );
+
+    let listed = drive(get(&FIXTURE.admin, other.as_str())).await;
+    assert_eq!(
+        listed.status(),
+        StatusCode::NOT_FOUND,
+        "the admin cannot list another graph's subscriptions"
+    );
+
+    let created = drive(json_call(
+        "post",
+        &FIXTURE.admin,
+        other.as_str(),
+        Some(r#"{"endpoint":"https://hooks.example.test/cb","consumerOrigin":"probe","secretRef":"hooks-key"}"#),
+    ))
+    .await;
+    assert_eq!(
+        created.status(),
+        StatusCode::NOT_FOUND,
+        "the admin cannot create a subscription in another graph"
+    );
+
+    let unknown = drive(get(
+        &FIXTURE.admin,
+        "/ui/api/webhooks?workspaceId=00000000-0000-0000-0000-000000000000",
+    ))
+    .await;
+    assert_eq!(
+        unknown.status(),
+        StatusCode::NOT_FOUND,
+        "an unknown workspace id is the same not-found"
     );
 }

@@ -5,6 +5,15 @@
 //!
 //! A raw `TcpStream` is the client (no HTTP-client dependency), matching
 //! `tests/vector_http.rs`.
+//!
+//! Fixture shape after the workspaces contract: the legacy graph is owned by
+//! `machine:local`, so the static bearer is a fresh identity with *no default
+//! workspace and no grant*. Every fixture therefore registers its own
+//! workspace through MCP (`create_workspace`) and seeds it with an explicit
+//! `workspaceId`, and every viewer data request carries the selected
+//! `workspaceId` — exactly what the shipped viewer dropdown sends. A request
+//! without a `workspaceId` and without a default is the approved
+//! selection-required error, never a silent read of the legacy graph.
 
 use std::fmt;
 use std::fs::File;
@@ -160,9 +169,12 @@ fn try_spawn_http_server(
     cmd.arg("-f")
         .arg(&db_path)
         .arg("--legacy-owner-id")
-        // The static bearer seeds and reads every graph in this file, so the
-        // legacy workspace is owned by `machine:static`, not `machine:local`.
-        .arg("machine:static")
+        // The legacy workspace belongs to `machine:local`. The static bearer
+        // is therefore a fresh identity with no default: every fixture below
+        // registers its own workspace through MCP and selects it explicitly,
+        // and a request without a `workspaceId` is the approved
+        // selection-required error.
+        .arg("machine:local")
         .arg("--transport")
         .arg("http")
         .arg("--bind")
@@ -322,15 +334,49 @@ fn get(port: u16, path: &str, bearer: Option<&str>) -> (u16, String, String) {
     request(port, "GET", path, None, bearer)
 }
 
-/// Populate a tiny graph through an authenticated HTTP request.
-fn seed_graph(port: u16, bearer: Option<&str>) {
-    let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_entities","arguments":{"entities":[{"name":"Alice","entityType":"person","observations":[{"body":"likes hiking"}]},{"name":"Acme","entityType":"company","observations":[]}]}},"id":2}"#;
-    let (status, _, _) = request(port, "POST", "/mcp", Some(create), bearer);
+/// The parsed JSON of one JSON-RPC tool result. `create_workspace` returns its
+/// object directly (`result.workspace`), so the helper reads that shape.
+fn workspace_of(body: &str) -> serde_json::Value {
+    let v: serde_json::Value = serde_json::from_str(body).expect("jsonrpc body");
+    let result = v.get("result").unwrap_or_else(|| panic!("no result: {body}"));
+    result["workspace"]
+        .clone()
+}
+
+/// Register one private workspace for `bearer` over MCP and return its id.
+///
+/// The static bearer has no default workspace (the legacy graph is owned by
+/// `machine:local`), so registration is explicit: this is the "register and
+/// seed through an explicit workspaceId" fixture the approved contract
+/// describes.
+fn register_workspace(port: u16, bearer: Option<&str>) -> String {
+    let create = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_workspace","arguments":{"name":"fixture","visibility":"private"}},"id":1}"#;
+    let (status, _, body) = request(port, "POST", "/mcp", Some(create), bearer);
+    assert_eq!(status, 200, "seed create_workspace should succeed: {body}");
+    let ws = workspace_of(&body);
+    ws["workspaceId"]
+        .as_str()
+        .expect("the workspace id is returned")
+        .to_owned()
+}
+
+/// Populate a tiny graph in `bearer`'s own workspace: register the workspace
+/// and seed Alice/Acme with an explicit `workspaceId`. Returns the id.
+fn seed_graph(port: u16, bearer: Option<&str>) -> String {
+    let ws = register_workspace(port, bearer);
+
+    let create = format!(
+        r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"workspaceId":"{ws}","entities":[{{"name":"Alice","entityType":"person","observations":[{{"body":"likes hiking"}}]}},{{"name":"Acme","entityType":"company","observations":[]}}]}}}},"id":2}}"#
+    );
+    let (status, _, _) = request(port, "POST", "/mcp", Some(&create), bearer);
     assert_eq!(status, 200, "seed create_entities should succeed");
 
-    let rel = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_relations","arguments":{"relations":[{"from":"Alice","to":"Acme","relationType":"works_at"}]}},"id":3}"#;
-    let (status, _, _) = request(port, "POST", "/mcp", Some(rel), bearer);
+    let rel = format!(
+        r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_relations","arguments":{{"workspaceId":"{ws}","relations":[{{"from":"Alice","to":"Acme","relationType":"works_at"}}]}}}},"id":3}}"#
+    );
+    let (status, _, _) = request(port, "POST", "/mcp", Some(&rel), bearer);
     assert_eq!(status, 200, "seed create_relations should succeed");
+    ws
 }
 
 #[test]
@@ -410,10 +456,14 @@ fn test_ui_assets_served_with_content_types() {
 #[test]
 fn test_ui_expand_returns_neighborhood() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    seed_graph(srv.port, Some(TEST_BEARER));
+    let ws = seed_graph(srv.port, Some(TEST_BEARER));
 
     // Expanding Alice must return her plus her neighbour Acme and the edge.
-    let (status, headers, body) = get(srv.port, "/ui/expand?name=Alice", Some(TEST_BEARER));
+    let (status, headers, body) = get(
+        srv.port,
+        &format!("/ui/expand?workspaceId={ws}&name=Alice"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 200, "GET /ui/expand should succeed: {body}");
     assert!(
         headers
@@ -444,7 +494,12 @@ fn test_ui_expand_returns_neighborhood() {
 #[test]
 fn test_ui_expand_unknown_entity_is_404() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    let (status, _, _) = get(srv.port, "/ui/expand?name=DoesNotExist", Some(TEST_BEARER));
+    let ws = register_workspace(srv.port, Some(TEST_BEARER));
+    let (status, _, _) = get(
+        srv.port,
+        &format!("/ui/expand?workspaceId={ws}&name=DoesNotExist"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 404, "expanding a missing entity should be 404");
 }
 
@@ -452,22 +507,32 @@ fn test_ui_expand_unknown_entity_is_404() {
 fn test_ui_expand_requires_name_and_permission() {
     // Missing name → 400 (client error).
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    let (status, _, _) = get(srv.port, "/ui/expand", Some(TEST_BEARER));
+    let ws = register_workspace(srv.port, Some(TEST_BEARER));
+    let (status, _, _) = get(srv.port, &format!("/ui/expand?workspaceId={ws}"), Some(TEST_BEARER));
     assert_eq!(status, 400, "expand without a name should be 400");
     drop(srv);
 
     // Read disabled → 403, same gate as /ui/graph.
     let srv = spawn_http_server(&["--enable-graph-write"], Some(TEST_BEARER));
-    let (status, _, _) = get(srv.port, "/ui/expand?name=Alice", Some(TEST_BEARER));
+    let ws = register_workspace(srv.port, Some(TEST_BEARER));
+    let (status, _, _) = get(
+        srv.port,
+        &format!("/ui/expand?workspaceId={ws}&name=Alice"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 403, "graph-read disabled must forbid /ui/expand");
 }
 
 #[test]
 fn test_ui_graph_returns_entities_and_relations() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    seed_graph(srv.port, Some(TEST_BEARER));
+    let ws = seed_graph(srv.port, Some(TEST_BEARER));
 
-    let (status, headers, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
+    let (status, headers, body) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 200, "GET /ui/graph should succeed: {body}");
     assert!(
         headers
@@ -509,9 +574,13 @@ fn test_ui_graph_returns_entities_and_relations() {
 #[test]
 fn test_ui_graph_entity_type_filter() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    seed_graph(srv.port, Some(TEST_BEARER));
+    let ws = seed_graph(srv.port, Some(TEST_BEARER));
 
-    let (status, _, body) = get(srv.port, "/ui/graph?entityType=company", Some(TEST_BEARER));
+    let (status, _, body) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}&entityType=company"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 200, "filtered graph should succeed: {body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let names: Vec<&str> = v["entities"]
@@ -531,7 +600,12 @@ fn test_ui_graph_entity_type_filter() {
 fn test_ui_graph_requires_graph_read() {
     // Write enabled but read disabled: the viewer's data endpoint is forbidden.
     let srv = spawn_http_server(&["--enable-graph-write"], Some(TEST_BEARER));
-    let (status, _, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
+    let ws = register_workspace(srv.port, Some(TEST_BEARER));
+    let (status, _, body) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 403, "graph-read disabled must forbid /ui/graph");
     assert!(
         body.contains("graph-read"),
@@ -551,7 +625,13 @@ fn test_ui_graph_honours_static_bearer_scopes_not_enabled_categories() {
         &["--enable-all", "--static-bearer-scopes", "vectors"],
         Some(TEST_BEARER),
     );
-    let (status, headers, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
+    // A credential without graph-write cannot even register a workspace, so the
+    // request names an id the scope gate must refuse before it is resolved.
+    let (status, headers, body) = get(
+        srv.port,
+        "/ui/graph?workspaceId=00000000-0000-0000-0000-000000000000",
+        Some(TEST_BEARER),
+    );
     assert_eq!(
         status, 403,
         "a credential without graph-read must be refused: {body}"
@@ -568,18 +648,26 @@ fn test_ui_graph_honours_static_bearer_scopes_not_enabled_categories() {
 #[test]
 fn test_ui_graph_auth_gate() {
     let srv = spawn_http_server(&["--enable-all"], Some("s3cret"));
-    seed_graph(srv.port, Some("s3cret"));
+    let ws = seed_graph(srv.port, Some("s3cret"));
 
     // No credentials → 401.
-    let (status, _, _) = get(srv.port, "/ui/graph", None);
+    let (status, _, _) = get(srv.port, &format!("/ui/graph?workspaceId={ws}"), None);
     assert_eq!(status, 401, "missing token must be rejected");
 
     // Wrong token via query → 401.
-    let (status, _, _) = get(srv.port, "/ui/graph?token=nope", None);
+    let (status, _, _) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}&token=nope"),
+        None,
+    );
     assert_eq!(status, 401, "wrong token must be rejected");
 
     // Correct token via the ?token= query fallback → 200.
-    let (status, _, body) = get(srv.port, "/ui/graph?token=s3cret", None);
+    let (status, _, body) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}&token=s3cret"),
+        None,
+    );
     assert_eq!(status, 200, "query-param token should be accepted: {body}");
     assert!(
         body.contains("Alice"),
@@ -587,7 +675,7 @@ fn test_ui_graph_auth_gate() {
     );
 
     // Correct token via the Authorization header → 200.
-    let (status, _, _) = get(srv.port, "/ui/graph", Some("s3cret"));
+    let (status, _, _) = get(srv.port, &format!("/ui/graph?workspaceId={ws}"), Some("s3cret"));
     assert_eq!(status, 200, "bearer header token should be accepted");
 
     // The shell itself carries no data, so it is reachable without a token.
@@ -595,8 +683,51 @@ fn test_ui_graph_auth_gate() {
     assert_eq!(status, 200, "the /ui shell should not require auth");
 }
 
-/// Create `n` entities named `person_0000`..`person_(n-1)` in one batch.
-fn seed_many(port: u16, n: usize) {
+/// A viewer request without a `workspaceId` must not silently read the legacy
+/// graph: the static bearer has no default workspace, and the approved
+/// contract answers the distinct selection-required error that makes the
+/// viewer show "select a workspace" instead of a graph.
+#[test]
+fn test_ui_graph_without_workspace_id_and_without_default_is_selection_required() {
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    let (status, _, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
+    assert_eq!(
+        status, 400,
+        "no workspaceId and no default is the selection-required error, not a read: {body}"
+    );
+    assert!(
+        body.to_lowercase().contains("selection required"),
+        "the error must be the distinct selection-required shape: {body}"
+    );
+}
+
+/// Unknown and malformed workspace ids have their approved error shapes: an
+/// unknown id is the same not-found as an inaccessible graph, and a malformed
+/// id is an input error.
+#[test]
+fn test_ui_graph_unknown_workspace_id_is_not_found() {
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    // The positive selector works: the fixture's own workspace reads.
+    let ws = register_workspace(srv.port, Some(TEST_BEARER));
+    let (status, _, _) = get(srv.port, &format!("/ui/graph?workspaceId={ws}"), Some(TEST_BEARER));
+    assert_eq!(status, 200, "the owned workspace id should read");
+
+    let (status, _, _) = get(
+        srv.port,
+        "/ui/graph?workspaceId=7f4c5a1e-0000-4000-8000-000000000000",
+        Some(TEST_BEARER),
+    );
+    assert_eq!(status, 404, "an unknown workspace id must be not-found");
+
+    let (status, _, _) = get(srv.port, "/ui/graph?workspaceId=not-a-uuid", Some(TEST_BEARER));
+    assert_eq!(
+        status, 400,
+        "a malformed workspace id is an input error, not a graph lookup"
+    );
+}
+
+/// Create `n` entities named `person_0000`..`person_(n-1)` in `workspace_id`.
+fn seed_many(port: u16, n: usize, workspace_id: &str) {
     let ents: Vec<String> = (0..n)
         .map(|i| {
             format!(
@@ -605,7 +736,7 @@ fn seed_many(port: u16, n: usize) {
         })
         .collect();
     let body = format!(
-        r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"entities":[{}]}}}},"id":9}}"#,
+        r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"workspaceId":"{workspace_id}","entities":[{}]}}}},"id":9}}"#,
         ents.join(",")
     );
     let (status, _, _) = request(port, "POST", "/mcp", Some(&body), Some(TEST_BEARER));
@@ -615,10 +746,15 @@ fn seed_many(port: u16, n: usize) {
 #[test]
 fn test_ui_graph_pagination_cursor() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    seed_many(srv.port, 25);
+    let ws = register_workspace(srv.port, Some(TEST_BEARER));
+    seed_many(srv.port, 25, &ws);
 
     // First page: 10 of 25, more to come.
-    let (_, _, body) = get(srv.port, "/ui/graph?limit=10&offset=0", Some(TEST_BEARER));
+    let (_, _, body) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}&limit=10&offset=0"),
+        Some(TEST_BEARER),
+    );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["entities"].as_array().unwrap().len(), 10);
     assert_eq!(v["page"]["offset"], 0);
@@ -627,7 +763,11 @@ fn test_ui_graph_pagination_cursor() {
     assert_eq!(v["stats"]["entities"], 25);
 
     // Last page: offset 20 leaves 5, no more.
-    let (_, _, body) = get(srv.port, "/ui/graph?limit=10&offset=20", Some(TEST_BEARER));
+    let (_, _, body) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}&limit=10&offset=20"),
+        Some(TEST_BEARER),
+    );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["entities"].as_array().unwrap().len(), 5);
     assert_eq!(v["page"]["hasMore"], false);
@@ -636,11 +776,12 @@ fn test_ui_graph_pagination_cursor() {
 #[test]
 fn test_ui_search_paginated_nodes_only() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    seed_many(srv.port, 25);
+    let ws = register_workspace(srv.port, Some(TEST_BEARER));
+    seed_many(srv.port, 25, &ws);
 
     let (status, headers, body) = get(
         srv.port,
-        "/ui/search?q=person&limit=10&offset=0",
+        &format!("/ui/search?workspaceId={ws}&q=person&limit=10&offset=0"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 200, "search should succeed: {body}");
@@ -663,7 +804,7 @@ fn test_ui_search_paginated_nodes_only() {
     // Second page paginates the same query.
     let (_, _, body) = get(
         srv.port,
-        "/ui/search?q=person&limit=10&offset=20",
+        &format!("/ui/search?workspaceId={ws}&q=person&limit=10&offset=20"),
         Some(TEST_BEARER),
     );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -674,10 +815,14 @@ fn test_ui_search_paginated_nodes_only() {
 #[test]
 fn test_ui_search_prefix_and_permission() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    seed_graph(srv.port, Some(TEST_BEARER)); // Alice (person), Acme (company)
+    let ws = seed_graph(srv.port, Some(TEST_BEARER)); // Alice (person), Acme (company)
 
     // A prefix ("Ac") matches "Acme" — search-as-you-type behaviour.
-    let (status, _, body) = get(srv.port, "/ui/search?q=Ac", Some(TEST_BEARER));
+    let (status, _, body) = get(
+        srv.port,
+        &format!("/ui/search?workspaceId={ws}&q=Ac"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let names: Vec<&str> = v["entities"]
@@ -694,16 +839,25 @@ fn test_ui_search_prefix_and_permission() {
 
     // Same graph-read gate as the rest of the viewer.
     let srv = spawn_http_server(&["--enable-graph-write"], Some(TEST_BEARER));
-    let (status, _, _) = get(srv.port, "/ui/search?q=x", Some(TEST_BEARER));
+    let ws = register_workspace(srv.port, Some(TEST_BEARER));
+    let (status, _, _) = get(
+        srv.port,
+        &format!("/ui/search?workspaceId={ws}&q=x"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 403, "search must require graph-read");
 }
 
 #[test]
 fn test_ui_graph_omits_observation_bodies() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    seed_graph(srv.port, Some(TEST_BEARER)); // Alice has one observation ("likes hiking")
+    let ws = seed_graph(srv.port, Some(TEST_BEARER)); // Alice has one observation ("likes hiking")
 
-    let (status, _, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
+    let (status, _, body) = get(
+        srv.port,
+        &format!("/ui/graph?workspaceId={ws}"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 200, "graph should succeed: {body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let alice = v["entities"]
@@ -726,9 +880,13 @@ fn test_ui_graph_omits_observation_bodies() {
 #[test]
 fn test_ui_node_lazy_loads_observations() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    seed_graph(srv.port, Some(TEST_BEARER));
+    let ws = seed_graph(srv.port, Some(TEST_BEARER));
 
-    let (status, headers, body) = get(srv.port, "/ui/node?name=Alice", Some(TEST_BEARER));
+    let (status, headers, body) = get(
+        srv.port,
+        &format!("/ui/node?workspaceId={ws}&name=Alice"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 200, "node fetch should succeed: {body}");
     assert!(
         headers
@@ -754,13 +912,22 @@ fn test_ui_node_lazy_loads_observations() {
     );
 
     // Unknown entity → 404.
-    let (status, _, _) = get(srv.port, "/ui/node?name=DoesNotExist", Some(TEST_BEARER));
+    let (status, _, _) = get(
+        srv.port,
+        &format!("/ui/node?workspaceId={ws}&name=DoesNotExist"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 404, "unknown entity should be 404");
 }
 
 #[test]
 fn test_ui_node_requires_graph_read() {
     let srv = spawn_http_server(&["--enable-graph-write"], Some(TEST_BEARER));
-    let (status, _, _) = get(srv.port, "/ui/node?name=Alice", Some(TEST_BEARER));
+    let ws = register_workspace(srv.port, Some(TEST_BEARER));
+    let (status, _, _) = get(
+        srv.port,
+        &format!("/ui/node?workspaceId={ws}&name=Alice"),
+        Some(TEST_BEARER),
+    );
     assert_eq!(status, 403, "graph-read disabled must forbid /ui/node");
 }
