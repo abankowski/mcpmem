@@ -659,12 +659,42 @@ async fn a_read_only_token_does_not_see_write_tools_in_the_list() {
 //
 // The gate is `authz::allows_tool(principal, "read_graph")`, so the viewer and
 // the tool it stands for cannot come to disagree.
+/// Give the token's human a private graph without granting graph-write to the
+/// OAuth client. The viewer request must name this workspace explicitly.
+fn owned_viewer_workspace(authorized: &Authorized, tokens: &Tokens) -> String {
+    let principal = authorized
+        .server()
+        .oauth()
+        .validate(&tokens.access_token)
+        .expect("the issued access token is valid")
+        .principal;
+    let registry = mcpmem::workspace::WorkspaceRegistry::open_with_principals(
+        &authorized.server().memory_db_path(),
+        None,
+        &support::principals(&authorized.idp().issuer),
+        false,
+    )
+    .expect("the workspace registry opens");
+    registry
+        .create(
+            &principal,
+            "OAuth viewer graph",
+            mcpmem::workspace::Visibility::Private,
+            |_| Ok(()),
+        )
+        .expect("the human owns the viewer graph")
+        .workspace_id
+}
 
 #[tokio::test]
 async fn a_graph_read_token_may_read_the_viewer_graph() {
     let (authorized, tokens) = to_tokens(&["graph-read"]).await;
+    let workspace_id = owned_viewer_workspace(&authorized, &tokens);
     let res = authorized
-        .get("/ui/graph", Some(&tokens.access_token))
+        .get(
+            &format!("/ui/graph?workspaceId={workspace_id}"),
+            Some(&tokens.access_token),
+        )
         .await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
     assert!(res.body["entities"].is_array(), "{}", res.body);
@@ -733,8 +763,12 @@ async fn the_reserved_graph_client_walks_the_viewer_login_and_reads_the_graph() 
         .await;
     let code = authorized.approve(&["graph-read"]).await;
     let tokens = authorized.exchange(&code).await;
+    let workspace_id = owned_viewer_workspace(&authorized, &tokens);
     let res = authorized
-        .get("/ui/graph", Some(&tokens.access_token))
+        .get(
+            &format!("/ui/graph?workspaceId={workspace_id}"),
+            Some(&tokens.access_token),
+        )
         .await;
     assert_eq!(res.status, StatusCode::OK, "{}", res.body);
     assert!(res.body["entities"].is_array(), "{}", res.body);
