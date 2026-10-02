@@ -1027,6 +1027,8 @@ pub async fn admin_access_token(idp: &FakeIdp, server: &Server) -> String {
 /// way, so the admin API cannot tell this credential from a walked one.
 pub fn plant_admin_token(server: &Server) -> String {
     let token = mcpmem_oauth::new_token();
+    let principal = &server.oauth().config.principals[0];
+    let principal_id = mcpmem::principals::human_id(&principal.iss, &principal.sub);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("the clock is after the epoch")
@@ -1038,7 +1040,7 @@ pub fn plant_admin_token(server: &Server) -> String {
                 TokenKind::Access,
                 &Grant {
                     client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
-                    principal: "adam".to_owned(),
+                    principal: principal_id,
                     scopes: vec![mcpmem::principals::ADMIN_SCOPE.to_owned()],
                     resource: format!("{}/mcp", super::PUBLIC_URL),
                     family: mcpmem_oauth::new_token(),

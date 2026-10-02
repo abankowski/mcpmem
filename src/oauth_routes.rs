@@ -1271,7 +1271,7 @@ async fn finish_login(
     oauth
         .with_store(|store| {
             store.put_login(&LoginRecord {
-                principal: Some(principal.name.clone()),
+                principal: Some(crate::principals::human_id(&principal.iss, &principal.sub)),
                 scopes: offered,
                 ..login
             })
@@ -1315,30 +1315,38 @@ fn principal_of(
     oauth: &OauthState,
     claims: &IdentityClaims,
 ) -> std::result::Result<crate::principals::PrincipalEntry, String> {
-    if let Some(p) = oauth
-        .config
-        .principals
-        .iter()
-        .find(|p| p.key() == (claims.iss.as_str(), claims.sub.as_str()))
-    {
-        return Ok(p.clone());
-    }
-    let row = oauth
-        .with_principals(|s| s.get(&claims.iss, &claims.sub))
-        .map_err(|e| format!("the principals store refused a read: {e}"))?;
-    match row {
-        Some(row) => Ok(crate::principals::PrincipalEntry {
-            name: row.name,
-            iss: row.iss,
-            sub: row.sub,
-            label: row.label,
-            scopes: row.scopes,
-        }),
-        None => Err(format!(
+    crate::principals::resolve_human(
+        &claims.iss,
+        &claims.sub,
+        |iss, sub| {
+            oauth
+                .config
+                .principals
+                .iter()
+                .find(|p| p.key() == (iss, sub))
+                .cloned()
+        },
+        |iss, sub| {
+            oauth
+                .with_principals(|store| store.get(iss, sub))
+                .map(|row| {
+                    row.map(|row| crate::principals::PrincipalEntry {
+                        name: row.name,
+                        iss: row.iss,
+                        sub: row.sub,
+                        label: row.label,
+                        scopes: row.scopes,
+                    })
+                })
+                .map_err(|error| format!("the principals store refused a read: {error}"))
+        },
+    )?
+    .ok_or_else(|| {
+        format!(
             "no principal is registered for {} {}",
             claims.iss, claims.sub
-        )),
-    }
+        )
+    })
 }
 
 /// The redirect URI this server registers at the upstream provider. One

@@ -773,7 +773,8 @@ async fn the_callback_records_the_authenticated_human_on_the_login() {
         .with_store(|s| s.take_login(&back.state, now))
         .unwrap()
         .expect("the callback leaves the login row for the consent step");
-    assert_eq!(login.principal.as_deref(), Some("adam"));
+    let id = mcpmem::principals::human_id(&idp.issuer, support::fake_idp::SUBJECT);
+    assert_eq!(login.principal.as_deref(), Some(id.as_str()));
     assert_eq!(login.client_id, client_id);
 }
 
@@ -808,7 +809,8 @@ async fn a_replayed_callback_leaves_a_completed_login_alone() {
         .with_store(|s| s.take_login(&back.state, now))
         .unwrap()
         .expect("the replay must leave the completed login in place");
-    assert_eq!(login.principal.as_deref(), Some("adam"));
+    let id = mcpmem::principals::human_id(&idp.issuer, support::fake_idp::SUBJECT);
+    assert_eq!(login.principal.as_deref(), Some(id.as_str()));
 }
 
 /// Every refusal at the callback is one page. An anonymous caller learns

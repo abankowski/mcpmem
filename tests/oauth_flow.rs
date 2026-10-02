@@ -52,6 +52,150 @@ async fn to_tokens(scopes: &[&str]) -> (Authorized, Tokens) {
     (authorized, tokens)
 }
 
+/// A runtime principal changes its display name. A second OAuth login must
+/// still resolve the same owned workspace and the same private grant.
+#[tokio::test]
+async fn oauth_subject_keeps_workspace_ownership_and_grants_after_a_name_change() {
+    let idp = support::fake_idp::FakeIdp::start(support::fake_idp::IdpBehaviour::default()).await;
+    let mut config = support::oauth_config(&idp.issuer);
+    config.principals[0].sub = "another-subject".into();
+    let file_principals = config.principals.clone();
+    let server = support::server(Some(config), support::Scopes::all(), None).await;
+    let db_path = server.memory_db_path();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    assert_eq!(
+        conn.execute(
+            "INSERT INTO runtime_principal (iss,sub,name,label,scopes,created_us,updated_us)
+             VALUES (?1,'sub-1','First name',NULL,'[\"graph-read\",\"graph-write\"]',1,1)",
+            [&idp.issuer],
+        )
+        .unwrap(),
+        1
+    );
+    let expected_id = mcpmem::principals::human_id(&idp.issuer, "sub-1");
+    let registry = mcpmem::workspace::WorkspaceRegistry::open_with_principals(
+        &db_path,
+        None,
+        &file_principals,
+        false,
+    )
+    .unwrap();
+    let first_token = flow::admin_access_token(&idp, &server).await;
+    assert_eq!(
+        server.oauth().validate(&first_token).unwrap().principal,
+        expected_id
+    );
+    let owned = registry
+        .create(
+            &expected_id,
+            "owned graph",
+            mcpmem::workspace::Visibility::Private,
+            |_| Ok(()),
+        )
+        .unwrap();
+    let granted = registry
+        .create(
+            "machine:local",
+            "granted graph",
+            mcpmem::workspace::Visibility::Private,
+            |_| Ok(()),
+        )
+        .unwrap();
+    registry
+        .grant(
+            "machine:local",
+            &granted.workspace_id,
+            &expected_id,
+            "reader",
+        )
+        .unwrap();
+
+    assert_eq!(
+        conn.execute(
+            "UPDATE runtime_principal SET name='Second name',updated_us=2
+             WHERE iss=?1 AND sub='sub-1'",
+            [&idp.issuer],
+        )
+        .unwrap(),
+        1
+    );
+    let second_token = flow::admin_access_token(&idp, &server).await;
+    let after = server.oauth().validate(&second_token).unwrap().principal;
+    assert_eq!(after, expected_id);
+    assert_eq!(
+        registry
+            .resolve(
+                &after,
+                Some(&owned.workspace_id),
+                mcpmem::workspace::WorkspaceAccess::Owner
+            )
+            .unwrap()
+            .owner_id,
+        expected_id
+    );
+    assert_eq!(
+        registry
+            .resolve(
+                &after,
+                Some(&granted.workspace_id),
+                mcpmem::workspace::WorkspaceAccess::Read
+            )
+            .unwrap()
+            .workspace_id,
+        granted.workspace_id
+    );
+    for token in [&first_token, &second_token] {
+        let response = server
+            .request(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(TOOLS_LIST))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+/// A legacy runtime row can share the file principal's issuer and subject.
+/// The file scopes must win even when the runtime row contains admin.
+#[tokio::test]
+async fn a_file_principal_takes_precedence_over_a_runtime_collision_on_oauth_login() {
+    let started = Flow::new("graph-read graph-write admin").start().await;
+    let conn = rusqlite::Connection::open(started.server().memory_db_path()).unwrap();
+    assert_eq!(
+        conn.execute(
+            "INSERT INTO runtime_principal (iss,sub,name,label,scopes,created_us,updated_us)
+             VALUES (?1,'sub-1','shadow',NULL,'[\"graph-read\",\"admin\"]',1,1)",
+            [&started.idp().issuer],
+        )
+        .unwrap(),
+        1
+    );
+    let client_id = started.register().await;
+    let res = started.authorize(&client_id).await;
+    assert_eq!(res.status(), StatusCode::FOUND);
+    let back = started.idp().login(&header(&res, "location")).await;
+    let res = started.callback(&back.code, &back.state).await;
+    let authorized = started
+        .into_stage(res, back.state, client_id)
+        .into_consent()
+        .await;
+    let code = authorized.approve(&["graph-write"]).await;
+    let tokens = authorized.exchange(&code).await;
+    let names = authorized.tool_names(&tokens.access_token).await;
+    assert!(names.contains(&"delete_entities".to_owned()), "{names:?}");
+    assert_eq!(
+        authorized
+            .get("/ui/api/principals", Some(&tokens.access_token))
+            .await
+            .status,
+        StatusCode::FORBIDDEN,
+        "the runtime row's admin scope must not replace the file principal"
+    );
+}
+
 // ── The whole path ──────────────────────────────────────────────────────────
 
 /// Every hop a connector makes, in the order it makes them, with an assertion

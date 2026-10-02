@@ -14,7 +14,7 @@ use crate::tools::{self, ToolCategory};
 /// The shared, immutable stdio principal. The line transports dispatch one of
 /// these per message, so the scope set is built once instead of per request.
 pub(crate) static LOCAL_PRINCIPAL: LazyLock<Principal> =
-    LazyLock::new(|| principal_with("local", ToolCategory::ALL));
+    LazyLock::new(|| principal_with("machine:local", ToolCategory::ALL));
 
 /// The stdio caller. stdio is local and unauthenticated, so it holds every
 /// scope; the process-wide category flags still apply.
@@ -24,7 +24,7 @@ pub fn local_principal() -> Principal {
 
 /// The principal behind the static bearer token, with operator-chosen scopes.
 pub fn bearer_principal(scopes: &[ToolCategory]) -> Principal {
-    principal_with("static", scopes)
+    principal_with("machine:static", scopes)
 }
 
 /// A principal named by the OAuth layer, with the scopes the human approved.
@@ -35,6 +35,15 @@ pub fn oauth_principal(id: &str, scopes: BTreeSet<String>) -> Principal {
         scopes,
         allowed_origins: BTreeSet::new(),
     }
+}
+
+/// Only an admin human or trusted local stdio can manage machine credentials.
+/// A machine with a malformed `admin` scope is still not an administrator.
+pub fn may_manage_machines(principal: &Principal) -> bool {
+    (principal.kind == PrincipalKind::Machine && principal.id == "machine:local")
+        || (principal.kind == PrincipalKind::Human
+            && principal.id.starts_with("human:")
+            && principal.scopes.contains(crate::principals::ADMIN_SCOPE))
 }
 
 fn principal_with(id: &str, scopes: &[ToolCategory]) -> Principal {

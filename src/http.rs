@@ -100,6 +100,7 @@ const SERVER_HEADER_VALUE: &str = concat!("mcpmem ", env!("CARGO_PKG_VERSION"));
 #[derive(Clone)]
 pub struct HttpState {
     kg: Arc<GraphHandle>,
+    registry: Arc<crate::workspace::WorkspaceRegistry>,
     vs: Option<Arc<VectorStore>>,
     auth_token: Option<Arc<str>>,
     bearer_scopes: Arc<[ToolCategory]>,
@@ -186,9 +187,9 @@ impl HttpState {
             ..crate::config::Config::default()
         };
         let busy_timeout_ms = config.busy_timeout_ms;
-        let kg = crate::server::MCPServer::new_kg(config)
-            .expect("build the test server")
-            .graph();
+        let server = crate::server::MCPServer::new_kg(config).expect("build the test server");
+        let registry = server.workspace_registry();
+        let kg = server.graph();
         let oauth = oauth.map(|config| {
             let state = match now_us {
                 Some(clock) => {
@@ -204,6 +205,7 @@ impl HttpState {
         });
         HttpState {
             kg,
+            registry,
             vs: None,
             auth_token,
             bearer_scopes: Arc::from(bearer_scopes),
@@ -219,6 +221,7 @@ impl HttpState {
 pub struct HttpRunConfig {
     pub addr: String,
     pub kg: Arc<GraphHandle>,
+    pub registry: Arc<crate::workspace::WorkspaceRegistry>,
     pub vs: Option<Arc<VectorStore>>,
     pub auth_token: Option<Arc<str>>,
     /// Scopes granted to the static bearer token.
@@ -300,6 +303,7 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
     let HttpRunConfig {
         addr,
         kg,
+        registry,
         vs,
         auth_token,
         bearer_scopes,
@@ -316,6 +320,7 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
     };
     let state = HttpState {
         kg,
+        registry,
         vs,
         auth_token,
         bearer_scopes,
@@ -388,9 +393,8 @@ fn wants_sse(headers: &HeaderMap) -> bool {
 
 /// Resolve the caller, or `None` when the request is unauthorized.
 ///
-/// The order is OAuth token, then the static bearer, then the fully open
-/// case, and it is the order of specificity: a value that validates as an
-/// issued token is one, and nothing else can be tried for it.
+/// The order is OAuth, configured static bearer, then a registered machine.
+/// Each credential keeps its own scopes and principal ID.
 ///
 /// With OAuth on and no static token, a request without a credential is not
 /// allowed: an OAuth server refuses anonymous access even before it can
@@ -412,15 +416,25 @@ fn principal_of(state: &HttpState, headers: &HeaderMap) -> Option<Principal> {
             grant.scopes.into_iter().collect(),
         ));
     }
-    match (state.auth_token.as_ref(), presented) {
-        (Some(expected), Some(token)) if server::token_matches(token, expected) => {
-            Some(crate::authz::bearer_principal(&state.bearer_scopes))
-        }
-        (None, _) if state.oauth.is_none() => {
-            Some(crate::authz::bearer_principal(&state.bearer_scopes))
-        }
-        _ => None,
+    if let (Some(expected), Some(token)) = (state.auth_token.as_ref(), presented)
+        && server::token_matches(token, expected)
+    {
+        return Some(crate::authz::bearer_principal(&state.bearer_scopes));
     }
+    if let Some(token) = presented {
+        match state.registry.authenticate_machine(token) {
+            Ok(Some(principal)) => return Some(principal),
+            Ok(None) => {}
+            Err(error) => {
+                error!("machine credential lookup failed: {error}");
+                return None;
+            }
+        }
+    }
+    if state.auth_token.is_none() && state.oauth.is_none() {
+        return Some(crate::authz::bearer_principal(&state.bearer_scopes));
+    }
+    None
 }
 
 /// The RFC 6750 challenge. With OAuth on it names the resource metadata, so the
@@ -893,9 +907,8 @@ async fn admin_update_principal(
 /// `DELETE /ui/api/principals/{id}` — delete one runtime principal and
 /// revoke every live token family that names it.
 ///
-/// The revocation runs by the row's *current* name. A token minted under the
-/// row's previous name survives a rename-then-delete; the v1 spec documents
-/// that gap and this task does not close it.
+/// The admin path keeps its bare ID segment. Convert it to the stable human
+/// ID before the owner check or token revocation.
 async fn admin_delete_principal(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -918,11 +931,22 @@ async fn admin_delete_principal(
         Ok(None) => return not_found(),
         Err(e) => return store_failure(e),
     };
+    let stable_id = crate::principals::human_id(&iss, &sub);
+    match state.registry.owns_workspace(&stable_id) {
+        Ok(true) => return conflict("a workspace owner cannot be deleted"),
+        Ok(false) => {}
+        Err(error) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("workspace registry: {error}"),
+            );
+        }
+    }
     // Revoke before the row goes: a swallowed revoke error would leave a
     // deleted principal's tokens live, and token validation never
     // cross-checks the principals store. On a revoke failure the row stays
     // intact, so the delete is retryable.
-    let revoked = match oauth.revoke_principal(&row.name) {
+    let revoked = match oauth.revoke_principal(&stable_id) {
         Ok(n) => n,
         Err(e) => return oauth_store_failure(e),
     };
@@ -2011,11 +2035,12 @@ mod tests {
             enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
             ..Config::default()
         };
-        let kg = MCPServer::new_kg(config)
-            .expect("test server builds")
-            .graph();
+        let server = MCPServer::new_kg(config).expect("test server builds");
+        let registry = server.workspace_registry();
+        let kg = server.graph();
         HttpState {
             kg,
+            registry,
             vs: None,
             auth_token: None,
             bearer_scopes: Arc::from(scopes),

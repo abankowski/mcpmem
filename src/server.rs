@@ -543,6 +543,7 @@ impl MCPServer {
         crate::http::run(crate::http::HttpRunConfig {
             addr: addr.to_owned(),
             kg: self.graph(),
+            registry: self.workspace_registry(),
             vs: self.vs.clone(),
             auth_token: self.config.auth_token.clone(),
             // Scopes granted to the static bearer token. Defaults to every

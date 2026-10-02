@@ -643,9 +643,8 @@ impl Store {
             .optional()?)
     }
 
-    /// Revoke every live token family that names `principal`, and return how
-    /// many families were revoked. A renamed, then deleted, principal keeps
-    /// old-name families alive until they expire; that gap is documented.
+    /// Revoke every live token family for one stable principal ID.
+    /// A display-name change does not change the family owner.
     pub fn revoke_principal(&self, principal: &str) -> Result<usize> {
         let families: Vec<String> = self
             .conn

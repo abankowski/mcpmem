@@ -46,6 +46,29 @@ impl PrincipalEntry {
     }
 }
 
+/// A stable human identity. A display name is not part of this ID.
+pub fn human_id(iss: &str, sub: &str) -> String {
+    format!("human:{}", mcpmem_oauth::principal_id(iss, sub))
+}
+
+/// Decode only stable human IDs, never bare admin-API path segments.
+pub fn human_key(id: &str) -> Option<(String, String)> {
+    mcpmem_oauth::parse_principal_id(id.strip_prefix("human:")?)
+}
+
+/// Prefer the file-backed principal before the runtime principal.
+pub(crate) fn resolve_human<T, E>(
+    iss: &str,
+    sub: &str,
+    file: impl FnOnce(&str, &str) -> Option<T>,
+    runtime: impl FnOnce(&str, &str) -> std::result::Result<Option<T>, E>,
+) -> std::result::Result<Option<T>, E> {
+    match file(iss, sub) {
+        Some(principal) => Ok(Some(principal)),
+        None => runtime(iss, sub),
+    }
+}
+
 /// The single scope spelling for administration. It grants access to the
 /// admin API only; no tool carries it.
 pub const ADMIN_SCOPE: &str = "admin";
