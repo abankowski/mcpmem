@@ -1,268 +1,124 @@
 # File Attachments with Embeddings — Design
 
-**Status:** Design approved in sections on 2026-10-02. Written specification awaits review.
+**Status:** The owner approved the upload, workspace, and scope decisions on 2026-10-02. This document defines the implementation contract.
 
-## Goal and scope
+## Goal and boundaries
 
-A user can attach a file to an entity (a graph node). Text files are read
-directly; PDFs are converted to text by an LLM-driven OCR. The extracted text
-is chunked and embedded exactly like entity observations, so semantic, hybrid
-and MMR search surface file content — each hit identifying the file, the page
-and an excerpt. A per-workspace durable worker performs the extraction asynchronously;
-an upload returns immediately with an `attachment_id` and a status.
+A user attaches a UTF-8 text file or a PDF to a graph entity. The server stores the bytes in that entity's workspace graph file. A durable extractor writes page text. The existing indexer embeds that text. Semantic, hybrid, and MMR search identify the file, page, and matching segment. An upload returns `attachmentId` and `status: "uploaded"` before extraction starts.
 
-Supported source types: UTF-8 text files and `application/pdf`. Code files are
-out of scope: the tree-sitter `code` feature already owns code symbols, and mixing
-file attachments into that path is a separate design.
+A profile rebuild reads stored text and does not repeat OCR. The feature does not add attachment versions, attachment-specific workspace grants, cross-workspace search, or tree-sitter code symbols. A code-like file with an allowed text MIME type receives ordinary text treatment, not code indexing.
 
-This change does not add attachment versioning, per-attachment permission, or
-cross-workspace file search. Extraction output is stored permanently so a
-profile rebuild re-embeds without re-running OCR.
+## Owner decisions and rejected contracts
 
-## Evidence and the pipeline this plugs into
+1. **50 MiB:** HTTP uploads use a bounded body stream. MCP uploads use multiple calls with chunks. The existing 16 MiB JSON-RPC request cap remains in force. A single base64 `attach_file` call cannot carry a 50 MiB file and is not part of this design.
+2. **Workspace ownership:** Each workspace has a separate graph file. An attachment row has `entity_id`, but no `workspace_id`. The selected workspace comes from `WorkspaceRegistry::resolve` on every request. The registry stores no attachment metadata or bytes.
+3. **Consent:** Attachment operations require the dedicated OAuth/tool scope `attachments` and the existing workspace access check. `graph-write` does not imply `attachments`. A read requires `WorkspaceAccess::Read`; an upload or delete requires `WorkspaceAccess::Write`. No new workspace grant type exists.
 
-- `crates/mcpmem-core/src/jobs.rs:39` queues one `chunk_index_job` row per owner
-  per serving profile, inside the write transaction; a second change replaces
-  the row and raises the lease epoch.
-- `crates/mcpmem-indexer/src/lib.rs:301-308` dispatches on `job.owner_kind`
-  (only `Entity` and `Relation` today) and builds the canonical document, then
-  `embed_chunks_and_commit` calls the provider outside the
-  transaction and `commit_chunks` fences the write on lease, revision and
-  profile writability.
-- `crates/mcpmem-core/src/jobs.rs:83` `ChunkKind` has three variants
-  (`Identity`, `Observation`, `Relation`); `jobs.rs:100` `OwnerKind` has two.
-  Both are single definitions imported by the worker and the vector store, so
-  one addition sites both.
-- `src/vector_store.rs:1130` `chunk_text(hit)` resolves a chunk back to text;
-  `:1091` `resolve_owner` renders an owner name. `src/vector_store.rs:521`
-  inserts chunk rows into `chunk_vector`, which already carries a `source`
-  column.
+The graph viewer currently asks for `graph-read` only (`src/ui/graph.js:94-101`). The inspector asks for separate `attachments` consent before it offers attachment actions. A writer without that scope cannot upload. A principal with that scope but only reader access cannot upload or delete.
 
-**Root cause to reuse:** the file-attachment pipeline is OCR-and-chunking, and
-the embedding half is already a fenced, durable, provider-neutral worker.
-Adding attachments must not add a second embedding path. The design therefore
-splits the work: a new extraction worker produces permanent text, and the
-existing indexer worker embeds that text through a new `OwnerKind::Attachment`
-arm. All embedding reuse (lease, revision fence, profile adopt/rebuild,
-dead-letter) then works for files with no new embedding code.
+## Existing seams
 
-## Decisions taken in brainstorming (2026-10-02)
+- `src/workspace.rs:207-225` checks that the greatest graph migration is exactly 14. This prevents a new binary from reopening a graph after migration 15. The gate must check that marker 14 exists and reject a version above the binary's compiled maximum.
+- `crates/mcpmem-core/src/events.rs:45-75` ends at `0014_workspace_marker.sql`. Its checksum is pinned at `events.rs:145-148`. Migration 15 is additive to that history; migration 14 must not change.
+- Migration `0009_chunked_embeddings.sql:1-31` restricts both `chunk_vector` and `chunk_index_job` to entity and relation owners. Migration 15 must replace both CHECK constraints while preserving rows, indexes, and the other constraints.
+- `crates/mcpmem-core/src/jobs.rs:11-61,293-299,430-535,580-681` owns enqueue, rebuild sweep, live revision/type checks, and full-scan verification. Attachment support must extend each path.
+- `crates/mcpmem-indexer/src/lib.rs:296-323` dispatches an owner through the existing embedding worker. `commit_chunks` assigns consecutive `chunk_index` values. A split page therefore cannot use `chunk_index + 1` as its page number.
+- `src/server.rs:128-129` caps an MCP message at 16 MiB. `src/http.rs:233-290` owns HTTP routes and their default extractor body limit. The browser inspector lives at `src/ui/index.html:64-76` and `src/ui/graph.js:830-895`, not in the separate admin SPA.
 
-| Question | Decision |
-|---|---|
-| Pipeline timing | Asynchronous durable worker; upload returns immediately with status |
-| Where file bytes live | SQLite, alongside the graph — each workspace stays one portable file |
-| Ship surface | MCP tools + embedded `/ui` admin (upload, download, live status) |
-| OCR provider | Separate `[ocr]` config; `model` independently selected; credentials reuse the primary OpenAI embedding provider by default |
-| Code files | Out of scope (tree-sitter owns code symbols) |
-| Size limits | Server config, not hard-coded |
+## Durable schema and migration
 
-## Architecture and single owners of facts
+Migration `0015_attachments.sql` creates these STRICT tables in every graph file:
 
-| Fact | Owner | Consumers |
-|---|---|---|
-| Attachment bytes, metadata, status, revision | Attachment tables in the workspace graph file | MCP tools, admin UI, extraction worker, indexer, cascade delete |
-| Extracted page text | `attachment_text` in the workspace file | Indexer chunks; rebuilds re-embed from it, never re-OCR |
-| Attachment chunk vectors | The existing `chunk_vector` via the indexer worker | Vector search, `chunk_text`, entity view |
-| OCR credentials and model | `[ocr]` config (the runtime config file) | Extraction worker |
-| Workspace access to attachments | PR #55 workspace registry authorization (attachments inherit entity/workspace access) | MCP tools, admin UI |
+- `attachment(id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, filename TEXT NOT NULL, mime TEXT NOT NULL, size_bytes INTEGER NOT NULL, sha256 BLOB NOT NULL, content BLOB NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL, last_error TEXT, error_stage TEXT, created_us INTEGER NOT NULL)`. Status is one of `uploaded`, `extracting`, `ready`, `error`. The stage is null before extraction and after success. A failed attempt records `config`, `render`, `provider`, `decode`, or `storage` while status is `extracting` or `error`.
+- `attachment_text(attachment_id INTEGER NOT NULL, page INTEGER NOT NULL, text TEXT NOT NULL, chars INTEGER NOT NULL, PRIMARY KEY(attachment_id,page))`. Page numbers start at one. Text is retained after embedding and across profile rebuilds.
+- `attachment_chunk(attachment_id INTEGER NOT NULL, chunk_index INTEGER NOT NULL, page INTEGER NOT NULL, segment_index INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(attachment_id,chunk_index), UNIQUE(attachment_id,page,segment_index))`. This is the permanent mapping from each vector index to the exact embedded text and its page. It is not inferred from a page number.
+- `attachment_job(attachment_id INTEGER PRIMARY KEY, state TEXT NOT NULL, lease_token TEXT, lease_epoch INTEGER NOT NULL, lease_until_us INTEGER NOT NULL, next_attempt_us INTEGER NOT NULL, attempts INTEGER NOT NULL, last_error TEXT)`. The state uses the queue's `pending`, `leased`, `done`, and `dead` values.
+- `attachment_upload(upload_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, entity_id INTEGER NOT NULL, filename TEXT NOT NULL, mime TEXT NOT NULL, expected_bytes INTEGER NOT NULL, expected_sha256 BLOB NOT NULL, received_bytes INTEGER NOT NULL, next_index INTEGER NOT NULL, expires_us INTEGER NOT NULL, attachment_id INTEGER)`. A non-null `attachment_id` records a completed session for an idempotent finish.
+- `attachment_upload_chunk(upload_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, content BLOB NOT NULL, PRIMARY KEY(upload_id,chunk_index))`. An upload has at most 50 chunks of 1 MiB each at the default size cap.
 
-Every graph fact stays in the workspace's SQLite file; no attachment data is
-stored in the registry or the legacy file.
+Create a unique index on `(entity_id,filename)`. A second entity may use the same filename. A duplicate filename on one entity returns a named conflict and does not overwrite, bump a revision, or silently start a new extraction. Store the entity's current type ID on attachment vectors by joining `attachment.entity_id` to the live entity. Keep attachment `revision` as the authoritative embedding fence. Check the entity is live for every attachment read and write. When an upsert changes a parent's type, update its stored attachment vector `type_id` in the same graph mutation transaction. Advance the ANN generation and clear the full-scan mark for each affected profile. Do not repeat OCR or embeddings for this type-only change.
 
-## Data model
+Migration 15 copies the existing `chunk_vector` and `chunk_index_job` rows into replacement tables. It extends `chunk_vector.kind` and both `owner_kind` checks with `attachment`. It preserves the other columns, PKs, CHECKs, indexes, and stored vectors. Do not edit migration 0009 or 0014. Update the migration inventory with a pinned checksum for 15 and leave the checksum for 14 unchanged. The migration runner applies pending files in one transaction and refuses future versions.
 
-New tables in the workspace graph schema (new migration, next number after the
-workspaces migration for that schema):
+The graph connection does not enforce foreign keys. Deletion code removes upload sessions, their chunks, extracted text, index jobs, vectors, and the attachment in one graph transaction. Entity deletion also finds incomplete sessions by `entity_id`, even when `attachment_id` is null. It deletes those sessions and their chunks before deleting the entity. This releases their reserved bytes in the same transaction. Removal advances affected ANN generations and resets their full-scan marks so readers cannot retain stale attachment hits. A claimed job cannot commit after its attachment or job disappears.
 
-```sql
-CREATE TABLE attachment (
-  id INTEGER PRIMARY KEY,
-  workspace_id TEXT NOT NULL,
-  entity_id INTEGER NOT NULL,
-  filename TEXT NOT NULL,
-  mime TEXT NOT NULL,
-  size_bytes INTEGER NOT NULL,
-  sha256 BLOB NOT NULL,
-  content BLOB NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('uploaded','extracting','ready','error')),
-  revision INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT,
-  created_us INTEGER NOT NULL
-) STRICT;
+## Upload and read protocols
 
-CREATE TABLE attachment_text (
-  attachment_id INTEGER NOT NULL REFERENCES attachment(id),
-  page INTEGER NOT NULL,
-  text TEXT NOT NULL,
-  chars INTEGER NOT NULL,
-  PRIMARY KEY (attachment_id, page)
-) STRICT;
+**Shared checks:** Validate an existing live entity, an allowed MIME type, a non-empty filename, a 50 MiB maximum (`52,428,800` bytes), and a 256 MiB workspace budget (`268,435,456` bytes). The budget counts completed attachments and active upload reservations. Apply checks in the resolved graph file. Reject a duplicate filename on that entity before committing. No row in that graph carries a workspace ID. The raw HTTP path and the MCP path call one attachment finalization service and share transaction rules.
 
-CREATE TABLE attachment_job (
-  attachment_id INTEGER PRIMARY KEY REFERENCES attachment(id),
-  state TEXT NOT NULL CHECK (state IN ('pending','leased','done','dead')),
-  lease_token TEXT,
-  lease_epoch INTEGER NOT NULL DEFAULT 0,
-  lease_until_us INTEGER,
-  next_attempt_us INTEGER NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT
-) STRICT;
-```
+**HTTP:** `POST /ui/attachments?workspaceId=<uuid>&entityName=<name>&filename=<name>` carries the file as the raw request body. `Content-Type` supplies the MIME type. Every attachment route checks that this process enabled the `attachments` category before it reads a body. This process gate is separate from authentication, `attachments` OAuth scope, and the workspace read or write grant. The upload handler validates headers before it reads the body. It streams into a bounded temporary spool in chunks; it counts every received body byte and rejects byte 52,428,801 with HTTP 413. It checks `Content-Length` early when supplied but never trusts it as the sole limit. A route-local body-limit override does not change the global 16 MiB limit on `/mcp` or other routes. `DefaultBodyLimit` is not a cap on a raw Axum body stream: the handler's counter is mandatory. It streams the validated spool into a SQLite `zeroblob` through incremental blob I/O within the final transaction. A failed or disconnected request removes its spool and commits no attachment. The handler returns JSON `{ "attachmentId": <integer>, "status": "uploaded" }`.
 
-`attachment_job` mirrors the `chunk_index_job` lease/attempt machinery so the
-extraction worker needs no new failure primitives: bounded attempts, dead-letter
-on error, no work lost on crash (row written in the same transaction as the
-blob).
+**MCP:** `begin_attachment_upload({workspaceId?,entityName,filename,mime,expectedBytes,sha256})` returns `{uploadId,nextIndex:0}`. `expectedBytes` is an integer; `sha256` is a 64-character lowercase hexadecimal digest. `append_attachment_chunk({workspaceId?,uploadId,index,content})` takes base64 bytes, up to 1,048,576 decoded bytes per call, and returns `{nextIndex,receivedBytes}`. `finish_attachment_upload({workspaceId?,uploadId})` verifies byte count and SHA-256, commits the attachment and pending job, then returns `{attachmentId,status:\"uploaded\"}`. `cancel_attachment_upload({workspaceId?,uploadId})` removes a session. The `workspaceId` is optional only when a saved workspace default resolves to the original graph. The server binds the session to the authenticated principal and selected graph. It checks both on every append, finish, and cancel, including across changed defaults. Each call still passes the batch-wide OAuth scope preflight and its own workspace write gate. A caller cannot transfer a session to another principal or graph. Chunks arrive in consecutive indexes; an exact replay of the last chunk is harmless, but different replay data is a conflict. Finish is idempotent for a completed session. Expired incomplete sessions release their reservations and chunk rows.
 
-Indexes: `attachment(entity_id)`, `attachment(workspace_id)`, and a unique
-`(workspace_id, filename)` for a per-entity name collision policy.
+**Reads:** `list_attachments({workspaceId?,entityName})` returns `{attachments:[{attachmentId,filename,mime,sizeBytes,status,revision,errorStage,lastError,pageCount}]}`. `get_attachment({workspaceId?,attachmentId})` returns that metadata, including `entityName`, but no blob. `read_attachment_chunk({workspaceId?,attachmentId,offset,length})` returns `{content,offset,nextOffset,eof}`. The `content` is base64 for at most 1,048,576 bytes; offsets count raw bytes. `get_attachment_page({workspaceId?,attachmentId,page,offset,maxChars})` returns `{page,text,offset,nextOffset,eof}`. Offsets count Unicode scalar characters; `maxChars` defaults to 4,096 and cannot exceed 4,096. The browser uses `GET /ui/attachments?workspaceId=&entityName=`, `GET /ui/attachments/{id}?workspaceId=`, `GET /ui/attachments/{id}/pages?workspaceId=&page=&offset=&maxChars=`, and a streamed `GET /ui/attachments/{id}/download?workspaceId=`. Upload and delete use `POST /ui/attachments?workspaceId=&entityName=&filename=` and `DELETE /ui/attachments/{id}?workspaceId=`. Every read requires both the `attachments` scope and workspace read access. `delete_attachment({workspaceId?,attachmentId})` requires workspace write access.
 
-## Pipeline
+## Extraction and embedding
 
-1. **`attach_file`** validates MIME against the allowlist and size against the
-   per-attachment and per-workspace budgets, writes `content`+metadata and the
-   `attachment_job` row `pending` in one transaction, returns
-   `(attachment_id, status="uploaded")`.
-2. **Extraction worker** (new role, gated like `indexer`/`webhooks`):
-   - text files: decode UTF-8 (BOM stripped, CRLF normalised), one synthetic
-     page.
-   - PDFs: render per page, call the OCR provider per page, store one
-     `attachment_text` row per page. On success set
-     `attachment.status='ready'`, bump `attachment.revision`, enqueue
-     `chunk_index_job` rows (`owner_kind='attachment'`) for every serving and
-     rebuilding profile, mark the job `done`. On failure set
-     `status='error'`, `last_error`, and dead-letter after the attempt bound.
-3. **Existing indexer worker** gains one `OwnerKind::Attachment` arm at
-   `lib.rs:301-308`: assemble from `attachment_text` one chunk per page (split
-   pages over the profile's token cap), then the existing
-   claim→embed→commit/fence path runs unchanged. `ChunkKind::Attachment` is a
-   new variant on `jobs.rs:83`.
+Upload finalization writes the attachment and a pending extraction job in one transaction. The `uploaded` row remains queued when this process runs no extractor role. A separate extractor process can lease it from the same workspace graph. Do not require a local extractor role to accept uploads. At startup, warn if attachment tools are enabled and this process runs no extractor role. The warning states that another extractor must run; it does not prove that one exists. The extractor leases one job per workspace. A text file decodes as UTF-8, removes a BOM, normalizes CRLF, and becomes page 1. A PDF runs `pdfinfo` to count pages and `pdftoppm` to render one page at a time. The worker sends a rendered image to the vision endpoint for OCR. It holds no graph write transaction during a renderer or network call. It stages all page text, then writes page rows and deterministic segment rows in one fenced transaction. An empty extracted page still has a page row; it has no invented vector. A ready attachment with no non-empty segments needs a completed index job, but the full-scan gate does not require a nonexistent vector.
 
-Chunking: PDFs use per-page chunks so a search hit carries a page number;
-splitting preserves page attribution. Text files use the existing entity
-chunker.
+The segmenter walks Unicode scalar boundaries in source order. Each segment has at most 1,600 characters. Concatenating segment texts in `(page,segment_index)` order reproduces each stored page exactly. Assign `chunk_index` consecutively across all non-empty segments, starting at zero. A page can have several segments. The indexer reads `attachment_chunk` in `chunk_index` order and embeds each non-empty row through `IndexerWorker::embed_chunks_and_commit`. For zero segments, it passes `Some(&[])` to the fenced `IndexJobRepository::commit_chunks` without a provider request. Do not rely on a nonexistent profile token cap or an entity document splitter. `IndexJobRepository::commit_chunks` checks the live attachment revision and readiness, and `owner_type_id` joins to the live parent entity. The indexer never reads the blob or repeats OCR.
 
-Rebuilds: `attachment_text` is permanent, so rescan/reprofile re-embeds files
-without re-OCR, and profile swap supersedes old attachment chunks exactly as it
-does for entities.
+On success, the fenced extraction transaction sets `ready`, increments `revision`, clears errors, and enqueues an `OwnerKind::Attachment` upsert for every serving and rebuilding profile. It uses `enqueue_chunk_change` so an unset profile yields a held job. `IndexProfileRegistry::begin_rebuild` also enqueues every ready attachment from stored text. `verify_vectors_current` checks live ready attachments, stale or orphan attachment vectors, and all unfinished attachment jobs. It checks the expected vector count against persisted non-empty segments. Dead-lettered owners have their old vectors removed and cannot falsely pass with stale text. The ANN generation and published-snapshot rules remain in force.
 
-## OCR provider configuration
+A transient extraction failure keeps status `extracting` and records the last `error_stage` and `last_error`. The job retries under an eight-attempt lease bound. A terminal failure sets status `error` and retains the last stage and error. Invalid OCR configuration fails the PDF job at stage `config` without a provider request. The worker removes expired upload sessions in its periodic sweep. A terminal error leaves the blob available for download but publishes no partial text or vector set. An unknown OCR provider kind fails a PDF job with `unsupported ocr provider '<kind>'` at stage `config`; it does not fall through to a different provider. A missing renderer or nonzero renderer exit fails at stage `render`, never as successful OCR.
+
+## OCR provider and native renderer
 
 ```toml
 [ocr]
-model = "gpt-4o-mini"    # OCR model, chosen independently of the embedding model
-provider = "inherit"     # default; see below
-base-url = ""            # optional override, only when provider explicitly named
-api-key-file = ""        # optional override, only when provider explicitly named
+model = "gpt-4o-mini"
+provider = "inherit"
+# vision-url = "https://api.openai.com/v1/chat/completions" # optional for first-party OpenAI
+# api-key-file = "/path/to/vision-key" # required for an explicit openai provider
 ```
 
-- `provider = "inherit"` (default): reuse the primary `[indexer]` provider and
-  its credentials when that provider is `openai`/`openai-compatible`.
-- `provider = "openai"` with explicit `base-url`/`api-key-file`: a fully
-  separate endpoint and key.
-- A new `OcrProvider` registry mirrors `ProviderRegistry`: dispatch strictly on
-  provider kind; an unknown kind fails the extraction job rather than silently
-  reaching another provider; a URL carrying a user name or password is rejected
-  at construction.
-- An unset `[ocr]` section, or `provider = "inherit"` with no openai embedding
-  provider, disables OCR: PDF attach returns `status='error'` with a named
-  configuration gap; text-file attach still works. OCR never runs when the
-  profile is unset.
+The vision URL is a separate full endpoint. It never inherits `[indexer] openai-url`, because that URL is an embeddings endpoint. `inherit` selects the primary OpenAI or OpenAI-compatible embedding provider and reuses its effective API key. Only a first-party `openai` provider can use the default `https://api.openai.com/v1/chat/completions` vision URL. An inherited `openai-compatible` provider needs an explicit `vision-url` that does not use the default OpenAI host. Otherwise the PDF job fails at stage `config` before it sends an image or key. An explicit `openai` provider needs a readable `api-key-file` with a non-empty key. If the file is absent or invalid, the PDF job fails at stage `config` without a provider request. If the primary provider is absent, Bedrock, or Ollama, a PDF job fails at stage `config`. A text file still succeeds without valid OCR settings. Reject a URL with userinfo and disable redirects. No `[ocr]` section disables PDF OCR but does not disable text extraction. An unknown provider name remains an extraction-job error, not a config-parse error.
 
-## Search integration
+Choose Poppler's `pdfinfo` and `pdftoppm` as external renderers. The `mcpmem` Rust binary and its crates.io package do **not** include Poppler. A host that runs PDF extraction must install both commands in the extractor process's `PATH`. Check the installed commands with `command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v` (same command in bash and fish). Run the real-PDF render-to-fake-vision integration test on the release target before deployment. A missing executable is an observable `render` error. No fallback reports success without page images.
 
-- Attachment chunks use `ChunkKind::Attachment` and enter the existing vector
-  store. `chunk_text` (vector_store.rs:1130) gains an `Attachment` branch
-  resolving `(attachment_id, page, excerpt)` from `attachment_text` first, then
-  the filename from `attachment`; `resolve_owner` renders the filename for an
-  attachment owner.
-- Existing semantic, hybrid and MMR search return attachment hits with kind
-  `Attachment`, carrying `filename`, `page` and `excerpt`. A filter
-  (`include_attachments`, default on) lets a caller restrict to entity hits.
-  Disabling it makes the graph's own identity/observation space unaffected.
-- The entity's `Identity` chunk is untouched; an attachment never replaces the
-  entity's identity.
+## Search and viewer
 
-## Tools and admin UI
+`src/vector_store.rs` resolves attachment owners to the filename and live parent entity type. It reads the exact segment from `attachment_chunk(attachment_id,chunk_index)` and its stored page. It drops orphaned or deleted owners. Semantic, hybrid, vector, and MMR searches include ready attachments by default only when the caller has `attachments` consent. The search tool itself still needs `vectors` scope. Without `attachments` scope, exclude attachment candidates before distance ranking, owner aggregation, fusion, and `topK`. Keep entity and relation candidates available with `vectors` scope alone. Attachment result rows add `filename`, `page`, and `excerpt`, including when `includeChunks` is false. The `includeAttachments` boolean defaults to true but cannot override missing consent. When false, the store also excludes attachment candidates before ranking. `filter.kind` accepts `attachment`; `filter.type` matches the attached entity's type. Hybrid FTS remains entity-only. If `filter.kind="attachment"`, do not add entity FTS candidates to hybrid or fused semantic results. Attachment hits enter by vector rank.
 
-MCP tools: `attach_file` (base64 content, returns id+status), `list_attachments`,
-`get_attachment` (bytes, status, per-page text), `delete_attachment`. The `/ui` admin
-gains the same quartet via the browser: file picker upload, live status badges,
-download, per-page text viewer, delete. Attachment tools register under their
-own category so PR #55 scope gating covers them without new work.
+The current MMR path selects only entity candidates and reads only identity vectors (`src/vector_actions.rs:678-702`). Extend its candidate path to use each attachment's best matching chunk vector for diversity. Keep entity identity behavior unchanged. MMR must return attachment metadata from the selected chunk. Do not claim MMR coverage by changing only the standard vector result builder.
 
-`delete_attachment` deletes blob, text, its chunk rows (delete by
-`owner_kind='attachment'`) and the job in one transaction; deleting an entity
-cascades its attachments; re-attach bumps revision and supersedes the prior
-chunk set. These are the only destructive paths, reachable only through the
-fenced tools.
+The entity inspector at `/ui` adds a file picker, status and error badges, page-text reader, download, and delete. It polls while status is `uploaded` or `extracting`, including after a transient failure with a visible last error stage. It stops after `ready` or terminal `error`; success clears the previous error badge. It binds all requests to the current workspace and selected node. On a workspace switch or node switch, it cancels pending requests and polling so a stale response cannot alter another inspector. It requests `attachments` OAuth consent separately from its existing `graph-read` login; upload and delete also need a workspace writer or owner grant. The admin SPA does not receive an attachment panel.
 
-## Configuration and limits
+## Numbered requirements and checks
 
-`[attachments]`: `max-bytes` (per attachment, default 50 MiB), `workspace-byte-budget`
-(default 256 MiB), `allow-mime` (default `text/*`, `text/markdown`,
-`application/pdf`). Both budgets are enforced at `attach_file`, named in the
-error. `[ocr] model` is the separate OCR model selection.
+| ID | Requirement | Observable check |
+|---|---|---|
+| R1 | HTTP streams 50 MiB without raising the `/mcp` 16 MiB cap. | Upload a 50 MiB stream; byte 52,428,801 returns 413; a 16 MiB+ MCP request still fails. |
+| R2 | MCP completes a 50 MiB file through ordered 1 MiB calls. | Begin, append 50 chunks, finish, then compare downloaded bytes and SHA-256. |
+| R3 | No attachment or upload graph row contains a workspace ID. | Inspect migration 15 and read two distinct graphs with the same entity/filename. |
+| R4 | Attachment access needs `attachments` scope and a workspace read or write grant. | Test withheld scope, reader upload, wrong principal, changed default, and denied batch before any write. |
+| R5 | A duplicate filename on one entity conflicts; another entity may reuse it. | Attempt both cases and inspect the first row and revision. |
+| R6 | Text extraction succeeds without OCR and an upload returns before extraction. | Upload UTF-8 with no `[ocr]`; check pending, then ready with normalized page 1. |
+| R7 | PDF OCR calls a separate vision URL with the inherited primary OpenAI key. | Fake distinct embedding and vision endpoints; assert the vision request URL and key. |
+| R8 | An unknown OCR provider or missing Poppler fails with a named `config` or `render` stage. | Exercise both errors; assert no page rows or vectors appear. |
+| R9 | Page splits retain exact segment text and page across vector commits. | Split one page twice; compare each hit with its persisted segment mapping. |
+| R10 | Ready attachments enqueue serving, candidate, and held jobs correctly. | Test active profile, rebuild, and absent profile. |
+| R11 | Rebuild reads stored text and never runs OCR again. | Count fake vision calls across initial extraction and profile rebuild. |
+| R12 | A changed or deleted attachment cannot commit an old leased vector. | Change revision or delete after claim and before commit; assert no stale vector. |
+| R13 | Full-scan verification rejects missing, stale, and orphan attachment rows. | Exercise each invalid state and a complete rebuilt profile. |
+| R14 | Semantic, hybrid, vector, and MMR hits return filename, page, and excerpt. | Search a page-2 split segment in each path; check `includeAttachments=false` before ranking. |
+| R15 | Deletion and entity cascade remove all associated data and invalidate published vectors. | Delete both ways; inspect tables and the next search snapshot. |
+| R16 | MIME, per-file, and workspace-budget errors name the failed rule. | Send disallowed MIME, 50 MiB+1, and an exhausted 256 MiB reservation. |
+| R17 | The `/ui` entity inspector uploads, polls, reads pages, downloads, and deletes. | Run a browser session with a writer, a reader, and a workspace switch. |
+| R18 | Every new user-facing surface ships with README and release instructions. | Inspect README, CHANGES, and the release-target Poppler smoke result. |
+| R19 | Search needs `attachments` consent for attachment candidates but not for entity or relation candidates. | With `vectors` scope only, a higher-ranked attachment never consumes `topK` or reveals an excerpt; with both scopes, it appears. |
+| R20 | Uploads stay durably `uploaded` without a local extractor role. | Run separate MCP and extractor processes against one graph; test missing local role and missing extractor build, startup warning, and later extraction. |
+| R21 | Parent retype updates attachment vector types and invalidates ANN snapshots without new embeddings. | Search with old and new `filter.type` before and after retype; inspect affected generations and provider call count. |
+| R22 | Explicit `openai` OCR needs a valid `api-key-file`. | Upload a PDF without a readable non-empty key file; assert terminal `config` error and no request. Extract text with the same settings. |
+| R23 | Compatible-provider inheritance never sends its key to the default OpenAI vision host. | Use distinct embedding and vision endpoints; assert an explicit compatible vision URL gets the key and missing or OpenAI-host URLs fail before any request. |
+| R24 | Every HTTP attachment route needs the enabled `attachments` category before body consumption. | Disable the category while retaining OAuth and workspace grants; assert all routes deny access and an upload reads no body. |
+| R25 | A zero-segment attachment completes indexing without an embedding request. | Index a blank text page or empty OCR page; assert the job is done with zero vectors and zero provider calls. |
+| R26 | `filter.kind="attachment"` excludes entity FTS candidates from fusion. | Run filtered hybrid and fused semantic search against a matching entity; assert only attachment hits consume `topK`. |
+| R27 | Transient extraction failures retain `extracting` and a visible last error stage. | Fail one attempt, observe inspector polling and its error badge, then succeed and observe `ready` with no error badge. |
+| R28 | Entity deletion removes incomplete upload sessions, chunks, and reservations. | Delete an entity with only an incomplete upload; assert no session or chunk remains and the 256 MiB budget is free. |
 
-## Numbered requirements
+## Rejected alternatives and limits of approval
 
-1. `attach_file` returns immediately with `attachment_id` and `status`,
-   regardless of file length; it never calls an LLM synchronously.
-2. Text files become indexable without any `[ocr]` config.
-3. A PDF's extracted per-page text is embedded into the serving vector profile
-   through the existing indexer queue, not a second embedding path.
-4. A semantic-search hit for file content returns `filename`, `page` and an
-   `excerpt` from the extracted text.
-5. A profile rebuild re-embeds attachment text from `attachment_text` and never
-   re-runs OCR.
-6. An attachment revision change supersedes an in-flight embed of the old
-   revision (fence preserved).
-7. `delete_attachment` and entity-delete cascade remove blob, text, chunks and
-   job atomically.
-8. Size and MIME violations are rejected at `attach_file` with a named reason.
-9. An unknown OCR provider kind fails the extraction job with
-   `unsupported ocr provider '<kind>'`; it never reaches another provider.
-10. Attachment access is authorised by the PR #55 workspace registry, identical
-    to entity access; no new grant type exists.
-11. Every `attachment` mutation ships with its README section in the same
-    change (repo rule).
+A single base64 MCP call is rejected because the existing 16 MiB message cap is correct. Storing `workspace_id` on each graph row is rejected because graph files are already isolated. Reusing `graph-write` as the attachment OAuth scope is rejected because the owner asked for separate consent. A page derived from `chunk_index + 1` is rejected because pages split into several segments. Reusing the OpenAI embedding URL for OCR is rejected because it is not a vision endpoint. `pdfium-render` is not selected: it needs an external native Pdfium library, and the chosen Poppler commands are already available on the development host. Neither renderer is bundled with the current binary release. No business or schema choice remains implicit; deployment must install Poppler before enabling PDF extraction.
 
-## Migration
-
-One `STRICT` migration creating the three tables, the indexes, and the
-`attachment` FTS-equivalent nothing (search is vector + per-page text, not FTS
-over blobs). Extraction and chunk tables are additive; no existing row or
-revision changes. Rollback is drop-only (new feature, no production data).
-
-## Testing
-
-- Worker contract tests for the new `OwnerKind::Attachment` arm: chunks match
-  page-per-chunk shape; pages over the token cap split without page drift;
-  vanished/superseded attachment routes through the retry path.
-- Fence chain: a revision bump between claim and commit refuses the commit.
-- `chunk_text`/`resolve_owner` resolve attachment hits to `(filename, page,
-  excerpt)`; unknown attachment returns `None`.
-- Cascade: `delete_attachment` and entity-delete leave no `attachment`,
-  `attachment_text`, `chunk_vector` or `attachment_job` row.
-- Budgets: `attach_file` rejects over-`max-bytes` and over-workspace-budget
-  with named reasons.
-- OCR registry: a fake vision HTTP upstream proves dispatch, credential
-  inheritance, and unknown-kind failure (mirrors the embedding-provider tests).
-  Each guard/assertion is tested in the failing direction.
-- MCP tool tests follow the repo's existing tools suite; admin UI verified
-  manually against the running server.
-
-## Non-goals and rejected alternatives
-
-- **Separate embedding path for files** — rejected: forks the fenced,
-  provider-neutral worker and splits rebuild semantics in two.
-- **Filesystem for bytes** — rejected in brainstorming: breaks the single-portable-file
-  workspace property and splits backup/delete/workspace-move across two artefacts.
-- **Synchronous OCR** — rejected in brainstorming: multi-page PDFs would time
-  out MCP calls.
-- **Code files as attachments** — deferred: tree-sitter owns code symbols;
-  mixing paths is a separate design.
-- **Re-OCR on rebuild** — rejected: OCR is the expensive operation; permanent
-  text makes rebuilds a re-embed.
+The preflight analysis's owner-approval stop is superseded by the decisions in this design. Do not use that old stop to delay migration 15.
