@@ -158,6 +158,30 @@ fn bearer_get(token: &str, path: &str) -> Request<Body> {
         .unwrap()
 }
 
+async fn assert_graph_tools_available(server: &support::Server, token: &str) {
+    let response = server
+        .request(
+            Request::post("/mcp")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, bearer(token))
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = support::json(response).await;
+    assert!(
+        body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "read_graph"),
+        "the credential must hold the graph-read scope: {body}"
+    );
+}
+
 #[tokio::test]
 async fn an_anonymous_caller_is_challenged_not_refused() {
     let (server, _token) = admin_server().await;
@@ -231,10 +255,10 @@ async fn list_marks_builtins_immutable_and_lists_runtime_rows() {
 async fn create_update_delete_round_trip_and_delete_revokes() {
     let (server, token) = admin_server().await;
 
-    // A name a real login could never mint tokens for: "ada" has no OAuth
-    // client and no code. The family is planted the way the store writes
-    // every minted token, so the delete's revoke has a family to reach.
+    // The provider cannot authenticate u-9 in this fixture. Plant a token
+    // for its stable ID so the HTTP delete must revoke the correct family.
     let family = mcpmem_oauth::new_token();
+    let principal_id = mcpmem::principals::human_id("https://idp.example", "u-9");
     let now = (server.oauth().now_us)();
     support::flow::with_store(&server, |store| {
         store
@@ -243,7 +267,7 @@ async fn create_update_delete_round_trip_and_delete_revokes() {
                 mcpmem_oauth::store::TokenKind::Refresh,
                 &mcpmem_oauth::store::Grant {
                     client_id: "c-ada".into(),
-                    principal: "ada".into(),
+                    principal: principal_id.clone(),
                     scopes: vec!["graph-read".into()],
                     resource: format!("{}/mcp", support::PUBLIC_URL),
                     family: "ada-fam".into(),
@@ -325,12 +349,94 @@ async fn create_update_delete_round_trip_and_delete_revokes() {
     assert_eq!(del.status(), 204);
 
     let outcome = support::flow::with_store(&server, |store| {
-        store.take_refresh(&family, now + 2 * 60 * 60 * 1_000_000)
+        store.take_refresh(&family, now + 1_000_000)
     })
     .expect("the store answers");
     assert!(
         matches!(outcome, mcpmem_oauth::store::RefreshOutcome::Unknown),
         "deleting the principal revoked its token family"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_workspace_owner_is_refused_before_its_token_is_revoked() {
+    let (server, admin_token) = admin_server().await;
+    let created = server
+        .request(
+            Request::post("/ui/api/principals")
+                .header(header::AUTHORIZATION, bearer(&admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"owner","iss":"https://idp.example","sub":"owner-1","scopes":["graph-read"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let deletion_id = support::json(created).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let owner_id = mcpmem::principals::human_id("https://idp.example", "owner-1");
+    let registry =
+        mcpmem::workspace::WorkspaceRegistry::open(&server.memory_db_path(), None).unwrap();
+    let workspace = registry
+        .create(
+            &owner_id,
+            "owned graph",
+            mcpmem::workspace::Visibility::Private,
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert!(
+        registry
+            .resolve(
+                &owner_id,
+                Some(&workspace.workspace_id),
+                mcpmem::workspace::WorkspaceAccess::Owner
+            )
+            .is_ok(),
+        "the principal owns the graph before deletion"
+    );
+    let owner_token = mcpmem_oauth::new_token();
+    let now = (server.oauth().now_us)();
+    support::flow::with_store(&server, |store| {
+        store
+            .put_token(
+                &owner_token,
+                mcpmem_oauth::store::TokenKind::Access,
+                &mcpmem_oauth::store::Grant {
+                    client_id: "owner-client".into(),
+                    principal: owner_id.clone(),
+                    scopes: vec!["graph-read".into()],
+                    resource: format!("{}/mcp", support::PUBLIC_URL),
+                    family: "owner-family".into(),
+                },
+                now,
+                now + 60 * 60 * 1_000_000,
+            )
+            .unwrap();
+    });
+    assert_graph_tools_available(&server, &owner_token).await;
+    let deleted = server
+        .request(
+            Request::delete(format!("/ui/api/principals/{deletion_id}"))
+                .header(header::AUTHORIZATION, bearer(&admin_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(deleted.status(), StatusCode::CONFLICT);
+    assert_graph_tools_available(&server, &owner_token).await;
+    assert!(
+        registry
+            .resolve(
+                &owner_id,
+                Some(&workspace.workspace_id),
+                mcpmem::workspace::WorkspaceAccess::Owner
+            )
+            .is_ok(),
+        "a refused deletion must preserve the workspace owner"
     );
 }
 

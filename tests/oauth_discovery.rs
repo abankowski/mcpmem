@@ -380,6 +380,8 @@ async fn oauth_state_revokes_by_principal_through_the_store() {
     use mcpmem_oauth::store::{Grant, TokenKind};
     let server = support::oauth_server().await;
     let token = new_token();
+    let file_principal = &server.oauth().config.principals[0];
+    let principal_id = mcpmem::principals::human_id(&file_principal.iss, &file_principal.sub);
     server
         .oauth()
         .with_store(|store| {
@@ -388,7 +390,7 @@ async fn oauth_state_revokes_by_principal_through_the_store() {
                 TokenKind::Refresh,
                 &Grant {
                     client_id: "c1".into(),
-                    principal: "adam".into(),
+                    principal: principal_id.clone(),
                     scopes: vec!["graph-read".into()],
                     resource: format!("{PUBLIC_URL}/mcp"),
                     family: "f1".into(),
@@ -401,9 +403,9 @@ async fn oauth_state_revokes_by_principal_through_the_store() {
 
     let count = server
         .oauth()
-        .revoke_principal("adam")
+        .revoke_principal(&principal_id)
         .expect("the store answers");
-    assert_eq!(count, 1, "one live family names adam");
+    assert_eq!(count, 1, "one live family has the stable human ID");
 
     let outcome = server
         .oauth()

@@ -1,6 +1,6 @@
 //! One registry holds graph paths and access grants. Graph rows stay in separate files.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -9,7 +9,8 @@ use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::principals::PrincipalEntry;
+use crate::authz::{Principal, PrincipalKind};
+use crate::principals::{self, PrincipalEntry};
 
 const REGISTRY_VERSION: i64 = 1;
 const LOCAL_ID: &str = "machine:local";
@@ -91,6 +92,16 @@ pub struct WorkspaceGrant {
     pub role: String,
 }
 
+/// Public metadata for a machine account. It never carries a credential.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineView {
+    pub principal_id: String,
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub revoked: bool,
+}
+
 pub struct WorkspaceRegistry {
     conn: Mutex<Connection>,
     legacy_path: PathBuf,
@@ -121,7 +132,7 @@ impl WorkspaceRegistry {
         let memory_path = absolute_path.as_path();
         let file_humans = principals
             .iter()
-            .map(|principal| human_id(&principal.iss, &principal.sub))
+            .map(|principal| principals::human_id(&principal.iss, &principal.sub))
             .collect();
         let registry_path = appended_path(memory_path, ".workspaces.sqlite");
         let graph_dir = appended_path(memory_path, ".workspaces");
@@ -295,6 +306,45 @@ impl WorkspaceRegistry {
         Ok(registry)
     }
 
+    /// Check a stable human ID against the file and runtime principals.
+    pub fn registered_human(&self, id: &str) -> Result<bool, WorkspaceError> {
+        let Some((iss, sub)) = principals::human_key(id) else {
+            return Ok(false);
+        };
+        if principals::human_id(&iss, &sub) != id {
+            return Ok(false);
+        }
+        principals::resolve_human(
+            &iss,
+            &sub,
+            |_, _| self.file_humans.contains(id).then_some(()),
+            |iss, sub| {
+                if !self.legacy_path.exists() {
+                    return Ok(None);
+                }
+                let conn = Connection::open_with_flags(
+                    &self.legacy_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                let has_table: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='runtime_principal')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if !has_table {
+                    return Ok(None);
+                }
+                let exists: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_principal WHERE iss=?1 AND sub=?2)",
+                    params![iss, sub],
+                    |row| row.get(0),
+                )?;
+                Ok(exists.then_some(()))
+            },
+        )
+        .map(|principal| principal.is_some())
+    }
+
     fn registered(&self, principal: &str) -> Result<bool, WorkspaceError> {
         if principal == LOCAL_ID {
             return Ok(true);
@@ -302,30 +352,8 @@ impl WorkspaceRegistry {
         if principal == STATIC_ID {
             return Ok(self.static_enabled);
         }
-        if let Some(rest) = principal.strip_prefix("human:") {
-            let Some((iss, sub)) = mcpmem_oauth::parse_principal_id(rest) else {
-                return Ok(false);
-            };
-            if self.file_humans.contains(principal) {
-                return Ok(true);
-            }
-            if !self.legacy_path.exists() {
-                return Ok(false);
-            }
-            let conn =
-                Connection::open_with_flags(&self.legacy_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='runtime_principal')",
-                [], |row| row.get(0),
-            )?;
-            if !exists {
-                return Ok(false);
-            }
-            return Ok(conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM runtime_principal WHERE iss=?1 AND sub=?2)",
-                params![iss, sub],
-                |row| row.get(0),
-            )?);
+        if principal.starts_with("human:") {
+            return self.registered_human(principal);
         }
         if principal.starts_with("machine:") {
             let conn = self.conn.lock().expect("workspace registry lock poisoned");
@@ -713,14 +741,150 @@ impl WorkspaceRegistry {
         })?;
         rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
+
+    /// A principal with a graph cannot be removed from the principal store.
+    pub fn owns_workspace(&self, principal_id: &str) -> Result<bool, WorkspaceError> {
+        let conn = self.conn.lock().expect("workspace registry lock poisoned");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace WHERE owner_id=?1)",
+            [principal_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Issue a random credential once. The registry retains only its digest.
+    pub fn create_machine(
+        &self,
+        name: &str,
+        scopes: &[String],
+    ) -> Result<(String, String), WorkspaceError> {
+        let name = name.trim();
+        let scopes = principals::canonical_scopes(scopes)
+            .map_err(|error| WorkspaceError::InvalidInput(error.to_string()))?;
+        if name.is_empty() || scopes.is_empty() || scopes.iter().any(|scope| scope == "admin") {
+            return Err(WorkspaceError::InvalidInput(
+                "a machine needs a name and tool-category scopes, not admin".into(),
+            ));
+        }
+        let id = format!("machine:{}", Uuid::new_v4());
+        let token = mcpmem_oauth::new_token();
+        let digest = mcpmem_oauth::digest(&token);
+        let scopes_json = serde_json::to_string(&scopes)
+            .map_err(|error| WorkspaceError::Graph(error.to_string()))?;
+        let conn = self.conn.lock().expect("workspace registry lock poisoned");
+        conn.execute(
+            "INSERT INTO machine_account(principal_id,name,scopes,token_digest) VALUES(?1,?2,?3,?4)",
+            params![id, name, scopes_json, digest.as_bytes()],
+        )?;
+        Ok((id, token))
+    }
+
+    /// List metadata without reading or returning a machine credential.
+    pub fn list_machines(&self) -> Result<Vec<MachineView>, WorkspaceError> {
+        let conn = self.conn.lock().expect("workspace registry lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT principal_id,name,scopes,revoked FROM machine_account ORDER BY principal_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        })?;
+        let mut accounts = Vec::new();
+        for row in rows {
+            let (principal_id, name, scopes, revoked) = row?;
+            accounts.push(MachineView {
+                principal_id,
+                name,
+                scopes: serde_json::from_str(&scopes)
+                    .map_err(|error| WorkspaceError::Graph(error.to_string()))?,
+                revoked,
+            });
+        }
+        Ok(accounts)
+    }
+
+    /// Refuse to disable an owner. Remove its grants and default together.
+    pub fn revoke_machine(&self, principal_id: &str) -> Result<bool, WorkspaceError> {
+        if principal_id == LOCAL_ID
+            || principal_id == STATIC_ID
+            || !principal_id.starts_with("machine:")
+        {
+            return Err(WorkspaceError::InvalidInput(
+                "only created machine accounts can be revoked".into(),
+            ));
+        }
+        let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let is_owner: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace WHERE owner_id=?1)",
+            [principal_id],
+            |row| row.get(0),
+        )?;
+        if is_owner {
+            return Err(WorkspaceError::AccessDenied);
+        }
+        let revoked = tx.execute(
+            "UPDATE machine_account SET revoked=1 WHERE principal_id=?1 AND revoked=0",
+            [principal_id],
+        )? != 0;
+        if revoked {
+            tx.execute(
+                "DELETE FROM workspace_default WHERE principal_id=?1",
+                [principal_id],
+            )?;
+            tx.execute(
+                "DELETE FROM workspace_grant WHERE principal_id=?1",
+                [principal_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(revoked)
+    }
+
+    /// Resolve a machine bearer for this request, after a fresh revocation check.
+    pub fn authenticate_machine(&self, token: &str) -> Result<Option<Principal>, WorkspaceError> {
+        if token.is_empty() {
+            return Ok(None);
+        }
+        let digest = mcpmem_oauth::digest(token);
+        let conn = self.conn.lock().expect("workspace registry lock poisoned");
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT principal_id,scopes FROM machine_account WHERE token_digest=?1 AND revoked=0",
+                [digest.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((id, scopes)) = row else {
+            return Ok(None);
+        };
+        let scopes: BTreeSet<String> = serde_json::from_str(&scopes)
+            .map_err(|error| WorkspaceError::Graph(error.to_string()))?;
+        if scopes.is_empty()
+            || scopes
+                .iter()
+                .any(|scope| scope.parse::<crate::tools::ToolCategory>().is_err())
+        {
+            return Err(WorkspaceError::Graph(
+                "machine account has invalid tool-category scopes".into(),
+            ));
+        }
+        Ok(Some(Principal {
+            id,
+            kind: PrincipalKind::Machine,
+            scopes,
+            allowed_origins: BTreeSet::new(),
+        }))
+    }
 }
 
 fn appended_path(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
-}
-
-fn human_id(issuer: &str, subject: &str) -> String {
-    format!("human:{}", mcpmem_oauth::principal_id(issuer, subject))
 }

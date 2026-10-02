@@ -68,7 +68,7 @@ DELETE FROM oauth_login;
 
 ### Task 2: Stable human and machine identities
 
-**Files:** Modify `src/principals.rs`, `src/oauth_routes.rs`, `src/authz.rs`, `src/workspace.rs`, `src/http.rs` identity and deletion paths, `crates/mcpmem-oauth/src/store.rs`, `tests/oauth_flow.rs`, `tests/principal_admin.rs`, `tests/oauth_upstream.rs`, `tests/oauth_consent.rs`, and `tests/oauth_discovery.rs`. Create `tests/workspace_identity.rs`. The HTTP viewer routes remain in Task 5.
+**Files:** Modify `src/principals.rs`, `src/oauth_routes.rs`, `src/authz.rs`, `src/workspace.rs`, `src/http.rs` identity and deletion paths, `src/server.rs` HTTP state wiring, `crates/mcpmem-oauth/src/store.rs`, `tests/oauth_flow.rs`, `tests/principal_admin.rs`, `tests/oauth_upstream.rs`, `tests/oauth_consent.rs`, `tests/oauth_discovery.rs`, and `tests/support/flow.rs`. Create `tests/workspace_identity.rs`. The HTTP viewer routes remain in Task 5.
 
 **Interfaces:** Export `human_id(iss: &str, sub: &str) -> String` and `registered_human(id: &str) -> Result<bool, WorkspaceError>` from a shared principal resolver. Preserve built-in precedence over runtime principals. Keep `Principal.id` as the stable ID. Registry methods `create_machine(name, scopes) -> Result<(String, String), WorkspaceError>`, `list_machines() -> Result<Vec<MachineView>, WorkspaceError>`, `revoke_machine(id) -> Result<bool, WorkspaceError>`, and `authenticate_machine(token) -> Result<Option<Principal>, WorkspaceError>` use random 256-bit credentials and a stored digest. Do not expose a digest to MCP.
 
@@ -89,7 +89,7 @@ assert!(registry.resolve(&id, Some(&workspace_id), WorkspaceAccess::Read).is_ok(
 
 ### Task 3: MCP tools, grants, selection, and graph cache
 
-**Files:** Modify `src/server.rs`, `src/tools.rs`, `src/workspace.rs`, `tools.json`, `vector_tools.json`, `webhooks_tools.json`, `tests/scope_gating.rs`. Create `tests/workspace_mcp.rs`.
+**Files:** Modify `src/server.rs`, `src/tools.rs`, `src/workspace.rs`, `src/http.rs` MCP dispatch wiring, `src/actions/webhooks.rs` selected-path handlers, `tools.json`, `vector_tools.json`, `webhooks_tools.json`, `tests/scope_gating.rs`, and `tests/webhook_tools.rs`. Create `tests/workspace_mcp.rs`. Task 4 owns the separate webhook worker changes in `src/actions/webhooks.rs`.
 
 **Interfaces:** `WorkspaceRegistry::resolve` is the single ACL check. Add a bounded `WorkspaceHandles` cache keyed by ID. Each cache entry holds `Arc<GraphHandle>` and optional `Arc<VectorStore>` for the registered path. Use the existing `GraphHandle::new` and `VectorStore::with_config`. Add the MCP tool names and exact JSON fields from the spec. Preserve `tools/list` scope filtering and HTTP JSON-RPC batch pre-screen. A batch can contain different explicit workspace IDs, but each call resolves one workspace before its handler runs.
 
