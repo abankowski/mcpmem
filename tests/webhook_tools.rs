@@ -1,18 +1,12 @@
 #![cfg(feature = "webhooks")]
-//! `webhook_add_subscription` / `webhook_delete_subscription`: the MCP tool
-//! surface over the shared subscription table.
-//!
-//! All tests share one server. The subscription tools record their database
-//! path in a process-wide cell the first time a server is built (see
-//! `mcpmem::actions::webhooks::init`), so a second server built later in this
-//! process would silently keep pointing at the first one's file. One shared
-//! fixture keeps that true on purpose instead of by accident.
+//! MCP webhook subscription tools, including per-workspace ownership and storage.
 
 use mcpmem::authz::{bearer_principal, local_principal};
 use mcpmem::config::Config;
 use mcpmem::server::{HttpOutcome, MCPServer, dispatch_http_body};
 use mcpmem::tools::ToolCategory;
-use mcpmem::workspace::{WorkspaceHandles, WorkspaceRegistry};
+use mcpmem::workspace::{Visibility, WorkspaceAccess, WorkspaceHandles, WorkspaceRegistry};
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
 
@@ -194,4 +188,82 @@ fn tools_are_hidden_from_tools_list_without_graph_write_scope() {
     ]));
     assert!(names.iter().any(|n| n == "webhook_add_subscription"));
     assert!(names.iter().any(|n| n == "webhook_delete_subscription"));
+}
+
+#[test]
+fn a_workspace_writer_cannot_register_a_webhook_subscription() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        memory_file_path: dir
+            .path()
+            .join("legacy.sqlite")
+            .to_string_lossy()
+            .into_owned(),
+        legacy_owner_id: Some("machine:local".into()),
+        enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
+        ..Config::default()
+    };
+    let server = MCPServer::new_kg(config).unwrap();
+    let registry = server.workspace_registry();
+    let handles = server.workspace_handles();
+    let workspace_id = registry
+        .create(
+            "machine:local",
+            "private hooks",
+            Visibility::Private,
+            |path| handles.initialize_graph(path),
+        )
+        .unwrap()
+        .workspace_id;
+    let second_path = registry
+        .resolve("machine:local", Some(&workspace_id), WorkspaceAccess::Owner)
+        .unwrap()
+        .graph_path;
+    let legacy_path = registry
+        .resolve("machine:local", None, WorkspaceAccess::Owner)
+        .unwrap()
+        .graph_path;
+    let (writer_id, credential) = registry
+        .create_machine("writer", &["graph-read".into(), "graph-write".into()])
+        .unwrap();
+    registry
+        .grant("machine:local", &workspace_id, &writer_id, "writer")
+        .unwrap();
+    let writer = registry.authenticate_machine(&credential).unwrap().unwrap();
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "webhook_add_subscription",
+            "arguments": {
+                "workspaceId": workspace_id,
+                "endpoint": "https://hooks.example.test/receive",
+                "consumerOrigin": "writer-test",
+                "secretRef": "vault://webhook/test",
+            },
+        },
+    })
+    .to_string();
+    let denied = body_of(dispatch_http_body(&request, &writer, &registry, &handles).unwrap());
+    assert!(
+        is_error(&denied) || denied["error"].is_object(),
+        "a writer must not add a webhook: {denied}"
+    );
+    let row_count = |path: &std::path::Path| -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM webhook_subscription", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(row_count(&second_path), 0, "denied calls leave no row");
+
+    let owner =
+        body_of(dispatch_http_body(&request, &local_principal(), &registry, &handles).unwrap());
+    assert!(!is_error(&owner), "the owner can add a webhook: {owner}");
+    assert!(result_json(&owner)["subscriptionId"].is_string());
+    assert_eq!(row_count(&second_path), 1);
+    assert_eq!(row_count(&legacy_path), 0);
 }
