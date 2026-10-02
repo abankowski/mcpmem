@@ -964,3 +964,114 @@ fn webhook_subscription_creation_requires_workspace_ownership() {
         tool_json(&added)
     );
 }
+
+/// A disabled category must reject a direct management-tool call the same way
+/// it rejects the graph tools: the process-wide graph-read / graph-write
+/// flags gate the management tools too, not only the caller's scopes.
+/// RED: the management branch runs before any category check, so both calls
+/// execute with every category off.
+#[test]
+fn management_tools_are_rejected_when_their_category_is_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        memory_file_path: dir
+            .path()
+            .join("memory.sqlite")
+            .to_string_lossy()
+            .into_owned(),
+        legacy_owner_id: Some("machine:local".into()),
+        // Neither graph category is enabled; the local caller still holds
+        // every scope, so only the category flags can refuse the calls.
+        enabled_categories: vec![ToolCategory::Vectors],
+        vectors_enabled: true,
+        ..Config::default()
+    };
+    let server = MCPServer::new(config, VectorConfig::new(2)).expect("test server builds");
+    let fx = Fixture {
+        _dir: dir,
+        registry: server.workspace_registry(),
+        handles: server.workspace_handles(),
+    };
+    let owner = local_principal();
+
+    let read = call(&fx, &owner, "list_workspaces", json!({ "limit": 100 }));
+    assert!(
+        is_denied(&read),
+        "RED: list_workspaces must be refused with graph-read disabled: {read}"
+    );
+
+    let write = call(
+        &fx,
+        &owner,
+        "create_workspace",
+        json!({ "name": "Nope", "visibility": "private" }),
+    );
+    assert!(
+        is_denied(&write),
+        "RED: create_workspace must be refused with graph-write disabled: {write}"
+    );
+}
+
+/// An explicit `workspaceId` of the wrong type is an input error. It must
+/// never be treated as "absent": it cannot fall back to the caller's default,
+/// and it cannot mutate the default graph.
+/// RED: a non-string `workspaceId` currently reads as missing, so the write
+/// lands in the default workspace.
+#[test]
+fn a_non_string_workspace_id_never_falls_back_to_the_default() {
+    let fx = fixture();
+    let owner = local_principal();
+
+    let smuggled = call(
+        &fx,
+        &owner,
+        "create_entities",
+        json!({
+            "workspaceId": 42,
+            "entities": [entity("smuggled-via-bad-id", "Thing")],
+        }),
+    );
+    assert!(
+        is_denied(&smuggled),
+        "RED: a non-string workspaceId must be an input error, not a default write: {smuggled}"
+    );
+
+    // The default graph must not carry the write the bad ID smuggled in.
+    let probe = call(
+        &fx,
+        &owner,
+        "get_entity",
+        json!({ "name": "smuggled-via-bad-id" }),
+    );
+    assert!(
+        is_denied(&probe),
+        "RED: the bad-id write must not have reached the default graph: {probe}"
+    );
+}
+
+/// `list_workspaces` rejects a non-string cursor and a zero limit as input
+/// errors. A typed cursor must not read as "no cursor", and the spec's
+/// positive limit must not be clamped into a first page.
+/// RED: both calls succeed today — the cursor is ignored and the limit is
+/// clamped to one.
+#[test]
+fn list_workspaces_rejects_a_non_string_cursor_and_a_zero_limit() {
+    let fx = fixture();
+    let owner = local_principal();
+
+    let bad_cursor = call(&fx, &owner, "list_workspaces", json!({ "cursor": 123 }));
+    assert!(
+        is_denied(&bad_cursor),
+        "RED: a non-string cursor must be an input error: {bad_cursor}"
+    );
+
+    let zero_limit = call(&fx, &owner, "list_workspaces", json!({ "limit": 0 }));
+    assert!(
+        is_denied(&zero_limit),
+        "RED: a limit of zero must be an input error: {zero_limit}"
+    );
+
+    // Control: the same caller can list with valid arguments.
+    let ok = call(&fx, &owner, "list_workspaces", json!({ "limit": 100 }));
+    assert!(!is_denied(&ok), "a valid list must still work: {ok}");
+}

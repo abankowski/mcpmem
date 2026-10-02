@@ -1,4 +1,6 @@
 use mcpmem::authz::PrincipalKind;
+use mcpmem::config::Config;
+use mcpmem::server::MCPServer;
 use mcpmem::workspace::{Visibility, WorkspaceAccess, WorkspaceRegistry};
 
 fn registry() -> (tempfile::TempDir, WorkspaceRegistry) {
@@ -6,6 +8,59 @@ fn registry() -> (tempfile::TempDir, WorkspaceRegistry) {
     let registry =
         WorkspaceRegistry::open(&dir.path().join("memory.sqlite"), Some("machine:local")).unwrap();
     (dir, registry)
+}
+
+/// A relative `-f` memory path must start a server with the legacy graph
+/// registered. The registry stores absolute paths; the server's legacy-id
+/// lookup compares the memory path against them, so a relative path must be
+/// resolved to the same absolute form before the comparison.
+/// RED: the comparison is literal, so startup fails with "the registry has
+/// no legacy workspace" for every relative path.
+#[test]
+fn a_relative_memory_path_starts_with_a_registered_legacy_graph() {
+    // The test process runs with the crate root as cwd. A uniquely named
+    // subdirectory keeps the relative database out of every other test's way.
+    let sub = format!(
+        ".ws-relative-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .subsec_nanos()
+    );
+    std::fs::create_dir(&sub).expect("create the relative test directory");
+    let relative_db = format!("{sub}/memory.sqlite");
+
+    let config = Config {
+        memory_file_path: relative_db.clone(),
+        legacy_owner_id: Some("machine:local".into()),
+        ..Config::default()
+    };
+    let server = MCPServer::new_kg(config);
+
+    // The failure mode is a failed startup, so the construction itself is
+    // the first assertion; clean the directory before unwrapping so a red
+    // run leaves nothing behind.
+    std::fs::remove_dir_all(&sub).expect("remove the relative test directory");
+    let server = server.expect("a relative -f path must build a server with the legacy graph");
+
+    let registry = server.workspace_registry();
+    let legacy = registry
+        .resolve("machine:local", None, WorkspaceAccess::Read)
+        .expect("the legacy default resolves from a relative -f path");
+    let absolute_db = std::env::current_dir()
+        .expect("the test cwd")
+        .join(&relative_db);
+    assert_eq!(
+        legacy.graph_path, absolute_db,
+        "the legacy record must carry the absolute form of the relative path"
+    );
+
+    // And the pinned legacy entry opens from the handle cache.
+    server
+        .workspace_handles()
+        .get(&legacy)
+        .expect("the legacy entry opens from the cache");
 }
 
 #[test]
