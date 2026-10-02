@@ -301,9 +301,13 @@ fn file_backed_human_owner_must_still_be_registered_on_restart() {
         "human:{}",
         mcpmem_oauth::principal_id(&principal.iss, &principal.sub)
     );
-    let registry =
-        WorkspaceRegistry::open_with_principals(&legacy, Some(&id), &[principal.clone()], false)
-            .unwrap();
+    let registry = WorkspaceRegistry::open_with_principals(
+        &legacy,
+        Some(&id),
+        std::slice::from_ref(&principal),
+        false,
+    )
+    .unwrap();
     assert!(registry.resolve(&id, None, WorkspaceAccess::Write).is_ok());
     drop(registry);
     assert!(
