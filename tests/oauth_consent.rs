@@ -184,7 +184,10 @@ async fn the_code_grant_binds_the_client_the_resource_and_the_challenge() {
     let code = a.approve(&["graph-write", "graph-read"]).await;
     let stored = a.code_grant(&code);
     assert_eq!(stored.grant.client_id, a.client_id);
-    assert_eq!(stored.grant.principal, "adam");
+    assert_eq!(
+        stored.grant.principal,
+        mcpmem::principals::human_id(&a.idp().issuer, support::fake_idp::SUBJECT)
+    );
     assert_eq!(stored.grant.resource, "https://mem.example.com/mcp");
     assert!(
         !stored.grant.family.is_empty(),
