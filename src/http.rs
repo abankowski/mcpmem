@@ -13,12 +13,11 @@
 //! semantics are identical to the stdio and TCP transports — only framing
 //! differs (see [`crate::server::dispatch_http_body`]).
 //!
-//! Two extra routes serve a **browser knowledge-graph viewer** (HTTP transport
-//! only):
-//! * `GET /ui` — a self-contained, dependency-free HTML/canvas graph explorer.
-//! * `GET /ui/graph` — the JSON the viewer renders (entities, relations, type
-//!   legend, stats). Gated behind the same `graph-read` permission as
-//!   `read_graph`; auth via the `Authorization` header or a `?token=` fallback.
+//! The browser viewer has a static `/ui` shell and scoped JSON routes.
+//! `GET /ui/workspaces` lists accessible graphs. The `/ui/graph`,
+//! `/ui/search`, `/ui/node`, and `/ui/expand` data routes resolve the selected
+//! workspace before they read its graph. The data routes use the same
+//! `graph-read` permission as `read_graph`.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -42,6 +41,7 @@ use crate::kg::GraphHandle;
 use crate::oauth_routes::OauthState;
 use crate::server::{self, HttpOutcome};
 use crate::tools::ToolCategory;
+use crate::workspace::{WorkspaceAccess, WorkspaceError};
 
 /// The subscription tools and the admin handlers below share the store's
 /// validation: both call [`webhooks_actions`]' checks, so the MCP surface
@@ -92,13 +92,10 @@ const MAX_UI_EXPAND_DEPTH: u32 = 3;
 /// reply — `curl -i http://host:port/` answers before any MCP handshake.
 const SERVER_HEADER_VALUE: &str = concat!("mcpmem ", env!("CARGO_PKG_VERSION"));
 
-/// Shared state for the HTTP handlers: the graph, the optional vector store,
-/// an optional bearer token required on every request when present, the scopes
-/// that token grants, the categories this server advertises, and the OAuth
-/// authorization server when it is on.
+/// Shared HTTP state. MCP dispatch and viewer requests use the same registry
+/// and bounded graph-handle cache; there is no process-global viewer graph.
 #[derive(Clone)]
 pub struct HttpState {
-    kg: Arc<GraphHandle>,
     registry: Arc<crate::workspace::WorkspaceRegistry>,
     /// The bounded per-workspace handle cache MCP dispatch resolves through.
     handles: Arc<crate::workspace::WorkspaceHandles>,
@@ -189,7 +186,6 @@ impl HttpState {
         let server = crate::server::MCPServer::new_kg(config).expect("build the test server");
         let registry = server.workspace_registry();
         let handles = server.workspace_handles();
-        let kg = server.graph();
         let oauth = oauth.map(|config| {
             let state = match now_us {
                 Some(clock) => {
@@ -204,7 +200,6 @@ impl HttpState {
             })
         });
         HttpState {
-            kg,
             registry,
             handles,
             auth_token,
@@ -220,7 +215,6 @@ impl HttpState {
 /// compiler catches a swap between two arguments of one type.
 pub struct HttpRunConfig {
     pub addr: String,
-    pub kg: Arc<GraphHandle>,
     pub registry: Arc<crate::workspace::WorkspaceRegistry>,
     /// The bounded per-workspace handle cache MCP dispatch resolves through.
     pub handles: Arc<crate::workspace::WorkspaceHandles>,
@@ -244,6 +238,7 @@ pub fn router(state: HttpState) -> Router {
         .route("/ui/nav.css", get(ui_nav_css_handler))
         .route("/ui/graph.css", get(ui_css_handler))
         .route("/ui/graph.js", get(ui_js_handler))
+        .route("/ui/workspaces", get(ui_workspaces_handler))
         .route("/ui/graph", get(ui_graph_handler))
         .route("/ui/search", get(ui_search_handler))
         .route("/ui/node", get(ui_node_handler))
@@ -303,7 +298,6 @@ pub fn router(state: HttpState) -> Router {
 pub async fn run(config: HttpRunConfig) -> Result<()> {
     let HttpRunConfig {
         addr,
-        kg,
         registry,
         handles,
         auth_token,
@@ -324,7 +318,6 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
         "static bearer"
     };
     let state = HttpState {
-        kg,
         registry,
         handles,
         auth_token,
@@ -609,13 +602,14 @@ fn admin_principal(state: &HttpState, headers: &HeaderMap) -> Option<Principal> 
         .then_some(p)
 }
 
-/// The gate every `/ui/api/*` handler runs first. `Ok(())` when the caller
-/// holds the admin scope; `Err(Box<Response>)` is the 401/403 answer. The
-/// box keeps the error variant small: the value is built once and returned
-/// once, never copied.
-fn admin_gate(state: &HttpState, headers: &HeaderMap) -> std::result::Result<(), Box<Response>> {
-    if admin_principal(state, headers).is_some() {
-        return Ok(());
+/// The gate every `/ui/api/*` handler runs first. On success, return the
+/// authorized principal so workspace checks do not repeat token validation.
+fn admin_gate(
+    state: &HttpState,
+    headers: &HeaderMap,
+) -> std::result::Result<Principal, Box<Response>> {
+    if let Some(principal) = admin_principal(state, headers) {
+        return Ok(principal);
     }
     let response = if principal_of_ui(state, headers, None).is_some() {
         insufficient_scope(state, &[crate::principals::ADMIN_SCOPE])
@@ -696,6 +690,24 @@ fn conflict(message: impl Into<String>) -> Response {
 
 fn not_found() -> Response {
     json_error(StatusCode::NOT_FOUND, "no such row")
+}
+
+/// Hide whether a denied workspace exists. Invalid selectors and absent
+/// defaults keep their distinct input errors for the viewer.
+fn workspace_failure(error: &WorkspaceError) -> Response {
+    match error {
+        WorkspaceError::NotFound | WorkspaceError::AccessDenied => not_found(),
+        WorkspaceError::SelectionRequired | WorkspaceError::InvalidInput(_) => {
+            bad_request(error.to_string())
+        }
+        WorkspaceError::Storage(_) | WorkspaceError::Io(_) | WorkspaceError::Graph(_) => {
+            error!("workspace lookup failed: {error}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "workspace registry error",
+            )
+        }
+    }
 }
 
 fn store_failure(e: impl std::fmt::Display) -> Response {
@@ -1129,6 +1141,27 @@ struct WebhookPatch {
     enabled: Option<bool>,
 }
 
+/// Authorize one admin request before opening its workspace subscription
+/// store. A non-owner gets the same response as an unknown workspace.
+#[cfg(feature = "webhooks")]
+fn webhook_workspace_connection(
+    state: &HttpState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> std::result::Result<rusqlite::Connection, Box<Response>> {
+    let principal = admin_gate(state, headers)?;
+    let record = state
+        .registry
+        .resolve(
+            &principal.id,
+            params.get("workspaceId").map(String::as_str),
+            WorkspaceAccess::Owner,
+        )
+        .map_err(|error| Box::new(workspace_failure(&error)))?;
+    webhooks_actions::open_connection_at(&record.graph_path)
+        .map_err(|error| Box::new(webhook_store_failure(error)))
+}
+
 /// Attach the webhook-subscription admin routes. Every handler is gated on
 /// the `admin` scope like the principals routes; the routes themselves exist
 /// only when the `webhooks` feature compiled them in.
@@ -1171,22 +1204,17 @@ async fn admin_test_webhook(
     State(state): State<HttpState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(response) = admin_gate(&state, &headers) {
-        return *response;
-    }
-    let Some(_) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+    let conn = match webhook_workspace_connection(&state, &headers, &params) {
+        Ok(conn) => conn,
+        Err(response) => return *response,
     };
     let id = match Uuid::parse_str(id.as_str()) {
         Ok(id) => id,
         // A malformed id names no row, the same answer the principals routes
         // give for an id their key format cannot parse.
         Err(_) => return not_found(),
-    };
-    let conn = match webhooks_actions::open_connection() {
-        Ok(conn) => conn,
-        Err(e) => return webhook_store_failure(e),
     };
     let subscription = match SubscriptionRepository::new(&conn).get(id) {
         Ok(Some(row)) => row,
@@ -1262,18 +1290,16 @@ fn webhook_caps_error(subscription: &WebhookSubscription) -> Option<String> {
     None
 }
 
-/// `GET /ui/api/webhooks` — every subscription, oldest first.
+/// `GET /ui/api/webhooks` — subscriptions in the selected workspace, oldest first.
 #[cfg(feature = "webhooks")]
-async fn admin_list_webhooks(State(state): State<HttpState>, headers: HeaderMap) -> Response {
-    if let Err(response) = admin_gate(&state, &headers) {
-        return *response;
-    }
-    let Some(_) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let conn = match webhooks_actions::open_connection() {
+async fn admin_list_webhooks(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let conn = match webhook_workspace_connection(&state, &headers, &params) {
         Ok(conn) => conn,
-        Err(e) => return webhook_store_failure(e),
+        Err(response) => return *response,
     };
     let subscriptions = match SubscriptionRepository::new(&conn).list() {
         Ok(rows) => rows,
@@ -1298,13 +1324,12 @@ async fn admin_list_webhooks(State(state): State<HttpState>, headers: HeaderMap)
 async fn admin_create_webhook(
     State(state): State<HttpState>,
     headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
     body: String,
 ) -> Response {
-    if let Err(response) = admin_gate(&state, &headers) {
-        return *response;
-    }
-    let Some(_) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+    let conn = match webhook_workspace_connection(&state, &headers, &params) {
+        Ok(conn) => conn,
+        Err(response) => return *response,
     };
     let input: WebhookInput = match serde_json::from_str(&body) {
         Ok(v) => v,
@@ -1337,10 +1362,6 @@ async fn admin_create_webhook(
     if let Some(message) = webhook_caps_error(&subscription) {
         return bad_request(message);
     }
-    let conn = match webhooks_actions::open_connection() {
-        Ok(conn) => conn,
-        Err(e) => return webhook_store_failure(e),
-    };
     if let Err(e) = SubscriptionRepository::new(&conn).upsert(subscription.clone()) {
         // The checks above are not the only validator: upsert runs
         // `WebhookSubscription::validate` (non-empty fields, length and
@@ -1361,13 +1382,12 @@ async fn admin_update_webhook(
     State(state): State<HttpState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
     body: String,
 ) -> Response {
-    if let Err(response) = admin_gate(&state, &headers) {
-        return *response;
-    }
-    let Some(_) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+    let conn = match webhook_workspace_connection(&state, &headers, &params) {
+        Ok(conn) => conn,
+        Err(response) => return *response,
     };
     let id = match Uuid::parse_str(id.as_str()) {
         Ok(id) => id,
@@ -1390,10 +1410,6 @@ async fn admin_update_webhook(
             }
         }
     }
-    let conn = match webhooks_actions::open_connection() {
-        Ok(conn) => conn,
-        Err(e) => return webhook_store_failure(e),
-    };
     let repo = SubscriptionRepository::new(&conn);
     let row = match repo.get(id) {
         Ok(Some(row)) => row,
@@ -1448,20 +1464,15 @@ async fn admin_delete_webhook(
     State(state): State<HttpState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(response) = admin_gate(&state, &headers) {
-        return *response;
-    }
-    let Some(_) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+    let conn = match webhook_workspace_connection(&state, &headers, &params) {
+        Ok(conn) => conn,
+        Err(response) => return *response,
     };
     let id = match Uuid::parse_str(id.as_str()) {
         Ok(id) => id,
         Err(_) => return not_found(),
-    };
-    let conn = match webhooks_actions::open_connection() {
-        Ok(conn) => conn,
-        Err(e) => return webhook_store_failure(e),
     };
     match SubscriptionRepository::new(&conn).delete(id) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -1677,11 +1688,9 @@ async fn admin_js_handler() -> Response {
         .into_response()
 }
 
-/// Shared auth + scope gate for the viewer's data endpoints (`/ui/graph`,
-/// `/ui/search`, `/ui/node`, `/ui/expand`). The viewer reads the whole graph,
-/// so it needs both the process-wide category and the scope `read_graph`
-/// needs. Returns the error `Response` to send back, or `None` when the
-/// request may proceed.
+/// Shared auth + scope gate for the viewer's workspace list and data routes.
+/// Return the authenticated principal only after the category and the
+/// `read_graph` scope checks pass.
 ///
 /// The scope decision is [`crate::authz::allows_tool`]'s and is asked about
 /// `read_graph` by name, never spelled here. `src/authz.rs` is the one place
@@ -1697,30 +1706,90 @@ fn ui_data_gate(
     state: &HttpState,
     headers: &HeaderMap,
     params: &HashMap<String, String>,
-) -> Option<Response> {
+) -> std::result::Result<Principal, Box<Response>> {
     let Some(principal) = principal_of_ui(state, headers, params.get("token").map(String::as_str))
     else {
-        return Some(unauthorized(state));
+        return Err(Box::new(unauthorized(state)));
     };
     if !server::graph_read_enabled() {
-        return Some(
+        return Err(Box::new(
             (
                 StatusCode::FORBIDDEN,
                 "graph-read tools are disabled; start the server with --enable-graph-read (or --enable-all) to view the graph",
             )
                 .into_response(),
-        );
+        ));
     }
     if !crate::authz::allows_tool(&principal, "read_graph") {
         // The scope the challenge names is the one `authz` reports missing, so
-        // the header cannot drift from the decision that produced it. The
-        // fallback is unreachable while `read_graph` is a tool this server
-        // knows, and names the category the viewer stands for.
+        // the header cannot drift from the decision that produced it.
         let missing = crate::authz::missing_scope(&principal, "read_graph")
             .unwrap_or(ToolCategory::GraphRead.slug());
-        return Some(insufficient_scope(state, &[missing]));
+        return Err(Box::new(insufficient_scope(state, &[missing])));
     }
-    None
+    Ok(principal)
+}
+
+/// `GET /ui/workspaces` — the MCP workspace-list page for this caller.
+async fn ui_workspaces_handler(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let principal = match ui_data_gate(&state, &headers, &params) {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let limit = match params.get("limit") {
+        None => 100,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(limit) if limit > 0 => limit,
+            _ => return bad_request("'limit' must be a positive integer"),
+        },
+    };
+    let cursor = params.get("cursor").cloned();
+    let registry = state.registry;
+    match tokio::task::spawn_blocking(move || {
+        registry.list(&principal.id, cursor.as_deref(), limit)
+    })
+    .await
+    {
+        Ok(Ok(page)) => Json(page).into_response(),
+        Ok(Err(error)) => workspace_failure(&error),
+        Err(error) => {
+            error!("/ui/workspaces task panicked: {error}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// A viewer data request resolves the same registry record and handle as MCP.
+/// Resolve inside the payload task so registry I/O never blocks the reactor.
+struct UiSelection {
+    registry: Arc<crate::workspace::WorkspaceRegistry>,
+    handles: Arc<crate::workspace::WorkspaceHandles>,
+    principal_id: String,
+    workspace_id: Option<String>,
+}
+
+impl UiSelection {
+    fn new(state: HttpState, principal: Principal, params: &HashMap<String, String>) -> Self {
+        Self {
+            registry: state.registry,
+            handles: state.handles,
+            principal_id: principal.id,
+            workspace_id: params.get("workspaceId").cloned(),
+        }
+    }
+
+    fn graph(self) -> std::result::Result<Arc<GraphHandle>, WorkspaceError> {
+        let record = self.registry.resolve(
+            &self.principal_id,
+            self.workspace_id.as_deref(),
+            WorkspaceAccess::Read,
+        )?;
+        Ok(self.handles.get(&record)?.kg)
+    }
 }
 
 fn parse_usize(params: &HashMap<String, String>, key: &str, default: usize) -> usize {
@@ -1730,18 +1799,22 @@ fn parse_usize(params: &HashMap<String, String>, key: &str, default: usize) -> u
         .unwrap_or(default)
 }
 
-/// Run a blocking JSON-payload builder off the async reactor (the graph lock may
-/// block) and map its `Result<String>` to an HTTP response. Shared by the
-/// viewer's `/ui/graph` and `/ui/search` data endpoints.
-async fn ui_json<F>(kg: Arc<GraphHandle>, what: &'static str, build: F) -> Response
+/// Run workspace selection and the graph payload in one blocking task.
+async fn ui_json<F>(selection: UiSelection, what: &'static str, build: F) -> Response
 where
     F: FnOnce(&GraphHandle) -> Result<String> + Send + 'static,
 {
-    match tokio::task::spawn_blocking(move || build(&kg)).await {
-        Ok(Ok(json)) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
-        Ok(Err(e)) => {
-            error!("{what} error: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+    match tokio::task::spawn_blocking(move || {
+        let kg = selection.graph()?;
+        Ok::<_, WorkspaceError>(build(&kg))
+    })
+    .await
+    {
+        Ok(Ok(Ok(json))) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
+        Ok(Err(error)) => workspace_failure(&error),
+        Ok(Ok(Err(error))) => {
+            error!("{what} error: {error}");
+            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
         }
         Err(join_err) => {
             error!("{what} task panicked: {join_err}");
@@ -1752,21 +1825,23 @@ where
 
 /// `GET /ui/graph` — a page of the whole graph for the viewer: entities, the
 /// relations among them, the entity-type legend, overall stats, and a pagination
-/// cursor. Requires the `graph-read` category (like `read_graph`) and the same
-/// bearer-token gate as the MCP endpoints. Query params: `entityType` (filter),
-/// `offset`, `limit` (capped at [`MAX_UI_NODES`]), and `token` (auth fallback).
+/// cursor. Requires the `graph-read` category and a readable workspace.
+/// Query params: `entityType` (filter), `offset`, `limit` (capped at
+/// [`MAX_UI_NODES`]), `workspaceId` and `token` (auth fallback).
 async fn ui_graph_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Some(resp) = ui_data_gate(&state, &headers, &params) {
-        return resp;
-    }
+    let principal = match ui_data_gate(&state, &headers, &params) {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
     let entity_type = params.get("entityType").filter(|s| !s.is_empty()).cloned();
     let offset = parse_usize(&params, "offset", 0);
     let limit = parse_usize(&params, "limit", 300).clamp(1, MAX_UI_NODES);
-    ui_json(state.kg, "/ui/graph", move |kg| {
+    let selection = UiSelection::new(state, principal, &params);
+    ui_json(selection, "/ui/graph", move |kg| {
         build_graph_payload(kg, entity_type.as_deref(), offset, limit)
     })
     .await
@@ -1777,15 +1852,16 @@ async fn ui_graph_handler(
 /// (the matched nodes; the user double-clicks to expand their relationships).
 /// Same auth + `graph-read` gate. Query params: `q` (the query; prefix-matched),
 /// `entityType` (filter), `offset`, `limit` (capped at [`MAX_UI_NODES`]),
-/// and `token`.
+/// `workspaceId` and `token`.
 async fn ui_search_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Some(resp) = ui_data_gate(&state, &headers, &params) {
-        return resp;
-    }
+    let principal = match ui_data_gate(&state, &headers, &params) {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
     let query = params
         .get("q")
         .map(|s| s.trim().to_string())
@@ -1793,7 +1869,8 @@ async fn ui_search_handler(
     let entity_type = params.get("entityType").filter(|s| !s.is_empty()).cloned();
     let offset = parse_usize(&params, "offset", 0);
     let limit = parse_usize(&params, "limit", 100).clamp(1, MAX_UI_NODES);
-    ui_json(state.kg, "/ui/search", move |kg| {
+    let selection = UiSelection::new(state, principal, &params);
+    ui_json(selection, "/ui/search", move |kg| {
         build_search_payload(kg, &query, entity_type.as_deref(), offset, limit)
     })
     .await
@@ -1804,29 +1881,36 @@ async fn ui_search_handler(
 /// `/ui/search`) deliberately omit observation bodies (they only carry
 /// `obsCount`) to keep those payloads small; this fetches the bodies for the
 /// single node the user is looking at. Same auth + `graph-read` gate. Query
-/// params: `name` (required) and `token` (auth fallback).
+/// params: `name` (required), `workspaceId` and `token` (auth fallback).
 async fn ui_node_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Some(resp) = ui_data_gate(&state, &headers, &params) {
-        return resp;
-    }
+    let principal = match ui_data_gate(&state, &headers, &params) {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
     let Some(name) = params.get("name").filter(|s| !s.is_empty()).cloned() else {
         return (StatusCode::BAD_REQUEST, "missing 'name' parameter").into_response();
     };
-    let kg = state.kg;
-    match tokio::task::spawn_blocking(move || kg.get_entity(&name)).await {
-        Ok(Ok(Some(entity))) => match serde_json::to_string(&entity) {
+    let selection = UiSelection::new(state, principal, &params);
+    match tokio::task::spawn_blocking(move || {
+        let kg = selection.graph()?;
+        Ok::<_, WorkspaceError>(kg.get_entity(&name))
+    })
+    .await
+    {
+        Ok(Err(error)) => workspace_failure(&error),
+        Ok(Ok(Ok(Some(entity)))) => match serde_json::to_string(&entity) {
             Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
             Err(e) => {
                 error!("/ui/node serialize error: {e}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
             }
         },
-        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "entity not found").into_response(),
-        Ok(Err(e)) => {
+        Ok(Ok(Ok(None))) => (StatusCode::NOT_FOUND, "entity not found").into_response(),
+        Ok(Ok(Err(e))) => {
             error!("/ui/node error: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
@@ -1985,15 +2069,16 @@ fn build_search_payload(
 ///
 /// Query params: `name` (required, the entity to expand), `depth` (1..=
 /// [`MAX_UI_EXPAND_DEPTH`], default 1), `direction` (`outgoing` / `incoming` /
-/// `both`, default both), and `token` (auth fallback).
+/// `both`, default both), `workspaceId` and `token` (auth fallback).
 async fn ui_expand_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Some(resp) = ui_data_gate(&state, &headers, &params) {
-        return resp;
-    }
+    let principal = match ui_data_gate(&state, &headers, &params) {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
     let Some(name) = params.get("name").filter(|s| !s.is_empty()).cloned() else {
         return (StatusCode::BAD_REQUEST, "missing 'name' parameter").into_response();
     };
@@ -2006,15 +2091,19 @@ async fn ui_expand_handler(
     let direction =
         crate::kg::Direction::parse(params.get("direction").map(|s| s.to_uppercase()).as_deref());
 
-    let kg = state.kg;
-    let result =
-        tokio::task::spawn_blocking(move || kg.neighbors(&name, direction, None, depth)).await;
+    let selection = UiSelection::new(state, principal, &params);
+    let result = tokio::task::spawn_blocking(move || {
+        let kg = selection.graph()?;
+        Ok::<_, WorkspaceError>(kg.neighbors(&name, direction, None, depth))
+    })
+    .await;
 
     match result {
-        Ok(Ok(json)) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
+        Ok(Ok(Ok(json))) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
+        Ok(Err(error)) => workspace_failure(&error),
         // An unknown entity is a client error (bad `name`), not a server fault.
-        Ok(Err(MCSError::InvalidParams(msg))) => (StatusCode::NOT_FOUND, msg).into_response(),
-        Ok(Err(e)) => {
+        Ok(Ok(Err(MCSError::InvalidParams(msg)))) => (StatusCode::NOT_FOUND, msg).into_response(),
+        Ok(Ok(Err(e))) => {
             error!("/ui/expand error: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
@@ -2044,8 +2133,8 @@ mod tests {
     }
 
     /// A viewer state with a static bearer and the given credential scopes.
-    /// The caller must present the token before the scope gate runs.
-    /// Both graph categories remain on to avoid a race with the server tests.
+    /// Grant its legacy workspace to that bearer and set a saved default.
+    /// The scope gate remains independent of graph access.
     fn ui_state(dir: &tempfile::TempDir, scopes: &[ToolCategory]) -> HttpState {
         let config = Config {
             memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
@@ -2057,9 +2146,20 @@ mod tests {
         let server = MCPServer::new_kg(config).expect("test server builds");
         let registry = server.workspace_registry();
         let handles = server.workspace_handles();
-        let kg = server.graph();
+        let legacy_id = registry
+            .all_paths()
+            .expect("the registry lists its legacy workspace")
+            .into_iter()
+            .next()
+            .expect("the legacy workspace exists")
+            .0;
+        registry
+            .grant("machine:local", &legacy_id, "machine:static", "reader")
+            .expect("the bearer can read its test workspace");
+        registry
+            .set_default("machine:static", &legacy_id)
+            .expect("the bearer has a saved default");
         HttpState {
-            kg,
             registry,
             handles,
             auth_token: Some(Arc::from(UI_TEST_BEARER)),
@@ -2197,9 +2297,8 @@ mod tests {
             ))
         }
 
-        /// A state with OAuth on and an access token holding the admin scope,
-        /// plus the token to present. The temp dir is returned with the state
-        /// so the database file outlives the test.
+        /// A state with OAuth on and an admin token. The admin owns a graph
+        /// and has a saved default. Keep its database alive for each request.
         fn admin_state() -> (HttpState, String, tempfile::TempDir) {
             let dir = tempfile::tempdir().unwrap();
             let state = HttpState::for_test(TestSetup {
@@ -2211,6 +2310,17 @@ mod tests {
                 enabled_categories: ToolCategory::ALL.to_vec(),
                 now_us: Some(Arc::new(|| NOW_US)),
             });
+            let principal_id =
+                crate::principals::human_id("https://idp.invalid", "admin@example.test");
+            state
+                .registry
+                .create(
+                    &principal_id,
+                    "admin-fixture",
+                    crate::workspace::Visibility::Private,
+                    |path| state.handles.initialize_graph(path),
+                )
+                .expect("the admin owns a workspace with a saved default");
             let oauth = state.oauth().expect("oauth is on");
             let token = "admin-test-token";
             oauth.with_store(|store| {
@@ -2234,14 +2344,6 @@ mod tests {
                     .expect("the admin token stores")
             });
             (state, token.to_owned(), dir)
-        }
-
-        /// The subscription store is process-wide and may point at a database
-        /// file that outlived its test's temp dir; `ensure_test_store`
-        /// recreates a missing parent directory and bootstraps a fresh file,
-        /// and is a no-op on a live migrated store.
-        fn ensure_store() {
-            webhooks_actions::ensure_test_store().expect("the subscription store is usable");
         }
 
         /// Drive one admin-api request through the router and return the
@@ -2270,7 +2372,6 @@ mod tests {
         #[tokio::test]
         async fn the_list_names_the_configured_secrets_sorted() {
             let (state, token, _dir) = admin_state();
-            ensure_store();
             let response =
                 webhooks_actions::with_test_kit_async(Some(kit_with(&["stripe", "n8n"])), async {
                     api_request(&state, "GET", "/ui/api/webhooks", "", &token).await
@@ -2289,7 +2390,6 @@ mod tests {
         #[tokio::test]
         async fn the_list_answers_an_empty_secret_list_without_a_kit() {
             let (state, token, _dir) = admin_state();
-            ensure_store();
             let response = webhooks_actions::with_test_kit_async(None, async {
                 api_request(&state, "GET", "/ui/api/webhooks", "", &token).await
             })
@@ -2304,7 +2404,6 @@ mod tests {
         #[tokio::test]
         async fn create_refuses_an_unknown_secret_name() {
             let (state, token, _dir) = admin_state();
-            ensure_store();
             let response = webhooks_actions::with_test_kit_async(
                 Some(kit_with(&["n8n"])),
                 async {
@@ -2333,7 +2432,6 @@ mod tests {
         #[tokio::test]
         async fn create_accepts_a_configured_secret_name() {
             let (state, token, _dir) = admin_state();
-            ensure_store();
             let response = webhooks_actions::with_test_kit_async(
                 Some(kit_with(&["n8n"])),
                 async {
@@ -2358,7 +2456,6 @@ mod tests {
         #[tokio::test]
         async fn update_validates_only_a_new_secret_name() {
             let (state, token, _dir) = admin_state();
-            ensure_store();
             let created = webhooks_actions::with_test_kit_async(
                 Some(kit_with(&["n8n"])),
                 async {

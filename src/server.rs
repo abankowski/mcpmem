@@ -552,7 +552,7 @@ impl MCPServer {
         Self::new(config, VectorConfig::new(0))
     }
 
-    /// Expose the shared graph handle (used to drive the HTTP transport).
+    /// Expose the legacy graph handle for local callers and tests.
     pub fn graph(&self) -> Arc<GraphHandle> {
         Arc::clone(&self.kg)
     }
@@ -597,9 +597,8 @@ impl MCPServer {
             self.config.oauth.is_some(),
             self.config.auth_token.as_deref(),
         )?;
-        // The graph handle above already migrated the schema, so the four
-        // `oauth_*` tables exist by the time the store opens. It is built
-        // before the maintenance task because that task sweeps it.
+        // The legacy graph handle migrated the schema during server setup.
+        // Open the OAuth store before the maintenance task starts to sweep it.
         let oauth = match self.config.oauth.clone() {
             Some(cfg) => Some(Arc::new(crate::oauth_routes::OauthState::open(
                 cfg,
@@ -612,7 +611,6 @@ impl MCPServer {
         spawn_wal_flush(self.kg.clone(), self.config.wal_flush_ms);
         crate::http::run(crate::http::HttpRunConfig {
             addr: addr.to_owned(),
-            kg: self.graph(),
             registry: self.workspace_registry(),
             handles: self.workspace_handles(),
             auth_token: self.config.auth_token.clone(),
