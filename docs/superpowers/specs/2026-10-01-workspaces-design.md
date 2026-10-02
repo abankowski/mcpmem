@@ -93,7 +93,9 @@ Workspace listing exposes public graph IDs, names, and visibility to authenticat
 
 ## MCP contract
 
-Use the existing camel-case JSON argument convention. Use `workspaceId` for graph selection. Each graph and vector tool gains an optional string `workspaceId`; omission selects the caller's saved default. Selection occurs once before a batch starts. A request never joins records from two workspaces. Code-project tools remain unchanged. Webhook subscription tools gain the same selector and need workspace ownership in addition to their current scope.
+Use the existing camel-case JSON argument convention. Use `workspaceId` for graph selection. Each graph, vector, and webhook tool accepts an optional string `workspaceId`. If absent, use the caller's saved default. Resolve the workspace for each call before its handler runs. A batch can contain calls for different workspaces. A call never joins records from two workspaces. Code-project tools remain unchanged. Webhook subscription tools also need workspace ownership.
+
+Superseded on 2026-10-02: “Selection occurs once before a batch starts.” The owner selected per-call resolution because each call has its own selector. The alternative rejects mixed workspace IDs in one batch. A batch still checks tool-category scopes before any handler runs.
 
 | Tool | Input fields | Result fields | Scope and access |
 |---|---|---|---|
