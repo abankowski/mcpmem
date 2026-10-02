@@ -218,6 +218,54 @@ pub const ALL_TOOLS: &[ToolMeta] = &[
         name: "degree",
         write: false,
     },
+    // Workspace-management tools (Task 3). Their category follows the same
+    // read/write rule as the graph tools: listing and viewing are graph-read,
+    // every mutation is graph-write. The machine-admin tools additionally
+    // need `authz::may_manage_machines` at listing and dispatch time.
+    ToolMeta {
+        name: "create_workspace",
+        write: true,
+    },
+    ToolMeta {
+        name: "list_workspaces",
+        write: false,
+    },
+    ToolMeta {
+        name: "get_workspace",
+        write: false,
+    },
+    ToolMeta {
+        name: "set_workspace_visibility",
+        write: true,
+    },
+    ToolMeta {
+        name: "list_workspace_grants",
+        write: false,
+    },
+    ToolMeta {
+        name: "grant_workspace_access",
+        write: true,
+    },
+    ToolMeta {
+        name: "revoke_workspace_access",
+        write: true,
+    },
+    ToolMeta {
+        name: "set_default_workspace",
+        write: false,
+    },
+    ToolMeta {
+        name: "create_machine_account",
+        write: true,
+    },
+    ToolMeta {
+        name: "list_machine_accounts",
+        write: true,
+    },
+    ToolMeta {
+        name: "revoke_machine_account",
+        write: true,
+    },
 ];
 
 /// The read-side embedding tool. `src/server.rs` gates it on the `indexer`
@@ -261,6 +309,40 @@ pub const CODE_TOOL_NAMES: &[&str] = &[
 /// of their own.
 pub const WEBHOOK_TOOL_NAMES: &[&str] =
     &["webhook_add_subscription", "webhook_delete_subscription"];
+
+/// Names of the workspace-management tools (Task 3). They live in
+/// `tools.json` beside the graph tools and share their graph-read /
+/// graph-write categories; the machine-admin subset needs
+/// `authz::may_manage_machines` in addition.
+pub const MANAGEMENT_TOOL_NAMES: &[&str] = &[
+    "create_workspace",
+    "list_workspaces",
+    "get_workspace",
+    "set_workspace_visibility",
+    "list_workspace_grants",
+    "grant_workspace_access",
+    "revoke_workspace_access",
+    "set_default_workspace",
+    "create_machine_account",
+    "list_machine_accounts",
+    "revoke_machine_account",
+];
+
+/// `true` for the workspace-management tool names.
+#[inline]
+pub fn is_management_tool_name(name: &str) -> bool {
+    MANAGEMENT_TOOL_NAMES.contains(&name)
+}
+
+/// `true` for the machine-credential tools, which need an admin human or
+/// trusted local stdio on top of their `graph-write` category.
+#[inline]
+pub fn is_machine_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "create_machine_account" | "list_machine_accounts" | "revoke_machine_account"
+    )
+}
 
 #[inline]
 pub fn tool_exists(name: &str) -> bool {

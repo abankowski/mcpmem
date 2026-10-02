@@ -1,8 +1,9 @@
 //! One registry holds graph paths and access grants. Graph rows stay in separate files.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
@@ -10,7 +11,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::authz::{Principal, PrincipalKind};
+use crate::config::{Durability, SqliteTuning};
+use crate::kg::GraphHandle;
 use crate::principals::{self, PrincipalEntry};
+use crate::vector_store::{VectorConfig, VectorStore};
 
 const REGISTRY_VERSION: i64 = 1;
 const LOCAL_ID: &str = "machine:local";
@@ -658,6 +662,32 @@ impl WorkspaceRegistry {
         Ok(())
     }
 
+    /// The caller's view of one workspace it can access, plus the record.
+    /// The record carries the owner identity for owner-only result fields;
+    /// the view carries the caller's current role and default flag.
+    pub fn view(
+        &self,
+        principal_id: &str,
+        workspace_id: &str,
+    ) -> Result<(WorkspaceRecord, WorkspaceView), WorkspaceError> {
+        let record = self.resolve(principal_id, Some(workspace_id), WorkspaceAccess::Read)?;
+        let conn = self.conn.lock().expect("workspace registry lock poisoned");
+        let role = Self::role(&conn, &record, principal_id)?.ok_or(WorkspaceError::NotFound)?;
+        let is_default: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_default WHERE principal_id=?1 AND workspace_id=?2)",
+            params![principal_id, record.workspace_id],
+            |row| row.get(0),
+        )?;
+        let view = WorkspaceView {
+            workspace_id: record.workspace_id.clone(),
+            name: record.name.clone(),
+            visibility: record.visibility,
+            role: role.into(),
+            is_default,
+        };
+        Ok((record, view))
+    }
+
     pub fn grant(
         &self,
         owner: &str,
@@ -923,6 +953,156 @@ impl WorkspaceRegistry {
             scopes,
             allowed_origins: BTreeSet::new(),
         }))
+    }
+}
+
+/// Open handles for the graph and vector store of one workspace.
+pub struct WorkspaceEntry {
+    pub kg: Arc<GraphHandle>,
+    pub vs: Option<Arc<VectorStore>>,
+}
+
+/// The open parameters every workspace handle is built with, shared so the
+/// constructor and the first-open path cannot drift apart.
+#[derive(Clone, Copy)]
+pub struct HandleSpec {
+    pub durability: Durability,
+    pub tuning: SqliteTuning,
+    pub lru_cache_size: NonZeroUsize,
+    pub read_pool_size: usize,
+    pub vector_dims: Option<u32>,
+}
+
+/// LRU bookkeeping for the entry cache. `recency` holds workspace IDs, most
+/// recently used at the back. The pinned legacy workspace (whose entry holds
+/// the server's original handles) is never evicted.
+struct HandleCache {
+    entries: HashMap<String, WorkspaceEntry>,
+    recency: VecDeque<String>,
+    pinned: HashSet<String>,
+    legacy_id: String,
+}
+
+/// Bounded cache of graph handles, one entry per workspace ID.
+///
+/// Each entry holds the [`GraphHandle`] and, when vector support is on, the
+/// [`VectorStore`] for that workspace's registered file. The cache is bounded
+/// so a process with many workspaces does not hold one reader pool per
+/// workspace; an evicted entry has no in-process state left behind, so the
+/// next call to that workspace re-opens from its file. The legacy workspace
+/// entry is pinned: it carries the original handles the server was built with.
+pub struct WorkspaceHandles {
+    inner: Mutex<HandleCache>,
+    spec: HandleSpec,
+}
+
+impl WorkspaceHandles {
+    /// The cache bound, in open workspace entries. Chosen so a deployment
+    /// with hundreds of workspaces stays within the process's file-descriptor
+    /// and connection budget; each entry holds a graph handle plus its reader
+    /// pool, and optionally one vector store.
+    pub const BOUND: usize = 32;
+
+    /// A cache seeded with the server's own legacy handles.
+    pub fn new(
+        legacy_id: &str,
+        legacy_kg: Arc<GraphHandle>,
+        legacy_vs: Option<Arc<VectorStore>>,
+        spec: HandleSpec,
+    ) -> Self {
+        let mut entries = HashMap::new();
+        entries.insert(
+            legacy_id.to_owned(),
+            WorkspaceEntry {
+                kg: legacy_kg,
+                vs: legacy_vs,
+            },
+        );
+        Self {
+            inner: Mutex::new(HandleCache {
+                entries,
+                recency: VecDeque::from([legacy_id.to_owned()]),
+                pinned: HashSet::from([legacy_id.to_owned()]),
+                legacy_id: legacy_id.to_owned(),
+            }),
+            spec,
+        }
+    }
+
+    /// The open handles for a resolved workspace, opening them on first use
+    /// and evicting the least-recently-used non-pinned entry when at capacity.
+    pub fn get(&self, record: &WorkspaceRecord) -> Result<WorkspaceEntry, WorkspaceError> {
+        let mut cache = self.inner.lock().expect("workspace handle cache poisoned");
+        if let Some(entry) = cache.entries.get(&record.workspace_id) {
+            let kg = Arc::clone(&entry.kg);
+            let vs = entry.vs.clone();
+            touch(&mut cache, &record.workspace_id);
+            return Ok(WorkspaceEntry { kg, vs });
+        }
+        let kg = Arc::new(
+            GraphHandle::new(
+                &record.graph_path,
+                self.spec.durability,
+                self.spec.tuning,
+                self.spec.lru_cache_size,
+                self.spec.read_pool_size,
+            )
+            .map_err(|error| WorkspaceError::Graph(error.to_string()))?,
+        );
+        let vs = match self.spec.vector_dims {
+            Some(dims) => Some(Arc::new(
+                VectorStore::with_config(&record.graph_path, &VectorConfig::new(dims))
+                    .map_err(|error| WorkspaceError::Graph(error.to_string()))?,
+            )),
+            None => None,
+        };
+        while cache.entries.len() >= Self::BOUND {
+            let Some(id) = cache.recency.pop_front() else {
+                break;
+            };
+            if cache.pinned.contains(&id) {
+                cache.recency.push_front(id);
+                break;
+            }
+            cache.entries.remove(&id);
+        }
+        let entry = WorkspaceEntry {
+            kg: Arc::clone(&kg),
+            vs: vs.clone(),
+        };
+        cache.entries.insert(record.workspace_id.clone(), entry);
+        cache.recency.push_back(record.workspace_id.clone());
+        Ok(WorkspaceEntry { kg, vs })
+    }
+
+    /// The vector store of the pinned legacy entry, when vector support is
+    /// on. `tools/list` and `initialize` use it to decide whether the vector
+    /// tools can run, the same way the previous single-store dispatch did.
+    pub fn legacy_vs(&self) -> Option<Arc<VectorStore>> {
+        let cache = self.inner.lock().expect("workspace handle cache poisoned");
+        cache.entries.get(&cache.legacy_id)?.vs.clone()
+    }
+
+    /// Create and initialize a fresh graph file for `registry.create`, with
+    /// the same storage settings as every other workspace.
+    pub fn initialize_graph(&self, path: &Path) -> Result<(), WorkspaceError> {
+        GraphHandle::new(
+            path,
+            self.spec.durability,
+            self.spec.tuning,
+            self.spec.lru_cache_size,
+            self.spec.read_pool_size,
+        )
+        .map(|_| ())
+        .map_err(|error| WorkspaceError::Graph(error.to_string()))
+    }
+}
+
+/// Move `id` to the back of the recency queue.
+fn touch(cache: &mut HandleCache, id: &str) {
+    if let Some(position) = cache.recency.iter().position(|cached| cached == id) {
+        let id = cache.recency.remove(position).expect("position is valid");
+        cache.recency.push_back(id);
     }
 }
 

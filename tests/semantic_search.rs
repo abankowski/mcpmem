@@ -8,18 +8,25 @@
 //! one installed provider would leak into every other test in this binary.
 
 use mcpmem::config::Config;
-use mcpmem::kg::GraphHandle;
 use mcpmem::server::{HttpOutcome, MCPServer, dispatch_http_body};
 use mcpmem::tools::{SEMANTIC_SEARCH, ToolCategory, category_of};
 use mcpmem::vector_store::{VectorConfig, VectorStore};
+use mcpmem::workspace::{WorkspaceHandles, WorkspaceRegistry};
 use serde_json::Value;
 use std::sync::Arc;
 
 const DIMS: u32 = 8;
 
-/// A server with the vector subsystem on. The category flags are process-wide,
-/// so this goes through the same constructor `src/main.rs` uses.
-fn vector_server(dir: &tempfile::TempDir) -> (Arc<GraphHandle>, Arc<VectorStore>) {
+/// A server with the vector subsystem on, plus its registry and handle cache
+/// (workspace selection resolves through them). The category flags are
+/// process-wide, so this goes through the same constructor `src/main.rs` uses.
+struct TestServer {
+    vs: Arc<VectorStore>,
+    registry: Arc<WorkspaceRegistry>,
+    handles: Arc<WorkspaceHandles>,
+}
+
+fn vector_server(dir: &tempfile::TempDir) -> TestServer {
     let config = Config {
         memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
         legacy_owner_id: Some("machine:local".into()),
@@ -33,7 +40,13 @@ fn vector_server(dir: &tempfile::TempDir) -> (Arc<GraphHandle>, Arc<VectorStore>
     };
     let server = MCPServer::new(config, VectorConfig::new(DIMS)).expect("test server builds");
     let vs = server.vector_store().expect("vectors are enabled");
-    (server.graph(), vs)
+    let registry = server.workspace_registry();
+    let handles = server.workspace_handles();
+    TestServer {
+        vs,
+        registry,
+        handles,
+    }
 }
 
 fn body_of(outcome: HttpOutcome) -> Value {
@@ -51,7 +64,7 @@ fn result_text(value: &Value) -> String {
         .to_owned()
 }
 
-fn call_tool(kg: &GraphHandle, vs: &VectorStore, name: &str, arguments: &Value) -> Value {
+fn call_tool(s: &TestServer, name: &str, arguments: &Value) -> Value {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -60,20 +73,30 @@ fn call_tool(kg: &GraphHandle, vs: &VectorStore, name: &str, arguments: &Value) 
     })
     .to_string();
     body_of(
-        dispatch_http_body(&body, kg, Some(vs), &mcpmem::authz::local_principal())
-            .expect("the body is valid JSON"),
+        dispatch_http_body(
+            &body,
+            &mcpmem::authz::local_principal(),
+            &s.registry,
+            &s.handles,
+        )
+        .expect("the body is valid JSON"),
     )
 }
 
-fn call(kg: &GraphHandle, vs: &VectorStore, arguments: &Value) -> Value {
-    call_tool(kg, vs, SEMANTIC_SEARCH, arguments)
+fn call(s: &TestServer, arguments: &Value) -> Value {
+    call_tool(s, SEMANTIC_SEARCH, arguments)
 }
 
-fn listed_tool_names(kg: &GraphHandle, vs: &VectorStore) -> Vec<String> {
+fn listed_tool_names(s: &TestServer) -> Vec<String> {
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
     let v = body_of(
-        dispatch_http_body(body, kg, Some(vs), &mcpmem::authz::local_principal())
-            .expect("the body is valid JSON"),
+        dispatch_http_body(
+            body,
+            &mcpmem::authz::local_principal(),
+            &s.registry,
+            &s.handles,
+        )
+        .expect("the body is valid JSON"),
     );
     v["result"]["tools"]
         .as_array()
@@ -168,8 +191,8 @@ fn semantic_search_is_always_a_vector_tool() {
 #[test]
 fn semantic_search_is_absent_from_tools_list_without_a_provider() {
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
-    let names = listed_tool_names(&kg, &vs);
+    let s = vector_server(&dir);
+    let names = listed_tool_names(&s);
     assert!(
         names.iter().any(|n| n == "hybrid_search"),
         "the vector tools must be listed: {names:?}"
@@ -229,13 +252,13 @@ fn hide_tool_for_provider_kind_mismatch() {
     use std::time::Duration;
 
     let dir = tempfile::tempdir().expect("make a temporary database");
-    let (kg, vs) = vector_server(&dir);
+    let s = vector_server(&dir);
     let profile = openai_profile();
     activate_serving_profile(&dir, &profile);
-    let serving = vs
-        .serving_profile()
-        .expect("read the serving profile")
-        .expect("the profile is active");
+    let serving =
+        s.vs.serving_profile()
+            .expect("read the serving profile")
+            .expect("the profile is active");
     assert_eq!(serving.provider_kind, "openai");
 
     let ollama = OllamaProvider::new("http://127.0.0.1:11434", Duration::from_secs(1))
@@ -245,7 +268,7 @@ fn hide_tool_for_provider_kind_mismatch() {
         None,
     )));
 
-    let names = listed_tool_names(&kg, &vs);
+    let names = listed_tool_names(&s);
     assert!(
         !names.iter().any(|name| name == SEMANTIC_SEARCH),
         "the registry has Ollama, but the serving profile names OpenAI: {names:?}"
@@ -279,7 +302,7 @@ fn list_tool_for_matching_provider() {
     use std::time::Duration;
 
     let dir = tempfile::tempdir().expect("make a temporary database");
-    let (kg, vs) = vector_server(&dir);
+    let s = vector_server(&dir);
     let profile = openai_profile();
     activate_serving_profile(&dir, &profile);
     let openai = OpenAiCompatibleProvider::new(
@@ -293,7 +316,7 @@ fn list_tool_for_matching_provider() {
         Some(Arc::new(openai)),
     )));
 
-    let names = listed_tool_names(&kg, &vs);
+    let names = listed_tool_names(&s);
     assert!(
         names.iter().any(|name| name == SEMANTIC_SEARCH),
         "the registry and the serving profile both name OpenAI: {names:?}"
@@ -329,8 +352,8 @@ fn semantic_search_is_listed_when_registry_supports_serving_provider() {
 #[test]
 fn a_hidden_semantic_search_call_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
-    let v = call(&kg, &vs, &serde_json::json!({ "queryText": "anything" }));
+    let s = vector_server(&dir);
+    let v = call(&s, &serde_json::json!({ "queryText": "anything" }));
     let text = result_text(&v);
     assert!(v["error"].is_null(), "a scope refusal is not wanted: {v}");
     assert_eq!(
@@ -352,12 +375,8 @@ fn a_hidden_semantic_search_call_is_refused() {
 #[test]
 fn a_missing_serving_profile_names_the_indexer_section() {
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
-    let v = call(
-        &kg,
-        &vs,
-        &serde_json::json!({ "queryText": "graph database" }),
-    );
+    let s = vector_server(&dir);
+    let v = call(&s, &serde_json::json!({ "queryText": "graph database" }));
     let text = result_text(&v);
     assert_eq!(v["result"]["isError"], Value::Bool(true), "{v}");
     assert!(
@@ -379,9 +398,9 @@ fn a_missing_serving_profile_names_the_indexer_section() {
 #[test]
 fn an_empty_query_text_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
+    let s = vector_server(&dir);
     for blank in ["", "   ", "\t\n"] {
-        let v = call(&kg, &vs, &serde_json::json!({ "queryText": blank }));
+        let v = call(&s, &serde_json::json!({ "queryText": blank }));
         let text = result_text(&v);
         assert_eq!(v["result"]["isError"], Value::Bool(true), "{blank:?}: {v}");
         assert!(
@@ -397,8 +416,8 @@ fn an_empty_query_text_is_rejected() {
 #[test]
 fn a_missing_query_text_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
-    let v = call(&kg, &vs, &serde_json::json!({ "topK": 5 }));
+    let s = vector_server(&dir);
+    let v = call(&s, &serde_json::json!({ "topK": 5 }));
     let text = result_text(&v);
     assert_eq!(v["result"]["isError"], Value::Bool(true), "{v}");
     assert!(text.contains("'queryText'"), "{text}");
@@ -496,11 +515,10 @@ fn seed_chunk_snapshot(dir: &tempfile::TempDir) {
 #[test]
 fn filter_selects_kind_and_type_before_ranking() {
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
+    let s = vector_server(&dir);
     let seed = |name: &str, etype: &str| {
         let v = call_tool(
-            &kg,
-            &vs,
+            &s,
             "create_entities",
             &serde_json::json!({
                 "entities": [{"name": name, "entityType": etype, "observations": []}]
@@ -511,12 +529,11 @@ fn filter_selects_kind_and_type_before_ranking() {
     seed("ada", "Person");
     seed("acme", "Company");
     seed_chunk_snapshot(&dir);
-    vs.reconcile_managed_snapshot().unwrap();
+    s.vs.reconcile_managed_snapshot().unwrap();
 
     // Without a filter both entities come back, kind-marked.
     let text = result_text(&call_tool(
-        &kg,
-        &vs,
+        &s,
         "vector_search_entities",
         &serde_json::json!({ "embedding": vec![1.0f64; DIMS as usize], "topK": 10 }),
     ));
@@ -535,8 +552,7 @@ fn filter_selects_kind_and_type_before_ranking() {
 
     // A `{kind, type}` filter narrows before ranking.
     let text = result_text(&call_tool(
-        &kg,
-        &vs,
+        &s,
         "vector_search_entities",
         &serde_json::json!({
             "embedding": vec![1.0f64; DIMS as usize],
@@ -556,8 +572,7 @@ fn filter_selects_kind_and_type_before_ranking() {
 
     // A type filter without a kind also applies.
     let text = result_text(&call_tool(
-        &kg,
-        &vs,
+        &s,
         "vector_search_entities",
         &serde_json::json!({
             "embedding": vec![1.0f64; DIMS as usize],
@@ -577,8 +592,7 @@ fn filter_selects_kind_and_type_before_ranking() {
     // The seeded snapshot holds no relation chunks, so `kind: "relation"`
     // matches nothing, without erroring.
     let text = result_text(&call_tool(
-        &kg,
-        &vs,
+        &s,
         "vector_search_entities",
         &serde_json::json!({
             "embedding": vec![1.0f64; DIMS as usize],
@@ -595,10 +609,9 @@ fn filter_selects_kind_and_type_before_ranking() {
 #[test]
 fn filter_rejects_unknown_kind() {
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
+    let s = vector_server(&dir);
     let v = call_tool(
-        &kg,
-        &vs,
+        &s,
         "vector_search_entities",
         &serde_json::json!({
             "embedding": vec![1.0f64; DIMS as usize],
@@ -619,10 +632,9 @@ fn filter_rejects_unknown_kind() {
 #[test]
 fn filter_rejects_non_string_members() {
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
+    let s = vector_server(&dir);
     let v = call_tool(
-        &kg,
-        &vs,
+        &s,
         "vector_search_entities",
         &serde_json::json!({
             "embedding": vec![1.0f64; DIMS as usize],
@@ -636,8 +648,7 @@ fn filter_rejects_non_string_members() {
         "the refusal must name the member: {text}"
     );
     let v = call_tool(
-        &kg,
-        &vs,
+        &s,
         "vector_search_entities",
         &serde_json::json!({
             "embedding": vec![1.0f64; DIMS as usize],
@@ -661,10 +672,9 @@ fn filter_rejects_non_string_members() {
 #[test]
 fn identity_and_stats_follow_the_serving_profile_dimension() {
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
+    let s = vector_server(&dir);
     let v = call_tool(
-        &kg,
-        &vs,
+        &s,
         "create_entities",
         &serde_json::json!({
             "entities": [
@@ -706,14 +716,13 @@ fn identity_and_stats_follow_the_serving_profile_dimension() {
     seed_identity(&conn, "ada", 1.0);
     seed_identity(&conn, "acme", 0.1);
     drop(conn);
-    vs.reconcile_managed_snapshot().unwrap();
+    s.vs.reconcile_managed_snapshot().unwrap();
 
     // The identity chunk must serve at the profile dimension, not be dropped
     // by a gate built on the store's 8-dims default. ada's identity chunk
     // then finds acme (the default excludes the query owner itself).
     let text = result_text(&call_tool(
-        &kg,
-        &vs,
+        &s,
         "vector_search_by_entity",
         &serde_json::json!({ "entityName": "ada", "topK": 10 }),
     ));
@@ -729,12 +738,7 @@ fn identity_and_stats_follow_the_serving_profile_dimension() {
     );
 
     // Stats report the dimension the store actually serves.
-    let text = result_text(&call_tool(
-        &kg,
-        &vs,
-        "vector_store_stats",
-        &serde_json::json!({}),
-    ));
+    let text = result_text(&call_tool(&s, "vector_store_stats", &serde_json::json!({})));
     assert!(
         text.contains(r#""dims":4"#),
         "stats report the profile dimension, not the CLI default: {text}"
@@ -785,7 +789,7 @@ fn relation_observation_chain_serves_include_chunks() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    let (kg, vs) = vector_server(&dir);
+    let s = vector_server(&dir);
     let database = dir.path().join("memory.db");
 
     // A candidate profile: mutations enqueue their chunk jobs against it, and
@@ -812,8 +816,7 @@ fn relation_observation_chain_serves_include_chunks() {
     // Seed the graph through the real tools: two entities, one relation, and
     // one observation on the relation.
     let v = call_tool(
-        &kg,
-        &vs,
+        &s,
         "create_entities",
         &serde_json::json!({
             "entities": [
@@ -824,8 +827,7 @@ fn relation_observation_chain_serves_include_chunks() {
     );
     assert!(v["error"].is_null(), "seed entities: {v}");
     let v = call_tool(
-        &kg,
-        &vs,
+        &s,
         "create_relations",
         &serde_json::json!({
             "relations": [{"from": "ada", "to": "bob", "relationType": "knows"}]
@@ -833,8 +835,7 @@ fn relation_observation_chain_serves_include_chunks() {
     );
     assert!(v["error"].is_null(), "seed relation: {v}");
     let v = call_tool(
-        &kg,
-        &vs,
+        &s,
         "add_relation_observations",
         &serde_json::json!({
             "relations": [{
@@ -876,12 +877,11 @@ fn relation_observation_chain_serves_include_chunks() {
 
     // Publish the candidate snapshot, then search with the observation axis.
     // The relation ranks first, and its best chunk is the observation body.
-    vs.reconcile_managed_snapshot().unwrap();
+    s.vs.reconcile_managed_snapshot().unwrap();
     let mut query = vec![0.0f64; DIMS as usize];
     query[1] = 1.0;
     let text = result_text(&call_tool(
-        &kg,
-        &vs,
+        &s,
         "vector_search_entities",
         &serde_json::json!({
             "embedding": query,

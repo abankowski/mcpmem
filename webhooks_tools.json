@@ -5,6 +5,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "endpoint": {
           "type": "string",
           "description": "HTTPS URL that receives delivery POST requests. Must use port 443 (default or explicit), carry no credentials or fragment, and name a host rather than a literal IP address."
@@ -47,6 +48,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "subscriptionId": {
           "type": "string",
           "description": "The subscription id returned by webhook_add_subscription."

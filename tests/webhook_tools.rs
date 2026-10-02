@@ -10,18 +10,19 @@
 
 use mcpmem::authz::{bearer_principal, local_principal};
 use mcpmem::config::Config;
-use mcpmem::kg::GraphHandle;
 use mcpmem::server::{HttpOutcome, MCPServer, dispatch_http_body};
 use mcpmem::tools::ToolCategory;
+use mcpmem::workspace::{WorkspaceHandles, WorkspaceRegistry};
 use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
 
 /// A server whose `graph-read` and `graph-write` categories are both
-/// enabled. A per-test principal narrows what the caller may reach; the
-/// category flags stay fixed for every test in this process.
+/// enabled, plus the registry and handle cache of the same server —
+/// `workspaceId` selection resolves against them.
 struct Fixture {
     _dir: tempfile::TempDir,
-    kg: Arc<GraphHandle>,
+    registry: Arc<WorkspaceRegistry>,
+    handles: Arc<WorkspaceHandles>,
 }
 
 static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
@@ -33,8 +34,13 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
         ..Config::default()
     };
     let server = MCPServer::new_kg(config).expect("test server builds");
-    let kg = server.graph();
-    Fixture { _dir: dir, kg }
+    let registry = server.workspace_registry();
+    let handles = server.workspace_handles();
+    Fixture {
+        _dir: dir,
+        registry,
+        handles,
+    }
 });
 
 fn body_of(outcome: HttpOutcome) -> Value {
@@ -54,7 +60,15 @@ fn call(name: &str, arguments: &Value) -> Value {
         "params": { "name": name, "arguments": arguments },
     })
     .to_string();
-    body_of(dispatch_http_body(&body, &FIXTURE.kg, None, &local_principal()).expect("valid JSON"))
+    body_of(
+        dispatch_http_body(
+            &body,
+            &local_principal(),
+            &FIXTURE.registry,
+            &FIXTURE.handles,
+        )
+        .expect("valid JSON"),
+    )
 }
 
 fn is_error(response: &Value) -> bool {
@@ -72,7 +86,9 @@ fn result_json(response: &Value) -> Value {
 
 fn listed_tool_names(principal: &mcpmem::authz::Principal) -> Vec<String> {
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
-    body_of(dispatch_http_body(body, &FIXTURE.kg, None, principal).unwrap())["result"]["tools"]
+    body_of(
+        dispatch_http_body(body, principal, &FIXTURE.registry, &FIXTURE.handles).unwrap(),
+    )["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()

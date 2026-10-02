@@ -5,12 +5,12 @@ use clap::Parser;
 
 use mcpmem::authz::local_principal;
 use mcpmem::config::Config;
-use mcpmem::kg::GraphHandle;
 #[cfg(all(feature = "indexer", feature = "webhooks"))]
 use mcpmem::runtime::{AppServices, RoleFuture, RoleLifecycle, RoleService, RuntimeComposition};
 use mcpmem::runtime::{ConfigError, RoleSet, RuntimeRole};
 use mcpmem::server::{HttpOutcome, MCPServer, dispatch_http_body};
 use mcpmem::tools::ToolCategory;
+use mcpmem::workspace::{WorkspaceHandles, WorkspaceRegistry};
 use serde_json::Value;
 
 #[cfg(feature = "indexer")]
@@ -169,33 +169,45 @@ async fn supervises_selected_roles_and_stops_with_mcp() {
 // build a graph with both categories enabled, then send JSON-RPC `tools/call`
 // bodies to `dispatch_http_body` and inspect the parsed tool payload.
 
-/// A graph whose `graph-read` and `graph-write` categories are both enabled.
-/// Those flags are process-wide, so this goes through the same entry point
-/// `src/main.rs` uses rather than setting the atomics directly.
-fn test_graph(dir: &tempfile::TempDir) -> Arc<GraphHandle> {
+/// A graph whose `graph-read` and `graph-write` categories are both enabled,
+/// together with the registry and handle cache of the same server (workspace
+/// selection resolves through them). Those flags are process-wide, so this
+/// goes through the same entry point `src/main.rs` uses rather than setting
+/// the atomics directly.
+struct TestGraph {
+    registry: Arc<WorkspaceRegistry>,
+    handles: Arc<WorkspaceHandles>,
+}
+
+fn test_graph(dir: &tempfile::TempDir) -> TestGraph {
     let config = Config {
         memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
         legacy_owner_id: Some("machine:local".into()),
         enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
         ..Config::default()
     };
-    MCPServer::new_kg(config)
-        .expect("test server builds")
-        .graph()
+    let server = MCPServer::new_kg(config).expect("test server builds");
+    TestGraph {
+        registry: server.workspace_registry(),
+        handles: server.workspace_handles(),
+    }
 }
 
 /// A graph over an explicitly named database, for tests that must open the
 /// database directly (the chunk-index-job counting test).
-fn test_graph_at(database: &std::path::Path) -> Arc<GraphHandle> {
+#[cfg(feature = "indexer")]
+fn test_graph_at(database: &std::path::Path) -> TestGraph {
     let config = Config {
         memory_file_path: database.to_string_lossy().into_owned(),
         legacy_owner_id: Some("machine:local".into()),
         enabled_categories: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
         ..Config::default()
     };
-    MCPServer::new_kg(config)
-        .expect("test server builds")
-        .graph()
+    let server = MCPServer::new_kg(config).expect("test server builds");
+    TestGraph {
+        registry: server.workspace_registry(),
+        handles: server.workspace_handles(),
+    }
 }
 
 fn body_of(outcome: HttpOutcome) -> Value {
@@ -207,7 +219,7 @@ fn body_of(outcome: HttpOutcome) -> Value {
 
 /// Runs one `tools/call` through the MCP dispatch. Returns the full JSON-RPC
 /// response value, error envelope included.
-fn call_raw(kg: &GraphHandle, name: &str, arguments: &Value) -> Value {
+fn call_raw(kg: &TestGraph, name: &str, arguments: &Value) -> Value {
     let req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -215,8 +227,13 @@ fn call_raw(kg: &GraphHandle, name: &str, arguments: &Value) -> Value {
         "params": {"name": name, "arguments": arguments},
     });
     let v = body_of(
-        dispatch_http_body(&req.to_string(), kg, None, &local_principal())
-            .expect("valid JSON body dispatches"),
+        dispatch_http_body(
+            &req.to_string(),
+            &local_principal(),
+            &kg.registry,
+            &kg.handles,
+        )
+        .expect("valid JSON body dispatches"),
     );
     assert!(
         v["error"].is_null(),
@@ -226,14 +243,14 @@ fn call_raw(kg: &GraphHandle, name: &str, arguments: &Value) -> Value {
 }
 
 /// Runs one `tools/call` and returns the payload inside `content[0].text`.
-fn call_payload(kg: &GraphHandle, name: &str, arguments: &Value) -> Value {
+fn call_payload(kg: &TestGraph, name: &str, arguments: &Value) -> Value {
     let text = call_text(kg, name, arguments);
     serde_json::from_str::<Value>(&text).expect("tool text is JSON")
 }
 
 /// Runs one `tools/call` and returns its text payload. Unit-text tools (the
 /// delete family) put a plain sentence there, so the text is the contract.
-fn call_text(kg: &GraphHandle, name: &str, arguments: &Value) -> String {
+fn call_text(kg: &TestGraph, name: &str, arguments: &Value) -> String {
     let raw = call_raw(kg, name, arguments);
     // A successful tool result carries no `isError` key at all; an error
     // result carries `true`.

@@ -24,8 +24,8 @@ use mcpmem::config::{Config, Durability, SqliteTuning};
 use mcpmem::kg::GraphHandle;
 use mcpmem::server::{HttpOutcome, MCPServer, dispatch_http_body};
 use mcpmem::tools::ToolCategory;
-use mcpmem::vector_store::{VectorConfig, VectorStore};
-use mcpmem::workspace::{Visibility, WorkspaceRegistry};
+use mcpmem::vector_store::VectorConfig;
+use mcpmem::workspace::{Visibility, WorkspaceHandles, WorkspaceRegistry};
 use serde_json::{Value, json};
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -36,9 +36,8 @@ use std::sync::Arc;
 /// (`machine:static`) registered so a static caller is a real identity.
 struct Fixture {
     _dir: tempfile::TempDir,
-    kg: Arc<GraphHandle>,
     registry: Arc<WorkspaceRegistry>,
-    vs: Option<Arc<VectorStore>>,
+    handles: Arc<WorkspaceHandles>,
 }
 
 fn fixture() -> Fixture {
@@ -60,14 +59,12 @@ fn fixture() -> Fixture {
         ..Config::default()
     };
     let server = MCPServer::new(config, VectorConfig::new(2)).expect("test server builds");
-    let kg = server.graph();
     let registry = server.workspace_registry();
-    let vs = server.vector_store();
+    let handles = server.workspace_handles();
     Fixture {
         _dir: dir,
-        kg,
         registry,
-        vs,
+        handles,
     }
 }
 
@@ -122,10 +119,12 @@ fn body_of(outcome: HttpOutcome) -> Value {
 }
 
 fn dispatch(fx: &Fixture, principal: &Principal, body: &str) -> HttpOutcome {
-    dispatch_http_body(body, &fx.kg, fx.vs.as_deref(), principal).expect("valid JSON body")
+    dispatch_http_body(body, principal, &fx.registry, &fx.handles).expect("valid JSON body")
 }
 
 /// One `tools/call` as `principal`, returning the JSON-RPC response.
+/// `arguments` is owned because callers build it inline with `json!`.
+#[allow(clippy::needless_pass_by_value)]
 fn call(fx: &Fixture, principal: &Principal, name: &str, arguments: Value) -> Value {
     let body = json!({
         "jsonrpc": "2.0",
