@@ -132,6 +132,12 @@ fn revoked_machine_credential_is_rejected_on_the_next_lookup_and_drops_its_defau
             .resolve(&id, Some(&workspace), WorkspaceAccess::Read)
             .is_err()
     );
+    assert!(registry.set_default(&id, &workspace).is_err());
+    assert!(
+        registry
+            .grant("machine:local", &workspace, &id, "writer")
+            .is_err()
+    );
     assert!(
         registry
             .list_machines()
@@ -144,17 +150,19 @@ fn revoked_machine_credential_is_rejected_on_the_next_lookup_and_drops_its_defau
         "{}.workspaces.sqlite",
         dir.path().join("memory.sqlite").display()
     );
-    let default_count: i64 = rusqlite::Connection::open(sidecar)
+    let (default_count, grant_count): (i64, i64) = rusqlite::Connection::open(sidecar)
         .unwrap()
         .query_row(
-            "SELECT count(*) FROM workspace_default WHERE principal_id=?1",
+            "SELECT (SELECT count(*) FROM workspace_default WHERE principal_id=?1),
+                    (SELECT count(*) FROM workspace_grant WHERE principal_id=?1)",
             [&id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
     assert_eq!(
-        default_count, 0,
-        "a revoked credential retains no saved selection"
+        (default_count, grant_count),
+        (0, 0),
+        "a revoked credential retains no saved selection or grant"
     );
 }
 
@@ -184,6 +192,48 @@ fn a_machine_owner_cannot_be_revoked_while_it_owns_a_workspace() {
             .resolve(&id, Some(&workspace.workspace_id), WorkspaceAccess::Owner)
             .is_ok()
     );
+}
+
+#[test]
+fn revocation_during_graph_initialization_cannot_create_a_machine_owner() {
+    use std::sync::Barrier;
+
+    let (dir, registry) = registry();
+    let path = dir.path().join("memory.sqlite");
+    let (id, token) = registry
+        .create_machine("race owner", &["graph-read".into(), "graph-write".into()])
+        .unwrap();
+    let entered_init = Barrier::new(2);
+    let resume_init = Barrier::new(2);
+    std::thread::scope(|scope| {
+        let creation = scope.spawn(|| {
+            registry.create(&id, "must not exist", Visibility::Private, |_| {
+                entered_init.wait();
+                resume_init.wait();
+                Ok(())
+            })
+        });
+        entered_init.wait();
+        let revoked = registry.revoke_machine(&id);
+        resume_init.wait();
+        let created = creation.join().unwrap();
+        assert!(revoked.unwrap(), "the machine was active before revocation");
+        assert!(created.is_err(), "a revoked machine became a graph owner");
+    });
+    let conn = rusqlite::Connection::open(format!("{}.workspaces.sqlite", path.display())).unwrap();
+    let (workspaces, defaults): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM workspace WHERE owner_id=?1),
+                    (SELECT count(*) FROM workspace_default WHERE principal_id=?1)",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((workspaces, defaults), (0, 0));
+    drop(registry);
+    let reopened = WorkspaceRegistry::open(&path, Some("machine:local")).unwrap();
+    assert!(reopened.authenticate_machine(&token).unwrap().is_none());
+    assert!(reopened.resolve(&id, None, WorkspaceAccess::Owner).is_err());
 }
 
 #[tokio::test]
@@ -339,6 +389,65 @@ mod migration {
             .unwrap();
         }
         conn
+    }
+
+    #[test]
+    fn unauthenticated_http_refuses_before_it_marks_a_legacy_graph() {
+        use std::fs::File;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sqlite");
+        let conn = legacy_graph(&path);
+        let binary =
+            std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
+        let log_path = path.to_string_lossy() + ".refusal.log";
+        let log = File::create(&*log_path).expect("create server log");
+        let log_err = log.try_clone().expect("clone server log handle");
+        let mut child = Command::new(&binary)
+            .arg("-f")
+            .arg(&path)
+            .arg("--transport")
+            .arg("http")
+            .arg("--legacy-owner-id")
+            .arg("machine:local")
+            .arg("--enable-all")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err))
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("an unauthenticated HTTP server stayed active");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        assert!(!status.success(), "the HTTP listener must refuse startup");
+        let output = std::fs::read_to_string(&*log_path)
+            .unwrap_or_else(|e| format!("<log unreadable: {e}>"));
+        let reason = output.to_ascii_lowercase();
+        assert!(
+            reason.contains("oauth") && reason.contains("bearer"),
+            "the refusal must name both credential options: {output}"
+        );
+        let latest: i64 = conn
+            .query_row("SELECT max(version) FROM schema_migration", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(latest, 13, "refused startup must not migrate the graph");
+        assert!(
+            !std::path::PathBuf::from(format!("{}.workspaces.sqlite", path.display())).exists(),
+            "refused startup must not create the workspace registry"
+        );
     }
 
     #[tokio::test]

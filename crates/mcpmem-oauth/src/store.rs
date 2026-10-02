@@ -643,9 +643,10 @@ impl Store {
             .optional()?)
     }
 
-    /// Revoke every live token family for one stable principal ID.
-    /// A display-name change does not change the family owner.
+    /// Revoke every token family and remove every pending code and login for
+    /// one stable principal ID. All changes commit together.
     pub fn revoke_principal(&self, principal: &str) -> Result<usize> {
+        let tx = Tx::begin(&self.conn)?;
         let families: Vec<String> = self
             .conn
             .prepare(
@@ -657,6 +658,11 @@ impl Store {
         for family in &families {
             self.revoke_family(family)?;
         }
+        self.conn
+            .execute("DELETE FROM oauth_code WHERE principal=?1", [principal])?;
+        self.conn
+            .execute("DELETE FROM oauth_login WHERE principal=?1", [principal])?;
+        tx.commit()?;
         Ok(families.len())
     }
 

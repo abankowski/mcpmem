@@ -122,6 +122,36 @@ impl OauthState {
         self.with_store(|store| mcpmem_oauth::token::validate(store, token, &resource, now_us))
     }
 
+    /// A token grants access only while its stable human is still registered.
+    pub(crate) fn human_registered(&self, id: &str) -> bool {
+        let Some((iss, sub)) = crate::principals::human_key(id) else {
+            return false;
+        };
+        if crate::principals::human_id(&iss, &sub) != id {
+            return false;
+        }
+        let registered: Result<Option<()>> = crate::principals::resolve_human(
+            &iss,
+            &sub,
+            |iss, sub| {
+                self.config
+                    .principals
+                    .iter()
+                    .any(|principal| principal.key() == (iss, sub))
+                    .then_some(())
+            },
+            |iss, sub| self.with_principals(|store| store.get(iss, sub).map(|row| row.map(|_| ()))),
+        );
+        match registered {
+            Ok(Some(())) => true,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::error!(%error, "human registration lookup failed");
+                false
+            }
+        }
+    }
+
     /// Run `f` with the store locked, and drop the guard before returning.
     ///
     /// The guard cannot escape and cannot span an `await`. `f` returns a `T`
@@ -186,8 +216,8 @@ impl OauthState {
         f(&guard)
     }
 
-    /// Revoke every live token family that names `principal`, and return how
-    /// many families were revoked.
+    /// Revoke every token family and delete each code and authenticated login
+    /// for `principal`. Return the number of revoked families.
     pub fn revoke_principal(&self, principal: &str) -> std::result::Result<usize, String> {
         self.with_store(|store| store.revoke_principal(principal).map_err(|e| e.to_string()))
     }

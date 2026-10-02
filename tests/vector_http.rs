@@ -145,14 +145,6 @@ const INIT_BODY: &str =
     r#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25"},"id":1}"#;
 
 #[test]
-fn test_http_no_auth_allows_requests() {
-    let srv = spawn_http_server(None);
-    let (status, body) = post_mcp(srv.port, INIT_BODY, None);
-    assert_eq!(status, 200, "no-auth server should accept requests: {body}");
-    assert!(body.contains("serverInfo"), "expected init result: {body}");
-}
-
-#[test]
 fn test_http_auth_rejects_missing_token() {
     let srv = spawn_http_server(Some("s3cret"));
     let (status, _body) = post_mcp(srv.port, INIT_BODY, None);

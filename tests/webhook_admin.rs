@@ -79,7 +79,7 @@ struct Fixture {
 /// Plant a live access token the way every minted token is stored, so the
 /// bearer path validates it exactly like a walked one (the shape
 /// `support::flow::plant_admin_token` uses). The provider is never involved.
-fn plant(store: &mcpmem_oauth::store::Store, scopes: Vec<String>) -> String {
+fn plant(store: &mcpmem_oauth::store::Store, principal_id: &str, scopes: Vec<String>) -> String {
     let token = mcpmem_oauth::new_token();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -91,7 +91,7 @@ fn plant(store: &mcpmem_oauth::store::Store, scopes: Vec<String>) -> String {
             mcpmem_oauth::store::TokenKind::Access,
             &mcpmem_oauth::store::Grant {
                 client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
-                principal: "adam".to_owned(),
+                principal: principal_id.to_owned(),
                 scopes,
                 resource: format!("{}/mcp", support::PUBLIC_URL),
                 family: mcpmem_oauth::new_token(),
@@ -111,6 +111,8 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
     // `principal_admin.rs::admin_server`. The issuer is never reached:
     // the tokens below are planted, not walked.
     config.principals[0].scopes.push(ADMIN_SCOPE.into());
+    let principal_id =
+        mcpmem::principals::human_id(&config.principals[0].iss, &config.principals[0].sub);
     let state = HttpState::for_test(TestSetup {
         db_path,
         oauth: Some(config),
@@ -125,8 +127,8 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
         .expect("the fixture server has OAuth on")
         .with_store(|store| {
             (
-                plant(store, vec![ADMIN_SCOPE.to_owned()]),
-                plant(store, vec!["graph-read".to_owned()]),
+                plant(store, &principal_id, vec![ADMIN_SCOPE.to_owned()]),
+                plant(store, &principal_id, vec!["graph-read".to_owned()]),
             )
         });
     // The test kit the admin Test button drives: `hooks.example.test` is the
