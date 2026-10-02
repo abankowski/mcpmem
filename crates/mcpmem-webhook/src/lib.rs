@@ -585,6 +585,9 @@ impl<C: DeliveryConnector, S: SecretProvider, R: Resolver> WorkerPoll for Webhoo
     fn poll(&self, now_us: i64) -> Result<DeliveryReport, WorkerError> {
         self.run_once(now_us)
     }
+    fn audit_subscriptions(&self) -> Result<Vec<SubscriptionAudit>, WorkerError> {
+        WebhookWorker::audit_subscriptions(self)
+    }
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

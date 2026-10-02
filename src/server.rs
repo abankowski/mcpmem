@@ -447,7 +447,15 @@ impl MCPServer {
         )?);
 
         let vs = if config.vectors_enabled {
-            Some(Arc::new(VectorStore::with_config(&path, &vec_config)?))
+            let store = Arc::new(VectorStore::with_config(&path, &vec_config)?);
+            #[cfg(feature = "indexer")]
+            if let Err(error) = store.load_managed_snapshot() {
+                tracing::warn!(
+                    %error,
+                    "legacy vector snapshot not published yet; the indexer will publish it"
+                );
+            }
+            Some(store)
         } else {
             None
         };
