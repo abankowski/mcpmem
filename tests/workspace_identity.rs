@@ -326,7 +326,7 @@ fn only_an_admin_human_or_trusted_local_can_manage_machine_accounts() {
 
     let admin = oauth_principal("human:admin", BTreeSet::from(["admin".into()]));
     let reader = oauth_principal("human:reader", BTreeSet::from(["graph-read".into()]));
-    let mut static_bearer = bearer_principal(&ToolCategory::ALL);
+    let mut static_bearer = bearer_principal(ToolCategory::ALL);
     assert!(may_manage_machines(&admin));
     assert!(may_manage_machines(&local_principal()));
     assert!(!may_manage_machines(&reader));
