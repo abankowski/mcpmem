@@ -203,12 +203,13 @@ fn semantic_search_is_absent_from_tools_list_without_a_provider() {
     );
 }
 
-/// The provider cell is a process-wide `OnceLock`. This test runs the mismatch
-/// in a child process, so its registry cannot change the no-provider tests.
-#[cfg(feature = "indexer")]
-const PROVIDER_KIND_MISMATCH_CHILD: &str = "MCPMEM_PROVIDER_KIND_MISMATCH_CHILD";
+/// The provider cell is a process-wide `OnceLock`. Tests that install a
+/// provider run their scenario in a child process, so the cell cannot change
+/// what the no-provider tests observe.
 #[cfg(feature = "indexer")]
 const PROVIDER_KIND_MATCH_CHILD: &str = "MCPMEM_PROVIDER_KIND_MATCH_CHILD";
+#[cfg(feature = "indexer")]
+const PROFILED_NEW_WORKSPACE_CHILD: &str = "MCPMEM_PROFILED_NEW_WORKSPACE_CHILD";
 
 #[cfg(feature = "indexer")]
 fn activate_serving_profile(dir: &tempfile::TempDir, profile: &mcpmem_core::jobs::IndexProfile) {
@@ -246,54 +247,24 @@ fn openai_profile() -> mcpmem_core::jobs::IndexProfile {
     }
 }
 
+/// An index profile served by an Ollama provider, matching the provider
+/// [`advertise_for_profiled_new_workspace`] installs.
 #[cfg(feature = "indexer")]
-fn hide_tool_for_provider_kind_mismatch() {
-    use mcpmem_indexer::{OllamaProvider, ProviderRegistry};
-    use std::time::Duration;
+fn ollama_profile() -> mcpmem_core::jobs::IndexProfile {
+    use mcpmem_core::jobs::{DistanceMetric, IndexProfile, Normalization};
+    use uuid::Uuid;
 
-    let dir = tempfile::tempdir().expect("make a temporary database");
-    let s = vector_server(&dir);
-    let profile = openai_profile();
-    activate_serving_profile(&dir, &profile);
-    let serving =
-        s.vs.serving_profile()
-            .expect("read the serving profile")
-            .expect("the profile is active");
-    assert_eq!(serving.provider_kind, "openai");
-
-    let ollama = OllamaProvider::new("http://127.0.0.1:11434", Duration::from_secs(1))
-        .expect("make an Ollama provider without a request");
-    mcpmem::indexer_provider::init(Arc::new(ProviderRegistry::new(
-        Some(Arc::new(ollama)),
-        None,
-    )));
-
-    let names = listed_tool_names(&s);
-    assert!(
-        !names.iter().any(|name| name == SEMANTIC_SEARCH),
-        "the registry has Ollama, but the serving profile names OpenAI: {names:?}"
-    );
-}
-
-/// An available registry is not enough. The registry must hold the provider
-/// the serving profile names, or the handler will fail after `tools/list`.
-#[cfg(feature = "indexer")]
-#[test]
-fn semantic_search_is_hidden_when_registry_lacks_serving_provider() {
-    if std::env::var_os(PROVIDER_KIND_MISMATCH_CHILD).is_some() {
-        hide_tool_for_provider_kind_mismatch();
-        return;
+    IndexProfile {
+        id: Uuid::new_v4(),
+        store_key: "default".into(),
+        provider_kind: "ollama".into(),
+        model: "test-model".into(),
+        dimensions: DIMS,
+        representation_version: "test-v1".into(),
+        normalization: Normalization::None,
+        distance_metric: DistanceMetric::Cosine,
+        vector_encoding_version: "f32le-v1".into(),
     }
-
-    let status = std::process::Command::new(
-        std::env::current_exe().expect("find the semantic search test binary"),
-    )
-    .arg("semantic_search_is_hidden_when_registry_lacks_serving_provider")
-    .arg("--exact")
-    .env(PROVIDER_KIND_MISMATCH_CHILD, "1")
-    .status()
-    .expect("run the isolated mismatch test");
-    assert!(status.success(), "the isolated mismatch test must pass");
 }
 
 #[cfg(feature = "indexer")]
@@ -344,6 +315,93 @@ fn semantic_search_is_listed_when_registry_supports_serving_provider() {
     assert!(
         status.success(),
         "the isolated matching-provider test must pass"
+    );
+}
+
+/// The serving profile lives in a *new* workspace's graph file while the
+/// legacy store has none. With a provider configured for that profile kind,
+/// the tool must still be advertised: availability is a property of the
+/// registered workspaces, not of the legacy store alone.
+#[cfg(feature = "indexer")]
+fn advertise_for_profiled_new_workspace() {
+    use mcpmem::workspace::{Visibility, WorkspaceAccess};
+    use mcpmem_core::jobs::{AnnGenerationRepository, IndexProfileRegistry};
+    use mcpmem_indexer::{OllamaProvider, ProviderRegistry};
+    use rusqlite::Connection;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().expect("make a temporary database");
+    let s = vector_server(&dir);
+
+    // Only the new workspace holds an active serving profile.
+    let ws = s
+        .registry
+        .create("machine:local", "Profiled", Visibility::Private, |_| Ok(()))
+        .expect("the new workspace registers");
+    let record = s
+        .registry
+        .resolve(
+            "machine:local",
+            Some(&ws.workspace_id),
+            WorkspaceAccess::Read,
+        )
+        .expect("the new workspace resolves");
+    assert!(
+        s.vs.serving_profile()
+            .expect("read the legacy profile")
+            .is_none(),
+        "the legacy store must have no profile in this scenario"
+    );
+
+    let profile = ollama_profile();
+    let conn = Connection::open(&record.graph_path).expect("open the new workspace graph");
+    let profiles = IndexProfileRegistry::new(&conn);
+    let ann = AnnGenerationRepository::new(&conn);
+    profiles.begin_rebuild(&profile).expect("start the profile");
+    ann.verify_full_scan(profile.id)
+        .expect("verify the empty generation");
+    ann.mark_published(profile.id, 0)
+        .expect("publish the empty generation");
+    profiles.activate(profile.id).expect("activate the profile");
+    drop(conn);
+
+    let ollama = OllamaProvider::new("http://127.0.0.1:11434", Duration::from_secs(1))
+        .expect("make an Ollama provider without a request");
+    mcpmem::indexer_provider::init(Arc::new(ProviderRegistry::new(
+        Some(Arc::new(ollama)),
+        None,
+    )));
+
+    let names = listed_tool_names(&s);
+    assert!(
+        names.iter().any(|name| name == SEMANTIC_SEARCH),
+        "a profiled new workspace must advertise semantic_search even when \
+         the legacy store has no profile: {names:?}"
+    );
+}
+
+/// The availability gate must not key on the legacy store alone. This test
+/// runs in a child process because it installs a provider into the
+/// process-wide cell, exactly like the mismatch and match tests above.
+#[cfg(feature = "indexer")]
+#[test]
+fn semantic_search_is_advertised_for_a_profiled_new_workspace() {
+    if std::env::var_os(PROFILED_NEW_WORKSPACE_CHILD).is_some() {
+        advertise_for_profiled_new_workspace();
+        return;
+    }
+
+    let status = std::process::Command::new(
+        std::env::current_exe().expect("find the semantic search test binary"),
+    )
+    .arg("semantic_search_is_advertised_for_a_profiled_new_workspace")
+    .arg("--exact")
+    .env(PROFILED_NEW_WORKSPACE_CHILD, "1")
+    .status()
+    .expect("run the isolated profiled-new-workspace test");
+    assert!(
+        status.success(),
+        "the isolated profiled-new-workspace test must pass"
     );
 }
 
