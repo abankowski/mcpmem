@@ -634,6 +634,37 @@ impl WorkspaceRegistry {
         rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
     }
 
+    /// Select the registered graph at `cursor`, wrapping around without
+    /// materializing the path list.
+    ///
+    /// Rows serve in insertion (rowid) order, so a graph registered mid-cycle
+    /// joins the schedule; `cursor` advances to the next offset. Workspace
+    /// rows are never deleted, so `MAX(rowid)` is the cycle length. A broken
+    /// registry query surfaces as an error instead of a silent empty schedule.
+    #[cfg(any(feature = "indexer", feature = "webhooks"))]
+    pub(crate) fn next_path(
+        &self,
+        cursor: &mut usize,
+    ) -> Result<Option<(String, PathBuf)>, WorkspaceError> {
+        let conn = self.conn.lock().expect("workspace registry lock poisoned");
+        let last: i64 =
+            conn.query_row("SELECT coalesce(MAX(rowid),0) FROM workspace", [], |row| {
+                row.get(0)
+            })?;
+        let count = last as usize;
+        if count == 0 {
+            return Ok(None);
+        }
+        let offset = if *cursor >= count { 0 } else { *cursor };
+        let (id, path): (String, String) = conn.query_row(
+            "SELECT workspace_id, graph_path FROM workspace ORDER BY rowid LIMIT 1 OFFSET ?1",
+            [offset as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        *cursor = offset + 1;
+        Ok(Some((id, PathBuf::from(path))))
+    }
+
     pub fn set_default(
         &self,
         principal_id: &str,
@@ -1031,17 +1062,43 @@ impl WorkspaceHandles {
 
     /// The open handles for a resolved workspace, opening them on first use
     /// and evicting the least-recently-used non-pinned entry when at capacity.
+    ///
+    /// A request path hydrates an already published vector snapshot from the
+    /// file so the first search after a reopen serves durable vectors. That
+    /// load reads only; it never publishes or changes profile state.
     pub fn get(&self, record: &WorkspaceRecord) -> Result<WorkspaceEntry, WorkspaceError> {
+        self.open_entry(&record.workspace_id, &record.graph_path, true)
+    }
+
+    /// Open a graph that the registry returned to a worker. Workers do not
+    /// have a request principal, so they cannot resolve a record by ACL, and
+    /// they must not block on snapshot hydration: an in-flight rebuild has no
+    /// published snapshot, and the worker itself publishes it after its turn.
+    #[cfg(feature = "indexer")]
+    pub(crate) fn get_by_registered_path(
+        &self,
+        workspace_id: &str,
+        graph_path: &Path,
+    ) -> Result<WorkspaceEntry, WorkspaceError> {
+        self.open_entry(workspace_id, graph_path, false)
+    }
+
+    fn open_entry(
+        &self,
+        workspace_id: &str,
+        graph_path: &Path,
+        hydrate_snapshot: bool,
+    ) -> Result<WorkspaceEntry, WorkspaceError> {
         let mut cache = self.inner.lock().expect("workspace handle cache poisoned");
-        if let Some(entry) = cache.entries.get(&record.workspace_id) {
+        if let Some(entry) = cache.entries.get(workspace_id) {
             let kg = Arc::clone(&entry.kg);
             let vs = entry.vs.clone();
-            touch(&mut cache, &record.workspace_id);
+            touch(&mut cache, workspace_id);
             return Ok(WorkspaceEntry { kg, vs });
         }
         let kg = Arc::new(
             GraphHandle::new(
-                &record.graph_path,
+                graph_path,
                 self.spec.durability,
                 self.spec.tuning,
                 self.spec.lru_cache_size,
@@ -1050,10 +1107,18 @@ impl WorkspaceHandles {
             .map_err(|error| WorkspaceError::Graph(error.to_string()))?,
         );
         let vs = match self.spec.vector_dims {
-            Some(dims) => Some(Arc::new(
-                VectorStore::with_config(&record.graph_path, &VectorConfig::new(dims))
-                    .map_err(|error| WorkspaceError::Graph(error.to_string()))?,
-            )),
+            Some(dims) => {
+                let store = Arc::new(
+                    VectorStore::with_config(graph_path, &VectorConfig::new(dims))
+                        .map_err(|error| WorkspaceError::Graph(error.to_string()))?,
+                );
+                #[cfg(feature = "indexer")]
+                if hydrate_snapshot {
+                    self.load_managed_snapshot(&store)?;
+                }
+                let _ = hydrate_snapshot;
+                Some(store)
+            }
             None => None,
         };
         // Evict least-recently-used non-pinned entries until under the bound.
@@ -1074,9 +1139,19 @@ impl WorkspaceHandles {
             kg: Arc::clone(&kg),
             vs: vs.clone(),
         };
-        cache.entries.insert(record.workspace_id.clone(), entry);
-        cache.recency.push_back(record.workspace_id.clone());
+        cache.entries.insert(workspace_id.to_owned(), entry);
+        cache.recency.push_back(workspace_id.to_owned());
         Ok(WorkspaceEntry { kg, vs })
+    }
+
+    /// A bounded snapshot of open vector handles for the MCP refresh loop.
+    pub(crate) fn cached_vectors(&self) -> Vec<Arc<VectorStore>> {
+        let cache = self.inner.lock().expect("workspace handle cache poisoned");
+        cache
+            .entries
+            .values()
+            .filter_map(|entry| entry.vs.clone())
+            .collect()
     }
 
     /// The vector store of the pinned legacy entry, when vector support is
@@ -1085,6 +1160,13 @@ impl WorkspaceHandles {
     pub fn legacy_vs(&self) -> Option<Arc<VectorStore>> {
         let cache = self.inner.lock().expect("workspace handle cache poisoned");
         cache.entries.get(&cache.legacy_id)?.vs.clone()
+    }
+
+    #[cfg(feature = "indexer")]
+    fn load_managed_snapshot(&self, store: &VectorStore) -> Result<(), WorkspaceError> {
+        store
+            .load_managed_snapshot()
+            .map_err(|error| WorkspaceError::Graph(error.to_string()))
     }
 
     /// Create and initialize a fresh graph file for `registry.create`, with

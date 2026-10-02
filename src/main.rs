@@ -59,10 +59,8 @@ async fn inner_main() -> Result<()> {
         config.bind_addr.clone(),
     );
     let services = runtime::AppServices::new(Arc::new(transport));
-    // The webhook worker polls the memory database directly, in its own
-    // connection. An empty `[webhooks]` section is a valid fail-closed
-    // worker: it refuses every delivery until the operator names an
-    // allowlisted host and a signing key.
+    // Each webhook turn selects one graph from the registry and reads only
+    // that graph's subscription and event tables. Missing policy fails closed.
     // The admin UI's webhook Test button needs the same delivery policy the
     // worker holds, so the `[webhooks]` section is read once and shared: the
     // worker role gets the config for its polling loop, and the process-wide
@@ -76,8 +74,8 @@ async fn inner_main() -> Result<()> {
         .roles()
         .contains(&runtime::RuntimeRole::Webhooks)
     {
-        let worker = runtime::WebhookService::with_config(
-            config.memory_file_path.clone(),
+        let worker = runtime::WebhookService::with_workspace_config(
+            mcp_server.workspace_registry(),
             webhook_config.clone(),
         )?;
         services.with_webhooks(Arc::new(worker))
@@ -180,11 +178,12 @@ async fn inner_main() -> Result<()> {
         .contains(&runtime::RuntimeRole::Indexer)
     {
         let vectors = mcp_server.vector_store();
-        adopt_index_profile(spec, vectors.as_deref())?;
-        services.with_indexer(Arc::new(runtime::IndexerService::with_provider(
-            config.memory_file_path.clone(),
-            vectors,
+        adopt_index_profile(spec.clone(), vectors.as_deref())?;
+        services.with_indexer(Arc::new(runtime::IndexerService::with_workspaces(
+            mcp_server.workspace_registry(),
+            mcp_server.workspace_handles(),
             provider,
+            spec,
         )))
     } else {
         // A rebuild fills a queue that only the worker drains, so a process

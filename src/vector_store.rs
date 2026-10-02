@@ -145,6 +145,116 @@ fn sqlite_err(e: rusqlite::Error) -> MCSError {
     MCSError::IoError(std::io::Error::other(e))
 }
 
+fn load_chunk_snapshot_vectors(
+    conn: &Connection,
+    profile_id: uuid::Uuid,
+    profile: &mcpmem_core::jobs::IndexProfile,
+) -> Result<Vec<SnapshotVector>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT kind, owner_kind, owner_id, chunk_index, type_id, blob
+             FROM chunk_vector WHERE profile_id=?1 ORDER BY owner_kind, owner_id, chunk_index",
+        )
+        .map_err(sqlite_err)?;
+    statement
+        .query_map([profile_id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+            ))
+        })
+        .map_err(sqlite_err)?
+        .map(|row| {
+            let (kind, owner_kind, owner_id, chunk_index, type_id, blob) =
+                row.map_err(sqlite_err)?;
+            if blob.len() != profile.dimensions as usize * std::mem::size_of::<f32>() {
+                return Err(MCSError::MemoryError(
+                    "managed profile vector has invalid byte length".into(),
+                ));
+            }
+            let (chunks, _) = blob.as_chunks::<4>();
+            let vector = chunks
+                .iter()
+                .map(|bytes| f32::from_le_bytes(*bytes))
+                .collect::<Vec<_>>();
+            profile.validate_vector(&vector)?;
+            Ok(SnapshotVector {
+                owner_kind: match owner_kind.as_str() {
+                    "entity" => OwnerKind::Entity,
+                    "relation" => OwnerKind::Relation,
+                    _ => return Err(MCSError::MemoryError("invalid chunk owner kind".into())),
+                },
+                owner_id,
+                chunk_kind: match kind.as_str() {
+                    "identity" => ChunkKind::Identity,
+                    "observation" => ChunkKind::Observation,
+                    "relation" => ChunkKind::Relation,
+                    _ => return Err(MCSError::MemoryError("invalid chunk kind".into())),
+                },
+                chunk_index,
+                type_id,
+                vector,
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+}
+
+fn load_taxonomy_snapshot_vectors(
+    conn: &Connection,
+    profile_id: uuid::Uuid,
+    profile: &mcpmem_core::jobs::IndexProfile,
+    kind: TaxonomyKind,
+) -> Result<Vec<(i64, Vec<f32>)>> {
+    let decode_row = |row: rusqlite::Result<(i64, Vec<u8>)>| -> Result<(i64, Vec<f32>)> {
+        let (id, blob) = row.map_err(sqlite_err)?;
+        if blob.len() != profile.dimensions as usize * std::mem::size_of::<f32>() {
+            return Err(MCSError::MemoryError(
+                "taxonomy vector has invalid byte length".into(),
+            ));
+        }
+        let (chunks, _) = blob.as_chunks::<4>();
+        let vector = chunks
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
+            .collect::<Vec<_>>();
+        profile.validate_vector(&vector)?;
+        Ok((id, vector))
+    };
+    if kind == TaxonomyKind::Relation {
+        let mut statement = conn
+            .prepare(
+                "SELECT owner_id,blob FROM chunk_vector
+                 WHERE profile_id=?1 AND kind='relation' ORDER BY owner_id",
+            )
+            .map_err(sqlite_err)?;
+        statement
+            .query_map([profile_id.to_string()], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(sqlite_err)?
+            .map(decode_row)
+            .collect::<Result<Vec<_>>>()
+    } else {
+        let mut statement = conn
+            .prepare(
+                "SELECT subject_id,blob FROM taxonomy_vector
+                 WHERE profile_id=?1 AND subject_kind=?2 ORDER BY subject_id",
+            )
+            .map_err(sqlite_err)?;
+        statement
+            .query_map(params![profile_id.to_string(), kind.as_i64()], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(sqlite_err)?
+            .map(decode_row)
+            .collect::<Result<Vec<_>>>()
+    }
+}
+
 thread_local! {
     static SCRATCH: std::cell::RefCell<Vec<f32>> = const {
         std::cell::RefCell::new(Vec::new())
@@ -513,6 +623,50 @@ impl VectorStore {
         })
     }
 
+    /// Load an already published managed snapshot without any write.
+    ///
+    /// A reader path (cache miss, startup) calls this so a profile that is
+    /// active and whose durable generation is published serves immediately.
+    /// It never touches `ann_generation`, the profile registry, or the
+    /// taxonomy tables, so it cannot race a worker's publish mark. It is an
+    /// error when the profile is rebuilding or the generation is not yet
+    /// published: the worker publishes asynchronously and the caller's
+    /// refresh loop retries. A newly adopted profile (LegacyCompat before
+    /// any `begin_rebuild`) loads nothing.
+    pub fn load_managed_snapshot(&self) -> Result<()> {
+        let conn = self.db.lock();
+        let registry = IndexProfileRegistry::new(&conn);
+        let profile_id = match registry.state("default")? {
+            StoreState::Active(profile) => profile,
+            StoreState::LegacyCompat => return Ok(()),
+            StoreState::Rebuilding { .. } => {
+                return Err(MCSError::MemoryError(
+                    "managed profile is rebuilding; no published snapshot exists".into(),
+                ));
+            }
+            StoreState::Failed { .. } => {
+                return Err(MCSError::MemoryError(
+                    "managed profile failed; no published snapshot exists".into(),
+                ));
+            }
+        };
+        let generation = AnnGenerationRepository::new(&conn).get(profile_id)?;
+        if generation.published_generation != generation.durable_generation {
+            return Err(MCSError::MemoryError(
+                "managed profile generation is not published yet".into(),
+            ));
+        }
+        let profile = registry.get(profile_id)?;
+        let vectors = load_chunk_snapshot_vectors(&conn, profile_id, &profile)?;
+        *self.managed_snapshot.write() = Some(Arc::new(ManagedSnapshot {
+            profile: profile_id,
+            durable_generation: generation.durable_generation,
+            metric: profile.distance_metric,
+            vectors,
+        }));
+        Ok(())
+    }
+
     /// Rebuild and atomically publish a managed reader from a durable profile
     /// generation. This is worker-only; MCP searches never invoke it.
     ///
@@ -566,57 +720,7 @@ impl VectorStore {
             return Ok(());
         };
         let profile = registry.get(profile_id)?;
-        let mut statement = conn
-            .prepare(
-                "SELECT kind, owner_kind, owner_id, chunk_index, type_id, blob
-                 FROM chunk_vector WHERE profile_id=?1 ORDER BY owner_kind, owner_id, chunk_index",
-            )
-            .map_err(sqlite_err)?;
-        let vectors = statement
-            .query_map([profile_id.to_string()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, Vec<u8>>(5)?,
-                ))
-            })
-            .map_err(sqlite_err)?
-            .map(|row| {
-                let (kind, owner_kind, owner_id, chunk_index, type_id, blob) =
-                    row.map_err(sqlite_err)?;
-                if blob.len() != profile.dimensions as usize * std::mem::size_of::<f32>() {
-                    return Err(MCSError::MemoryError(
-                        "managed profile vector has invalid byte length".into(),
-                    ));
-                }
-                let (chunks, _) = blob.as_chunks::<4>();
-                let vector = chunks
-                    .iter()
-                    .map(|bytes| f32::from_le_bytes(*bytes))
-                    .collect::<Vec<_>>();
-                profile.validate_vector(&vector)?;
-                Ok(SnapshotVector {
-                    owner_kind: match owner_kind.as_str() {
-                        "entity" => OwnerKind::Entity,
-                        "relation" => OwnerKind::Relation,
-                        _ => return Err(MCSError::MemoryError("invalid chunk owner kind".into())),
-                    },
-                    owner_id,
-                    chunk_kind: match kind.as_str() {
-                        "identity" => ChunkKind::Identity,
-                        "observation" => ChunkKind::Observation,
-                        "relation" => ChunkKind::Relation,
-                        _ => return Err(MCSError::MemoryError("invalid chunk kind".into())),
-                    },
-                    chunk_index,
-                    type_id,
-                    vector,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let vectors = load_chunk_snapshot_vectors(&conn, profile_id, &profile)?;
         if !AnnGenerationRepository::new(&conn).mark_published(profile_id, durable_generation)? {
             return Ok(());
         }
@@ -700,49 +804,8 @@ impl VectorStore {
             }
             // Kind 2 (relations) derives its snapshot from the single
             // relation chunk owned by each mirror; kinds 0 and 1 keep their
-            // `taxonomy_vector` rows. Both read the same `(id, blob)` shape.
-            let decode_row = |row: rusqlite::Result<(i64, Vec<u8>)>| -> Result<(i64, Vec<f32>)> {
-                let (id, blob) = row.map_err(sqlite_err)?;
-                if blob.len() != profile_def.dimensions as usize * std::mem::size_of::<f32>() {
-                    return Err(MCSError::MemoryError(
-                        "taxonomy vector has invalid byte length".into(),
-                    ));
-                }
-                let (chunks, _) = blob.as_chunks::<4>();
-                let vector = chunks
-                    .iter()
-                    .map(|bytes| f32::from_le_bytes(*bytes))
-                    .collect::<Vec<_>>();
-                profile_def.validate_vector(&vector)?;
-                Ok((id, vector))
-            };
-            let vectors = if kind == TaxonomyKind::Relation {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT owner_id, blob FROM chunk_vector WHERE profile_id=?1 AND kind='relation' ORDER BY owner_id",
-                    )
-                    .map_err(sqlite_err)?;
-                statement
-                    .query_map(params![profile.to_string()], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })
-                    .map_err(sqlite_err)?
-                    .map(decode_row)
-                    .collect::<Result<Vec<_>>>()?
-            } else {
-                let mut statement = conn
-                    .prepare(
-                        "SELECT subject_id,blob FROM taxonomy_vector WHERE profile_id=?1 AND subject_kind=?2 ORDER BY subject_id",
-                    )
-                    .map_err(sqlite_err)?;
-                statement
-                    .query_map(params![profile.to_string(), kind.as_i64()], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-                    })
-                    .map_err(sqlite_err)?
-                    .map(decode_row)
-                    .collect::<Result<Vec<_>>>()?
-            };
+            // `taxonomy_vector` rows.
+            let vectors = load_taxonomy_snapshot_vectors(conn, profile, &profile_def, kind)?;
             // Serve only durable generations. A concurrent durable advance
             // past the generation this build read refuses the publish; the
             // caller re-adopts after the next committed batch.
