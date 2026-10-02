@@ -952,6 +952,13 @@ async fn admin_delete_principal(
     if let Err(e) = oauth.with_principals(|s| s.delete(&iss, &sub)) {
         return store_failure(e);
     }
+    // A concurrent owner grant can commit between the first access sweep and
+    // this row delete: its registration check passed while the row still
+    // existed. Any later grant fails that check, because the row is gone now,
+    // so one more sweep under the registry lock closes every ordering.
+    if let Err(e) = state.registry.clear_human_access(&stable_id) {
+        return store_failure(e);
+    }
     tracing::info!(
         name = %row.name,
         revoked,
