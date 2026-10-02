@@ -9,10 +9,12 @@
  * headline interaction — double-click a node to expand its relationships.
  *
  * Data endpoints (same server that serves /mcp; no MCP tools involved):
- *   GET /ui/graph?entityType&offset&limit → a page of the graph
- *   GET /ui/search?q&entityType&offset&limit → a page of FTS matches
- *   GET /ui/expand?name&depth&direction   → a node's neighbourhood
- * All return {entities, relations, entityTypes, stats, page:{offset,limit,returned,hasMore}}.
+ *   GET /ui/workspaces?cursor         → accessible workspace pages
+ *   GET /ui/graph?workspaceId&entityType&offset&limit → a graph page
+ *   GET /ui/search?workspaceId&q&entityType&offset&limit → FTS matches
+ *   GET /ui/node?workspaceId&name     → one node's observations
+ *   GET /ui/expand?workspaceId&name&depth&direction → a node's neighbourhood
+ * Graph routes return entities, relations, entityTypes, stats, and page details.
  */
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -83,7 +85,7 @@
   function oauthAdvertised(res) {
     return (res.headers.get("WWW-Authenticate") || "").includes("resource_metadata");
   }
-  async function beginOAuth() {
+  async function beginOAuth(generation, isActive) {
     const verifier = randomVerifier();
     sessionStorage.setItem(OAUTH_VERIFIER_KEY, verifier);
     const params = new URLSearchParams({
@@ -95,7 +97,7 @@
       code_challenge_method: "S256",
       code_challenge: await pkceChallenge(verifier),
     });
-    location.href = "/oauth/authorize?" + params;
+    if (isCurrent(generation) && isActive()) location.href = "/oauth/authorize?" + params;
   }
   async function completeOAuth() {
     const params = new URLSearchParams(location.search);
@@ -141,6 +143,15 @@
   let totalStats = null;
   let selected = null, hover = null, pinnedDrag = null;
   let alpha = 0, raf = null, busyReq = false;
+  const workspace = { id: null, generation: 0 };
+  const activeRequests = new Set();
+  let workspaceListRequest = null;
+  const isCurrent = (generation) => generation === workspace.generation;
+  function beginRequest() {
+    const controller = new AbortController();
+    activeRequests.add(controller);
+    return controller;
+  }
   let dpr = Math.max(1, window.devicePixelRatio || 1);
   // Cap on nodes held in the canvas at once. Browse pages are already bounded
   // (≤1000, server-enforced); this bounds *expansion* so double-clicking a hub
@@ -160,10 +171,10 @@
   window.addEventListener("resize", resize);
 
   // ── API & overlay ──────────────────────────────────────────────────────────
-  function api(path) {
+  function api(path, signal) {
     const headers = {};
     if (token) headers["Authorization"] = "Bearer " + token;
-    return fetch(path, { headers });
+    return fetch(path, { headers, signal });
   }
   function overlay(title, msg, opts = {}) {
     $("ovTitle").textContent = title;
@@ -174,42 +185,165 @@
     if (opts.token) $("ovToken").focus();
   }
   const hideOverlay = () => $("overlay").classList.remove("show");
-  async function handleError(res) {
-    if (res.ok) return false;
+  async function handleError(res, generation, isActive = () => true) {
+    const current = () => isCurrent(generation) && isActive();
+    if (res.ok || !current()) return !res.ok;
     if (res.status === 401) {
-      // OAuth on: the challenge names the authorization server, so run the
-      // same PKCE login the admin SPA does. OAuth off: bare challenge, and
-      // the token box is the whole login.
-      if (oauthAdvertised(res)) { await beginOAuth(); return true; }
+      // OAuth on: start PKCE login. A static bearer uses the token box.
+      if (oauthAdvertised(res)) {
+        await beginOAuth(generation, isActive);
+        return true;
+      }
       overlay("Authentication required", "This server requires a bearer token.", { token: true, err: true });
+    } else {
+      const message = await res.text().catch(() => "");
+      if (!current()) return true;
+      if (res.status === 403) {
+        overlay("Graph reading disabled", message || "Start the server with --enable-graph-read (or --enable-all).", { err: true });
+      } else {
+        overlay("Error " + res.status, message, { err: true });
+      }
     }
-    else if (res.status === 403) overlay("Graph reading disabled", (await res.text().catch(() => "")) || "Start the server with --enable-graph-read (or --enable-all).", { err: true });
-    else overlay("Error " + res.status, await res.text().catch(() => ""), { err: true });
     return true;
+  }
+
+  function resetGraphView() {
+    browse.offset = 0;
+    browse.query = "";
+    browse.entityType = "";
+    page = { offset: 0, limit: browse.limit, returned: 0, hasMore: false };
+    nodes = []; links = []; nodeById = new Map();
+    totalStats = null;
+    hover = null; pinnedDrag = null; dragging = false; dragMoved = false;
+    alpha = 0; view.x = 0; view.y = 0; view.k = 1;
+    colorOf.clear(); paletteNext = 0;
+    clearTimeout(flashTimer);
+    $("search").value = "";
+    $("typeFilter").innerHTML = '<option value="">all labels</option>';
+    $("tooltip").style.display = "none";
+    $("legend").textContent = "";
+    $("insBody").textContent = "";
+    $("insName").textContent = "";
+    selectNode(null);
+    setBusy(false);
+    if (!workspace.id) {
+      $("stats").textContent = "—";
+      $("pageLabel").textContent = "—";
+    } else updateStats();
+    requestDraw();
+  }
+
+  function selectWorkspace(id) {
+    if (workspace.id === id) return;
+    workspace.id = id;
+    workspace.generation++;
+    for (const controller of activeRequests) controller.abort();
+    activeRequests.clear();
+    workspaceListRequest = null;
+    resetGraphView();
+    $("workspace").value = id || "";
+    if (id) load();
+    else overlay("Select a workspace", "Choose a workspace to view its graph.");
+  }
+
+  function rejectWorkspace(generation) {
+    if (!isCurrent(generation)) return;
+    selectWorkspace(null);
+    overlay("Workspace unavailable", "Access to this workspace ended. Choose another workspace.", { err: true });
+    loadWorkspaces(false);
+  }
+
+  async function loadWorkspaces(initial) {
+    if (workspaceListRequest) workspaceListRequest.abort();
+    const generation = workspace.generation;
+    const controller = beginRequest();
+    workspaceListRequest = controller;
+    const isActive = () => isCurrent(generation) && workspaceListRequest === controller;
+    $("workspace").disabled = true;
+    if (initial) {
+      $("workspace").innerHTML = '<option value="">Loading workspaces…</option>';
+      overlay("Loading workspaces…", "Fetching accessible workspaces.");
+    }
+    try {
+      const workspaces = [];
+      let cursor = null;
+      do {
+        const path = "/ui/workspaces" + (cursor === null ? "" : "?cursor=" + encodeURIComponent(cursor));
+        const res = await api(path, controller.signal);
+        if (!isActive()) return;
+        if (await handleError(res, generation, isActive)) return;
+        if (!isActive()) return;
+        const data = await res.json();
+        if (!isActive()) return;
+        workspaces.push(...data.workspaces);
+        cursor = data.nextCursor;
+      } while (cursor !== null);
+
+      const picker = $("workspace");
+      picker.textContent = "";
+      const prompt = document.createElement("option");
+      prompt.value = "";
+      prompt.textContent = "Select a workspace";
+      picker.append(prompt);
+      for (const entry of workspaces) {
+        const option = document.createElement("option");
+        option.value = entry.workspaceId;
+        option.textContent = entry.name;
+        picker.append(option);
+      }
+      picker.disabled = false;
+      if (initial) {
+        const savedDefault = workspaces.find((entry) => entry.isDefault);
+        if (savedDefault) selectWorkspace(savedDefault.workspaceId);
+        else overlay("Select a workspace", "No saved default. Choose a workspace to view its graph.");
+      } else if (workspace.id && !workspaces.some((entry) => entry.workspaceId === workspace.id)) {
+        selectWorkspace(null);
+        overlay("Workspace unavailable", "Access to this workspace ended. Choose another workspace.", { err: true });
+      } else picker.value = workspace.id || "";
+    } catch (e) {
+      if (isActive() && e.name !== "AbortError") {
+        overlay("Workspace list failed", String(e), { err: true });
+      }
+    } finally {
+      activeRequests.delete(controller);
+      if (workspaceListRequest === controller) workspaceListRequest = null;
+    }
   }
 
   // ── Paginated load (browse overview OR full-text search) ───────────────────
   function setBusy(b) {
     busyReq = b;
-    for (const id of ["searchBtn", "overview", "prev", "next"]) $(id).disabled = b;
-    if (!b) updatePager(); // restore correct prev/next disabled state
+    const disabled = b || !workspace.id;
+    for (const id of ["searchBtn", "overview", "typeFilter"]) $(id).disabled = disabled;
+    if (!b) updatePager();
+    else for (const id of ["prev", "next"]) $(id).disabled = true;
   }
   async function load() {
-    if (busyReq) return;
+    if (!workspace.id || busyReq) return;
+    const generation = workspace.generation;
+    const controller = beginRequest();
     setBusy(true);
     overlay("Loading…", browse.query ? `Searching for “${browse.query}”…` : "Fetching the knowledge graph.");
-    const p = new URLSearchParams();
+    const p = new URLSearchParams({ workspaceId: workspace.id });
     if (browse.entityType) p.set("entityType", browse.entityType);
     p.set("offset", String(browse.offset));
     p.set("limit", String(browse.limit));
     const path = browse.query ? "/ui/search?q=" + encodeURIComponent(browse.query) + "&" + p : "/ui/graph?" + p;
-    let res;
-    try { res = await api(path); }
-    catch (e) { overlay("Connection failed", String(e), { err: true }); setBusy(false); return; }
-    if (await handleError(res)) { setBusy(false); return; }
-    const data = await res.json();
-    setBusy(false);
-    setGraph(data);
+    try {
+      const res = await api(path, controller.signal);
+      if (!isCurrent(generation)) return;
+      if (res.status === 404) { rejectWorkspace(generation); return; }
+      if (await handleError(res, generation)) return;
+      if (!isCurrent(generation)) return;
+      const data = await res.json();
+      if (!isCurrent(generation)) return;
+      setGraph(data);
+    } catch (e) {
+      if (isCurrent(generation) && e.name !== "AbortError") overlay("Connection failed", String(e), { err: true });
+    } finally {
+      activeRequests.delete(controller);
+      if (isCurrent(generation)) setBusy(false);
+    }
   }
 
   function runSearch() {
@@ -231,19 +365,39 @@
   }
 
   // ── Expand (double-click traversal) ────────────────────────────────────────
+  // A workspace failure arrives as JSON 404; an entity the caller asks
+  // about but that no longer exists arrives as plain-text 404. Only the
+  // first means the session lost its workspace. A deleted entity (another
+  // writer removed it) is normal: degrade gracefully, keep the session.
+  const isJsonError = (res) => (res.headers.get("Content-Type") || "").includes("application/json");
   async function expand(node) {
-    if (!node || node._loading) return;
+    if (!workspace.id || !node || node._loading) return;
+    const generation = workspace.generation;
+    const controller = beginRequest();
     node._loading = true; kick();
-    let res;
-    try { res = await api("/ui/expand?depth=1&direction=both&name=" + encodeURIComponent(node.id)); }
-    catch (e) { node._loading = false; flash("expand failed: " + e); return; }
-    node._loading = false;
-    if (!res.ok) { flash("expand failed (" + res.status + ")"); if (res.status === 401 || res.status === 403) await handleError(res); kick(); return; }
-    const data = await res.json();
-    node.expanded = true;
-    const { added, capped } = mergeGraph(data, node);
-    if (capped) flash(`node limit ${fmt(MAX_RENDER_NODES)} reached — dismiss or isolate to explore further`);
-    else flash(added ? `+${added} node${added === 1 ? "" : "s"}` : "no new relationships");
+    const params = new URLSearchParams({ workspaceId: workspace.id, depth: "1", direction: "both", name: node.id });
+    try {
+      const res = await api("/ui/expand?" + params, controller.signal);
+      if (!isCurrent(generation)) return;
+      if (res.status === 404 && isJsonError(res)) { rejectWorkspace(generation); return; }
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) await handleError(res, generation);
+        if (!isCurrent(generation)) return;
+        flash("expand failed (" + res.status + ")");
+        return;
+      }
+      const data = await res.json();
+      if (!isCurrent(generation)) return;
+      node.expanded = true;
+      const { added, capped } = mergeGraph(data, node);
+      if (capped) flash(`node limit ${fmt(MAX_RENDER_NODES)} reached — dismiss or isolate to explore further`);
+      else flash(added ? `+${added} node${added === 1 ? "" : "s"}` : "no new relationships");
+    } catch (e) {
+      if (isCurrent(generation) && e.name !== "AbortError") flash("expand failed: " + e);
+    } finally {
+      activeRequests.delete(controller);
+      if (isCurrent(generation)) { node._loading = false; kick(); }
+    }
   }
 
   // ── Graph (re)building ─────────────────────────────────────────────────────
@@ -369,8 +523,8 @@
     const from = page.returned ? page.offset + 1 : 0;
     const to = page.offset + page.returned;
     $("pageLabel").textContent = page.returned ? `${fmt(from)}–${fmt(to)}` : "0";
-    $("prev").disabled = busyReq || page.offset === 0;
-    $("next").disabled = busyReq || !page.hasMore;
+    $("prev").disabled = busyReq || !workspace.id || page.offset === 0;
+    $("next").disabled = busyReq || !workspace.id || !page.hasMore;
   }
   function fillTypeFilter(types) {
     const sel = $("typeFilter"), cur = sel.value;
@@ -713,14 +867,32 @@
   // Lazy-fetch observation bodies for the inspected node; re-render if it's still
   // selected when they arrive. On failure, mark as loaded-empty so we don't retry.
   async function loadObservations(n) {
+    if (!workspace.id) return;
+    const generation = workspace.generation;
+    const controller = beginRequest();
+    const params = new URLSearchParams({ workspaceId: workspace.id, name: n.id });
     try {
-      const res = await api("/ui/node?name=" + encodeURIComponent(n.id));
-      if (!res.ok) { n.obs = []; if (selected === n) selectNode(n); return; }
-      const data = await res.json();
-      n.obs = data.observations || [];
-      n.obsCount = n.obs.length;
-    } catch { n.obs = []; }
-    if (selected === n) selectNode(n);
+      const res = await api("/ui/node?" + params, controller.signal);
+      if (!isCurrent(generation)) return;
+      if (res.status === 404 && isJsonError(res)) { rejectWorkspace(generation); return; }
+      if (res.status === 404) { n.obs = []; n.obsCount = 0; /* entity vanished; keep the session */ }
+      else if (!res.ok) {
+        if (res.status === 401 || res.status === 403) await handleError(res, generation);
+        if (!isCurrent(generation)) return;
+        n.obs = [];
+      } else {
+        const data = await res.json();
+        if (!isCurrent(generation)) return;
+        n.obs = data.observations || [];
+        n.obsCount = n.obs.length;
+      }
+    } catch (e) {
+      if (!isCurrent(generation) || e.name === "AbortError") return;
+      n.obs = [];
+    } finally {
+      activeRequests.delete(controller);
+    }
+    if (isCurrent(generation) && selected === n) selectNode(n);
   }
   function centerOn(n) {
     const W = cv.width / dpr, H = cv.height / dpr;
@@ -752,6 +924,7 @@
   }
 
   // ── Controls ────────────────────────────────────────────────────────────────
+  $("workspace").addEventListener("change", () => selectWorkspace($("workspace").value || null));
   $("searchBtn").addEventListener("click", runSearch);
   $("overview").addEventListener("click", showOverview);
   $("typeFilter").addEventListener("change", () => { browse.entityType = $("typeFilter").value; browse.offset = 0; load(); });
@@ -767,7 +940,13 @@
   $("insExpand").addEventListener("click", () => selected && expand(selected));
   $("insIsolate").addEventListener("click", () => selected && isolate(selected));
   $("insDismiss").addEventListener("click", () => selected && dismiss(selected));
-  $("ovGo").addEventListener("click", () => { token = $("ovToken").value.trim(); if (token) sessionStorage.setItem("mcpmem_token", token); load(); });
+  $("ovGo").addEventListener("click", () => {
+    token = $("ovToken").value.trim();
+    if (!token) return;
+    sessionStorage.setItem("mcpmem_token", token);
+    selectWorkspace(null);
+    loadWorkspaces(true);
+  });
   $("ovToken").addEventListener("keydown", (e) => { if (e.key === "Enter") $("ovGo").click(); });
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { if (selected) selectNode(null); }
@@ -776,10 +955,10 @@
   resize();
   (async function boot() {
     if (new URLSearchParams(location.search).has("code")) {
-      // The provider sent `?code=` back. Exchange it before the first load;
-      // a failed exchange has already explained itself on the overlay.
+      // Exchange the provider's code before the first workspace request.
       if (!await completeOAuth()) return;
     }
-    load();
+    setBusy(false);
+    loadWorkspaces(true);
   })();
 })();
