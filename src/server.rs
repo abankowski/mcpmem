@@ -23,7 +23,10 @@ use crate::taxonomy;
 use crate::tools;
 use crate::vector_actions;
 use crate::vector_store::{VectorConfig, VectorStore};
-use crate::workspace::WorkspaceRegistry;
+use crate::workspace::{
+    HandleSpec, Visibility, WorkspaceAccess, WorkspaceEntry, WorkspaceHandles, WorkspaceRecord,
+    WorkspaceRegistry,
+};
 
 /// Outcome of processing a request: either a pre-escaped JSON Value (small
 /// payloads) or a pre-serialized JSON *string* of the `result` field (avoids
@@ -211,8 +214,14 @@ fn parse_error(msg: String) -> JsonRpcResponse {
 }
 
 /// Dispatch one framed line (stdio / tcp). Returns the serialized response, or
-/// `None` for a notification. `vs` is `Some` only when vector support is enabled.
-pub fn dispatch_line(line: &str, kg: &GraphHandle, vs: Option<&VectorStore>) -> Option<String> {
+/// `None` for a notification. The line transport serves the local machine
+/// identity, so every graph, vector and webhook call resolves the workspace
+/// the same way an authenticated HTTP call does.
+pub fn dispatch_line(
+    line: &str,
+    registry: &WorkspaceRegistry,
+    handles: &WorkspaceHandles,
+) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return Some(serde_json::to_string(&parse_error("Empty request".into())).unwrap());
@@ -226,7 +235,7 @@ pub fn dispatch_line(line: &str, kg: &GraphHandle, vs: Option<&VectorStore>) -> 
         Err(e) => return Some(serde_json::to_string(&parse_error(e.to_string())).unwrap()),
     };
     req.id.as_ref()?;
-    match process_request(&req, kg, vs, &authz::LOCAL_PRINCIPAL) {
+    match process_request(&req, &authz::LOCAL_PRINCIPAL, registry, handles) {
         Ok(HandlerResult::Value(result)) => {
             let resp = JsonRpcResponse::success(req.id, result);
             Some(serde_json::to_string(&resp).unwrap())
@@ -269,11 +278,15 @@ pub enum HttpOutcome {
 /// batch that holds one denied call returns
 /// [`HttpOutcome::InsufficientScope`] for the *whole* batch — naming the scopes
 /// of every denied call, sorted and deduplicated — and applies none of it.
+///
+/// Every tools/call resolves its own workspace through [`WorkspaceRegistry`]
+/// — per call, never per batch — and executes on the handles the
+/// [`WorkspaceHandles`] cache returns for that workspace's file.
 pub fn dispatch_http_body(
     body: &str,
-    kg: &GraphHandle,
-    vs: Option<&VectorStore>,
     principal: &Principal,
+    registry: &WorkspaceRegistry,
+    handles: &WorkspaceHandles,
 ) -> std::result::Result<HttpOutcome, String> {
     let value: Value = serde_json::from_str(body.trim()).map_err(|e| e.to_string())?;
     let denied = denied_scopes(&value, principal);
@@ -285,7 +298,7 @@ pub fn dispatch_http_body(
             // Batches are rare and never huge — keep Value path for simplicity.
             let responses: Vec<Value> = items
                 .into_iter()
-                .filter_map(|v| process_value_http(v, kg, vs, principal))
+                .filter_map(|v| process_value_http(v, principal, registry, handles))
                 .collect();
             Ok(if responses.is_empty() {
                 HttpOutcome::Accepted
@@ -293,10 +306,12 @@ pub fn dispatch_http_body(
                 HttpOutcome::Body(Value::Array(responses))
             })
         }
-        other => Ok(match process_value_http(other, kg, vs, principal) {
-            Some(value) => HttpOutcome::Body(value),
-            None => HttpOutcome::Accepted,
-        }),
+        other => Ok(
+            match process_value_http(other, principal, registry, handles) {
+                Some(value) => HttpOutcome::Body(value),
+                None => HttpOutcome::Accepted,
+            },
+        ),
     }
 }
 
@@ -336,16 +351,16 @@ fn denied_scope(value: &Value, principal: &Principal) -> Option<&'static str> {
 /// much smaller in this context). `None` means the message was a notification.
 fn process_value_http(
     value: Value,
-    kg: &GraphHandle,
-    vs: Option<&VectorStore>,
     principal: &Principal,
+    registry: &WorkspaceRegistry,
+    handles: &WorkspaceHandles,
 ) -> Option<Value> {
     let req: JsonRpcRequest = match serde_json::from_value(value) {
         Ok(r) => r,
         Err(e) => return Some(to_value(parse_error(e.to_string()))),
     };
     req.id.as_ref()?;
-    match process_request(&req, kg, vs, principal) {
+    match process_request(&req, principal, registry, handles) {
         Ok(HandlerResult::Value(result)) => {
             Some(to_value(JsonRpcResponse::success(req.id, result)))
         }
@@ -373,6 +388,7 @@ pub struct MCPServer {
     config: Arc<Config>,
     registry: Arc<WorkspaceRegistry>,
     kg: Arc<GraphHandle>,
+    handles: Arc<WorkspaceHandles>,
     /// `Some` when vector support is enabled (`--vectors`); drives the extra
     /// `vector_*` / `hybrid_search` tools. `None` for a pure knowledge-graph server.
     vs: Option<Arc<VectorStore>>,
@@ -425,6 +441,32 @@ impl MCPServer {
         } else {
             None
         };
+
+        // The legacy workspace is a registered row like any other; its entry
+        // in the handle cache is pinned and holds the handles built above, so
+        // a no-`workspaceId` call with the legacy default serves the same
+        // store the server was built with.
+        let legacy_id = registry
+            .all_paths()
+            .map_err(|error| MCSError::InvalidParams(error.to_string()))?
+            .into_iter()
+            .find(|(_, graph_path)| graph_path == path)
+            .map(|(id, _)| id)
+            .ok_or_else(|| {
+                MCSError::InvalidParams("the registry has no legacy workspace".into())
+            })?;
+        let handles = Arc::new(WorkspaceHandles::new(
+            &legacy_id,
+            Arc::clone(&kg),
+            vs.clone(),
+            HandleSpec {
+                durability: config.durability,
+                tuning: config.sqlite_tuning(),
+                lru_cache_size: lru_cache,
+                read_pool_size: config.read_pool_size,
+                vector_dims: config.vectors_enabled.then_some(vec_config.dims),
+            },
+        ));
 
         // Publish the knowledge-graph exposure flags for the dispatch path.
         use crate::tools::ToolCategory;
@@ -480,6 +522,7 @@ impl MCPServer {
             config: Arc::new(config),
             registry,
             kg,
+            handles,
             vs,
         })
     }
@@ -500,6 +543,11 @@ impl MCPServer {
         Arc::clone(&self.registry)
     }
 
+    /// The bounded per-workspace handle cache used by dispatch.
+    pub fn workspace_handles(&self) -> Arc<WorkspaceHandles> {
+        Arc::clone(&self.handles)
+    }
+
     /// The shared vector store, if vector support is enabled.
     pub fn vector_store(&self) -> Option<Arc<VectorStore>> {
         self.vs.clone()
@@ -518,8 +566,8 @@ impl MCPServer {
         serve_line_conn(
             reader,
             stdout,
-            Arc::clone(&self.kg),
-            self.vs.clone(),
+            Arc::clone(&self.registry),
+            Arc::clone(&self.handles),
             self.config.stdio_concurrency,
         )
         .await
@@ -548,7 +596,7 @@ impl MCPServer {
             addr: addr.to_owned(),
             kg: self.graph(),
             registry: self.workspace_registry(),
-            vs: self.vs.clone(),
+            handles: self.workspace_handles(),
             auth_token: self.config.auth_token.clone(),
             // Scopes granted to the static bearer token. Defaults to every
             // category, so a token holder keeps the reach it had before scopes
@@ -635,8 +683,8 @@ fn spawn_maintenance(kg: Arc<GraphHandle>, oauth: Option<Arc<crate::oauth_routes
 async fn serve_line_conn<R, W>(
     mut reader: R,
     mut writer: W,
-    kg: Arc<GraphHandle>,
-    vs: Option<Arc<VectorStore>>,
+    registry: Arc<WorkspaceRegistry>,
+    handles: Arc<WorkspaceHandles>,
     concurrency: usize,
 ) -> Result<()>
 where
@@ -679,12 +727,12 @@ where
                     break; // semaphore closed: unreachable, but don't spin
                 };
                 let line_copy = line.clone();
-                let kg_clone = Arc::clone(&kg);
-                let vs_clone = vs.clone();
+                let registry_clone = Arc::clone(&registry);
+                let handles_clone = Arc::clone(&handles);
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let resp = tokio::task::spawn_blocking(move || {
-                        dispatch_line(&line_copy, &kg_clone, vs_clone.as_deref())
+                        dispatch_line(&line_copy, &registry_clone, &handles_clone)
                     })
                     .await;
                     drop(permit);
@@ -724,14 +772,20 @@ where
 
 fn process_request(
     req: &JsonRpcRequest,
-    kg: &GraphHandle,
-    vs: Option<&VectorStore>,
     principal: &Principal,
+    registry: &WorkspaceRegistry,
+    handles: &WorkspaceHandles,
 ) -> Result<HandlerResult> {
     match req.method.as_str() {
-        "initialize" => Ok(HandlerResult::Value(handle_initialize(req, vs.is_some()))),
-        "tools/list" => Ok(HandlerResult::Value(handle_tools_list(vs, principal))),
-        "tools/call" => handle_tools_call(req, kg, vs, principal),
+        "initialize" => Ok(HandlerResult::Value(handle_initialize(
+            req,
+            handles.legacy_vs().is_some(),
+        ))),
+        "tools/list" => Ok(HandlerResult::Value(handle_tools_list(
+            handles.legacy_vs().as_deref(),
+            principal,
+        ))),
+        "tools/call" => handle_tools_call(req, principal, registry, handles),
         "ping" => Ok(HandlerResult::Value(Value::Null)),
         method if method.starts_with("notifications/") => {
             tracing::trace!("Received notification: {method}");
@@ -866,7 +920,12 @@ fn handle_tools_list(vs: Option<&VectorStore>, principal: &Principal) -> Value {
         .filter(|t| {
             t.get("name").and_then(Value::as_str).is_some_and(|n| {
                 let category_on = if tools::is_write_tool(n) { write } else { read };
-                category_on && authz::allows_tool(principal, n)
+                // The machine-admin tools need an admin human or local stdio
+                // in addition to their graph-write category. Listing them for
+                // a caller whose call would be refused is a false promise.
+                let machine_ok =
+                    !tools::is_machine_tool_name(n) || authz::may_manage_machines(principal);
+                category_on && authz::allows_tool(principal, n) && machine_ok
             })
         })
         .cloned()
@@ -979,11 +1038,45 @@ const fn code_enabled() -> bool {
     false
 }
 
+/// Resolve the `workspaceId` argument for one call — or the caller's saved
+/// default when it is absent — against the required access. The failure is a
+/// tool error, so the caller sees an `isError` result rather than a protocol
+/// error. The explicit ID never changes the caller's saved default, and the
+/// default is consulted per call, so a batch resolves each call on its own.
+fn resolve_for_call(
+    tool_args: Option<&Value>,
+    principal: &Principal,
+    registry: &WorkspaceRegistry,
+    access: WorkspaceAccess,
+) -> std::result::Result<WorkspaceRecord, Value> {
+    let requested = tool_args
+        .and_then(|a| a.get("workspaceId"))
+        .and_then(Value::as_str);
+    registry
+        .resolve(&principal.id, requested, access)
+        .map_err(|e| tool_error(&e.to_string()))
+}
+
+/// Resolve one call's workspace and return the open handles for its file.
+fn selected_handles(
+    tool_args: Option<&Value>,
+    principal: &Principal,
+    registry: &WorkspaceRegistry,
+    handles: &WorkspaceHandles,
+    access: WorkspaceAccess,
+) -> std::result::Result<(WorkspaceRecord, WorkspaceEntry), Value> {
+    let record = resolve_for_call(tool_args, principal, registry, access)?;
+    let entry = handles
+        .get(&record)
+        .map_err(|e| tool_error(&e.to_string()))?;
+    Ok((record, entry))
+}
+
 fn handle_tools_call(
     req: &JsonRpcRequest,
-    kg: &GraphHandle,
-    vs: Option<&VectorStore>,
     principal: &Principal,
+    registry: &WorkspaceRegistry,
+    handles: &WorkspaceHandles,
 ) -> Result<HandlerResult> {
     let tool_name = req
         .params
@@ -1008,8 +1101,36 @@ fn handle_tools_call(
     };
     let tool_args = adapted_args.as_ref().or(tool_args);
 
+    // Workspace-management tools operate on the registry itself; they have no
+    // graph selection of their own.
+    if tools::is_management_tool_name(tool_name) {
+        let result = handle_management_tool(tool_name, tool_args, principal, registry, handles);
+        return Ok(result.unwrap_or_else(|e| {
+            error!("Tool '{tool_name}' error: {e}");
+            HandlerResult::Value(tool_error(&e.to_string()))
+        }));
+    }
+
     if tools::is_vector_tool_name(tool_name) {
-        let Some(vs) = vs else {
+        // The process-wide vector gate. The legacy entry carries the store the
+        // server was built with, so its presence is the support signal.
+        if handles.legacy_vs().is_none() {
+            return Err(MCSError::MethodNotFound(format!(
+                "{tool_name} (vector support disabled; start the server with --enable-vectors)"
+            )));
+        }
+        let (_record, entry) = match selected_handles(
+            tool_args,
+            principal,
+            registry,
+            handles,
+            WorkspaceAccess::Read,
+        ) {
+            Ok(pair) => pair,
+            Err(err) => return Ok(HandlerResult::Value(err)),
+        };
+        let kg = &entry.kg;
+        let Some(vs) = entry.vs.as_deref() else {
             return Err(MCSError::MethodNotFound(format!(
                 "{tool_name} (vector support disabled; start the server with --enable-vectors)"
             )));
@@ -1122,14 +1243,25 @@ fn handle_tools_call(
             if !graph_write_enabled() {
                 return Err(MCSError::MethodNotFound(tool_name.to_string()));
             }
+            // Subscriptions live in the workspace's own graph file, and only
+            // the workspace owner may create or remove them — the graph-write
+            // scope alone is not enough.
+            let record =
+                match resolve_for_call(tool_args, principal, registry, WorkspaceAccess::Owner) {
+                    Ok(record) => record,
+                    Err(err) => return Ok(HandlerResult::Value(err)),
+                };
             let result = match tool_name {
                 "webhook_add_subscription" => {
-                    webhooks_actions::handle_webhook_add_subscription(tool_args)
+                    webhooks_actions::handle_webhook_add_subscription(tool_args, &record.graph_path)
                         .map(HandlerResult::Value)
                 }
                 "webhook_delete_subscription" => {
-                    webhooks_actions::handle_webhook_delete_subscription(tool_args)
-                        .map(HandlerResult::Value)
+                    webhooks_actions::handle_webhook_delete_subscription(
+                        tool_args,
+                        &record.graph_path,
+                    )
+                    .map(HandlerResult::Value)
                 }
                 other => Err(MCSError::MethodNotFound(other.to_string())),
             };
@@ -1155,6 +1287,22 @@ fn handle_tools_call(
     if !category_enabled {
         return Err(MCSError::MethodNotFound(tool_name.to_string()));
     }
+
+    // One workspace per call: the explicit `workspaceId`, or the caller's
+    // saved default. A write needs writer-or-owner access, a read needs any
+    // access. Resolved here, before the handler runs, so a denied mutation
+    // never executes.
+    let access = if meta.write {
+        WorkspaceAccess::Write
+    } else {
+        WorkspaceAccess::Read
+    };
+    let (_record, entry) = match selected_handles(tool_args, principal, registry, handles, access) {
+        Ok(pair) => pair,
+        Err(err) => return Ok(HandlerResult::Value(err)),
+    };
+    let kg = &entry.kg;
+    let vs = entry.vs.as_deref();
 
     let result = match tool_name {
         // Raw-result handlers (large payloads, avoid second serialization pass).
@@ -1253,9 +1401,273 @@ fn handle_tools_call(
     }
 }
 
+/// A required string argument.
+fn str_arg<'a>(params: &'a Value, field: &str) -> Result<&'a str> {
+    params
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| MCSError::InvalidParams(format!("Missing '{field}' parameter")))
+}
+
+/// A success-shaped text tool result; `content[0].text` holds the JSON.
+fn text_result(text: &str) -> Value {
+    json!({ "content": [{ "type": "text", "text": text }] })
+}
+
+/// Map a registry failure onto the error category its cause belongs to.
+/// Accepts the owned value because `map_err` hands ownership to its mapper.
+#[allow(clippy::needless_pass_by_value)]
+fn management_error(error: crate::workspace::WorkspaceError) -> MCSError {
+    use crate::workspace::WorkspaceError;
+    match error {
+        WorkspaceError::NotFound
+        | WorkspaceError::SelectionRequired
+        | WorkspaceError::AccessDenied => MCSError::MemoryError(error.to_string()),
+        WorkspaceError::InvalidInput(_) | WorkspaceError::Graph(_) => {
+            MCSError::InvalidParams(error.to_string())
+        }
+        WorkspaceError::Storage(_) | WorkspaceError::Io(_) => {
+            MCSError::MemoryError(error.to_string())
+        }
+    }
+}
+
+/// The workspace-management tool handlers (approved spec §"MCP contract").
+///
+/// Result shapes follow the spec table: the creator/view/visibility/grant
+/// tools return a direct result object, and the list and revoke tools put
+/// their JSON in `content[0].text` like the other tools. The machine-admin
+/// tools additionally demand `authz::may_manage_machines`, on top of their
+/// `graph-write` category scope.
+fn handle_management_tool(
+    tool_name: &str,
+    tool_args: Option<&Value>,
+    principal: &Principal,
+    registry: &WorkspaceRegistry,
+    handles: &WorkspaceHandles,
+) -> Result<HandlerResult> {
+    match tool_name {
+        "create_workspace" => {
+            let params =
+                tool_args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+            let name = str_arg(params, "name")?;
+            let visibility = match params.get("visibility").and_then(Value::as_str) {
+                Some("private") => Visibility::Private,
+                Some("public") => Visibility::Public,
+                _ => {
+                    return Err(MCSError::InvalidParams(
+                        "'visibility' must be 'private' or 'public'".into(),
+                    ));
+                }
+            };
+            let view = registry
+                .create(&principal.id, name, visibility, |path| {
+                    handles.initialize_graph(path)
+                })
+                .map_err(management_error)?;
+            // The caller becomes the owner, and the first workspace becomes
+            // the caller's default.
+            Ok(HandlerResult::Value(json!({ "workspace": view })))
+        }
+        "list_workspaces" => {
+            let params = tool_args.unwrap_or(&Value::Null);
+            let cursor = params.get("cursor").and_then(Value::as_str);
+            let limit = match params.get("limit") {
+                None => 100,
+                Some(value) => value.as_u64().ok_or_else(|| {
+                    MCSError::InvalidParams("'limit' must be a positive integer".into())
+                })? as usize,
+            };
+            let page = registry
+                .list(&principal.id, cursor, limit)
+                .map_err(management_error)?;
+            let text = serde_json::to_string(&page).map_err(MCSError::JsonError)?;
+            Ok(HandlerResult::Value(text_result(text.as_str())))
+        }
+        "get_workspace" => {
+            let params =
+                tool_args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+            let workspace_id = str_arg(params, "workspaceId")?;
+            let (record, view) = registry
+                .view(&principal.id, workspace_id)
+                .map_err(management_error)?;
+            let mut workspace = serde_json::to_value(&view).map_err(MCSError::JsonError)?;
+            if record.owner_id == principal.id {
+                workspace["ownerId"] = json!(record.owner_id);
+            }
+            Ok(HandlerResult::Value(json!({ "workspace": workspace })))
+        }
+        "set_workspace_visibility" => {
+            let params =
+                tool_args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+            let workspace_id = str_arg(params, "workspaceId")?;
+            let visibility = match params.get("visibility").and_then(Value::as_str) {
+                Some("private") => Visibility::Private,
+                Some("public") => Visibility::Public,
+                _ => {
+                    return Err(MCSError::InvalidParams(
+                        "'visibility' must be 'private' or 'public'".into(),
+                    ));
+                }
+            };
+            let view = registry
+                .set_visibility(&principal.id, workspace_id, visibility)
+                .map_err(management_error)?;
+            Ok(HandlerResult::Value(json!({ "workspace": view })))
+        }
+        "list_workspace_grants" => {
+            let params =
+                tool_args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+            let workspace_id = str_arg(params, "workspaceId")?;
+            let grants = registry
+                .grants(&principal.id, workspace_id)
+                .map_err(management_error)?;
+            let text =
+                serde_json::to_string(&json!({ "grants": grants })).map_err(MCSError::JsonError)?;
+            Ok(HandlerResult::Value(text_result(text.as_str())))
+        }
+        "grant_workspace_access" => {
+            let params =
+                tool_args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+            let workspace_id = str_arg(params, "workspaceId")?;
+            let target = str_arg(params, "principalId")?;
+            let role = str_arg(params, "role")?;
+            registry
+                .grant(&principal.id, workspace_id, target, role)
+                .map_err(management_error)?;
+            Ok(HandlerResult::Value(json!({
+                "grant": { "principalId": target, "role": role }
+            })))
+        }
+        "revoke_workspace_access" => {
+            let params =
+                tool_args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+            let workspace_id = str_arg(params, "workspaceId")?;
+            let target = str_arg(params, "principalId")?;
+            let revoked = registry
+                .revoke(&principal.id, workspace_id, target)
+                .map_err(management_error)?;
+            let text = serde_json::to_string(&json!({ "revoked": revoked }))
+                .map_err(MCSError::JsonError)?;
+            Ok(HandlerResult::Value(text_result(text.as_str())))
+        }
+        "set_default_workspace" => {
+            let params =
+                tool_args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+            let workspace_id = str_arg(params, "workspaceId")?;
+            registry
+                .set_default(&principal.id, workspace_id)
+                .map_err(management_error)?;
+            let (_, view) = registry
+                .view(&principal.id, workspace_id)
+                .map_err(management_error)?;
+            Ok(HandlerResult::Value(json!({ "workspace": view })))
+        }
+        "create_machine_account" => {
+            require_machine_admin(principal, tool_name)?;
+            let params =
+                tool_args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+            let name = str_arg(params, "name")?;
+            let scopes: Vec<String> = match params.get("scopes") {
+                Some(value) => serde_json::from_value(value.clone())
+                    .map_err(|e| MCSError::InvalidParams(format!("Invalid 'scopes': {e}")))?,
+                None => return Err(MCSError::InvalidParams("Missing 'scopes' parameter".into())),
+            };
+            let (principal_id, token) = registry
+                .create_machine(name, &scopes)
+                .map_err(management_error)?;
+            // The credential appears exactly once, in this result.
+            let text = serde_json::to_string(&json!({
+                "principalId": principal_id,
+                "token": token,
+            }))
+            .map_err(MCSError::JsonError)?;
+            Ok(HandlerResult::Value(text_result(text.as_str())))
+        }
+        "list_machine_accounts" => {
+            require_machine_admin(principal, tool_name)?;
+            let accounts = registry.list_machines().map_err(management_error)?;
+            let text = serde_json::to_string(&json!({ "accounts": accounts }))
+                .map_err(MCSError::JsonError)?;
+            Ok(HandlerResult::Value(text_result(text.as_str())))
+        }
+        "revoke_machine_account" => {
+            require_machine_admin(principal, tool_name)?;
+            let params =
+                tool_args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
+            let principal_id = str_arg(params, "principalId")?;
+            let revoked = registry
+                .revoke_machine(principal_id)
+                .map_err(management_error)?;
+            let text = serde_json::to_string(&json!({ "revoked": revoked }))
+                .map_err(MCSError::JsonError)?;
+            Ok(HandlerResult::Value(text_result(text.as_str())))
+        }
+        other => Err(MCSError::MethodNotFound(other.to_string())),
+    }
+}
+
+/// Machine-account tools need an admin human or trusted local stdio on top of
+/// the `graph-write` category scope. Neither the static bearer nor an issued
+/// machine may administer accounts, whatever scopes it holds.
+fn require_machine_admin(principal: &Principal, tool_name: &str) -> Result<()> {
+    if authz::may_manage_machines(principal) {
+        return Ok(());
+    }
+    Err(MCSError::InsufficientScope {
+        tool: tool_name.to_owned(),
+        scope: crate::principals::ADMIN_SCOPE,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything a dispatch test needs: the graph, the registry and the
+    /// handle cache of one built server.
+    struct ServerForTest {
+        kg: Arc<GraphHandle>,
+        registry: Arc<WorkspaceRegistry>,
+        handles: Arc<WorkspaceHandles>,
+    }
+
+    /// A test server with both graph categories enabled, built the same way
+    /// `src/main.rs` builds one. The static bearer is configured as a real
+    /// account (writer on the legacy workspace, saved as default), so a
+    /// bearer principal's dispatch resolves instead of failing selection.
+    fn server_for_test(dir: &tempfile::TempDir) -> ServerForTest {
+        let config = Config {
+            memory_file_path: dir.path().join("memory.db").to_string_lossy().into_owned(),
+            legacy_owner_id: Some("machine:local".into()),
+            auth_token: Some("lib-test-bearer".into()),
+            enabled_categories: vec![
+                tools::ToolCategory::GraphRead,
+                tools::ToolCategory::GraphWrite,
+            ],
+            ..Config::default()
+        };
+        let server = MCPServer::new_kg(config).expect("test server builds");
+        let registry = server.workspace_registry();
+        let legacy = registry
+            .all_paths()
+            .expect("registered paths")
+            .into_iter()
+            .find(|(_, path)| path.ends_with("memory.db"))
+            .expect("the legacy workspace")
+            .0;
+        registry
+            .grant("machine:local", &legacy, "machine:static", "writer")
+            .expect("static bearer is a registered identity");
+        registry
+            .set_default("machine:static", &legacy)
+            .expect("static bearer default saves");
+        ServerForTest {
+            kg: server.graph(),
+            registry: server.workspace_registry(),
+            handles: server.workspace_handles(),
+        }
+    }
 
     /// The gate inside the dispatcher is the authoritative one: it covers every
     /// transport, not only the HTTP body screen. Exercise it directly, because
@@ -1263,14 +1675,7 @@ mod tests {
     #[test]
     fn tools_call_refuses_a_tool_outside_the_principals_scopes() {
         let dir = tempfile::tempdir().unwrap();
-        let kg = GraphHandle::new(
-            &dir.path().join("memory.db"),
-            crate::config::Durability::Sync,
-            crate::config::SqliteTuning::default(),
-            NonZeroUsize::new(32).unwrap(),
-            2,
-        )
-        .unwrap();
+        let server = server_for_test(&dir);
         let principal = authz::bearer_principal(&[tools::ToolCategory::GraphRead]);
         let req: JsonRpcRequest = serde_json::from_value(json!({
             "jsonrpc": "2.0",
@@ -1280,7 +1685,7 @@ mod tests {
         }))
         .unwrap();
 
-        let Err(err) = process_request(&req, &kg, None, &principal) else {
+        let Err(err) = process_request(&req, &principal, &server.registry, &server.handles) else {
             panic!("expected a scope refusal");
         };
         assert_eq!(err.error_code(), -32002, "{err}");
@@ -1295,7 +1700,7 @@ mod tests {
         let allowed = authz::bearer_principal(&[tools::ToolCategory::GraphWrite]);
         let was_on = graph_write_enabled();
         GRAPH_WRITE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
-        let outcome = process_request(&req, &kg, None, &allowed);
+        let outcome = process_request(&req, &allowed, &server.registry, &server.handles);
         GRAPH_WRITE_ENABLED.store(was_on, std::sync::atomic::Ordering::Relaxed);
         assert!(outcome.is_ok(), "control failed");
     }
@@ -1308,14 +1713,8 @@ mod tests {
     #[test]
     fn suggest_taxonomy_is_listed_and_dispatched_for_a_seeded_graph() {
         let dir = tempfile::tempdir().unwrap();
-        let kg = GraphHandle::new(
-            &dir.path().join("memory.db"),
-            crate::config::Durability::Sync,
-            crate::config::SqliteTuning::default(),
-            NonZeroUsize::new(32).unwrap(),
-            2,
-        )
-        .unwrap();
+        let server = server_for_test(&dir);
+        let kg: Arc<GraphHandle> = Arc::clone(&server.kg);
         memory::handle_create_entities(
             &kg,
             None,
@@ -1366,7 +1765,9 @@ mod tests {
             }
         }))
         .unwrap();
-        let Ok(HandlerResult::Value(result)) = process_request(&req, &kg, None, &principal) else {
+        let Ok(HandlerResult::Value(result)) =
+            process_request(&req, &principal, &server.registry, &server.handles)
+        else {
             panic!("expected a suggestion value");
         };
         let suggestions = &result["suggestions"];
@@ -1385,7 +1786,9 @@ mod tests {
             }
         }))
         .unwrap();
-        let Ok(HandlerResult::Value(result)) = process_request(&req, &kg, None, &principal) else {
+        let Ok(HandlerResult::Value(result)) =
+            process_request(&req, &principal, &server.registry, &server.handles)
+        else {
             panic!("expected a tool error value");
         };
         assert_eq!(result["isError"].as_bool(), Some(true));

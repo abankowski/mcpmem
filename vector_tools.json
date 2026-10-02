@@ -6,6 +6,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "embedding": {
           "type": "array",
           "items": { "type": "number" },
@@ -43,6 +44,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "queryText": {
           "type": "string",
           "description": "Text query for FTS5 search against entity names and observations"
@@ -91,7 +93,9 @@
     "description": "Rebuild the in-memory petgraph adjacency cache from the SQLite relation table. Use this after adding/removing relations via KG tools if you want the petgraph-based centrality boost in hybrid_search to be up-to-date.",
     "inputSchema": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." }
+      }
     },
     "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
   },
@@ -101,7 +105,9 @@
     "description": "Return statistics about the vector store: embeddingCount (chunk rows in the serving snapshot), dims, and petgraphNodes/petgraphEdges of the in-memory graph mirror used for the hybrid-search centrality boost.",
     "inputSchema": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." }
+      }
     },
     "annotations": { "readOnlyHint": true }
   },
@@ -112,6 +118,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "entityName": { "type": "string", "description": "The reference entity (must have an identity chunk)" },
         "topK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results (default 10)" },
         "filter": {
@@ -141,6 +148,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "embedding": { "type": "array", "items": { "type": "number" }, "description": "Query embedding vector" },
         "topK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of diversified results (default 10)" },
         "fetchK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Candidate pool size to diversify from (default max(20, 4*topK))" },
@@ -158,6 +166,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "queryText": { "type": "string", "description": "The text to search for. The server embeds this text itself." },
         "topK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results to return (default 10)" },
         "filter": {

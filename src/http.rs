@@ -42,7 +42,6 @@ use crate::kg::GraphHandle;
 use crate::oauth_routes::OauthState;
 use crate::server::{self, HttpOutcome};
 use crate::tools::ToolCategory;
-use crate::vector_store::VectorStore;
 
 /// The subscription tools and the admin handlers below share the store's
 /// validation: both call [`webhooks_actions`]' checks, so the MCP surface
@@ -101,7 +100,8 @@ const SERVER_HEADER_VALUE: &str = concat!("mcpmem ", env!("CARGO_PKG_VERSION"));
 pub struct HttpState {
     kg: Arc<GraphHandle>,
     registry: Arc<crate::workspace::WorkspaceRegistry>,
-    vs: Option<Arc<VectorStore>>,
+    /// The bounded per-workspace handle cache MCP dispatch resolves through.
+    handles: Arc<crate::workspace::WorkspaceHandles>,
     auth_token: Option<Arc<str>>,
     bearer_scopes: Arc<[ToolCategory]>,
     /// The tool categories enabled on this server. These are the scopes the
@@ -188,6 +188,7 @@ impl HttpState {
         let busy_timeout_ms = config.busy_timeout_ms;
         let server = crate::server::MCPServer::new_kg(config).expect("build the test server");
         let registry = server.workspace_registry();
+        let handles = server.workspace_handles();
         let kg = server.graph();
         let oauth = oauth.map(|config| {
             let state = match now_us {
@@ -205,7 +206,7 @@ impl HttpState {
         HttpState {
             kg,
             registry,
-            vs: None,
+            handles,
             auth_token,
             bearer_scopes: Arc::from(bearer_scopes),
             enabled_categories: Arc::from(enabled_categories),
@@ -221,7 +222,8 @@ pub struct HttpRunConfig {
     pub addr: String,
     pub kg: Arc<GraphHandle>,
     pub registry: Arc<crate::workspace::WorkspaceRegistry>,
-    pub vs: Option<Arc<VectorStore>>,
+    /// The bounded per-workspace handle cache MCP dispatch resolves through.
+    pub handles: Arc<crate::workspace::WorkspaceHandles>,
     pub auth_token: Option<Arc<str>>,
     /// Scopes granted to the static bearer token.
     pub bearer_scopes: Arc<[ToolCategory]>,
@@ -303,7 +305,7 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
         addr,
         kg,
         registry,
-        vs,
+        handles,
         auth_token,
         bearer_scopes,
         enabled_categories,
@@ -324,7 +326,7 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
     let state = HttpState {
         kg,
         registry,
-        vs,
+        handles,
         auth_token,
         bearer_scopes,
         enabled_categories,
@@ -512,8 +514,8 @@ async fn post_handler(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let kg = state.kg.clone();
-    let vs = state.vs.clone();
+    let registry = state.registry.clone();
+    let handles = state.handles.clone();
     let auth = state.clone();
     // Read before `headers` moves into the task. One header lookup, and the
     // alternative is cloning the whole map per request.
@@ -521,10 +523,7 @@ async fn post_handler(
     let result = tokio::task::spawn_blocking(move || {
         let principal = principal_of(&auth, &headers)?;
         Some(server::dispatch_http_body(
-            &body,
-            &kg,
-            vs.as_deref(),
-            &principal,
+            &body, &principal, &registry, &handles,
         ))
     })
     .await;
@@ -2057,11 +2056,12 @@ mod tests {
         };
         let server = MCPServer::new_kg(config).expect("test server builds");
         let registry = server.workspace_registry();
+        let handles = server.workspace_handles();
         let kg = server.graph();
         HttpState {
             kg,
             registry,
-            vs: None,
+            handles,
             auth_token: Some(Arc::from(UI_TEST_BEARER)),
             bearer_scopes: Arc::from(scopes),
             enabled_categories: Arc::from(&[ToolCategory::GraphRead, ToolCategory::GraphWrite][..]),
@@ -2156,7 +2156,13 @@ mod tests {
                 oidc_issuer: "https://idp.invalid".into(),
                 oidc_client_id: "mcpmem-test".into(),
                 oidc_client_secret: None,
-                principals: Vec::new(),
+                principals: vec![crate::principals::PrincipalEntry {
+                    name: "admin".into(),
+                    iss: "https://idp.invalid".into(),
+                    sub: "admin@example.test".into(),
+                    label: None,
+                    scopes: vec![ADMIN_SCOPE.to_owned()],
+                }],
                 cimd_allowed_domains: Vec::new(),
                 trust_forwarded_proto: false,
                 approval_waitlist: false,
@@ -2214,7 +2220,10 @@ mod tests {
                         TokenKind::Access,
                         &Grant {
                             client_id: "mcpmem-test".into(),
-                            principal: "https://idp.invalid\u{0}admin@example.test".into(),
+                            principal: crate::principals::human_id(
+                                "https://idp.invalid",
+                                "admin@example.test",
+                            ),
                             scopes: vec![ADMIN_SCOPE.to_owned()],
                             resource: oauth.resource(),
                             family: "admin-test-family".into(),

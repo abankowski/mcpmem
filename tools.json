@@ -5,6 +5,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "entities": {
           "type": "array",
           "items": {
@@ -29,6 +30,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "relations": {
           "type": "array",
           "items": {
@@ -54,6 +56,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "observations": {
           "type": "array",
           "items": {
@@ -76,6 +79,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "relations": {
           "type": "array",
           "items": {
@@ -100,6 +104,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "relations": {
           "type": "array",
           "items": {
@@ -124,6 +129,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "targets": {
           "type": "array",
           "items": {
@@ -150,6 +156,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "targets": {
           "type": "array",
           "items": {
@@ -176,6 +183,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "entityNames": {
           "type": "array",
           "items": { "type": "string" },
@@ -192,6 +200,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "deletions": {
           "type": "array",
           "items": {
@@ -214,6 +223,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "relations": {
           "type": "array",
           "items": {
@@ -237,6 +247,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "entityType": { "type": "string", "description": "Only return entities of this type (optional)" },
         "offset": { "type": "integer", "minimum": 0, "description": "Number of matching entities to skip (optional)" },
         "limit": { "type": "integer", "minimum": 0, "description": "Maximum number of entities to return (optional)" }
@@ -250,6 +261,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "query": { "type": "string", "description": "Search query to match against entity names, types, and observation content" },
         "entityType": { "type": "string", "description": "Only return entities of this type (optional)" },
         "offset": { "type": "integer", "minimum": 0, "description": "Number of ranked matches to skip (optional)" },
@@ -265,6 +277,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "names": {
           "type": "array",
           "items": { "type": "string" },
@@ -281,6 +294,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "name": { "type": "string", "description": "The exact name of the entity to retrieve" }
       },
       "required": ["name"]
@@ -292,7 +306,9 @@
     "description": "Return aggregate statistics about the knowledge graph: entity count, relation count, total observations, search index size, and interner utilization.",
     "inputSchema": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." }
+      }
     },
     "annotations": { "readOnlyHint": true }
   },
@@ -302,6 +318,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "from": { "type": "string", "description": "Filter by the source entity name (optional)" },
         "to": { "type": "string", "description": "Filter by the target entity name (optional)" },
         "relationType": { "type": "string", "description": "Filter by relation type (optional)" },
@@ -316,6 +333,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "from": { "type": "string", "description": "The starting entity name" },
         "to": { "type": "string", "description": "The target entity name" }
       },
@@ -328,7 +346,9 @@
     "description": "Trigger storage compaction: merge segments and drop tombstoned/superseded records to reclaim space. Safe to call periodically; runs in the background.",
     "inputSchema": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." }
+      }
     },
     "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
   },
@@ -338,6 +358,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "name": { "type": "string", "description": "The entity to expand around" },
         "direction": { "type": "string", "enum": ["out", "in", "both"], "description": "Follow outgoing (out), incoming (in), or any (both) edges. Defaults to both." },
         "relationType": { "type": "string", "description": "Only traverse/return relations of this type (optional)" },
@@ -353,6 +374,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "name": { "type": "string", "description": "The exact name of the entity to describe" }
       },
       "required": ["name"]
@@ -364,7 +386,9 @@
     "description": "List all distinct entity types present in the graph with their entity counts, ranked by count descending. Use to discover the schema of the memory before querying.",
     "inputSchema": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." }
+      }
     },
     "annotations": { "readOnlyHint": true }
   },
@@ -373,7 +397,9 @@
     "description": "List all distinct relation types present in the graph with their counts, ranked by count descending.",
     "inputSchema": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." }
+      }
     },
     "annotations": { "readOnlyHint": true }
   },
@@ -383,6 +409,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "query": {
           "type": "string",
           "description": "The name to find similar taxonomy names for (required, must not be blank)"
@@ -409,6 +436,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "kind": {
           "type": "string",
           "enum": ["entityType", "relationType"],
@@ -433,6 +461,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "entities": {
           "type": "array",
           "items": {
@@ -457,6 +486,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "format": { "type": "string", "enum": ["json", "mermaid", "dot"], "description": "Output format (default json)" }
       }
     },
@@ -468,6 +498,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "source": { "type": "string", "description": "Entity name to merge FROM (deleted after merge)" },
         "target": { "type": "string", "description": "Entity name to merge INTO (receives observations + redirected relations)" }
       },
@@ -481,6 +512,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "oldName": { "type": "string", "description": "Current exact entity name" },
         "newName": { "type": "string", "description": "New exact entity name" }
       },
@@ -494,6 +526,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "names": {
           "type": "array",
           "items": { "type": "string" },
@@ -511,6 +544,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "names": {
           "type": "array",
           "items": { "type": "string" },
@@ -527,6 +561,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "from": { "type": "string", "description": "Starting entity name" },
         "to": { "type": "string", "description": "Target entity name" },
         "maxDepth": { "type": "integer", "minimum": 1, "maximum": 16, "description": "Max path length; DFS prunes beyond this bound (default 6, cost grows exponentially)" },
@@ -542,6 +577,7 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "names": { "type": "array", "items": { "type": "string" }, "description": "Entity names to test for existence" }
       },
       "required": ["names"]
@@ -554,11 +590,157 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "workspaceId": { "type": "string", "description": "The workspace to select for this call. Omission uses the caller's saved default; an explicit ID never changes that default." },
         "name": { "type": "string", "description": "The entity whose degree to count" },
         "direction": { "type": "string", "enum": ["in", "out", "both"], "description": "Which edges to count (default both)" }
       },
       "required": ["name"]
     },
     "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "create_workspace",
+    "description": "Create a new workspace with the caller as owner. The first workspace a caller creates becomes its saved default; a later one never replaces it. The graph file is registered together with the ownership row.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The display name of the workspace" },
+        "visibility": { "type": "string", "enum": ["private", "public"], "description": "Private graphs serve only owners and grantees; public graphs are readable by any authenticated identity" }
+      },
+      "required": ["name", "visibility"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false }
+  },
+  {
+    "name": "list_workspaces",
+    "description": "List the workspaces the caller can access: owned, granted, and public graphs. Private graphs of other callers never appear. Sorted by immutable workspace ID; the cursor is opaque.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "cursor": { "type": "string", "description": "Opaque cursor from a previous page" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Page size (default 100, capped at 100)" }
+      },
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "get_workspace",
+    "description": "Return one workspace the caller can access, with the caller's role and default flag. Only the owner sees the owner identity.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The immutable workspace ID" }
+      },
+      "required": ["workspaceId"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "set_workspace_visibility",
+    "description": "Change a workspace's visibility. Only the owner may change it; a public-to-private transition clears the defaults of callers without a grant.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The immutable workspace ID" },
+        "visibility": { "type": "string", "enum": ["private", "public"], "description": "The new visibility" }
+      },
+      "required": ["workspaceId", "visibility"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
+  },
+  {
+    "name": "list_workspace_grants",
+    "description": "List the access grants of a workspace the caller owns.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The immutable workspace ID" }
+      },
+      "required": ["workspaceId"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "grant_workspace_access",
+    "description": "Grant reader or writer access to a registered identity. Only the owner may grant; the owner's own access cannot be replaced by a grant.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The immutable workspace ID" },
+        "principalId": { "type": "string", "description": "A registered human or machine identity" },
+        "role": { "type": "string", "enum": ["reader", "writer"], "description": "reader may read; writer may read and write" }
+      },
+      "required": ["workspaceId", "principalId", "role"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
+  },
+  {
+    "name": "revoke_workspace_access",
+    "description": "Revoke a grant. Only the owner may revoke, and the owner cannot revoke their own ownership. A revoked grant clears the caller's default in the same transaction.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The immutable workspace ID" },
+        "principalId": { "type": "string", "description": "The identity whose grant is removed" }
+      },
+      "required": ["workspaceId", "principalId"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true }
+  },
+  {
+    "name": "set_default_workspace",
+    "description": "Save the caller's default workspace. Omitted workspaceId on later graph, vector and webhook calls selects it. An explicit workspaceId never changes the default.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "The immutable workspace ID" }
+      },
+      "required": ["workspaceId"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "create_machine_account",
+    "description": "Create a machine credential with tool-category scopes. The token appears exactly once in the result; the registry keeps only its digest. Requires an admin human or trusted local stdio.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "A display name for the account" },
+        "scopes": { "type": "array", "items": { "type": "string" }, "description": "Tool-category scopes the credential may use (graph-read, graph-write, vectors, code). Never admin." }
+      },
+      "required": ["name", "scopes"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false }
+  },
+  {
+    "name": "list_machine_accounts",
+    "description": "List machine accounts and their scopes and revocation state. Credentials are never returned. Requires an admin human or trusted local stdio.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "revoke_machine_account",
+    "description": "Revoke a machine credential; it stops authenticating on the next request. Revoking clears the account's grants and default. Requires an admin human or trusted local stdio.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "principalId": { "type": "string", "description": "The machine principal ID (machine:...)" }
+      },
+      "required": ["principalId"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true }
   }
 ]
