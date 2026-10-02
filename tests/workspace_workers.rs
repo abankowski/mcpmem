@@ -227,8 +227,16 @@ async fn a_failed_webhook_graph_does_not_stop_delivery_from_the_next_graph() {
         .unwrap();
     let paths = registry.all_paths().unwrap();
     assert_eq!(paths.len(), 2);
-    let failed_path = paths[0].1.clone();
-    let healthy_path = paths[1].1.clone();
+    // Legacy is the first scheduled row (rowid 1), so its failing turn runs
+    // before the healthy graph is ever polled: delivery succeeds only if the
+    // role survives the per-graph error.
+    let failed_path = legacy_path.clone();
+    let healthy_path = paths
+        .iter()
+        .find(|(_, path)| path != &failed_path)
+        .unwrap()
+        .1
+        .clone();
     subscribe(&healthy_path, "healthy.example.test");
     create_entity(&healthy_path, "healthy-only");
     assert_eq!(count_outbox(&healthy_path, "pending"), 1);
