@@ -1,6 +1,6 @@
 //! Adapts the existing MCP transport to the reusable runtime supervisor.
 
-#[cfg(any(feature = "indexer", feature = "webhooks"))]
+#[cfg(any(feature = "indexer", feature = "webhooks", feature = "extractor"))]
 use parking_lot::Mutex;
 #[cfg(feature = "webhooks")]
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -74,7 +74,7 @@ impl RoleService for McpTransportService {
 /// Select one trusted graph path without materializing the full registry.
 /// Rows are read anew so new workspaces enter the schedule without a process
 /// restart; the cursor advances one row per turn and wraps.
-#[cfg(any(feature = "indexer", feature = "webhooks"))]
+#[cfg(any(feature = "indexer", feature = "webhooks", feature = "extractor"))]
 fn next_registered_path(
     registry: &crate::workspace::WorkspaceRegistry,
     cursor: &mut usize,
@@ -533,6 +533,176 @@ fn indexer_role_loop<P: mcpmem_indexer::EmbeddingProvider + Clone + Send + Sync 
 impl RoleService for IndexerService {
     fn run(&self) -> mcpmem_runtime::RoleFuture {
         indexer_role_loop(Arc::clone(&self.target), Arc::clone(&self.provider))
+    }
+}
+
+/// Resolve the OCR provider for the extractor role from the `[ocr]` section
+/// and the effective primary provider settings.
+///
+/// The resolution never fails startup: an invalid configuration produces a
+/// provider that fails PDF jobs at stage `config`, while text extraction
+/// keeps working with the same settings. The primary key follows the existing
+/// `config_file::indexer_settings` precedence (environment, then file).
+#[cfg(feature = "extractor")]
+pub fn ocr_provider(
+    ocr: Option<&crate::config_file::OcrSection>,
+    file: Option<&crate::config_file::FileConfig>,
+) -> Option<Arc<dyn mcpmem_extractor::OcrProvider>> {
+    let primary = match crate::config_file::profile_spec(file) {
+        Ok(spec) => mcpmem_extractor::PrimaryProvider {
+            kind: spec.map(|spec| spec.provider_kind),
+            api_key: crate::config_file::indexer_settings(file)
+                .ok()
+                .and_then(|settings| settings.openai_api_key),
+        },
+        Err(_) => mcpmem_extractor::PrimaryProvider::default(),
+    };
+    let config = ocr.map(|section| mcpmem_extractor::OcrConfig {
+        provider: section.provider.clone(),
+        model: section.model.clone(),
+        vision_url: section.vision_url.clone(),
+        api_key_file: section.api_key_file.clone(),
+    });
+    mcpmem_extractor::resolve_ocr(config.as_ref(), &primary)
+}
+
+#[cfg(feature = "extractor")]
+#[derive(Default)]
+struct WorkspaceExtractorState {
+    cursor: usize,
+    warned_empty: bool,
+}
+
+#[cfg(feature = "extractor")]
+enum ExtractorTarget {
+    /// The one-graph constructor, for callers with a single database.
+    Single { database: std::path::PathBuf },
+    /// Read trusted graph paths anew on every bounded worker turn.
+    Workspaces {
+        registry: Arc<crate::workspace::WorkspaceRegistry>,
+        state: Mutex<WorkspaceExtractorState>,
+    },
+}
+
+#[cfg(feature = "extractor")]
+pub struct ExtractorService {
+    target: Arc<ExtractorTarget>,
+    ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+}
+
+#[cfg(feature = "extractor")]
+fn run_extractor_graph(
+    path: &std::path::Path,
+    ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+    now_us: i64,
+) -> Result<mcpmem_extractor::ExtractionReport, String> {
+    mcpmem_extractor::ExtractionWorker::new(path, ocr)
+        .run_once(now_us)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "extractor")]
+fn run_extractor_workspace_turn(
+    registry: &crate::workspace::WorkspaceRegistry,
+    state: &mut WorkspaceExtractorState,
+    ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+    now_us: i64,
+) -> Result<mcpmem_extractor::ExtractionReport, String> {
+    let selected =
+        next_registered_path(registry, &mut state.cursor).map_err(|error| error.to_string())?;
+    let Some((id, path)) = selected else {
+        if !state.warned_empty {
+            tracing::warn!("extractor has no registered workspace to poll");
+            state.warned_empty = true;
+        }
+        return Ok(mcpmem_extractor::ExtractionReport::default());
+    };
+    match run_extractor_graph(&path, ocr, now_us) {
+        Ok(report) => {
+            tracing::debug!(
+                workspace_id = %id,
+                report = ?report,
+                "extractor turn finished"
+            );
+            Ok(report)
+        }
+        Err(error) => {
+            tracing::error!(
+                workspace_id = %id,
+                %error,
+                "extractor turn failed for one workspace; the next workspace stays scheduled"
+            );
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "extractor")]
+impl ExtractorService {
+    /// Preserve the one-file constructor for callers with one graph.
+    pub fn new(
+        database: impl Into<std::path::PathBuf>,
+        ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+    ) -> Self {
+        Self {
+            target: Arc::new(ExtractorTarget::Single {
+                database: database.into(),
+            }),
+            ocr,
+        }
+    }
+
+    /// Read trusted graph paths anew on every bounded worker turn.
+    pub fn with_workspaces(
+        registry: Arc<crate::workspace::WorkspaceRegistry>,
+        ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+    ) -> Self {
+        Self {
+            target: Arc::new(ExtractorTarget::Workspaces {
+                registry,
+                state: Mutex::new(WorkspaceExtractorState::default()),
+            }),
+            ocr,
+        }
+    }
+}
+
+#[cfg(feature = "extractor")]
+fn extractor_role_loop(
+    target: Arc<ExtractorTarget>,
+    ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+) -> mcpmem_runtime::RoleFuture {
+    Box::pin(async move {
+        loop {
+            let now_us = mcpmem_core::events::now_us();
+            let target = Arc::clone(&target);
+            let ocr = ocr.clone();
+            let result = tokio::task::spawn_blocking(move || match target.as_ref() {
+                ExtractorTarget::Single { database } => run_extractor_graph(database, ocr, now_us),
+                ExtractorTarget::Workspaces { registry, state } => {
+                    run_extractor_workspace_turn(registry, &mut state.lock(), ocr, now_us)
+                }
+            })
+            .await
+            .map_err(|error| RuntimeError::RoleFailed {
+                role: RuntimeRole::Extractor,
+                message: error.to_string(),
+            })?;
+            if let Err(error) = result {
+                tracing::error!(
+                    %error,
+                    "extractor poll failed for one workspace; the next workspace stays scheduled"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+}
+
+#[cfg(feature = "extractor")]
+impl RoleService for ExtractorService {
+    fn run(&self) -> mcpmem_runtime::RoleFuture {
+        extractor_role_loop(Arc::clone(&self.target), self.ocr.clone())
     }
 }
 
@@ -1087,6 +1257,192 @@ mod workspace_indexer_tests {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             }) => embedded.expect("the healthy graph must finish its jobs across broken turns"),
+        }
+        role.abort();
+    }
+}
+
+#[cfg(all(test, feature = "extractor"))]
+mod workspace_extractor_tests {
+    use super::*;
+    use crate::config::{Durability, SqliteTuning};
+    use crate::workspace::{Visibility, WorkspaceAccess, WorkspaceRegistry};
+    use mcpmem_core::attachments::{AttachmentLimits, AttachmentRepository};
+    use mcpmem_core::graph::GraphHandle;
+    use mcpmem_core::types::EntityInput;
+    use rusqlite::Connection;
+    use sha2::{Digest, Sha256};
+    use std::io::Cursor;
+    use std::num::NonZeroUsize;
+    use std::path::Path;
+    use std::time::Duration;
+
+    fn limits() -> AttachmentLimits {
+        AttachmentLimits {
+            max_bytes: 52_428_800,
+            workspace_byte_budget: 268_435_456,
+            allow_mime: vec!["text/*".into(), "application/pdf".into()],
+        }
+    }
+
+    fn digest(data: &[u8]) -> [u8; 32] {
+        Sha256::digest(data).into()
+    }
+
+    fn graph(path: &Path) -> GraphHandle {
+        GraphHandle::new(
+            path,
+            Durability::Sync,
+            SqliteTuning::default(),
+            NonZeroUsize::new(8).unwrap(),
+            1,
+        )
+        .unwrap()
+    }
+
+    fn entity(name: &str) -> EntityInput {
+        EntityInput {
+            name: name.into(),
+            entity_type: "note".into(),
+            observations: vec![],
+            attributes: None,
+        }
+    }
+
+    /// One live entity with one queued text attachment, as an upload would
+    /// leave it.
+    fn uploaded(path: &Path) -> i64 {
+        let handle = graph(path);
+        handle.create_entities(&[entity("doc")]).unwrap();
+        drop(handle);
+        let conn = Connection::open(path).unwrap();
+        AttachmentRepository::new(&conn)
+            .store_reader(
+                1,
+                "memo.txt",
+                "text/plain",
+                &mut Cursor::new(b"text\n".as_slice()),
+                5,
+                &digest(b"text\n"),
+                &limits(),
+                mcpmem_core::events::now_us(),
+            )
+            .unwrap()
+    }
+
+    fn entity_id(path: &Path) -> i64 {
+        let conn = Connection::open(path).unwrap();
+        conn.query_row("SELECT id FROM entity WHERE name='doc'", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    fn status(path: &Path, attachment: i64) -> String {
+        let conn = Connection::open(path).unwrap();
+        conn.query_row(
+            "SELECT status FROM attachment WHERE id=?1",
+            [attachment],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn two_registered_extractor_turns_process_one_graph_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.sqlite");
+        let registry = WorkspaceRegistry::open(&legacy_path, Some("machine:local")).unwrap();
+        let legacy = registry
+            .resolve("machine:local", None, WorkspaceAccess::Owner)
+            .unwrap();
+        let legacy_attachment = uploaded(&legacy.graph_path);
+        let legacy_entity = entity_id(&legacy.graph_path);
+        assert_eq!(legacy_entity, 1);
+        let second_id = registry
+            .create("machine:local", "second", Visibility::Private, |path| {
+                drop(graph(path));
+                Ok(())
+            })
+            .unwrap()
+            .workspace_id;
+        let second = registry
+            .resolve("machine:local", Some(&second_id), WorkspaceAccess::Owner)
+            .unwrap();
+        let second_attachment = uploaded(&second.graph_path);
+        assert_eq!(status(&legacy.graph_path, legacy_attachment), "uploaded");
+        assert_eq!(status(&second.graph_path, second_attachment), "uploaded");
+
+        let mut state = WorkspaceExtractorState::default();
+        let first_turn = run_extractor_workspace_turn(
+            &registry,
+            &mut state,
+            None,
+            mcpmem_core::events::now_us(),
+        )
+        .unwrap();
+        assert_eq!(first_turn.committed, 1);
+        assert_eq!(status(&legacy.graph_path, legacy_attachment), "ready");
+        assert_eq!(
+            status(&second.graph_path, second_attachment),
+            "uploaded",
+            "one turn must process at most one workspace"
+        );
+
+        let second_turn = run_extractor_workspace_turn(
+            &registry,
+            &mut state,
+            None,
+            mcpmem_core::events::now_us(),
+        )
+        .unwrap();
+        assert_eq!(second_turn.committed, 1);
+        assert_eq!(status(&second.graph_path, second_attachment), "ready");
+        assert_eq!(
+            status(&legacy.graph_path, legacy_attachment),
+            "ready",
+            "a finished attachment is not reprocessed"
+        );
+    }
+
+    #[tokio::test]
+    async fn extractor_role_keeps_scheduling_after_a_graph_turn_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.sqlite");
+        let registry =
+            Arc::new(WorkspaceRegistry::open(&legacy_path, Some("machine:local")).unwrap());
+        let legacy = registry
+            .resolve("machine:local", None, WorkspaceAccess::Owner)
+            .unwrap();
+        let attachment = uploaded(&legacy.graph_path);
+
+        let broken_id = registry
+            .create("machine:local", "broken", Visibility::Private, |path| {
+                drop(graph(path));
+                Ok(())
+            })
+            .unwrap()
+            .workspace_id;
+        let broken = registry
+            .resolve("machine:local", Some(&broken_id), WorkspaceAccess::Owner)
+            .unwrap();
+        std::fs::remove_file(&broken.graph_path).unwrap();
+
+        let target = Arc::new(ExtractorTarget::Workspaces {
+            registry: Arc::clone(&registry),
+            state: Mutex::new(WorkspaceExtractorState::default()),
+        });
+        let mut role = tokio::spawn(extractor_role_loop(target, None));
+        tokio::select! {
+            outcome = &mut role => panic!("one broken graph ended the extractor role: {outcome:?}"),
+            ready = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if status(&legacy.graph_path, attachment) == "ready" {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }) => ready.expect("the healthy graph must finish extraction across broken turns"),
         }
         role.abort();
     }

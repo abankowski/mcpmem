@@ -1988,6 +1988,7 @@ dependencies = [
  "jsonwebtoken",
  "lru",
  "mcpmem-core",
+ "mcpmem-extractor",
  "mcpmem-indexer",
  "mcpmem-oauth",
  "mcpmem-runtime",
@@ -2043,6 +2044,21 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "mcpmem-extractor"
+version = "2.1.6"
+dependencies = [
+ "base64",
+ "mcpmem-core",
+ "reqwest",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "url",
 ]
 
 [[package]]

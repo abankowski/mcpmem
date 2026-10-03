@@ -15,6 +15,7 @@ tokio = { version = "1.41", features = ["rt", "sync"] }
 [features]
 indexer = []
 webhooks = []
+extractor = []
 
 [lints]
 workspace = true

@@ -28,17 +28,20 @@ fn parses_mcp_role() {
 #[cfg(all(feature = "indexer", feature = "webhooks"))]
 #[test]
 fn parses_all_compiled_roles() {
-    let roles = RoleSet::parse_csv("mcp,indexer,webhooks")
-        .expect("all selected roles are compiled for this test");
+    let mut input = "mcp,indexer,webhooks".to_owned();
+    let mut expected = vec![
+        RuntimeRole::Mcp,
+        RuntimeRole::Indexer,
+        RuntimeRole::Webhooks,
+    ];
+    #[cfg(feature = "extractor")]
+    {
+        input.push_str(",extractor");
+        expected.push(RuntimeRole::Extractor);
+    }
+    let roles = RoleSet::parse_csv(&input).expect("all selected roles are compiled for this test");
 
-    assert_eq!(
-        roles.roles(),
-        &[
-            RuntimeRole::Mcp,
-            RuntimeRole::Indexer,
-            RuntimeRole::Webhooks
-        ]
-    );
+    assert_eq!(roles.roles(), &expected);
 }
 
 #[cfg(feature = "indexer")]
@@ -70,6 +73,14 @@ fn parses_webhooks_when_the_feature_is_compiled() {
     let roles = RoleSet::parse_csv("webhooks").expect("webhooks feature is compiled");
 
     assert_eq!(roles.roles(), &[RuntimeRole::Webhooks]);
+}
+
+#[cfg(feature = "extractor")]
+#[test]
+fn parses_extractor_when_the_feature_is_compiled() {
+    let roles = RoleSet::parse_csv("extractor").expect("extractor feature is compiled");
+
+    assert_eq!(roles.roles(), &[RuntimeRole::Extractor]);
 }
 
 #[test]
@@ -108,6 +119,17 @@ fn rejects_webhooks_when_the_feature_is_not_compiled() {
     );
 }
 
+#[cfg(not(feature = "extractor"))]
+#[test]
+fn rejects_extractor_when_the_feature_is_not_compiled() {
+    let result = RoleSet::parse_csv("extractor");
+
+    assert_eq!(
+        result,
+        Err(ConfigError::RoleNotCompiled(RuntimeRole::Extractor))
+    );
+}
+
 #[cfg(all(feature = "indexer", feature = "webhooks"))]
 struct ImmediateMcpService;
 
@@ -116,6 +138,16 @@ struct ImmediateWebhookService;
 
 #[cfg(all(feature = "indexer", feature = "webhooks"))]
 impl RoleService for ImmediateWebhookService {
+    fn run(&self) -> RoleFuture {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[cfg(all(feature = "extractor", feature = "webhooks"))]
+struct ImmediateExtractorService;
+
+#[cfg(all(feature = "extractor", feature = "webhooks"))]
+impl RoleService for ImmediateExtractorService {
     fn run(&self) -> RoleFuture {
         Box::pin(async { Ok(()) })
     }
@@ -131,30 +163,38 @@ impl RoleService for ImmediateMcpService {
 #[cfg(all(feature = "indexer", feature = "webhooks"))]
 #[tokio::test]
 async fn supervises_selected_roles_and_stops_with_mcp() {
-    let roles = RoleSet::parse_csv("mcp,indexer,webhooks").expect("features are compiled");
-    let services = Arc::new(
-        AppServices::new(Arc::new(ImmediateMcpService))
-            .with_webhooks(Arc::new(ImmediateWebhookService)),
-    );
+    let mut input = "mcp,indexer,webhooks".to_owned();
+    let mut expected = vec![
+        RoleLifecycle {
+            role: RuntimeRole::Mcp,
+            state: mcpmem_core::LifecycleState::Running,
+        },
+        RoleLifecycle {
+            role: RuntimeRole::Indexer,
+            state: mcpmem_core::LifecycleState::Running,
+        },
+        RoleLifecycle {
+            role: RuntimeRole::Webhooks,
+            state: mcpmem_core::LifecycleState::Running,
+        },
+    ];
+    #[cfg(feature = "extractor")]
+    {
+        input.push_str(",extractor");
+        expected.push(RoleLifecycle {
+            role: RuntimeRole::Extractor,
+            state: mcpmem_core::LifecycleState::Running,
+        });
+    }
+    let roles = RoleSet::parse_csv(&input).expect("features are compiled");
+    let services = AppServices::new(Arc::new(ImmediateMcpService))
+        .with_webhooks(Arc::new(ImmediateWebhookService));
+    #[cfg(feature = "extractor")]
+    let services = services.with_extractor(Arc::new(ImmediateExtractorService));
+    let services = Arc::new(services);
 
     let running = RuntimeComposition::start(roles, services).expect("roles start");
-    assert_eq!(
-        running.lifecycle(),
-        &[
-            RoleLifecycle {
-                role: RuntimeRole::Mcp,
-                state: mcpmem_core::LifecycleState::Running,
-            },
-            RoleLifecycle {
-                role: RuntimeRole::Indexer,
-                state: mcpmem_core::LifecycleState::Running,
-            },
-            RoleLifecycle {
-                role: RuntimeRole::Webhooks,
-                state: mcpmem_core::LifecycleState::Running,
-            },
-        ]
-    );
+    assert_eq!(running.lifecycle(), &expected);
 
     running
         .wait_for_shutdown()
