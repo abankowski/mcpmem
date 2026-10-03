@@ -490,6 +490,12 @@
       if (node) {
         selectNode(node);
         requestAttachmentConsent(false);
+      } else {
+        // The node may be one the user added by expansion, which survives only
+        // in this tab's canvas — a full-page OAuth round-trip cleared it, and
+        // the saved browse page does not contain it. Reload it by name so the
+        // return reopens its inspector instead of silently dropping it.
+        restoreInspectorNode(resume.entityName, workspace.generation);
       }
     }
     updateStats(); updatePager();
@@ -523,6 +529,41 @@
     if (selected === origin) selectNode(origin); // refresh inspector relation list
     alpha = Math.max(alpha, 0.45); kick(); // gentle reheat — keep existing layout calm
     return { added, capped };
+  }
+
+  // `/ui/expand` includes the origin entity, so it doubles as a fetch-one-node
+  // route: re-add a node the OAuth attachments round-trip dropped off the
+  // canvas and reopen its inspector. Mirrors `expand()`'s error handling and
+  // generation/selection guards so a slow response cannot steal the graph
+  // from the user for a return they no longer care about.
+  async function restoreInspectorNode(name, generation) {
+    if (!isCurrent(generation)) return;
+    const controller = beginRequest();
+    try {
+      let res;
+      try { res = await api("/ui/expand?depth=1&direction=both&name=" + encodeURIComponent(name), controller.signal); }
+      catch { return; }
+      if (!isCurrent(generation) || selected) return;
+      if (res.status === 404 && isJsonError(res)) { rejectWorkspace(generation); return; }
+      if (res.status === 401 || res.status === 403) { await handleError(res, generation); return; }
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!isCurrent(generation) || selected) return;
+      let node = nodeById.get(name);
+      if (!node) {
+        const e = (data.entities || []).find((ent) => ent.name === name);
+        if (!e) return;
+        node = makeNode(e, 0, 0);
+        nodes.push(node); nodeById.set(node.id, node);
+      }
+      mergeGraph(data, node);
+      node = nodeById.get(name);
+      centerOn(node);
+      selectNode(node);
+      requestAttachmentConsent(false);
+    } finally {
+      activeRequests.delete(controller);
+    }
   }
 
   function dismiss(node) {
@@ -970,7 +1011,7 @@
     attachmentListRequest = controller;
     const current = () => currentAttachment(ctx) && attachmentListRequest === controller && !controller.signal.aborted;
     try {
-      const params = new URLSearchParams({ workspaceId: ctx.workspaceId, entityName: ctx.node.id });
+      const params = new URLSearchParams({ workspaceId: ctx.workspaceId, entityName: ctx.node.id, limit: "1000" });
       const res = await attachmentFetch("/ui/attachments?" + params, { signal: controller.signal });
       if (!current()) return;
       if (!res.ok) {
@@ -1074,10 +1115,9 @@
         await attachmentFailure(res, ctx, true);
         return;
       }
-      const uploaded = await res.json();
       if (!currentAttachment(ctx) || originalGeneration !== attachmentGeneration) return;
       input.value = "";
-      attachmentMessage("Upload started for " + uploaded.filename + ".");
+      attachmentMessage("Upload started for " + file.name + ".");
       await loadAttachmentList(ctx);
     } catch (e) {
       if (currentAttachment(ctx) && e.name !== "AbortError") attachmentMessage("Upload failed: " + e.message);
@@ -1135,7 +1175,7 @@
   }
   function openAttachmentViewer(ctx, row) {
     if (!currentAttachment(ctx)) return;
-    attachmentViewer = { id: row.attachmentId, filename: row.filename, page: 1, offset: 0, accum: "" };
+    attachmentViewer = { id: row.attachmentId, filename: row.filename, page: 1, offset: 0, accum: "", pageCount: row.pageCount };
     loadAttachmentPage(ctx);
   }
   async function loadAttachmentPage(ctx) {
@@ -1169,7 +1209,7 @@
       const accumulated = (viewer.offset === 0 ? "" : viewer.accum + "\n") + data.text;
       $("attPageText").textContent = data.eof ? accumulated : accumulated + "\n…";
       $("attPageLabel").textContent = "Page " + data.page;
-      $("attNextPage").disabled = data.eof;
+      $("attNextPage").disabled = viewer.page >= (viewer.pageCount || 0);
       if (!data.eof && data.nextOffset > data.offset) $("attMoreText").hidden = false;
       attachmentViewer = { ...viewer, offset: data.offset, nextOffset: data.nextOffset, accum: accumulated };
     } catch (e) {
