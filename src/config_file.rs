@@ -152,6 +152,99 @@ pub struct FileConfig {
     pub indexer: IndexerSection,
     #[serde(default)]
     pub webhooks: WebhooksSection,
+    #[serde(default)]
+    pub attachments: AttachmentsSection,
+    pub ocr: Option<OcrSection>,
+}
+
+pub const DEFAULT_ATTACHMENT_MAX_BYTES: i64 = 52_428_800;
+pub const DEFAULT_WORKSPACE_BYTE_BUDGET: i64 = 268_435_456;
+
+fn default_max_bytes() -> i64 {
+    DEFAULT_ATTACHMENT_MAX_BYTES
+}
+
+fn default_workspace_byte_budget() -> i64 {
+    DEFAULT_WORKSPACE_BYTE_BUDGET
+}
+
+fn default_allow_mime() -> Vec<String> {
+    ["text/*", "text/markdown", "application/pdf"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Upload limits and accepted MIME patterns. The repository enforces these
+/// values after it selects the workspace graph.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct AttachmentsSection {
+    #[serde(default = "default_max_bytes")]
+    pub max_bytes: i64,
+    #[serde(default = "default_workspace_byte_budget")]
+    pub workspace_byte_budget: i64,
+    #[serde(default = "default_allow_mime")]
+    pub allow_mime: Vec<String>,
+}
+
+impl Default for AttachmentsSection {
+    fn default() -> Self {
+        Self {
+            max_bytes: default_max_bytes(),
+            workspace_byte_budget: default_workspace_byte_budget(),
+            allow_mime: default_allow_mime(),
+        }
+    }
+}
+
+impl AttachmentsSection {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_bytes <= 0 {
+            return Err(MCSError::InvalidParams(
+                "config 'attachments.max-bytes': must be positive".into(),
+            ));
+        }
+        if self.workspace_byte_budget <= 0 {
+            return Err(MCSError::InvalidParams(
+                "config 'attachments.workspace-byte-budget': must be positive".into(),
+            ));
+        }
+        if self.max_bytes > self.workspace_byte_budget {
+            return Err(MCSError::InvalidParams(
+                "config 'attachments.max-bytes': exceeds attachments.workspace-byte-budget"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// OCR settings exist only when the operator supplies an `[ocr]` section.
+/// The worker validates the provider and key for a PDF job, not at startup.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct OcrSection {
+    #[serde(default = "default_ocr_provider")]
+    pub provider: String,
+    pub model: Option<String>,
+    pub vision_url: Option<String>,
+    pub api_key_file: Option<String>,
+}
+
+fn default_ocr_provider() -> String {
+    "inherit".to_owned()
+}
+
+impl Default for OcrSection {
+    fn default() -> Self {
+        Self {
+            provider: default_ocr_provider(),
+            model: None,
+            vision_url: None,
+            api_key_file: None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -212,6 +305,7 @@ pub struct ToolsSection {
     pub graph_write: Option<bool>,
     pub vectors: Option<bool>,
     pub code: Option<bool>,
+    pub attachments: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -422,6 +516,11 @@ impl FileConfig {
             cli.absent("enable_vectors"),
         );
         assign(&mut args.enable_code, tools.code, cli.absent("enable_code"));
+        assign(
+            &mut args.enable_attachments,
+            tools.attachments,
+            cli.absent("enable_attachments"),
+        );
 
         let vectors = &self.vectors;
         assign(
@@ -521,6 +620,10 @@ impl FileConfig {
             oauth.default_new_principal_scopes.clone().map(Some),
             cli.absent("default_new_principal_scopes"),
         );
+
+        self.attachments.validate()?;
+        args.attachments = self.attachments.clone();
+        args.ocr = self.ocr.clone();
 
         Ok(())
     }

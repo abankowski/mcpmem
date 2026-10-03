@@ -7,12 +7,11 @@
 //!
 //! The knowledge-graph tools below carry a `write` flag that also selects their
 //! category: read-only queries are [`ToolCategory::GraphRead`], mutations are
-//! [`ToolCategory::GraphWrite`]. The vector, code and webhook tools live in
-//! separate JSON manifests (`vector_tools.json`, `code_tools.json`,
-//! `webhooks_tools.json`); their names are enumerated here so
-//! [`category_of`] can classify them uniformly. The webhook tools mutate a
-//! stored subscription row, so they share [`ToolCategory::GraphWrite`]
-//! rather than adding a category of their own.
+//! [`ToolCategory::GraphWrite`]. Vector, code and webhook tools live in
+//! separate JSON manifests. Their names are enumerated here so [`category_of`]
+//! can classify them uniformly. Attachment tools live in `tools.json` but
+//! require their own category, even when the tool mutates the graph. Webhook
+//! subscription changes keep the graph-write category.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -29,6 +28,8 @@ pub enum ToolCategory {
     Vectors,
     /// Tree-sitter code-symbol indexing (`code_*`).
     Code,
+    /// File upload, read, and delete on a workspace entity.
+    Attachments,
 }
 
 impl ToolCategory {
@@ -37,6 +38,7 @@ impl ToolCategory {
         ToolCategory::GraphWrite,
         ToolCategory::Vectors,
         ToolCategory::Code,
+        ToolCategory::Attachments,
     ];
 
     pub const fn slug(self) -> &'static str {
@@ -45,6 +47,7 @@ impl ToolCategory {
             ToolCategory::GraphWrite => "graph-write",
             ToolCategory::Vectors => "vectors",
             ToolCategory::Code => "code",
+            ToolCategory::Attachments => "attachments",
         }
     }
 }
@@ -63,6 +66,7 @@ impl FromStr for ToolCategory {
             "graph-write" => Ok(ToolCategory::GraphWrite),
             "vectors" => Ok(ToolCategory::Vectors),
             "code" => Ok(ToolCategory::Code),
+            "attachments" => Ok(ToolCategory::Attachments),
             _ => Err(format!("Unknown tool category: {s}")),
         }
     }
@@ -310,6 +314,19 @@ pub const CODE_TOOL_NAMES: &[&str] = &[
 pub const WEBHOOK_TOOL_NAMES: &[&str] =
     &["webhook_add_subscription", "webhook_delete_subscription"];
 
+/// Names of the attachment tools in `tools.json`. None inherits a graph scope.
+pub const ATTACHMENT_TOOL_NAMES: &[&str] = &[
+    "begin_attachment_upload",
+    "append_attachment_chunk",
+    "finish_attachment_upload",
+    "cancel_attachment_upload",
+    "list_attachments",
+    "get_attachment",
+    "read_attachment_chunk",
+    "get_attachment_page",
+    "delete_attachment",
+];
+
 /// Names of the workspace-management tools (Task 3). They live in
 /// `tools.json` beside the graph tools and share their graph-read /
 /// graph-write categories; the machine-admin subset needs
@@ -376,6 +393,12 @@ pub fn is_webhook_tool_name(name: &str) -> bool {
     WEBHOOK_TOOL_NAMES.contains(&name)
 }
 
+/// `true` for an attachment tool, whether it reads or writes attachment data.
+#[inline]
+pub fn is_attachment_tool_name(name: &str) -> bool {
+    ATTACHMENT_TOOL_NAMES.contains(&name)
+}
+
 /// The category a tool belongs to, or `None` if the name is unknown.
 #[inline]
 pub fn category_of(name: &str) -> Option<ToolCategory> {
@@ -387,6 +410,9 @@ pub fn category_of(name: &str) -> Option<ToolCategory> {
     }
     if is_code_tool_name(name) {
         return Some(ToolCategory::Code);
+    }
+    if is_attachment_tool_name(name) {
+        return Some(ToolCategory::Attachments);
     }
     if is_webhook_tool_name(name) {
         return Some(ToolCategory::GraphWrite);
@@ -488,6 +514,6 @@ mod tests {
                 meta.name
             );
         }
-        assert_eq!(ToolCategory::ALL.len(), 4, "a new category needs a scope");
+        assert_eq!(ToolCategory::ALL.len(), 5, "a new category needs a scope");
     }
 }

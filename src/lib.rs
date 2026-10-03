@@ -246,6 +246,11 @@ pub struct Args {
     #[arg(long = "enable-code", default_value_t = false)]
     pub enable_code: bool,
 
+    /// Enable the attachment tools. This scope is separate from graph-write.
+    #[arg(long = "enable-attachments", default_value_t = false)]
+    pub enable_attachments: bool,
+
+
     /// Embedding dimension for vector search (default: 384). Requires
     /// --enable-vectors. The serving index profile owns the dimension that
     /// actually validates chunk rows; this flag is the startup default.
@@ -256,6 +261,14 @@ pub struct Args {
     /// `code_semantic_search` HNSW index (default: 768). Requires --enable-code.
     #[arg(long = "code-embedding-dims", default_value_t = 768)]
     pub code_embedding_dims: u32,
+
+    /// Parsed upload limits from the TOML file, not a command-line flag.
+    #[arg(skip)]
+    pub attachments: config_file::AttachmentsSection,
+
+    /// Optional OCR section. An absent section must not enable PDF OCR.
+    #[arg(skip)]
+    pub ocr: Option<config_file::OcrSection>,
 }
 
 impl Args {
@@ -278,6 +291,7 @@ impl Args {
         push(self.enable_graph_write, C::GraphWrite);
         push(self.enable_vectors, C::Vectors);
         push(self.enable_code, C::Code);
+        push(self.enable_attachments, C::Attachments);
         cats
     }
 

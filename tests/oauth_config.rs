@@ -25,6 +25,65 @@ fn a_valid_principals_file_loads() {
 }
 
 #[test]
+fn attachment_scope_survives_principal_validation_and_oauth_consent() {
+    let path = write_tmp(
+        "attachments-consent.json",
+        r#"[{"name":"adam","iss":"https://idp.example","sub":"42",
+             "scopes":["graph-write"," Attachments "]}]"#,
+    );
+    let principal = mcpmem::principals::load(&path)
+        .expect("valid attachment scope")
+        .remove(0);
+    assert_eq!(principal.scopes, vec!["graph-write", "attachments"]);
+    let requested = vec!["graph-write".to_owned(), "attachments".to_owned()];
+    let without = mcpmem_oauth::consent::offered(
+        &requested,
+        &["graph-write".to_owned()].into_iter().collect(),
+    );
+    assert_eq!(without, vec!["graph-write"]);
+    let with = mcpmem_oauth::consent::offered(&requested, &principal.scope_set());
+    assert_eq!(with, vec!["graph-write", "attachments"]);
+    let token = mcpmem::authz::oauth_principal(
+        &mcpmem::principals::human_id(&principal.iss, &principal.sub),
+        with.into_iter().collect(),
+    );
+    assert_eq!(mcpmem::authz::missing_scope(&token, "list_attachments"), None);
+    assert_eq!(
+        mcpmem::authz::missing_scope(
+            &mcpmem::authz::oauth_principal("human:without", without.into_iter().collect()),
+            "list_attachments"
+        ),
+        Some("attachments")
+    );
+}
+
+#[test]
+fn default_bearer_scope_includes_attachments_but_graph_write_alone_does_not() {
+    use mcpmem::tools::ToolCategory;
+    let default = Config::from_args(&args(&[])).expect("default scopes");
+    assert!(default.bearer_scopes.contains(&ToolCategory::Attachments));
+
+    let writer = Config::from_args(&args(&["--static-bearer-scopes", "graph-write"]))
+        .expect("graph-only token");
+    let token = mcpmem::authz::bearer_principal(&writer.bearer_scopes);
+    assert_eq!(
+        mcpmem::authz::missing_scope(&token, "begin_attachment_upload"),
+        Some("attachments")
+    );
+    assert_eq!(mcpmem::authz::missing_scope(&token, "create_entities"), None);
+    let scoped = Config::from_args(&args(&[
+        "--static-bearer-scopes",
+        "graph-write,attachments",
+    ]))
+    .expect("attachment token");
+    let token = mcpmem::authz::bearer_principal(&scoped.bearer_scopes);
+    assert_eq!(
+        mcpmem::authz::missing_scope(&token, "begin_attachment_upload"),
+        None
+    );
+}
+
+#[test]
 fn an_empty_principals_file_is_refused() {
     let path = write_tmp("empty.json", "[]");
     let err = mcpmem::principals::load(&path).unwrap_err().to_string();
