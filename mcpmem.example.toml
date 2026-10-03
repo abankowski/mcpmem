@@ -37,9 +37,14 @@
 # operator.
 # log-file = "/var/log/mcpmem.log"
 
-# Roles this process starts. "indexer" needs the `indexer` Cargo feature and
-# "webhooks" needs the `webhooks` feature; a role whose feature is absent is a
-# startup error.
+# Roles this process starts. "indexer" needs the `indexer` Cargo feature,
+# "webhooks" needs the `webhooks` feature, and "extractor" needs the
+# `extractor` feature (which implies `indexer`); a role whose feature is
+# absent is a startup error.
+#
+# Without an `extractor` role, uploaded attachments stay durably queued. The
+# startup warning above the queue is not a proof that an extractor process
+# exists anywhere; start one with the role in another process.
 # roles = ["mcp"]
 
 # The deprecated string-observation adapter. Removed in 2.0.0.

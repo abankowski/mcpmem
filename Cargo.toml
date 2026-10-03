@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/mcpmem-core", "crates/mcpmem-runtime", "crates/mcpmem-indexer", "crates/mcpmem-webhook", "crates/mcpmem-oauth"]
+members = [".", "crates/mcpmem-core", "crates/mcpmem-runtime", "crates/mcpmem-indexer", "crates/mcpmem-webhook", "crates/mcpmem-oauth", "crates/mcpmem-extractor"]
 resolver = "3"
 
 [package]
@@ -46,6 +46,7 @@ zerocopy = { version = "0.8", features = ["derive"] }
 mcpmem-core = { path = "crates/mcpmem-core", version = "2.1.6" }
 mcpmem-runtime = { path = "crates/mcpmem-runtime", version = "2.1.6" }
 mcpmem-indexer = { path = "crates/mcpmem-indexer", version = "2.1.6", optional = true }
+mcpmem-extractor = { path = "crates/mcpmem-extractor", version = "2.1.6", optional = true }
 mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "2.1.6", optional = true }
 mcpmem-oauth = { path = "crates/mcpmem-oauth", version = "2.1.6" }
 uuid = { version = "1" }
@@ -61,6 +62,12 @@ url = { version = "2", optional = true }
 # build. `toml` carries no HTTP client, so the graph-only dependency guard in
 # `.github/workflows/ci.yml` is unaffected.
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
+# Attachment extraction needs these in the runtime dependency set, not only in
+# tests: the extractor role's integration tests and the release smoke use the
+# same crates the packaged binary must resolve.
+tempfile = "3"
+sha2 = "0.10"
+base64 = "0.22"
 
 # --- Code-symbol indexing (feature = "code") ---------------------------------
 # Tree-sitter parsing + the `tags` extractor drive the code knowledge graph.
@@ -88,6 +95,9 @@ notify = { version = "8", optional = true }
 default = ["code", "oauth"]
 indexer = ["mcpmem-runtime/indexer", "dep:mcpmem-indexer"]
 webhooks = ["mcpmem-runtime/webhooks", "dep:mcpmem-webhook"]
+# The attachment extraction role: the extractor crate, the runtime arm, and
+# the indexer arm it builds on. Only an enabled extractor role extracts.
+extractor = ["indexer", "dep:mcpmem-extractor", "mcpmem-runtime/extractor"]
 bedrock = ["indexer", "mcpmem-indexer/bedrock"]
 # The upstream OpenID Connect leg: `GET /oauth/authorize` and
 # `GET /oauth/callback`. Forwarding rather than a `features = ["upstream"]` on
@@ -118,8 +128,6 @@ code = [
 
 [dev-dependencies]
 hmac = "0.12"
-sha2 = "0.10"
-tempfile = "3"
 tokio = { version = "1.41", features = ["process"] }
 mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "2.1.6" }
 # Drive the axum router in-process (`oneshot`) and collect a response body,
@@ -138,7 +146,6 @@ http-body-util = "0.1"
 # test build must still have it.
 jsonwebtoken = { version = "9", default-features = false }
 ring = "0.17"
-base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json"] }
 url = "2"
 

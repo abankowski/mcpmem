@@ -18,7 +18,7 @@ set -euo pipefail
 # depends on it with a version requirement, and the release on 2026-09-11
 # failed exactly there, because the order skipped it while the manifest had
 # required it since the oauth work landed.
-ORDER=(mcpmem-core mcpmem-runtime mcpmem-indexer mcpmem-webhook mcpmem-oauth mcpmem)
+ORDER=(mcpmem-core mcpmem-extractor mcpmem-runtime mcpmem-indexer mcpmem-webhook mcpmem-oauth mcpmem)
 UA='mcpmem-release (https://github.com/abankowski/mcpmem)'
 
 dry_run=0
