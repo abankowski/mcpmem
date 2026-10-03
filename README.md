@@ -615,7 +615,9 @@ scope, and workspace grant are independent gates. `workspaceId` selects the
 graph per request; omission uses a saved default only if it selects that graph.
 The `/ui` entity inspector requests attachment consent separately from graph
 viewing. It has a file picker, status badges, page reader, download, and
-delete; the admin page has no attachment panel.
+delete; the admin page has no attachment panel. `merge_entities` refuses to
+merge a source that owns attachments or unfinished upload sessions; move or
+delete those first.
 
 ### Upload and read limits
 
@@ -625,7 +627,9 @@ different type is refused with a named rule. HTTP
 takes the **raw file body** with its MIME type in `Content-Type`. It streams
 up to **50 MiB (52,428,800 bytes)** and returns
 `{"attachmentId":123,"status":"uploaded"}`; byte 52,428,801 fails with HTTP
-413. Disconnects and failed uploads commit no attachment. This route does
+413. Disconnects and failed uploads commit no attachment. An empty body
+uploads a zero-byte file. At most four uploads stream concurrently; a full
+spool answers HTTP 503 and the client should retry later. This route does
 not raise the **16 MiB JSON-RPC `/mcp` request cap**. Do not send a 50 MiB
 base64 value in one MCP call.
 
@@ -638,7 +642,10 @@ A 50 MiB file takes **50 chunk calls**. `finish_attachment_upload` checks
 the count and digest, then returns `attachmentId` and `status: "uploaded"`.
 `cancel_attachment_upload` removes an unfinished session. Sessions are
 bound to the principal and graph; a changed workspace default does not move
-one. A completed finish can be repeated. Each workspace has a **256 MiB**
+one. An unfinished session expires after one hour; it then stops counting
+against the budget, and its owner can cancel it. Empty chunks are refused;
+a zero-byte file begins and finishes with no chunks. A completed finish can
+be repeated. Each workspace has a **256 MiB**
 budget for stored bytes plus incomplete upload reservations.
 
 Use `list_attachments` for an entity and `get_attachment` for metadata.
@@ -671,7 +678,8 @@ that one exists. The extractor stores page text; the `indexer` role embeds
 its segments. Profile rebuilds read that stored text and do not repeat OCR.
 Ready attachments appear in semantic, hybrid, vector, and MMR search when
 the caller has `vectors` **and** `attachments` scopes. Hits include
-`filename`, `page`, and `excerpt`, even without `includeChunks`. The optional
+`filename`, `page`, `excerpt`, `attachmentId`, and `entityName`, even without
+`includeChunks`. The optional
 `includeAttachments: false` excludes attachments before ranking and `topK`;
 without attachment consent, entity and relation search still works.
 
@@ -683,6 +691,11 @@ Check the commands before deployment (identical in Bash and fish):
 ```sh
 command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
 ```
+
+The render step refuses a PDF with more than 64 pages or a page over
+16,777,216 pixels, kills a renderer that stalls past 8 seconds, and refuses
+a rendered page over 32 MiB. A refusal is a transient `render` failure that
+the worker retries.
 
 Configure a separate full vision endpoint, never the `[indexer] openai-url`
 embedding endpoint:

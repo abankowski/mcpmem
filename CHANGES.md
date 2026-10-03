@@ -117,7 +117,11 @@ This entry lists every change since that snapshot. The version line restarts at
   remains 16 MiB. Each entity has one attachment per filename; a duplicate
   conflicts without overwriting, while another entity may reuse the filename.
   Stored attachments and unfinished upload reservations share a 256 MiB
-  workspace budget. The attachment blob, page text, and job remain in that
+  workspace budget. An unfinished session expires after one hour and stops
+  counting against the budget; its owner can cancel it. Empty chunks are
+  refused, and a zero-byte file finishes with none. At most four raw-body
+  uploads stream concurrently; a full spool answers HTTP 503. The attachment
+  blob, page text, and job remain in that
   workspace graph; there are no attachment-specific workspace grants.
 - **Separate `attachments` consent and inspector.** Attachment operations need
   an enabled `attachments` category and `attachments` OAuth/tool scope, plus
@@ -134,9 +138,14 @@ This entry lists every change since that snapshot. The version line restarts at
   and warns at startup that another extractor process must run; the warning
   does not prove that one exists. The `indexer` embeds stored page segments
   and rebuilds without another OCR request. Attachment hits in semantic,
-  hybrid, vector, and MMR search report filename, page, and excerpt when
+  hybrid, vector, and MMR search report filename, page, excerpt,
+  attachmentId, and entityName when
   the caller has both `vectors` and `attachments` consent; without the
   attachment scope, entity and relation search remains available.
+- **`merge_entities` refuses a source that owns attachments.** A merge used
+  to cascade-delete the source and silently destroy its files; it now stops
+  with a named error until those attachments and unfinished upload sessions
+  are moved or deleted.
 - **Poppler is a host dependency for PDF extraction.** The binary and
   crates.io package do not bundle it. Install `pdfinfo` and `pdftoppm` on
   the extractor host or PDF jobs fail at `render`. OCR calls a separate
