@@ -250,7 +250,6 @@ pub struct Args {
     #[arg(long = "enable-attachments", default_value_t = false)]
     pub enable_attachments: bool,
 
-
     /// Embedding dimension for vector search (default: 384). Requires
     /// --enable-vectors. The serving index profile owns the dimension that
     /// actually validates chunk rows; this flag is the startup default.

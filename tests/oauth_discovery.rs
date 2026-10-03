@@ -473,7 +473,14 @@ async fn bearer_holds_narrows_the_credential_and_not_the_advertised_scopes() {
     let body: serde_json::Value = support::json(res).await;
     assert_eq!(
         body["scopes_supported"],
-        json!(["graph-read", "graph-write", "vectors", "code", "attachments", "admin"]),
+        json!([
+            "graph-read",
+            "graph-write",
+            "vectors",
+            "code",
+            "attachments",
+            "admin"
+        ]),
         "the document advertises the enabled categories, not the credential"
     );
 }

@@ -381,8 +381,11 @@ fn registered_version_14_graph_upgrades_and_reopens_at_15() {
     conn.execute_batch(mcpmem_core::events::MIGRATIONS[8].1)
         .unwrap();
     assert_eq!(
-        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
         14
     );
     drop(conn);
@@ -395,8 +398,11 @@ fn registered_version_14_graph_upgrades_and_reopens_at_15() {
     );
     let conn = Connection::open(&legacy).unwrap();
     assert_eq!(
-        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
         15
     );
     assert_eq!(
@@ -427,8 +433,11 @@ fn registered_graph_requires_marker_14_even_when_version_15_exists() {
         .expect("a higher version is not proof of the workspace marker");
     assert!(error.to_string().contains("no workspace marker"), "{error}");
     assert_eq!(
-        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
         15,
         "a rejected graph must not be migrated"
     );
@@ -451,12 +460,17 @@ fn registered_graph_refuses_future_version_before_migration() {
         .err()
         .expect("a future graph must refuse startup");
     assert!(
-        error.to_string().contains("database schema is newer than this binary"),
+        error
+            .to_string()
+            .contains("database schema is newer than this binary"),
         "{error}"
     );
     assert_eq!(
-        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
         future_version,
         "a rejected graph must retain its future ledger row"
     );
