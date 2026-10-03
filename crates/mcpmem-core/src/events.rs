@@ -42,7 +42,7 @@ pub fn request_fingerprint(method: &str, normalized_path: &str, raw_body: &[u8])
 /// to this crate, and `cargo package` copies only the files under one crate
 /// root, so an `include_str!` from another crate ships a crate that cannot
 /// compile. That is how the `v1.0.0-rc.1` release failed.
-pub const MIGRATIONS: [(i64, &str); 14] = [
+pub const MIGRATIONS: [(i64, &str); 15] = [
     (1, include_str!("../migrations/0001_change_events.sql")),
     (
         2,
@@ -72,6 +72,7 @@ pub const MIGRATIONS: [(i64, &str); 14] = [
         include_str!("../migrations/0013_quiet_events_share_revision.sql"),
     ),
     (14, include_str!("../migrations/0014_workspace_marker.sql")),
+    (15, include_str!("../migrations/0015_attachments.sql")),
 ];
 
 #[cfg(test)]
@@ -146,6 +147,10 @@ mod migration_inventory {
                     14,
                     "7eb71e14f5978792748beb04a81601daf4ccbc0cbaa92e60b3189fa91d2021d7".to_string()
                 ),
+                (
+                    15,
+                    "b0bf821aea63c30d0eaf1397398c46196afa12b51dc8c82ff0037f359c3772a9".to_string()
+                ),
             ],
             "a migration was added, removed, renumbered or edited"
         );
@@ -202,6 +207,315 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         }
     }
     tx.commit()
+}
+
+#[cfg(test)]
+mod attachment_migration_tests {
+    use rusqlite::{Connection, params, types::Value};
+
+    use super::{MIGRATIONS, migrate, sha256};
+
+    // Build the graph that the version-14 binary leaves on disk. Apply its
+    // actual migrations and record their checksums, not a copy of their SQL.
+    fn graph_at_14() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE entity(id INTEGER PRIMARY KEY, name_hash INTEGER NOT NULL, name TEXT NOT NULL, type_id INTEGER NOT NULL,
+                obs_count INTEGER NOT NULL DEFAULT 0, out_deg INTEGER NOT NULL DEFAULT 0, in_deg INTEGER NOT NULL DEFAULT 0,
+                created_us INTEGER NOT NULL, updated_us INTEGER NOT NULL, flags INTEGER NOT NULL DEFAULT 0) STRICT;
+             CREATE TABLE observation(id INTEGER PRIMARY KEY, entity_id INTEGER NOT NULL, idx INTEGER NOT NULL, body TEXT NOT NULL, created_us INTEGER NOT NULL) STRICT;
+             CREATE TABLE relation(from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, type_id INTEGER NOT NULL, created_us INTEGER NOT NULL) STRICT;
+             CREATE TABLE type_dict(id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0) STRICT;
+             CREATE TABLE graph_stat(key TEXT NOT NULL PRIMARY KEY, value INTEGER NOT NULL) STRICT, WITHOUT ROWID;
+             INSERT INTO graph_stat VALUES
+                 ('entities',0),('relations',0),('observations',0),('entity_seq',0),('obs_seq',0);
+             CREATE VIRTUAL TABLE obs_fts USING fts5(body, content='observation', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+             CREATE TRIGGER obs_fts_bd BEFORE DELETE ON observation BEGIN
+               INSERT INTO obs_fts(obs_fts, rowid, body) VALUES ('delete', old.id, old.body);
+             END;
+             CREATE TABLE schema_migration(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at_us INTEGER NOT NULL) STRICT;",
+        )
+        .unwrap();
+        for &(version, sql) in MIGRATIONS.iter().filter(|(version, _)| *version <= 14) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migration VALUES(?1,?2,1)",
+                params![version, sha256(sql.as_bytes())],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            14
+        );
+        conn
+    }
+
+    fn rows(conn: &Connection, table: &str) -> Vec<Vec<Value>> {
+        let mut statement = conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid")).unwrap();
+        let column_count = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..column_count)
+                    .map(|index| row.get::<_, Value>(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn index_sql(conn: &Connection, name: &str) -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='index' AND name=?1",
+            [name],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn index_columns(conn: &Connection, name: &str) -> Vec<String> {
+        conn.prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+            .unwrap()
+            .query_map([name], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn migration_15_preserves_vector_bytes_jobs_keys_and_named_indexes() {
+        let conn = graph_at_14();
+        conn.execute_batch(
+            "INSERT INTO chunk_vector VALUES
+                ('profile','identity','entity',10,0,4,2,x'00ff80deadbeef',101,'old-entity'),
+                ('profile','relation','relation',20,1,5,3,x'0102030004',102,'old-relation');
+             INSERT INTO chunk_index_job
+                (profile_id,owner_kind,owner_id,owner_revision,operation,state,lease_token,lease_epoch,lease_until_us,next_attempt_us,attempts,last_error)
+             VALUES
+                ('profile','entity',10,2,'upsert','leased','old-lease',7,500,400,3,'retry'),
+                ('profile','relation',20,3,'delete','held',NULL,0,0,900,1,NULL);",
+        )
+        .unwrap();
+        let vectors = rows(&conn, "chunk_vector");
+        let jobs = rows(&conn, "chunk_index_job");
+        assert_eq!(vectors.len(), 2, "the historical fixture must have vectors");
+        assert_eq!(jobs.len(), 2, "the historical fixture must have jobs");
+        let index_names = [
+            "chunk_vector_owner",
+            "chunk_vector_type",
+            "chunk_index_job_due",
+            "chunk_index_job_owner",
+        ];
+        let indexes: Vec<_> = index_names
+            .iter()
+            .map(|name| index_sql(&conn, name))
+            .collect();
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(rows(&conn, "chunk_vector"), vectors);
+        assert_eq!(rows(&conn, "chunk_index_job"), jobs);
+        for (name, sql) in index_names.iter().zip(indexes) {
+            assert_eq!(index_sql(&conn, name), sql, "{name}");
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO chunk_vector VALUES ('profile','identity','entity',10,0,4,2,x'42',1,'duplicate')",
+                [],
+            )
+            .is_err(),
+            "the original composite vector key must remain unique"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation)
+                 VALUES ('profile','entity',10,2,'upsert')",
+                [],
+            )
+            .is_err(),
+            "the original composite job key must remain unique"
+        );
+        conn.execute(
+            "INSERT INTO chunk_vector VALUES ('profile','attachment','attachment',30,0,4,1,x'ff00',103,'new-file')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation)
+             VALUES ('profile','attachment',30,1,'upsert')",
+            [],
+        )
+        .unwrap();
+        for (kind, owner_kind) in [
+            ("invalid", "attachment"),
+            ("attachment", "invalid"),
+        ] {
+            assert!(
+                conn.execute(
+                    "INSERT INTO chunk_vector VALUES ('profile',?1,?2,31,0,4,1,x'01',1,'invalid')",
+                    params![kind, owner_kind],
+                )
+                .is_err(),
+                "invalid vector kind or owner must fail"
+            );
+        }
+        assert!(
+            conn.execute(
+                "INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation)
+                 VALUES ('profile','invalid',31,1,'upsert')",
+                [],
+            )
+            .is_err(),
+            "an unrelated job owner must fail"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation)
+                 VALUES ('profile','attachment',31,1,'invalid')",
+                [],
+            )
+            .is_err(),
+            "the old operation check must remain"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation,state)
+                 VALUES ('profile','attachment',31,1,'upsert','invalid')",
+                [],
+            )
+            .is_err(),
+            "the old job-state check must remain"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation,last_error)
+                 VALUES ('profile','attachment',31,1,'upsert',?1)",
+                ["x".repeat(2049)],
+            )
+            .is_err(),
+            "the old last-error length check must remain"
+        );
+        migrate(&conn).unwrap();
+        assert_eq!(rows(&conn, "chunk_vector").len(), 3);
+        assert_eq!(rows(&conn, "chunk_index_job").len(), 3);
+    }
+
+    #[test]
+    fn migration_15_creates_six_strict_graph_local_tables_with_valid_states() {
+        let conn = graph_at_14();
+        migrate(&conn).unwrap();
+        for name in [
+            "attachment",
+            "attachment_text",
+            "attachment_chunk",
+            "attachment_job",
+            "attachment_upload",
+            "attachment_upload_chunk",
+        ] {
+            let strict: i64 = conn
+                .query_row(
+                    "SELECT strict FROM pragma_table_list WHERE name=?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(strict, 1, "{name} must be STRICT");
+            let has_workspace_id: bool = conn
+                .prepare(&format!("PRAGMA table_info({name})"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .any(|column| column.unwrap() == "workspace_id");
+            assert!(!has_workspace_id, "{name} is already in a workspace graph");
+        }
+        for (index, expected_columns) in [
+            ("attachment_entity_filename", vec!["entity_id", "filename"]),
+            ("attachment_entity", vec!["entity_id"]),
+            (
+                "attachment_job_due",
+                vec!["state", "next_attempt_us", "lease_until_us"],
+            ),
+            ("attachment_upload_expires", vec!["expires_us"]),
+        ] {
+            assert_eq!(index_columns(&conn, index), expected_columns, "{index}");
+        }
+        conn.execute_batch(
+            "INSERT INTO attachment VALUES (1,10,'notes.txt','text/plain',2,zeroblob(32),x'6869','uploaded',0,NULL,NULL,1);
+             INSERT INTO attachment VALUES (2,11,'notes.txt','text/plain',2,zeroblob(32),x'6869','ready',1,NULL,NULL,1);
+             INSERT INTO attachment_text VALUES (2,1,'hi',2);
+             INSERT INTO attachment_chunk VALUES (2,0,1,0,'hi');
+             INSERT INTO attachment_job VALUES (1,'pending',NULL,0,0,0,0,NULL);
+             INSERT INTO attachment_upload VALUES ('upload','owner',10,'draft.txt','text/plain',2,zeroblob(32),2,1,100,NULL);
+             INSERT INTO attachment_upload_chunk VALUES ('upload',0,x'6869');",
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO attachment VALUES (3,10,'notes.txt','text/plain',2,zeroblob(32),x'6869','uploaded',0,NULL,NULL,1)",
+                [],
+            )
+            .is_err(),
+            "the filename must be unique within one entity"
+        );
+        assert!(
+            conn.execute("UPDATE attachment SET status='unknown' WHERE id=1", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("UPDATE attachment SET error_stage='unknown' WHERE id=1", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("UPDATE attachment SET error_stage='decode' WHERE id=1", [])
+                .is_err(),
+            "an upload cannot have a failed extraction stage"
+        );
+        conn.execute(
+            "UPDATE attachment SET status='extracting',error_stage='decode',last_error='invalid UTF-8' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE attachment SET status='error' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE attachment SET status='ready',error_stage=NULL,last_error=NULL WHERE id=1",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO attachment_text VALUES (2,0,'invalid page',12)",
+                [],
+            )
+            .is_err(),
+            "page numbers start at one"
+        );
+        assert!(
+            conn.execute("UPDATE attachment_job SET state='unknown' WHERE attachment_id=1", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO attachment_chunk VALUES (2,1,1,0,'duplicate segment')",
+                [],
+            )
+            .is_err(),
+            "one page segment cannot map to two vector indexes"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO attachment_chunk VALUES (2,0,1,1,'duplicate vector index')",
+                [],
+            )
+            .is_err(),
+            "one vector index maps to one segment"
+        );
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

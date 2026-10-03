@@ -565,7 +565,7 @@ mod migration {
                 0
             ))
             .unwrap(),
-            14
+            15
         );
         assert!(
             Store::new(Connection::open(dir.path().join("legacy.sqlite")).unwrap())
