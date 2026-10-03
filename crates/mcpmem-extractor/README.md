@@ -49,12 +49,36 @@ images.
    30-second lease.
 2. Read the stored blob without holding any transaction. A text file decodes
    as UTF-8, drops a BOM, and normalizes CRLF into LF; its page is page 1.
-3. A PDF runs `pdfinfo` for the page count and `pdftoppm` for one page per
-   invocation, with argument vectors — never a shell. Each rendered image goes
-   to the vision OCR provider.
-4. Re-arm the lease after each page, then commit every page and segment row,
-   status `ready`, the incremented revision, and the chunk-index job enqueues
-   in one fenced transaction.
+3. A PDF runs `pdfinfo` for the page count and page size, and `pdftoppm` for
+   one page per invocation, with argument vectors — never a shell. Each
+   rendered image goes to the vision OCR provider. `pdfinfo` and `pdftoppm`
+   each get a hard 8-second deadline: a stalled renderer is killed, never
+   left to hold the worker loop. A PDF over 64 pages, a page box that
+   renders more than 16,777,216 pixels at 150 dpi, or a rendered PNG over
+   32 MiB is refused at stage `render` before any OCR call — the page-count
+   and pixel refusals happen before the first render.
+
+   The vision request has a 15-second deadline, shorter than the 30-second
+   claim lease. The lease renewal runs only after a request returns, so any
+   response that outlived the lease would fail the renewal fence and the
+   transcription would be discarded; the deadline keeps every in-flight
+   request inside the lease. A response whose `finish_reason` is `length`
+   is a provider failure: the model stopped at the token limit, and a
+   truncated transcription is never published as a complete page.
+
+4. One claim transcribes at most eight pages. A longer PDF keeps its lease
+   re-armed per page, defers at the bound, and resumes on a later claim
+   from its durable checkpoints instead of holding the role loop for a
+   whole document: the loop rotates to the next workspace, and the deferred
+   job becomes claimable again once its lease expires.
+5. Commit every page and segment row, status `ready`, the incremented
+   revision, and the chunk-index job enqueues in one fenced transaction.
+
+Checkpointed page rows in `attachment_text` are provisional: a resumed
+claim skips the pages it already transcribed, and only the fenced commit
+publishes them. If the lease is lost before the commit, the rows are
+harmless leftovers of a superseded attempt — the attachment stays
+`extracting` and a later claim resumes from them.
 
 The commit is refused when the lease expired, the attachment revision moved,
 or the parent entity vanished. A refused commit publishes nothing. A transient
@@ -64,6 +88,9 @@ attempts. A terminal failure — invalid UTF-8 (`decode`) or invalid OCR
 configuration (`config`) — sets status `error` immediately. Invalid OCR
 configuration fails the PDF job before any image or API key leaves the
 process; text extraction keeps working with the same settings.
+
+The page caps are sized so a maximum-size PDF (64 pages) completes within
+the eight-claim dead-letter bound at eight pages per claim.
 
 OCR calls never run inside a graph write transaction.
 
