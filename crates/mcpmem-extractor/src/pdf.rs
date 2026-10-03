@@ -316,6 +316,21 @@ fn extract_pdf(
                 break;
             }
             let image = render_page(&pdf_path, dir.path(), page)?;
+            // Arm the lease before the vision request, not only after the
+            // transcription. The first renew of a claim arrives no earlier
+            // than pdfinfo plus the first render (16s); after that, every
+            // gap between renewals is render plus vision (23s). Without this
+            // renew the first window would be pdfinfo plus render plus vision
+            // (31s), which outlives the 30s claim lease; the post-transcription
+            // renew would then fail the fence and discard the page.
+            if !jobs
+                .renew(job, current_us(now_us), LEASE_US)
+                .map_err(|error| {
+                    transient("storage", format!("cannot renew attachment lease: {error}"))
+                })?
+            {
+                return Ok(ExtractionOutcome::LostLease);
+            }
             let text = match ocr.transcribe_page(&image, "image/png") {
                 Ok(text) => text,
                 Err(OcrError::Config(reason)) => return Err(terminal("config", reason)),
@@ -700,6 +715,10 @@ mod tests {
         // to be 60 seconds against a 30-second lease, which lost successful
         // responses at the fence; the two deadlines now fit with a margin.
         const {
+            assert!(
+                RENDER_DEADLINE_US + RENDER_DEADLINE_US < LEASE_US,
+                "the claim-to-first-renew window (pdfinfo plus one render) must fit inside the claim lease"
+            );
             assert!(
                 RENDER_DEADLINE_US + VISION_TIMEOUT_US < LEASE_US,
                 "every in-flight render and vision request must fit inside the claim lease"

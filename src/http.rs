@@ -984,11 +984,12 @@ async fn download_attachment_handler(
         Ok(id) => id,
         Err(response) => return *response,
     };
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = Connection::open(path).map_err(|error| attachment_db_error(&error))?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|error| attachment_db_error(&error))?;
-        let (mime, filename, size) = conn
+    // The download stream reads the blob after the metadata query. Run the
+    // metadata query through `attachment_result`, which bootstraps a
+    // pre-upgrade workspace before any attachment SQL; the stream then opens
+    // a fresh read connection on the migrated graph.
+    let (mime, filename, size) = match attachment_result(path.clone(), move |conn| {
+        let row = conn
             .query_row(
                 "SELECT a.mime,a.filename,a.size_bytes
                  FROM attachment a
@@ -1007,16 +1008,22 @@ async fn download_attachment_handler(
             .optional()
             .map_err(|error| attachment_db_error(&error))?
             .ok_or_else(|| Box::new(not_found()))?;
-        Ok::<_, Box<Response>>((mime, filename, size, conn))
+        Ok::<_, Box<Response>>(row)
     })
-    .await;
-    let (mime, filename, size, conn) = match result {
-        Ok(Ok(row)) => row,
-        Ok(Err(response)) => return *response,
-        Err(error) => {
-            error!("attachment download task panicked: {error}");
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-        }
+    .await
+    {
+        Ok(row) => row,
+        Err(response) => return *response,
+    };
+    let conn = match Connection::open(path)
+        .and_then(|conn| {
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            Ok(conn)
+        })
+        .map_err(|error| attachment_db_error(&error))
+    {
+        Ok(conn) => conn,
+        Err(response) => return *response,
     };
     let content_type = HeaderValue::from_str(&mime)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
