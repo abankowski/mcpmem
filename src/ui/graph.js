@@ -54,14 +54,15 @@
   const OAUTH_CLIENT_ID = "mcpmem-graph-ui";
   const OAUTH_TOKEN_KEY = "mcpmem_graph_access";
   const OAUTH_VERIFIER_KEY = "mcpmem_graph_verifier";
+  const OAUTH_RETURN_KEY = "mcpmem_graph_attachment_return";
   // The client is seeded with "{public_url}/ui" and /oauth/authorize compares
   // redirect_uri byte-for-byte, so this derives the redirect from the page's
   // own path: a path-prefixed --public-url must not lose its prefix.
   const OAUTH_REDIRECT = location.origin + location.pathname.replace(/\/+$/, "");
 
   let token = readHashToken()
-    || sessionStorage.getItem("mcpmem_token")
     || sessionStorage.getItem(OAUTH_TOKEN_KEY)
+    || sessionStorage.getItem("mcpmem_token")
     || "";
   if (readHashToken()) {
     sessionStorage.setItem("mcpmem_token", token);
@@ -85,19 +86,26 @@
   function oauthAdvertised(res) {
     return (res.headers.get("WWW-Authenticate") || "").includes("resource_metadata");
   }
-  async function beginOAuth(generation, isActive) {
+  async function beginOAuth(generation, isActive, scopes = "graph-read", flow = "graph") {
     const verifier = randomVerifier();
     sessionStorage.setItem(OAUTH_VERIFIER_KEY, verifier);
     const params = new URLSearchParams({
       response_type: "code",
       client_id: OAUTH_CLIENT_ID,
       redirect_uri: OAUTH_REDIRECT,
-      scope: "graph-read",
-      state: "graph",
+      scope: scopes,
+      state: flow,
       code_challenge_method: "S256",
       code_challenge: await pkceChallenge(verifier),
     });
-    if (isCurrent(generation) && isActive()) location.href = "/oauth/authorize?" + params;
+    if (!isCurrent(generation) || !isActive()) return;
+    if (flow === "attachments" && selected) {
+      sessionStorage.setItem(OAUTH_RETURN_KEY, JSON.stringify({
+        workspaceId: workspace.id, entityName: selected.id, offset: browse.offset,
+        limit: browse.limit, query: browse.query, entityType: browse.entityType,
+      }));
+    }
+    location.href = "/oauth/authorize?" + params;
   }
   async function completeOAuth() {
     const params = new URLSearchParams(location.search);
@@ -143,7 +151,8 @@
   let totalStats = null;
   let selected = null, hover = null, pinnedDrag = null;
   let alpha = 0, raf = null, busyReq = false;
-  const workspace = { id: null, generation: 0 };
+  const workspace = { id: null, role: null, generation: 0 };
+  let pendingInspector = null;
   const activeRequests = new Set();
   let workspaceListRequest = null;
   const isCurrent = (generation) => generation === workspace.generation;
@@ -236,12 +245,21 @@
   function selectWorkspace(id) {
     if (workspace.id === id) return;
     workspace.id = id;
+    workspace.role = [...$("workspace").options].find((option) => option.value === id)?.dataset.role || null;
     workspace.generation++;
     for (const controller of activeRequests) controller.abort();
     activeRequests.clear();
     workspaceListRequest = null;
     resetGraphView();
     $("workspace").value = id || "";
+    if (pendingInspector?.workspaceId === id) {
+      browse.offset = Number.isSafeInteger(pendingInspector.offset) && pendingInspector.offset >= 0 ? pendingInspector.offset : 0;
+      browse.limit = Number.isSafeInteger(pendingInspector.limit) && pendingInspector.limit > 0 ? Math.min(1000, pendingInspector.limit) : browse.limit;
+      browse.query = pendingInspector.query || "";
+      browse.entityType = pendingInspector.entityType || "";
+      $("search").value = browse.query;
+      $("typeFilter").value = browse.entityType;
+    }
     if (id) load();
     else overlay("Select a workspace", "Choose a workspace to view its graph.");
   }
@@ -289,12 +307,15 @@
         const option = document.createElement("option");
         option.value = entry.workspaceId;
         option.textContent = entry.name;
+        option.dataset.role = entry.role;
         picker.append(option);
       }
       picker.disabled = false;
       if (initial) {
         const savedDefault = workspaces.find((entry) => entry.isDefault);
-        if (savedDefault) selectWorkspace(savedDefault.workspaceId);
+        const resume = pendingInspector && workspaces.find((entry) => entry.workspaceId === pendingInspector.workspaceId);
+        if (resume) selectWorkspace(resume.workspaceId);
+        else if (savedDefault) selectWorkspace(savedDefault.workspaceId);
         else overlay("Select a workspace", "No saved default. Choose a workspace to view its graph.");
       } else if (workspace.id && !workspaces.some((entry) => entry.workspaceId === workspace.id)) {
         selectWorkspace(null);
@@ -462,6 +483,15 @@
     totalStats = data.stats || totalStats;
 
     selectNode(null);
+    if (pendingInspector?.workspaceId === workspace.id) {
+      const resume = pendingInspector;
+      pendingInspector = null;
+      const node = nodeById.get(resume.entityName);
+      if (node) {
+        selectNode(node);
+        requestAttachmentConsent(false);
+      }
+    }
     updateStats(); updatePager();
     if (!nodes.length) {
       overlay(browse.query ? "No matches" : "Empty graph",
@@ -828,8 +858,345 @@
   const zoomCenter = (f) => zoomAt(cv.width / dpr / 2, cv.height / dpr / 2, f);
 
   // ── Inspector ──────────────────────────────────────────────────────────────
+  const attachmentRequests = new Set();
+  let attachmentGeneration = 0;
+  let attachmentNode = null;
+  let attachmentConsentGranted = false;
+  let attachmentRows = [];
+  let attachmentListRequest = null;
+  let attachmentPageRequest = null;
+  let attachmentPoll = null;
+  let attachmentViewer = null;
+
+  function attachmentContext() {
+    return {
+      node: selected, workspaceId: workspace.id,
+      workspaceGeneration: workspace.generation, generation: attachmentGeneration,
+    };
+  }
+  function currentAttachment(ctx) {
+    return ctx && selected === ctx.node && workspace.id === ctx.workspaceId
+      && isCurrent(ctx.workspaceGeneration) && attachmentGeneration === ctx.generation;
+  }
+  function attachmentRequest() {
+    const controller = beginRequest();
+    attachmentRequests.add(controller);
+    return controller;
+  }
+  function finishAttachmentRequest(controller) {
+    attachmentRequests.delete(controller);
+    activeRequests.delete(controller);
+  }
+  function attachmentUrl(ctx, id, suffix = "") {
+    return "/ui/attachments" + (id == null ? "" : "/" + encodeURIComponent(id) + suffix)
+      + "?" + new URLSearchParams({ workspaceId: ctx.workspaceId });
+  }
+  function attachmentFetch(path, options = {}) {
+    const headers = { ...(options.headers || {}) };
+    if (token) headers.Authorization = "Bearer " + token;
+    return fetch(path, { ...options, headers });
+  }
+  const canWriteAttachments = () => workspace.role === "owner" || workspace.role === "writer";
+  function renderAttachmentPermissions() {
+    $("attEnable").hidden = attachmentConsentGranted;
+    $("attControls").hidden = !attachmentConsentGranted || !canWriteAttachments();
+    $("attConsentNote").hidden = attachmentConsentGranted && canWriteAttachments();
+    $("attConsentNote").textContent = attachmentConsentGranted
+      ? "This workspace is read-only. You can view and download attachments."
+      : "Attachment access needs separate consent.";
+  }
+  function attachmentMessage(text) {
+    $("attMessage").textContent = text || "";
+    $("attMessage").hidden = !text;
+  }
+  function cancelAttachmentPanel() {
+    attachmentGeneration++;
+    clearTimeout(attachmentPoll);
+    attachmentPoll = null;
+    for (const controller of attachmentRequests) controller.abort();
+    attachmentRequests.clear();
+    attachmentListRequest = null;
+    attachmentPageRequest = null;
+    attachmentNode = null;
+    attachmentRows = [];
+    attachmentViewer = null;
+    $("attList").textContent = "";
+    $("attViewer").hidden = true;
+    $("attFile").value = "";
+    $("attUpload").disabled = false;
+    attachmentMessage("");
+  }
+  async function attachmentFailure(res, ctx, promptForConsent = false) {
+    const challenge = res.headers.get("WWW-Authenticate") || "";
+    const needsScope = res.status === 403 && challenge.includes('scope="attachments"');
+    if (promptForConsent && (needsScope || res.status === 401) && oauthAdvertised(res)) {
+      await beginOAuth(ctx.workspaceGeneration, () => currentAttachment(ctx),
+        "graph-read attachments", "attachments");
+      return;
+    }
+    const detail = await res.text().catch(() => "");
+    if (!currentAttachment(ctx)) return;
+    if (needsScope) {
+      attachmentConsentGranted = false;
+      attachmentRows = [];
+      renderAttachmentPermissions();
+      renderAttachmentRows(ctx);
+      attachmentMessage("The attachments scope is required. Select Enable attachments to request consent.");
+    } else if (res.status === 403) {
+      attachmentMessage("Attachment access is denied in this workspace. " + detail);
+    } else if (res.status === 401) {
+      attachmentMessage("Sign in with an attachments-enabled bearer token.");
+    } else if (res.status === 409) {
+      attachmentMessage("This entity already has a file with that name. " + detail);
+    } else {
+      attachmentMessage("Attachment request failed (" + res.status + "). " + detail);
+    }
+  }
+  function scheduleAttachmentPoll(ctx) {
+    clearTimeout(attachmentPoll);
+    attachmentPoll = null;
+    if (!attachmentRows.some((row) => row.status === "uploaded" || row.status === "extracting")) return;
+    attachmentPoll = setTimeout(() => {
+      attachmentPoll = null;
+      if (currentAttachment(ctx)) loadAttachmentList(ctx);
+    }, 1500);
+  }
+  async function loadAttachmentList(ctx, promptForConsent = false) {
+    if (!currentAttachment(ctx)) return;
+    clearTimeout(attachmentPoll);
+    attachmentPoll = null;
+    if (attachmentListRequest) attachmentListRequest.abort();
+    const controller = attachmentRequest();
+    attachmentListRequest = controller;
+    const current = () => currentAttachment(ctx) && attachmentListRequest === controller && !controller.signal.aborted;
+    try {
+      const params = new URLSearchParams({ workspaceId: ctx.workspaceId, entityName: ctx.node.id });
+      const res = await attachmentFetch("/ui/attachments?" + params, { signal: controller.signal });
+      if (!current()) return;
+      if (!res.ok) {
+        await attachmentFailure(res, ctx, promptForConsent);
+        return;
+      }
+      const data = await res.json();
+      if (!current()) return;
+      attachmentConsentGranted = true;
+      renderAttachmentPermissions();
+      attachmentRows = data.attachments;
+      renderAttachmentRows(ctx);
+    } catch (e) {
+      if (current() && e.name !== "AbortError") attachmentMessage("Attachment list failed: " + e.message);
+    } finally {
+      finishAttachmentRequest(controller);
+      if (attachmentListRequest === controller) {
+        attachmentListRequest = null;
+        if (currentAttachment(ctx)) scheduleAttachmentPoll(ctx);
+      }
+    }
+  }
+  function requestAttachmentConsent(promptForConsent = true) {
+    if (!selected || !workspace.id) return;
+    attachmentNode = selected;
+    $("attList").textContent = "Loading attachments…";
+    loadAttachmentList(attachmentContext(), promptForConsent);
+  }
+  function attachmentButton(label, action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", action);
+    return button;
+  }
+  function renderAttachmentRows(ctx) {
+    const list = $("attList");
+    list.textContent = "";
+    if (!attachmentRows.length) {
+      list.textContent = "No attachments.";
+      attachmentViewer = null;
+      renderAttachmentViewer();
+      return;
+    }
+    if (attachmentViewer && !attachmentRows.some((row) => row.attachmentId === attachmentViewer.id && row.status === "ready")) {
+      attachmentViewer = null;
+      renderAttachmentViewer();
+    }
+    for (const row of attachmentRows) {
+      const item = document.createElement("div");
+      item.className = "attach-row";
+      const name = document.createElement("div");
+      name.className = "attach-name";
+      name.textContent = row.filename;
+      const details = document.createElement("div");
+      details.className = "attach-details";
+      const status = document.createElement("span");
+      status.className = "attach-badge" + (row.status === "ready" ? " ready" : row.status === "error" ? " error" : "");
+      status.textContent = row.status;
+      details.append(status);
+      if (row.errorStage || row.lastError) {
+        const error = document.createElement("span");
+        error.className = "attach-badge error";
+        error.textContent = [row.errorStage, row.lastError].filter(Boolean).join(": ");
+        details.append(error);
+      }
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = `${fmt(row.sizeBytes)} bytes · ${fmt(row.pageCount)} pages`;
+      details.append(meta);
+      const actions = document.createElement("div");
+      actions.className = "attach-row-actions";
+      if (row.status === "ready" && row.pageCount > 0) {
+        actions.append(attachmentButton("Read pages", () => openAttachmentViewer(ctx, row)));
+      }
+      actions.append(attachmentButton("Download", () => downloadAttachment(ctx, row)));
+      if (canWriteAttachments()) {
+        actions.append(attachmentButton("Delete", () => deleteAttachment(ctx, row)));
+      }
+      item.append(name, details, actions);
+      list.append(item);
+    }
+  }
+  async function uploadAttachment(ctx) {
+    if (!currentAttachment(ctx)) return;
+    if (!canWriteAttachments()) { attachmentMessage("This workspace is read-only. Attachment uploads need writer or owner access."); return; }
+    const input = $("attFile");
+    const file = input.files && input.files[0];
+    if (!file) { attachmentMessage("Choose a file to upload."); return; }
+    attachmentMessage("");
+    const controller = attachmentRequest();
+    const originalGeneration = attachmentGeneration;
+    $("attUpload").disabled = true;
+    try {
+      const params = new URLSearchParams({ workspaceId: ctx.workspaceId, entityName: ctx.node.id, filename: file.name });
+      const res = await attachmentFetch("/ui/attachments?" + params, {
+        method: "POST", headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file, signal: controller.signal,
+      });
+      if (!res.ok) {
+        await attachmentFailure(res, ctx, true);
+        return;
+      }
+      const uploaded = await res.json();
+      if (!currentAttachment(ctx) || originalGeneration !== attachmentGeneration) return;
+      input.value = "";
+      attachmentMessage("Upload started for " + uploaded.filename + ".");
+      await loadAttachmentList(ctx);
+    } catch (e) {
+      if (currentAttachment(ctx) && e.name !== "AbortError") attachmentMessage("Upload failed: " + e.message);
+    } finally {
+      finishAttachmentRequest(controller);
+      $("attUpload").disabled = false;
+    }
+  }
+  async function downloadAttachment(ctx, row) {
+    if (!currentAttachment(ctx)) return;
+    const controller = attachmentRequest();
+    try {
+      const res = await attachmentFetch(attachmentUrl(ctx, row.attachmentId, "/download"), { signal: controller.signal });
+      if (!currentAttachment(ctx)) return;
+      if (!res.ok) {
+        await attachmentFailure(res, ctx, true);
+        return;
+      }
+      const blob = await res.blob();
+      if (!currentAttachment(ctx)) return;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = row.filename;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (e) {
+      if (currentAttachment(ctx) && e.name !== "AbortError") attachmentMessage("Download failed: " + e.message);
+    } finally {
+      finishAttachmentRequest(controller);
+    }
+  }
+  async function deleteAttachment(ctx, row) {
+    if (!currentAttachment(ctx)) return;
+    if (!canWriteAttachments()) { attachmentMessage("This workspace is read-only. Attachment deletes need writer or owner access."); return; }
+    if (!window.confirm("Delete " + row.filename + " from this entity?")) return;
+    attachmentMessage("");
+    const controller = attachmentRequest();
+    try {
+      const res = await attachmentFetch(attachmentUrl(ctx, row.attachmentId), {
+        method: "DELETE", signal: controller.signal,
+      });
+      if (!res.ok) {
+        await attachmentFailure(res, ctx, true);
+        return;
+      }
+      if (currentAttachment(ctx)) await loadAttachmentList(ctx);
+    } catch (e) {
+      if (currentAttachment(ctx) && e.name !== "AbortError") attachmentMessage("Delete failed: " + e.message);
+    } finally {
+      finishAttachmentRequest(controller);
+    }
+  }
+  function openAttachmentViewer(ctx, row) {
+    if (!currentAttachment(ctx)) return;
+    attachmentViewer = { id: row.attachmentId, filename: row.filename, page: 1, offset: 0, accum: "" };
+    loadAttachmentPage(ctx);
+  }
+  async function loadAttachmentPage(ctx) {
+    if (!currentAttachment(ctx) || !attachmentViewer) return;
+    if (attachmentPageRequest) attachmentPageRequest.abort();
+    const controller = attachmentRequest();
+    attachmentPageRequest = controller;
+    const viewer = attachmentViewer;
+    $("attViewName").textContent = viewer.filename;
+    $("attPageLabel").textContent = "Page " + viewer.page + "…";
+    if (!viewer.accum) $("attPageText").textContent = "Loading…";
+    $("attPrevPage").disabled = viewer.page <= 1;
+    $("attNextPage").disabled = true;
+    $("attMoreText").hidden = true;
+    $("attViewer").hidden = false;
+    try {
+      const params = new URLSearchParams({ workspaceId: ctx.workspaceId, page: String(viewer.page), offset: String(viewer.offset), maxChars: "4096" });
+      const res = await attachmentFetch("/ui/attachments/" + encodeURIComponent(viewer.id) + "/pages?" + params, {
+        signal: controller.signal,
+      });
+      if (!currentAttachment(ctx) || attachmentViewer !== viewer) return;
+      if (!res.ok) {
+        attachmentPageRequest = null;
+        finishAttachmentRequest(controller);
+        await attachmentFailure(res, ctx, true);
+        renderAttachmentViewer();
+        return;
+      }
+      const data = await res.json();
+      if (!currentAttachment(ctx) || attachmentViewer !== viewer) return;
+      const accumulated = (viewer.offset === 0 ? "" : viewer.accum + "\n") + data.text;
+      $("attPageText").textContent = data.eof ? accumulated : accumulated + "\n…";
+      $("attPageLabel").textContent = "Page " + data.page;
+      $("attNextPage").disabled = data.eof;
+      if (!data.eof && data.nextOffset > data.offset) $("attMoreText").hidden = false;
+      attachmentViewer = { ...viewer, offset: data.offset, nextOffset: data.nextOffset, accum: accumulated };
+    } catch (e) {
+      if (currentAttachment(ctx) && attachmentViewer === viewer && e.name !== "AbortError") {
+        attachmentMessage("Page read failed: " + e.message);
+        renderAttachmentViewer();
+      }
+      attachmentPageRequest = null;
+      finishAttachmentRequest(controller);
+    }
+  }
+  function renderAttachmentViewer() {
+    const hasViewer = attachmentViewer && attachmentRows.some((row) => row.attachmentId === attachmentViewer.id && row.status === "ready");
+    if (!hasViewer) {
+      attachmentViewer = null;
+      $("attViewer").hidden = true;
+      return;
+    }
+    $("attPageText").textContent = attachmentViewer.offset ? "Page continues…" : "Loading…";
+  }
   function selectNode(n) {
+    if (selected !== n) cancelAttachmentPanel();
     selected = n;
+    if (n && attachmentConsentGranted && attachmentNode !== n) {
+      attachmentNode = n;
+      loadAttachmentList(attachmentContext());
+    }
     const ins = $("inspector");
     if (!n) { ins.classList.remove("show"); $("zoom").classList.remove("shift"); requestDraw(); return; }
     $("insName").textContent = n.id;
@@ -940,10 +1307,39 @@
   $("insExpand").addEventListener("click", () => selected && expand(selected));
   $("insIsolate").addEventListener("click", () => selected && isolate(selected));
   $("insDismiss").addEventListener("click", () => selected && dismiss(selected));
+  $("attEnable").addEventListener("click", () => requestAttachmentConsent(true));
+  $("attUpload").addEventListener("click", () => {
+    const ctx = attachmentContext();
+    if (!currentAttachment(ctx)) return;
+    if (attachmentViewer) { attachmentViewer = null; $("attViewer").hidden = true; }
+    uploadAttachment(ctx);
+  });
+  $("attViewClose").addEventListener("click", () => {
+    const ctx = attachmentContext();
+    if (!currentAttachment(ctx)) return;
+    attachmentViewer = null;
+    $("attViewer").hidden = true;
+  });
+  const attachmentPageStep = (delta) => {
+    const ctx = attachmentContext();
+    if (!currentAttachment(ctx) || !attachmentViewer) return;
+    if (delta < 0 && attachmentViewer.page <= 1) return;
+    attachmentViewer = { ...attachmentViewer, page: attachmentViewer.page + delta, offset: 0, accum: "" };
+    loadAttachmentPage(ctx);
+  };
+  $("attPrevPage").addEventListener("click", () => attachmentPageStep(-1));
+  $("attNextPage").addEventListener("click", () => attachmentPageStep(1));
+  $("attMoreText").addEventListener("click", () => {
+    const ctx = attachmentContext();
+    if (!currentAttachment(ctx) || !attachmentViewer || typeof attachmentViewer.nextOffset !== "number") return;
+    attachmentViewer = { ...attachmentViewer, offset: attachmentViewer.nextOffset };
+    loadAttachmentPage(ctx);
+  });
   $("ovGo").addEventListener("click", () => {
     token = $("ovToken").value.trim();
     if (!token) return;
     sessionStorage.setItem("mcpmem_token", token);
+    sessionStorage.removeItem(OAUTH_TOKEN_KEY);
     selectWorkspace(null);
     loadWorkspaces(true);
   });
@@ -954,9 +1350,18 @@
 
   resize();
   (async function boot() {
-    if (new URLSearchParams(location.search).has("code")) {
+    const callback = new URLSearchParams(location.search);
+    if (callback.has("code")) {
       // Exchange the provider's code before the first workspace request.
       if (!await completeOAuth()) return;
+      if (callback.get("state") === "attachments") {
+        try {
+          pendingInspector = JSON.parse(sessionStorage.getItem(OAUTH_RETURN_KEY));
+        } catch {
+          pendingInspector = null;
+        }
+        sessionStorage.removeItem(OAUTH_RETURN_KEY);
+      }
     }
     setBusy(false);
     loadWorkspaces(true);
