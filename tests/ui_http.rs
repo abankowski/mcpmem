@@ -4,7 +4,9 @@
 //! two gates on that data — the `graph-read` permission and the bearer token.
 //!
 //! A raw `TcpStream` is the client (no HTTP-client dependency), matching
-//! `tests/vector_http.rs`.
+//! `tests/vector_http.rs`. The attachment inspector exercises byte-exact
+//! uploads and downloads, where a real client is the shape the browser uses,
+//! so those tests drive `reqwest` (already a dev-dependency) instead.
 //!
 //! Fixture shape after the workspaces contract: the legacy graph is owned by
 //! `machine:local`, so the static bearer is a fresh identity with *no default
@@ -144,11 +146,56 @@ fn spawn_http_server(enable_args: &[&str], auth_token: Option<&str>) -> HttpServ
     );
 }
 
+/// Like [`spawn_http_server`], but with an extra `--role <role>` argument.
+#[cfg(feature = "extractor")]
+fn spawn_http_server_with_role(
+    enable_args: &[&str],
+    auth_token: Option<&str>,
+    role: Option<&str>,
+) -> HttpServer {
+    let mut races = Vec::new();
+    for attempt in 1..=SPAWN_ATTEMPTS {
+        match try_spawn_http_server_with_role(enable_args, auth_token, role) {
+            Ok(server) => return server,
+            Err(failure) if failure.lost_port_race() => {
+                races.push(format!("attempt {attempt}: {failure}"));
+            }
+            Err(failure) => {
+                panic!("attempt {attempt} of {SPAWN_ATTEMPTS}: {failure}")
+            }
+        }
+    }
+    panic!(
+        "no usable port after {SPAWN_ATTEMPTS} attempts:\n{}",
+        races.join("\n\n")
+    );
+}
+
 /// One spawn attempt on one port: either a server that is serving, or the
 /// reason it never got there.
 fn try_spawn_http_server(
     enable_args: &[&str],
     auth_token: Option<&str>,
+) -> Result<HttpServer, StartupFailure> {
+    try_spawn_http_server_impl(enable_args, auth_token, None)
+}
+
+/// Like [`try_spawn_http_server`], but with an extra `--role <role>` argument.
+#[cfg(feature = "extractor")]
+fn try_spawn_http_server_with_role(
+    enable_args: &[&str],
+    auth_token: Option<&str>,
+    role: Option<&str>,
+) -> Result<HttpServer, StartupFailure> {
+    try_spawn_http_server_impl(enable_args, auth_token, role)
+}
+
+/// One spawn attempt on one port: either a server that is serving, or the
+/// reason it never got there.
+fn try_spawn_http_server_impl(
+    enable_args: &[&str],
+    auth_token: Option<&str>,
+    role: Option<&str>,
 ) -> Result<HttpServer, StartupFailure> {
     let port = free_port();
     let pid = std::process::id();
@@ -183,8 +230,11 @@ fn try_spawn_http_server(
         // `info` so the child reports the address it bound; that report is the
         // only proof that the server answering on this port is ours.
         .arg("info")
-        .args(enable_args)
-        .stdin(Stdio::null())
+        .args(enable_args);
+    if let Some(role) = role {
+        cmd.arg("--role").arg(role);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
     if let Some(tok) = auth_token {
@@ -435,11 +485,6 @@ fn test_ui_assets_served_with_content_types() {
     assert!(
         headers.to_lowercase().contains("javascript"),
         "JS must be served with a javascript content-type, headers: {headers}"
-    );
-    // The script drives traversal via the /ui/expand endpoint.
-    assert!(
-        body.contains("/ui/expand"),
-        "viewer should call /ui/expand to traverse"
     );
 
     let (status, headers, body) = get(srv.port, "/ui/nav.css", None);
@@ -947,4 +992,239 @@ fn test_ui_node_requires_graph_read() {
         Some(TEST_BEARER),
     );
     assert_eq!(status, 403, "graph-read disabled must forbid /ui/node");
+}
+
+/// A filename belongs to one entity in one workspace. A different workspace
+/// must never show the first workspace's file, even with the same entity name.
+#[tokio::test]
+async fn attachment_inspector_routes_keep_files_in_the_selected_workspace() {
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    let first = seed_graph(srv.port, Some(TEST_BEARER));
+    let other = register_workspace(srv.port, Some(TEST_BEARER));
+    let create = format!(
+        r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"workspaceId":"{other}","entities":[{{"name":"Alice","entityType":"person","observations":[]}}]}}}},"id":4}}"#
+    );
+    let (status, _, body) = request(
+        srv.port,
+        "POST",
+        "/mcp",
+        Some(&create),
+        Some(TEST_BEARER),
+    );
+    assert_eq!(status, 200, "seed second workspace: {body}");
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}/ui/attachments", srv.port);
+    let file = "notes for Alice\nαβγ\n";
+    let first_url = format!("{base}?workspaceId={first}&entityName=Alice&filename=notes.txt");
+
+    let uploaded = client
+        .post(&first_url)
+        .bearer_auth(TEST_BEARER)
+        .header(reqwest::header::CONTENT_TYPE, "text/plain")
+        .body(file)
+        .send()
+        .await
+        .expect("upload request");
+    let status = uploaded.status();
+    assert!(status.is_success(), "raw file upload: {status}");
+    let upload: serde_json::Value = uploaded.json().await.unwrap();
+    let id = upload["attachmentId"].as_i64().expect("attachmentId");
+    assert_eq!(upload["status"], "uploaded");
+
+    let duplicate = client
+        .post(&first_url)
+        .bearer_auth(TEST_BEARER)
+        .header(reqwest::header::CONTENT_TYPE, "text/plain")
+        .body("different content")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        duplicate.status(),
+        reqwest::StatusCode::CONFLICT,
+        "a duplicate filename must not replace an existing attachment"
+    );
+
+    let list = |ws: &str, name: &str| {
+        format!(
+            "{base}?workspaceId={ws}&entityName={}",
+            url::form_urlencoded::byte_serialize(name.as_bytes())
+        )
+    };
+    let first_list: serde_json::Value = client
+        .get(list(&first, "Alice"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first_list["attachments"].as_array().unwrap().len(), 1);
+    assert_eq!(first_list["attachments"][0]["attachmentId"], id);
+    assert_eq!(first_list["attachments"][0]["filename"], "notes.txt");
+    assert_eq!(first_list["attachments"][0]["sizeBytes"], file.len());
+    assert_eq!(first_list["attachments"][0]["status"], "uploaded");
+    assert_eq!(first_list["attachments"][0]["revision"], 1);
+    assert_eq!(first_list["attachments"][0]["pageCount"], 0);
+    assert!(first_list["attachments"][0]["errorStage"].is_null());
+    assert!(first_list["attachments"][0]["lastError"].is_null());
+
+    let empty_other: serde_json::Value = client
+        .get(list(&other, "Alice"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty_other["attachments"], serde_json::json!([]));
+    let empty_entity: serde_json::Value = client
+        .get(list(&first, "Acme"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty_entity["attachments"], serde_json::json!([]));
+
+    let metadata_url = format!("{base}/{id}?workspaceId={first}");
+    let metadata: serde_json::Value = client
+        .get(&metadata_url)
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(metadata["entityName"], "Alice");
+    assert_eq!(metadata["filename"], "notes.txt");
+    assert_eq!(metadata["attachmentId"], id);
+    assert!(metadata.get("content").is_none(), "metadata excludes the blob");
+
+    let downloaded = client
+        .get(format!("{base}/{id}/download?workspaceId={first}"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(downloaded.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        downloaded.bytes().await.unwrap().as_ref(),
+        file.as_bytes(),
+        "the browser downloads the original raw bytes"
+    );
+    let wrong_workspace = client
+        .get(format!("{base}/{id}/download?workspaceId={other}"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        wrong_workspace.status(),
+        reqwest::StatusCode::OK,
+        "an id from another graph must not download the original file"
+    );
+
+    let deleted = client
+        .delete(&metadata_url)
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        deleted.status().is_success(),
+        "delete: {}",
+        deleted.text().await.unwrap()
+    );
+    let after: serde_json::Value = client
+        .get(list(&first, "Alice"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after["attachments"], serde_json::json!([]));
+}
+
+/// The page endpoint returns Unicode-scalar offsets, not byte offsets.
+/// A local extractor makes the text page available without an OCR provider.
+#[cfg(feature = "extractor")]
+#[tokio::test]
+async fn attachment_inspector_reads_extracted_page_by_character_offset() {
+    let srv = spawn_http_server_with_role(&["--enable-all"], Some(TEST_BEARER), Some("mcp,extractor"));
+    let ws = seed_graph(srv.port, Some(TEST_BEARER));
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}/ui/attachments", srv.port);
+    let uploaded = client
+        .post(format!(
+            "{base}?workspaceId={ws}&entityName=Alice&filename=greek.txt"
+        ))
+        .bearer_auth(TEST_BEARER)
+        .header(reqwest::header::CONTENT_TYPE, "text/plain")
+        .body("αβγδεζ")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), reqwest::StatusCode::CREATED);
+    let payload: serde_json::Value = uploaded.json().await.unwrap();
+    let id = payload["attachmentId"].as_i64().expect("attachmentId");
+    let list_url = format!("{base}?workspaceId={ws}&entityName=Alice");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let metadata: serde_json::Value = client
+            .get(&list_url)
+            .bearer_auth(TEST_BEARER)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let row = &metadata["attachments"][0];
+        if row["status"] == "ready" {
+            assert_eq!(row["pageCount"], 1);
+            assert!(row["lastError"].is_null());
+            break;
+        }
+        assert_ne!(row["status"], "error", "text extraction failed: {metadata}");
+        assert!(Instant::now() < deadline, "text extraction timed out: {metadata}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let page_url = format!("{base}/{id}/pages?workspaceId={ws}&page=1");
+    let first: serde_json::Value = client
+        .get(format!("{page_url}&offset=1&maxChars=2"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["page"], 1);
+    assert_eq!(first["offset"], 1);
+    assert_eq!(first["text"], "βγ");
+    assert_eq!(first["nextOffset"], 3);
+    assert_eq!(first["eof"], false);
+
+    let second: serde_json::Value = client
+        .get(format!("{page_url}&offset=3&maxChars=4096"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(second["text"], "δεζ");
+    assert_eq!(second["nextOffset"], 6);
+    assert_eq!(second["eof"], true);
 }

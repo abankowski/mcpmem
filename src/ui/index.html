@@ -73,6 +73,33 @@
         <button id="insDismiss" class="danger" title="Remove this node from the view">Dismiss</button>
       </div>
       <div class="ins-body" id="insBody"></div>
+      <section class="attachments" id="insAttachments" aria-label="Attachments">
+        <div class="attach-heading">
+          <h2>Attachments</h2>
+          <button id="attEnable" type="button">Enable attachments</button>
+        </div>
+        <p class="meta" id="attConsentNote">Attachment access needs separate consent.</p>
+        <div class="attach-controls" id="attControls" hidden>
+          <label for="attFile">Select a text file or PDF</label>
+          <input id="attFile" type="file" accept="text/*,.txt,.md,application/pdf" />
+          <button type="button" id="attUpload">Upload file</button>
+        </div>
+        <p id="attMessage" role="alert" hidden></p>
+        <div id="attList" aria-live="polite"></div>
+        <div id="attViewer" hidden>
+          <div class="attach-view-heading">
+            <strong id="attViewName"></strong>
+            <button id="attViewClose" type="button" aria-label="Close page viewer">✕</button>
+          </div>
+          <div class="attach-page-nav">
+            <button id="attPrevPage" type="button">Previous</button>
+            <span id="attPageLabel"></span>
+            <button id="attNextPage" type="button">Next</button>
+          </div>
+          <pre id="attPageText"></pre>
+          <button id="attMoreText" type="button" hidden>Show more text</button>
+        </div>
+      </section>
     </aside>
 
     <div id="overlay">

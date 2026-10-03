@@ -298,7 +298,7 @@ async function removePrincipal(p) {
 function scopesPicker(selected) {
   const wrap = document.createElement("div");
   wrap.className = "scopes";
-  const all = ["graph-read", "graph-write", "vectors", "code", "admin"];
+  const all = ["graph-read", "graph-write", "attachments", "vectors", "code", "admin"];
   for (const slug of all) {
     const label = document.createElement("label");
     const box = document.createElement("input");
