@@ -40,6 +40,11 @@ use mcpmem_extractor::{
 /// per page, with distinct text on each page.
 static PDF: &[u8] = include_bytes!("fixtures/two-page-ocr.pdf");
 
+/// One-page A4 fixture with a fractional MediaBox (`595.276 x 841.89`):
+/// pdfinfo prints the fractional size line the integer parser used to
+/// refuse.
+static A4: &[u8] = include_bytes!("fixtures/a4-fractional.pdf");
+
 fn limits() -> AttachmentLimits {
     AttachmentLimits {
         max_bytes: 52_428_800,
@@ -1014,6 +1019,42 @@ fn slow_vision_server(hold: Duration) -> String {
         }
     });
     format!("http://{addr}/v1/chat/completions")
+}
+
+#[cfg(feature = "extractor")]
+#[test]
+fn a_fractional_page_size_pdf_extracts_from_real_poppler() {
+    let _guard = ENV_LOCK.lock();
+    // pdfinfo prints A4 as "595.276 x 841.89 pts". The pixel gate must
+    // parse fractional boxes, or the most common PDF shape in existence
+    // dead-letters at the render gate.
+    let dir = tempfile::tempdir().unwrap();
+    let (path, entity_id) = test_graph(&dir);
+    let attachment = upload(&path, entity_id, "a4.pdf", "application/pdf", A4);
+
+    let vision = FakeVision::start();
+    let provider = VisionOcr::new(VisionSettings {
+        endpoint: vision.url.clone(),
+        api_key: "vision-key".into(),
+        model: "gpt-4o-mini".into(),
+    })
+    .unwrap();
+    let worker = ExtractionWorker::new(&path, Some(Arc::new(provider)));
+    let report = worker.run_once(now_us()).unwrap();
+    assert_eq!(report.claimed, 1);
+    assert_eq!(report.committed, 1, "the A4 page must commit");
+    assert_eq!(vision.recorded().len(), 1, "one vision call for one page");
+
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(attachment_status(&path, attachment), "ready");
+    let pages: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM attachment_text WHERE attachment_id=?1",
+            [attachment],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pages, 1, "the fractional PDF produces one page row");
 }
 
 #[cfg(feature = "extractor")]

@@ -107,6 +107,12 @@ const ATTACHMENT_STREAM_CHUNK: usize = 64 * 1024;
 /// before it opens a spool file when the bound is full.
 pub const MAX_CONCURRENT_ATTACHMENT_SPOOLS: usize = 4;
 
+/// How long one spool may wait for the next body frame. A client trickling
+/// a frame slower than this holds its spool permit without progress, so an
+/// idle upload releases its slot; the HTTP answer is 408 and the client
+/// retries later.
+const SPOOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The `Server` response header carried on every HTTP response,
 /// `mcpmem <version>`. An operator can identify the running build from any
 /// reply — `curl -i http://host:port/` answers before any MCP handshake.
@@ -1122,7 +1128,17 @@ async fn spool_body(
     let mut count = 0_i64;
     let mut hasher = Sha256::new();
     let mut frames = Box::pin(body.into_data_stream());
-    while let Some(frame) = frames.next().await {
+    while let Some(frame) = match tokio::time::timeout(SPOOL_IDLE_TIMEOUT, frames.next()).await {
+        Ok(frame) => frame,
+        Err(_) => {
+            // An idle body must release its spool permit, or four slow
+            // trickles would hold every slot forever and block all uploads.
+            return Err(Box::new(json_error(
+                StatusCode::REQUEST_TIMEOUT,
+                "attachment upload idle timeout; retry later",
+            )));
+        }
+    } {
         let bytes = match frame {
             Ok(bytes) => bytes,
             Err(error) => {
