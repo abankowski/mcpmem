@@ -151,7 +151,7 @@ T4 and T5 never edit each other's crates. T6 and T8 never edit each other's mani
 
 - [ ] Add a test that splits page 1 into at least two segments and includes page 2. Embed the ordered segments with the existing worker. Assert that persisted `chunk_vector.chunk_index` matches each `attachment_chunk.chunk_index`. Change the revision between claim and commit; assert that `commit_chunks` refuses the stale write. Delete the attachment after claim and assert the same fence. Add a blank page with zero segments; assert zero embedding provider calls, a done job, and zero vectors.
 - [ ] Add the `OwnerKind::Attachment` dispatch arm in `IndexerWorker::run_once`. Read segment text, not the PDF blob or a reconstructed page. Reuse the worker's provider request, lease renewal, vector validation, retry, and dead-letter paths for non-empty segments. For zero segments, call the fenced `commit_chunks(job, now_us, Some(&[]), source)` directly. Do not call `embed_texts` with an empty request. A missing or superseded attachment follows the existing bounded retry path, not a fabricated empty success.
-- [ ] Update the indexer crate README to state that attachment text is durable and rebuilds do not repeat OCR.
+- [ ] Update the indexer crate README to state that attachment text is durable and rebuilds do not repeat OCR. Correct its obsolete claim of unlimited retries: the worker dead-letters after eight attempts.
 - [ ] Run `cargo test --test indexer_worker --features indexer -- --test-threads=1` after the wave is stable. Run the same command with `--no-default-features --features indexer` to check the lean build. New revision tests must fail before the attachment fence is implemented.
 
 ## Task 6: MCP attachment tools and 50 MiB sessions
@@ -184,7 +184,7 @@ T4 and T5 never edit each other's crates. T6 and T8 never edit each other's mani
 
 ## Task 8: Vector, hybrid, semantic, and MMR search
 
-**Depends on:** T3, T5, T6. **Requirements:** R9, R13–R15, R19, R26.
+**Depends on:** T3, T5. **Requirements:** R9, R13–R15, R19, R26.
 
 **Files:** Modify `src/vector_store.rs`, `src/vector_actions.rs`, `vector_tools.json`, `tests/vector_e2e.rs`, and `tests/semantic_search.rs`.
 
@@ -214,7 +214,7 @@ T4 and T5 never edit each other's crates. T6 and T8 never edit each other's mani
 
 **Depends on:** T4, T7, T8, T9. **Requirements:** R1–R28, especially R18.
 
-**Files:** Modify `README.md`, `CHANGES.md`, `.github/workflows/ci.yml`, and `.github/workflows/release.yml`. T4 owns the extractor crate README and release scripts; coordinate the release checks without editing those files concurrently.
+**Files:** Modify `README.md`, `CHANGES.md`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `.omp/AGENTS.md`. T4 owns the extractor crate README and release scripts; coordinate the release checks without editing those files concurrently. Extend the preflight role matrix in `.omp/AGENTS.md` to include the extractor feature.
 
 - [ ] Add the complete attachment section to README in the same feature delivery. Include the 50 MiB streamed HTTP and chunked MCP protocol, the 16 MiB MCP cap, status/error stages, per-entity duplicate policy, workspace and `attachments` scope gates, Poppler installation, separate vision URL with its first-party and compatible-provider rule, and the extractor role. State the startup warning meaning: the current process lacks an extractor role and another process must run one. Name a separate extractor process as the remote-worker prerequisite. Do not claim that a warning proves a worker exists. Update CHANGES with the same behavior.
 - [ ] Add Poppler provisioning and the real-PDF fixture smoke to CI/release workflows for builds that exercise `--features extractor`. Do not raise workflow `permissions:`. The runtime dependency must be listed in the release notes even though crates.io does not package it. If a release target lacks both `pdfinfo` and `pdftoppm`, block the PDF-enabled release rather than treating the test as skipped.
