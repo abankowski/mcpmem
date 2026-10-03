@@ -1580,3 +1580,350 @@ fn identical_attribute_write_is_eventless() {
         "an empty attribute set emits no event"
     );
 }
+
+#[test]
+fn retype_updates_attachment_vector_types_without_new_embedding_work() {
+    use mcpmem_core::attachments::{AttachmentLimits, AttachmentRepository};
+    use rusqlite::params;
+    use sha2::{Digest, Sha256};
+    use std::io::Cursor;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retype.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph.create_entities(&[entity("parent")]).unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let id: i64 = conn
+        .query_row("SELECT id FROM entity WHERE name='parent'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let old_type: i64 = conn
+        .query_row("SELECT type_id FROM entity WHERE id=?1", [id], |r| r.get(0))
+        .unwrap();
+    let limits = AttachmentLimits {
+        max_bytes: 100,
+        workspace_byte_budget: 1000,
+        allow_mime: vec!["text/*".into()],
+    };
+    let digest: [u8; 32] = Sha256::digest(b"file").into();
+    let attachment = AttachmentRepository::new(&conn)
+        .store_reader(
+            id,
+            "file.txt",
+            "text/plain",
+            &mut Cursor::new(b"file"),
+            4,
+            &digest,
+            &limits,
+            100,
+        )
+        .unwrap();
+    let profiles = [uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+    for profile in profiles {
+        conn.execute("INSERT INTO ann_generation(profile_id,durable_generation,full_scan_generation) VALUES(?1,5,5)", [profile.to_string()]).unwrap();
+        conn.execute("INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source) VALUES(?1,'attachment','attachment',?2,0,?3,1,X'0000803F',100,'test')", params![profile.to_string(),attachment,old_type]).unwrap();
+    }
+    let job_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM chunk_index_job WHERE owner_kind='attachment'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let result = MutationService::new(&graph)
+        .apply(
+            MutationRequest::UpsertEntities {
+                entities: vec![Entity {
+                    entity_type: "new-type".into(),
+                    ..entity("parent")
+                }],
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+    assert!(
+        !result.changes.is_empty(),
+        "the type change must produce a change event"
+    );
+    let new_type: i64 = conn
+        .query_row("SELECT type_id FROM entity WHERE id=?1", [id], |r| r.get(0))
+        .unwrap();
+    assert_ne!(new_type, old_type);
+    for profile in profiles {
+        let row: (i64,Vec<u8>,i64) = conn.query_row("SELECT type_id,blob,owner_revision FROM chunk_vector WHERE profile_id=?1 AND owner_id=?2 AND owner_kind='attachment'",params![profile.to_string(),attachment],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(row, (new_type, vec![0, 0, 128, 63], 1));
+        let generation: (i64, Option<i64>) = conn.query_row("SELECT durable_generation,full_scan_generation FROM ann_generation WHERE profile_id=?1",[profile.to_string()],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!(generation, (6, None));
+    }
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM chunk_index_job WHERE owner_kind='attachment'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        job_count
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT status,revision FROM attachment WHERE id=?1",
+            [attachment],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        )
+        .unwrap(),
+        ("uploaded".into(), 1)
+    );
+
+    // A late graph failure rolls back both the retype and the vector refresh.
+    conn.execute_batch("CREATE TRIGGER block_type_change BEFORE UPDATE OF type_id ON chunk_vector BEGIN SELECT RAISE(ABORT, 'blocked vector refresh'); END;").unwrap();
+    assert!(
+        MutationService::new(&graph)
+            .apply(
+                MutationRequest::UpsertEntities {
+                    entities: vec![Entity {
+                        entity_type: "third-type".into(),
+                        ..entity("parent")
+                    }]
+                },
+                MutationContext::local()
+            )
+            .is_err()
+    );
+    assert_eq!(
+        conn.query_row("SELECT type_id FROM entity WHERE id=?1", [id], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        new_type
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT durable_generation FROM ann_generation WHERE profile_id=?1",
+            [profiles[0].to_string()],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        6
+    );
+}
+
+#[test]
+fn parent_delete_cascades_incomplete_sessions_and_completed_attachment_data() {
+    use mcpmem_core::attachments::{AttachmentLimits, AttachmentRepository};
+    use rusqlite::params;
+    use sha2::{Digest, Sha256};
+    use std::io::Cursor;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cascade.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph
+        .create_entities(&[entity("source"), entity("survivor")])
+        .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let source: i64 = conn
+        .query_row("SELECT id FROM entity WHERE name='source'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let survivor: i64 = conn
+        .query_row("SELECT id FROM entity WHERE name='survivor'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let limits = AttachmentLimits {
+        max_bytes: 100,
+        workspace_byte_budget: 10,
+        allow_mime: vec!["text/*".into()],
+    };
+    let hash: [u8; 32] = Sha256::digest(b"abc").into();
+    let attachments = AttachmentRepository::new(&conn);
+    let completed = attachments
+        .store_reader(
+            source,
+            "file.txt",
+            "text/plain",
+            &mut Cursor::new(b"abc"),
+            3,
+            &hash,
+            &limits,
+            100,
+        )
+        .unwrap();
+    let session = attachments
+        .begin_upload(
+            "alice",
+            source,
+            "waiting.txt",
+            "text/plain",
+            7,
+            &Sha256::digest(b"1234567").into(),
+            3_600_000_100,
+            &limits,
+        )
+        .unwrap();
+    attachments
+        .append_chunk("alice", session, 0, b"123", 100)
+        .unwrap();
+    let profile = uuid::Uuid::new_v4();
+    conn.execute("INSERT INTO ann_generation(profile_id,durable_generation,full_scan_generation) VALUES(?1,5,5)",[profile.to_string()]).unwrap();
+    conn.execute("INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation,state,lease_token,lease_epoch,lease_until_us) VALUES(?1,'attachment',?2,1,'upsert','leased',?3,1,999)",params![profile.to_string(),completed,uuid::Uuid::new_v4().to_string()]).unwrap();
+    conn.execute("INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source) VALUES(?1,'attachment','attachment',?2,0,1,1,X'0000803F',1,'test')",params![profile.to_string(),completed]).unwrap();
+    conn.execute(
+        "INSERT INTO attachment_text VALUES(?1,1,'hello',5)",
+        [completed],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO attachment_chunk VALUES(?1,0,1,0,'hello')",
+        [completed],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_source_delete BEFORE DELETE ON entity
+         WHEN old.name='source' BEGIN SELECT RAISE(ABORT,'late failure'); END;",
+    )
+    .unwrap();
+    assert!(
+        MutationService::new(&graph)
+            .apply(
+                MutationRequest::DeleteEntities {
+                    names: vec!["source".into()]
+                },
+                MutationContext::local(),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM attachment_upload WHERE entity_id=?1",
+            [source],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM attachment WHERE entity_id=?1",
+            [source],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT durable_generation FROM ann_generation WHERE profile_id=?1",
+            [profile.to_string()],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        5
+    );
+    conn.execute_batch("DROP TRIGGER reject_source_delete")
+        .unwrap();
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::DeleteEntities {
+                names: vec!["source".into()],
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+    for table in [
+        "attachment",
+        "attachment_job",
+        "attachment_text",
+        "attachment_chunk",
+        "attachment_upload",
+        "attachment_upload_chunk",
+    ] {
+        let rows: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "{table}");
+    }
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM chunk_index_job WHERE owner_kind='attachment'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM chunk_vector WHERE owner_kind='attachment'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(conn.query_row("SELECT durable_generation,full_scan_generation FROM ann_generation WHERE profile_id=?1",[profile.to_string()],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<i64>>(1)?))).unwrap(),(6,None));
+    assert!(
+        attachments
+            .begin_upload(
+                "alice",
+                survivor,
+                "free.txt",
+                "text/plain",
+                10,
+                &Sha256::digest(b"0123456789").into(),
+                3_600_000_100,
+                &limits
+            )
+            .is_ok()
+    );
+
+    let only = attachments.begin_upload(
+        "alice",
+        survivor,
+        "reserved.txt",
+        "text/plain",
+        1,
+        &Sha256::digest(b"x").into(),
+        3_600_000_100,
+        &limits,
+    );
+    assert!(
+        only.is_err(),
+        "the survivor reservation consumes the budget"
+    );
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::DeleteEntities {
+                names: vec!["survivor".into()],
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM attachment_upload", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM attachment_upload_chunk", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}

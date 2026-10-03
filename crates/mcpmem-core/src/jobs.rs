@@ -84,6 +84,8 @@ pub enum ChunkKind {
     Identity,
     Observation,
     Relation,
+    #[serde(rename = "attachment")]
+    Attachment,
 }
 
 impl ChunkKind {
@@ -92,6 +94,7 @@ impl ChunkKind {
             ChunkKind::Identity => "identity",
             ChunkKind::Observation => "observation",
             ChunkKind::Relation => "relation",
+            ChunkKind::Attachment => "attachment",
         }
     }
 }
@@ -100,6 +103,8 @@ impl ChunkKind {
 pub enum OwnerKind {
     Entity,
     Relation,
+    #[serde(rename = "attachment")]
+    Attachment,
 }
 
 impl OwnerKind {
@@ -107,6 +112,7 @@ impl OwnerKind {
         match self {
             OwnerKind::Entity => "entity",
             OwnerKind::Relation => "relation",
+            OwnerKind::Attachment => "attachment",
         }
     }
 }
@@ -296,6 +302,13 @@ impl<'a> IndexProfileRegistry<'a> {
         // upserts and tombstoned mirrors re-run as deletes, so a rebuild
         // also purges orphan chunk rows for relations that no longer exist.
         self.conn.execute("INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation) SELECT ?1,'relation',m.id,m.revision,CASE WHEN m.deleted=0 THEN 'upsert' ELSE 'delete' END FROM taxonomy_relation m", [profile.id.to_string()]).map_err(sql_error)?;
+        self.conn.execute(
+            "INSERT INTO chunk_index_job(profile_id,owner_kind,owner_id,owner_revision,operation)
+             SELECT ?1,'attachment',a.id,a.revision,'upsert' FROM attachment a
+             JOIN entity e ON e.id=a.entity_id JOIN entity_revision r ON r.entity_id=e.id
+             WHERE a.status='ready' AND e.flags=0 AND r.deleted=0",
+            [profile.id.to_string()],
+        ).map_err(sql_error)?;
         tx.commit()
     }
 
@@ -381,7 +394,7 @@ impl<'a> IndexJobRepository<'a> {
         let job = row.map(|(owner_kind,owner_id,profile,revision,operation,epoch,attempts)| -> Result<IndexJob> {
             let token = Uuid::new_v4();
             self.conn.execute("UPDATE chunk_index_job SET state='leased',lease_token=?4,lease_epoch=lease_epoch+1,lease_until_us=?5,attempts=attempts+1 WHERE profile_id=?1 AND owner_kind=?2 AND owner_id=?3", params![profile,owner_kind,owner_id,token.to_string(),until]).map_err(sql_error)?;
-            Ok(IndexJob { profile_id:parse_uuid(&profile)?,operation:match operation.as_str() { "upsert"=>IndexOperation::Upsert,"delete"=>IndexOperation::Delete,_=>return Err(MCSError::MemoryError("invalid index operation".into())) },owner_kind:match owner_kind.as_str() { "entity"=>OwnerKind::Entity,"relation"=>OwnerKind::Relation,_=>return Err(MCSError::MemoryError("invalid owner kind".into())) },owner_id,owner_revision:revision,lease:Lease {token,epoch:epoch+1,until_us:until},attempts:attempts+1 })
+            Ok(IndexJob { profile_id:parse_uuid(&profile)?,operation:match operation.as_str() { "upsert"=>IndexOperation::Upsert,"delete"=>IndexOperation::Delete,_=>return Err(MCSError::MemoryError("invalid index operation".into())) },owner_kind:match owner_kind.as_str() { "entity"=>OwnerKind::Entity,"relation"=>OwnerKind::Relation,"attachment"=>OwnerKind::Attachment,_=>return Err(MCSError::MemoryError("invalid owner kind".into())) },owner_id,owner_revision:revision,lease:Lease {token,epoch:epoch+1,until_us:until},attempts:attempts+1 })
         }).transpose()?;
         tx.commit()?;
         Ok(job)
@@ -410,12 +423,21 @@ impl<'a> IndexJobRepository<'a> {
         // snapshot serving an outdated embedding. Its next write re-enqueues
         // the owner from scratch.
         if changed == 1 && dead {
-            self.conn
+            let removed = self.conn
                 .execute(
                     "DELETE FROM chunk_vector WHERE profile_id=?1 AND owner_kind=?2 AND owner_id=?3",
                     params![job.profile_id.to_string(), job.owner_kind.as_str(), job.owner_id],
                 )
                 .map_err(sql_error)?;
+            if removed > 0 && job.owner_kind == OwnerKind::Attachment {
+                self.conn
+                    .execute(
+                        "UPDATE ann_generation SET durable_generation=durable_generation+1,
+                     full_scan_generation=NULL WHERE profile_id=?1",
+                        [job.profile_id.to_string()],
+                    )
+                    .map_err(sql_error)?;
+            }
         }
         tx.commit()?;
         Ok(changed == 1)
@@ -498,6 +520,28 @@ impl<'a> IndexJobRepository<'a> {
             _ => {
                 return Err(MCSError::InvalidParams(
                     "chunk payload does not match job operation".into(),
+                ));
+            }
+        }
+        if job.owner_kind == OwnerKind::Attachment {
+            let Some(chunk_list) = chunks else {
+                return Ok(false);
+            };
+            let expected: i64 = self
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM attachment_chunk WHERE attachment_id=?1 AND text!=''",
+                    [job.owner_id],
+                    |r| r.get(0),
+                )
+                .map_err(sql_error)?;
+            if chunk_list.len() as i64 != expected
+                || chunk_list
+                    .iter()
+                    .any(|(kind, _)| *kind != ChunkKind::Attachment)
+            {
+                return Err(MCSError::InvalidParams(
+                    "attachment chunks must match stored non-empty segments".into(),
                 ));
             }
         }
@@ -600,6 +644,16 @@ impl<'a> IndexJobRepository<'a> {
                 )
                 .optional()
                 .map_err(sql_error),
+            OwnerKind::Attachment => conn
+                .query_row(
+                    "SELECT a.revision, (a.status!='ready' OR e.flags!=0 OR r.deleted!=0)
+                     FROM attachment a JOIN entity e ON e.id=a.entity_id
+                     JOIN entity_revision r ON r.entity_id=e.id WHERE a.id=?1",
+                    [owner_id],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)),
+                )
+                .optional()
+                .map_err(sql_error),
         }
     }
 }
@@ -616,6 +670,15 @@ fn owner_type_id(conn: &Connection, owner_kind: OwnerKind, owner_id: i64) -> Res
         OwnerKind::Relation => conn
             .query_row(
                 "SELECT type_id FROM taxonomy_relation WHERE id=?1",
+                [owner_id],
+                |r| r.get(0),
+            )
+            .map_err(sql_error),
+        OwnerKind::Attachment => conn
+            .query_row(
+                "SELECT e.type_id FROM attachment a JOIN entity e ON e.id=a.entity_id
+                 JOIN entity_revision r ON r.entity_id=e.id
+                 WHERE a.id=?1 AND e.flags=0 AND r.deleted=0 AND a.status='ready'",
                 [owner_id],
                 |r| r.get(0),
             )
@@ -666,6 +729,46 @@ OR EXISTS(
   LEFT JOIN taxonomy_relation m ON m.id=v.owner_id
   WHERE v.profile_id=?1 AND v.owner_kind='relation'
     AND (m.id IS NULL OR m.deleted!=0)
+)
+OR EXISTS(
+  SELECT 1 FROM attachment a JOIN entity e ON e.id=a.entity_id
+  JOIN entity_revision r ON r.entity_id=e.id
+  LEFT JOIN chunk_index_job j ON j.profile_id=?1 AND j.owner_kind='attachment' AND j.owner_id=a.id
+  WHERE a.status='ready' AND e.flags=0 AND r.deleted=0
+    AND (j.owner_id IS NULL OR j.owner_revision!=a.revision
+      OR (j.state!='dead' AND
+          (j.state!='done'
+           OR (SELECT count(*) FROM attachment_chunk c WHERE c.attachment_id=a.id AND c.text!='')
+              != (SELECT count(*) FROM chunk_vector v WHERE v.profile_id=?1
+                  AND v.owner_kind='attachment' AND v.owner_id=a.id)))
+      OR (j.state='dead' AND EXISTS(
+            SELECT 1 FROM chunk_vector v WHERE v.profile_id=?1
+              AND v.owner_kind='attachment' AND v.owner_id=a.id)))
+)
+OR EXISTS(
+  SELECT 1 FROM attachment_chunk c JOIN attachment a ON a.id=c.attachment_id
+  JOIN entity e ON e.id=a.entity_id JOIN entity_revision r ON r.entity_id=e.id
+  JOIN chunk_index_job j ON j.profile_id=?1 AND j.owner_kind='attachment' AND j.owner_id=a.id
+  WHERE a.status='ready' AND e.flags=0 AND r.deleted=0 AND c.text!='' AND j.state!='dead'
+    AND NOT EXISTS(
+      SELECT 1 FROM chunk_vector v WHERE v.profile_id=?1
+        AND v.owner_kind='attachment' AND v.owner_id=a.id AND v.kind='attachment'
+        AND v.chunk_index=c.chunk_index AND v.owner_revision=a.revision
+        AND v.type_id=e.type_id)
+)
+OR EXISTS(
+  SELECT 1 FROM chunk_vector v
+  LEFT JOIN attachment a ON a.id=v.owner_id
+  LEFT JOIN entity e ON e.id=a.entity_id
+  LEFT JOIN entity_revision r ON r.entity_id=e.id
+  LEFT JOIN attachment_chunk c ON c.attachment_id=a.id AND c.chunk_index=v.chunk_index
+  WHERE v.profile_id=?1 AND v.owner_kind='attachment'
+    AND (a.id IS NULL OR a.status!='ready' OR e.id IS NULL OR e.flags!=0
+      OR r.deleted!=0 OR c.chunk_index IS NULL OR c.text=''
+      OR v.kind!='attachment' OR v.owner_revision!=a.revision OR v.type_id!=e.type_id)
+)
+OR EXISTS(
+  SELECT 1 FROM attachment_job j WHERE j.state IN ('pending','leased')
 )
 OR EXISTS(
   SELECT 1 FROM chunk_index_job WHERE profile_id=?1 AND state NOT IN ('done','dead')
@@ -1240,5 +1343,134 @@ mod tests {
         conn.execute("UPDATE type_dict SET count=0 WHERE id=1", [])
             .unwrap();
         assert!(!taxonomy_scan_invalid(&conn, profile, 0).unwrap());
+    }
+    #[test]
+    fn attachment_rebuild_and_full_scan_check_each_segment_and_owner() {
+        use crate::graph::name_hash;
+        let conn = Connection::open_in_memory().unwrap();
+        initialize_database(&conn).unwrap();
+        conn.execute("INSERT INTO entity(id,name_hash,name,type_id,created_us,updated_us) VALUES(1,?1,'owner',3,1,1)", [name_hash("owner")]).unwrap();
+        conn.execute("INSERT INTO entity_revision VALUES(1,1,0)", [])
+            .unwrap();
+        conn.execute("INSERT INTO attachment(id,entity_id,filename,mime,size_bytes,sha256,content,status,revision,created_us) VALUES(9,1,'file.txt','text/plain',1,zeroblob(32),X'61','ready',2,1)", []).unwrap();
+        conn.execute(
+            "INSERT INTO attachment_text VALUES(9,1,'hello world',11)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO attachment_chunk VALUES(9,0,1,0,'hello')", [])
+            .unwrap();
+        conn.execute("INSERT INTO attachment_chunk VALUES(9,1,1,1,' world')", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE attachment_job SET state='done' WHERE attachment_id=9",
+            [],
+        )
+        .unwrap();
+        let candidate = IndexProfile {
+            id: Uuid::new_v4(),
+            store_key: "default".into(),
+            provider_kind: "test".into(),
+            model: "m".into(),
+            dimensions: 2,
+            representation_version: "entity-v1".into(),
+            normalization: Normalization::None,
+            distance_metric: DistanceMetric::Cosine,
+            vector_encoding_version: "f32le-v1".into(),
+        };
+        IndexProfileRegistry::new(&conn)
+            .begin_rebuild(&candidate)
+            .unwrap();
+        assert_eq!(conn.query_row("SELECT owner_revision FROM chunk_index_job WHERE profile_id=?1 AND owner_kind='attachment' AND owner_id=9", [candidate.id.to_string()], |r| r.get::<_,i64>(0)).unwrap(), 2);
+        let queue = IndexJobRepository::new(&conn);
+        for time in 100..102 {
+            let claim = queue.claim_due(time, 10).unwrap().unwrap();
+            if claim.owner_kind == OwnerKind::Entity {
+                assert!(
+                    queue
+                        .commit_chunks(
+                            &claim,
+                            time + 1,
+                            Some(&[&(ChunkKind::Identity, &[1.0f32, 0.0])]),
+                            "test"
+                        )
+                        .unwrap()
+                );
+            } else {
+                assert_eq!(
+                    (claim.owner_kind, claim.owner_id),
+                    (OwnerKind::Attachment, 9)
+                );
+                conn.execute("UPDATE attachment SET revision=3 WHERE id=9", [])
+                    .unwrap();
+                assert!(
+                    !queue
+                        .commit_chunks(
+                            &claim,
+                            time + 1,
+                            Some(&[
+                                &(ChunkKind::Attachment, &[1.0f32, 0.0]),
+                                &(ChunkKind::Attachment, &[0.0f32, 1.0])
+                            ]),
+                            "test"
+                        )
+                        .unwrap()
+                );
+                conn.execute("UPDATE attachment SET revision=2 WHERE id=9", [])
+                    .unwrap();
+                assert!(
+                    queue
+                        .commit_chunks(
+                            &claim,
+                            time + 1,
+                            Some(&[
+                                &(ChunkKind::Attachment, &[1.0f32, 0.0]),
+                                &(ChunkKind::Attachment, &[0.0f32, 1.0])
+                            ]),
+                            "test"
+                        )
+                        .unwrap()
+                );
+            }
+        }
+        let ann = AnnGenerationRepository::new(&conn);
+        ann.verify_full_scan(candidate.id).unwrap();
+        conn.execute("DELETE FROM chunk_vector WHERE profile_id=?1 AND owner_kind='attachment' AND chunk_index=1", [candidate.id.to_string()]).unwrap();
+        assert!(
+            ann.verify_full_scan(candidate.id).is_err(),
+            "a missing second segment cannot pass the scan"
+        );
+        conn.execute("INSERT INTO chunk_vector SELECT profile_id,kind,owner_kind,owner_id,1,type_id,owner_revision,blob,created_at_us,source FROM chunk_vector WHERE owner_kind='attachment' AND chunk_index=0", []).unwrap();
+        conn.execute("UPDATE chunk_vector SET owner_revision=1 WHERE owner_kind='attachment' AND chunk_index=1", []).unwrap();
+        assert!(
+            ann.verify_full_scan(candidate.id).is_err(),
+            "a stale segment cannot pass the scan"
+        );
+        conn.execute("UPDATE chunk_vector SET owner_revision=2 WHERE owner_kind='attachment' AND chunk_index=1", []).unwrap();
+        conn.execute("INSERT INTO chunk_vector SELECT profile_id,kind,owner_kind,999,chunk_index,type_id,owner_revision,blob,created_at_us,source FROM chunk_vector WHERE owner_kind='attachment' AND chunk_index=0", []).unwrap();
+        assert!(
+            ann.verify_full_scan(candidate.id).is_err(),
+            "an orphan vector cannot pass the scan"
+        );
+        conn.execute(
+            "DELETE FROM chunk_vector WHERE owner_kind='attachment' AND owner_id=999",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO attachment_job(attachment_id,state,lease_epoch,lease_until_us,next_attempt_us,attempts)
+             VALUES(9,'pending',0,0,0,0)",
+            [],
+        ).unwrap();
+        assert!(
+            ann.verify_full_scan(candidate.id).is_err(),
+            "pending extraction cannot pass the scan"
+        );
+        conn.execute(
+            "UPDATE attachment_job SET state='done' WHERE attachment_id=9",
+            [],
+        )
+        .unwrap();
+        ann.verify_full_scan(candidate.id).unwrap();
     }
 }
