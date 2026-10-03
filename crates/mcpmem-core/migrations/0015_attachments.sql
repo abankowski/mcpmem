@@ -69,7 +69,7 @@ CREATE INDEX attachment_upload_expires ON attachment_upload(expires_us);
 CREATE TABLE attachment_upload_chunk (
     upload_id    TEXT    NOT NULL,
     chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
-    content     BLOB    NOT NULL CHECK (length(content) <= 1048576),
+    content     BLOB    NOT NULL CHECK (length(content) > 0 AND length(content) <= 1048576),
     PRIMARY KEY (upload_id, chunk_index)
 ) STRICT;
 
