@@ -1,4 +1,5 @@
 //! Dependency-light types shared by memory runtime roles.
+pub mod attachments;
 pub mod auth;
 pub mod errors;
 pub mod events;

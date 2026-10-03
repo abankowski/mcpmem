@@ -1115,6 +1115,17 @@ fn create_relation_with(
 fn delete_entities(conn: &Connection, names: &[String]) -> Result<()> {
     for name in names.iter().collect::<BTreeSet<_>>() {
         if let Some(entity) = read_entity(conn, name)? {
+            crate::attachments::delete_incomplete_uploads_for_entity(conn, entity.entity_id)?;
+            let attachment_ids = conn
+                .prepare_cached("SELECT id FROM attachment WHERE entity_id=?1")
+                .map_err(sql_error)?
+                .query_map([entity.entity_id], |row| row.get::<_, i64>(0))
+                .map_err(sql_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(sql_error)?;
+            for attachment_id in attachment_ids {
+                crate::attachments::delete_attachment_rows(conn, attachment_id)?;
+            }
             let triples = conn
                 .prepare_cached(
                     "SELECT from_id, to_id, type_id FROM relation WHERE from_id=?1 OR to_id=?1",
@@ -1180,11 +1191,17 @@ fn execute(
             for entity in entities {
                 if let Some(existing) = read_entity(conn, &entity.name)? {
                     if existing.entity_type != entity.entity_type {
+                        let new_type_id = type_id(conn, &entity.entity_type, 0)?;
                         conn.execute(
                             "UPDATE entity SET type_id=?1 WHERE id=?2",
-                            params![type_id(conn, &entity.entity_type, 0)?, existing.entity_id],
+                            params![new_type_id, existing.entity_id],
                         )
                         .map_err(sql_error)?;
+                        crate::attachments::refresh_attachment_vector_types(
+                            conn,
+                            existing.entity_id,
+                            new_type_id,
+                        )?;
                     }
                     let mut seen: BTreeSet<&str> = existing
                         .observations
