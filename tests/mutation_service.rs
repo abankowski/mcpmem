@@ -2055,8 +2055,11 @@ fn merge_refuses_a_source_that_owns_attachments_or_unfinished_uploads() {
         1
     );
     let bytes: Vec<u8> = conn
-        .query_row("SELECT content FROM attachment WHERE id=?1", [stored], |r| r
-            .get(0))
+        .query_row(
+            "SELECT content FROM attachment WHERE id=?1",
+            [stored],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(bytes, b"abc");
     // Once the file and the session are gone, the same merge succeeds.

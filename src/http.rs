@@ -1237,7 +1237,7 @@ async fn post_attachment_handler(
             return json_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "attachment spool capacity is full; retry later",
-            )
+            );
         }
     };
     let (spool, count, digest) = match spool_body(body, &state.attachment_limits).await {
