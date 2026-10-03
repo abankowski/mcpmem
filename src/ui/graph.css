@@ -110,7 +110,7 @@ canvas.grabbing { cursor: grabbing; }
 .icon:hover { color: var(--text); }
 .ins-actions { display: flex; gap: 7px; padding: 11px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .ins-actions button { padding: 5px 10px; font-size: 12px; }
-.ins-body { padding: 12px 14px; overflow: auto; }
+.ins-body { flex: 1 1 auto; padding: 12px 14px; overflow: auto; min-height: 0; }
 .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #2a2c34; }
 .meta { color: var(--muted); font-size: 12px; margin: 8px 0 4px; }
 .sec { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 15px 0 7px; font-weight: 600; }
@@ -125,6 +125,29 @@ canvas.grabbing { cursor: grabbing; }
 .rel a { color: var(--accent); text-decoration: none; cursor: pointer; word-break: break-word; }
 .rel a:hover { text-decoration: underline; }
 .rel .dir-in { opacity: .8; }
+
+/* The attachment panel does not share the observation body: a lazy
+   observation refresh must not reset uploads, errors, or the page viewer. */
+.attachments { border-top: 1px solid var(--border); padding: 12px 14px; overflow-y: auto; max-height: 52vh; flex-shrink: 0; }
+.attachments [hidden] { display: none; }
+.attach-heading, .attach-view-heading, .attach-page-nav { display: flex; align-items: center; gap: 7px; }
+.attach-heading h2 { margin: 0; font-size: 13px; flex: 1; }
+.attach-heading button, .attach-controls button, .attach-row button, .attach-view-heading button, .attach-page-nav button, #attMoreText { padding: 4px 7px; font-size: 11px; }
+.attach-controls { display: grid; gap: 6px; margin: 9px 0; }
+.attach-controls label { color: var(--muted); font-size: 12px; }
+#attFile { min-width: 0; max-width: 100%; font-size: 12px; }
+#attMessage { margin: 8px 0; color: var(--danger); overflow-wrap: anywhere; }
+.attach-row { border-top: 1px solid var(--border); padding: 9px 0; }
+.attach-name { font-weight: 600; overflow-wrap: anywhere; }
+.attach-details { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: 5px 0; }
+.attach-badge { border-radius: 999px; background: var(--accent-dim); padding: 2px 7px; font-size: 11px; }
+.attach-badge.ready { background: #e5f5e9; color: #226638; }
+.attach-badge.error { background: #fdebea; color: #a83338; overflow-wrap: anywhere; }
+.attach-row-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+#attViewer { margin-top: 10px; padding: 9px; border: 1px solid var(--border); border-radius: 7px; }
+.attach-view-heading strong { flex: 1; overflow-wrap: anywhere; }
+.attach-page-nav { justify-content: space-between; margin: 8px 0; }
+#attPageText { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 230px; overflow-y: auto; background: var(--bg); padding: 8px; margin: 8px 0; font: inherit; }
 
 /* ── Overlay (loading / error / auth) ────────────────────────────────────── */
 #overlay {
