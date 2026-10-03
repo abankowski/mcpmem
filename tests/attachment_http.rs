@@ -901,6 +901,40 @@ async fn attachment_routes_upgrade_a_pre_attachment_workspace() {
         .query_row("SELECT count(*) FROM attachment", [], |row| row.get(0))
         .expect("migration 15 must be re-applied");
     assert_eq!(migrated, 0);
+
+    // Roll the graph back a second time. The download route must bootstrap
+    // the graph on its own, like list, get, pages, post, and delete.
+    let conn = graph(&fx);
+    conn.execute_batch(
+        "DELETE FROM schema_migration WHERE version=15;
+         DROP TABLE IF EXISTS attachment_upload_chunk;
+         DROP TABLE IF EXISTS attachment_upload;
+         DROP TABLE IF EXISTS attachment_job;
+         DROP TABLE IF EXISTS attachment_chunk;
+         DROP TABLE IF EXISTS attachment_text;
+         DROP TABLE IF EXISTS attachment;",
+    )
+    .expect("roll the graph back a second time");
+    drop(conn);
+
+    let download = send(
+        &fx.server,
+        &fx.owner,
+        "GET",
+        &format!("/ui/attachments/1/download?workspaceId={}", fx.workspace),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(
+        download.status(),
+        StatusCode::NOT_FOUND,
+        "the download route must bootstrap the graph before reading attachment tables"
+    );
+    let migrated: i64 = graph(&fx)
+        .query_row("SELECT count(*) FROM attachment", [], |row| row.get(0))
+        .expect("migration 15 must be re-applied by the download route");
+    assert_eq!(migrated, 0);
 }
 
 /// The spool bound is process-wide: many partial chunked uploads must not be
