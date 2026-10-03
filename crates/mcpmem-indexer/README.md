@@ -47,7 +47,10 @@ provider request and completes with no vectors.
 Attachment owners embed one chunk per stored segment of extracted page text,
 read from the mapping the extraction worker publishes — never from the
 uploaded blob. A profile rebuild re-embeds that stored text and never re-runs
-OCR.
+OCR. The provider rejects a request with more than 2048 inputs. A large
+attachment has more segments than one request can carry, so the worker embeds
+the owner in bounded batches and renews the lease between batches. All vectors
+commit in the one fenced commit.
 
 On any failure the worker records the error in `chunk_index_job.last_error`,
 returns the job to `pending`, and sets the next attempt one second later.
