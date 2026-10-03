@@ -1376,6 +1376,18 @@ fn execute(
             let old = require_entity(conn, &source)?;
             let into = require_entity(conn, &target)?;
             if source != target {
+                // The merge copies observations, attributes and relations,
+                // but it does not transfer files. The cascade that deletes
+                // the source would silently discard its attachments and its
+                // unfinished upload sessions, so the merge refuses instead.
+                // The caller must move or delete them first. The refusal
+                // writes nothing, so the graph stays unchanged and retrying
+                // the merge after the cleanup is safe.
+                if crate::attachments::entity_has_attachments(conn, old.entity_id)? {
+                    return Err(MCSError::InvalidParams(
+                        "merge refused: source entity owns attachments or unfinished uploads; move or delete them before merging".into(),
+                    ));
+                }
                 // Body remains the observation identity. Equal target bodies keep
                 // their metadata; newly copied rows retain the original fact/write
                 // times and record this merge's immediate source as audit origin.
