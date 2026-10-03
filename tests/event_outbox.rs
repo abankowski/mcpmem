@@ -314,7 +314,7 @@ fn legacy_owner_validation_precedes_the_workspace_marker_on_a_populated_graph() 
             0
         ))
         .unwrap(),
-        14
+        15
     );
     assert_eq!(
         conn.query_row("SELECT count(*) FROM entity WHERE flags=0", [], |row| row
@@ -417,9 +417,10 @@ fn migration_runner_refuses_a_database_marked_newer_than_it_knows() {
     let path = dir.path().join("future-version.sqlite");
     let conn = version_thirteen_graph(&path);
     drop(WorkspaceRegistry::open(&path, Some("machine:local")).unwrap());
+    let future_version = mcpmem_core::events::MIGRATIONS.last().unwrap().0 + 1;
     conn.execute(
-        "INSERT INTO schema_migration VALUES(15,'future-checksum',1)",
-        [],
+        "INSERT INTO schema_migration VALUES(?1,'future-checksum',1)",
+        [future_version],
     )
     .unwrap();
     let error = mcpmem_core::events::migrate(&conn).unwrap_err();

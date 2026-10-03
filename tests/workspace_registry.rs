@@ -356,6 +356,113 @@ fn a_newer_registry_version_refuses_startup_without_replacing_its_owner() {
 }
 
 #[test]
+fn registered_version_14_graph_upgrades_and_reopens_at_15() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("memory.sqlite");
+    drop(WorkspaceRegistry::open(&legacy, Some("machine:local")).unwrap());
+
+    // Recreate the exact pre-15 chunk tables in a graph with a registered
+    // owner. The existing migration-14 ledger row remains intact.
+    let conn = Connection::open(&legacy).unwrap();
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         DROP TABLE attachment_upload_chunk;
+         DROP TABLE attachment_upload;
+         DROP TABLE attachment_job;
+         DROP TABLE attachment_chunk;
+         DROP TABLE attachment_text;
+         DROP TABLE attachment;
+         DROP TABLE chunk_vector;
+         DROP TABLE chunk_index_job;
+         DELETE FROM schema_migration WHERE version=15;
+         COMMIT;",
+    )
+    .unwrap();
+    conn.execute_batch(mcpmem_core::events::MIGRATIONS[8].1)
+        .unwrap();
+    assert_eq!(
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        14
+    );
+    drop(conn);
+
+    let registry = WorkspaceRegistry::open(&legacy, None).unwrap();
+    assert!(
+        registry
+            .resolve("machine:local", None, WorkspaceAccess::Read)
+            .is_ok()
+    );
+    let conn = Connection::open(&legacy).unwrap();
+    assert_eq!(
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        15
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='attachment'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+    drop(conn);
+    drop(registry);
+    WorkspaceRegistry::open(&legacy, None).expect("version 15 must reopen");
+}
+
+#[test]
+fn registered_graph_requires_marker_14_even_when_version_15_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("memory.sqlite");
+    drop(WorkspaceRegistry::open(&legacy, Some("machine:local")).unwrap());
+    let conn = Connection::open(&legacy).unwrap();
+    conn.execute("DELETE FROM schema_migration WHERE version=14", [])
+        .unwrap();
+
+    let error = WorkspaceRegistry::open(&legacy, None)
+        .err()
+        .expect("a higher version is not proof of the workspace marker");
+    assert!(error.to_string().contains("no workspace marker"), "{error}");
+    assert_eq!(
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        15,
+        "a rejected graph must not be migrated"
+    );
+}
+
+#[test]
+fn registered_graph_refuses_future_version_before_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("memory.sqlite");
+    drop(WorkspaceRegistry::open(&legacy, Some("machine:local")).unwrap());
+    let conn = Connection::open(&legacy).unwrap();
+    let future_version = mcpmem_core::events::MIGRATIONS.last().unwrap().0 + 1;
+    conn.execute(
+        "INSERT INTO schema_migration VALUES(?1,'future-version',1)",
+        [future_version],
+    )
+    .unwrap();
+
+    let error = WorkspaceRegistry::open(&legacy, None)
+        .err()
+        .expect("a future graph must refuse startup");
+    assert!(
+        error.to_string().contains("database schema is newer than this binary"),
+        "{error}"
+    );
+    assert_eq!(
+        conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        future_version,
+        "a rejected graph must retain its future ledger row"
+    );
+}
+
+#[test]
 fn list_cursor_pages_accessible_graphs_without_repeating_a_row() {
     let dir = tempfile::tempdir().unwrap();
     let legacy = dir.path().join("memory.sqlite");

@@ -206,12 +206,24 @@ impl WorkspaceRegistry {
                     }
                     let graph =
                         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-                    let marker: Option<i64> = graph.query_row(
+                    let newest: Option<i64> = graph.query_row(
                         "SELECT max(version) FROM schema_migration",
                         [],
                         |row| row.get(0),
                     )?;
-                    if marker != Some(14) {
+                    if newest.is_some_and(|version| {
+                        version > mcpmem_core::events::MIGRATIONS.last().unwrap().0
+                    }) {
+                        return Err(WorkspaceError::Graph(
+                            "database schema is newer than this binary".into(),
+                        ));
+                    }
+                    let has_marker: bool = graph.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM schema_migration WHERE version=14)",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    if !has_marker {
                         return Err(WorkspaceError::Graph(format!(
                             "registered graph has no workspace marker: {}",
                             path.display()
