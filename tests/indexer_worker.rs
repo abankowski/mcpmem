@@ -50,6 +50,34 @@ impl EmbeddingProvider for RecordingProvider {
     }
 }
 
+/// Simulates the embeddings API input cap: a request carrying more than
+/// [`mcpmem_indexer::MAX_INPUTS_PER_REQUEST`] inputs fails exactly as the
+/// real endpoint fails. Records each call's text slice, so a test can prove
+/// the worker split one owner into bounded provider requests.
+#[derive(Clone)]
+struct CapRecordingProvider(Arc<Mutex<Vec<Vec<String>>>>);
+
+impl EmbeddingProvider for CapRecordingProvider {
+    fn embed_texts(
+        &self,
+        profile: &IndexProfile,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, ProviderError> {
+        if texts.len() > mcpmem_indexer::MAX_INPUTS_PER_REQUEST {
+            return Err(ProviderError::Request(format!(
+                "{} inputs in one request; the API allows {}",
+                texts.len(),
+                mcpmem_indexer::MAX_INPUTS_PER_REQUEST
+            )));
+        }
+        self.0.lock().push(texts.to_vec());
+        Ok(texts
+            .iter()
+            .map(|_| vec![1.0; profile.dimensions as usize])
+            .collect())
+    }
+}
+
 fn profile() -> IndexProfile {
     IndexProfile {
         id: Uuid::new_v4(),
@@ -1643,4 +1671,98 @@ fn deleted_attachment_retries_without_a_vector_write() {
         0,
         "a vanished attachment writes no vectors"
     );
+}
+
+/// The embeddings API rejects a request with more than 2048 inputs. An
+/// attachment at the upload limit (3,278,400 ASCII characters) extracts
+/// into 2049 segments, so one whole-owner request exceeds the cap and every
+/// retry fails the job. The worker must split the owner into bounded calls;
+/// this test proves the split happens and that every segment still lands in
+/// the one fenced commit.
+#[test]
+fn oversized_attachment_splits_into_bounded_provider_calls_and_commits_all() {
+    use mcpmem_core::jobs::AnnGenerationRepository;
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    // One more segment than a single request may carry: the exact shape of
+    // the defect report.
+    let count = mcpmem_indexer::MAX_INPUTS_PER_REQUEST + 1;
+    let texts: Vec<String> = (0..count).map(|i| format!("segment {i}")).collect();
+    // The extraction worker restarts segment_index at zero per page, so each
+    // (page, segment_index) pair must be unique; the worker orders only by
+    // chunk_index, which stays contiguous across the split.
+    let segments: Vec<(i64, i64, i64, &str)> = texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| (i as i64, 1, i as i64, text.as_str()))
+        .collect();
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        mcpmem_core::schema::initialize_database(&conn).unwrap();
+        seed_attachment(&conn, 9, 2, &segments);
+    }
+    let profile = seed_profile(&database);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let worker = IndexerWorker::new(
+        &database,
+        CapRecordingProvider(Arc::clone(&captured)),
+        Duration::from_secs(5),
+    );
+    // The attachment ownership kind sorts first in the claim order, so poll
+    // one claims the attachment and poll two the parent entity.
+    for _ in 0..2 {
+        let report = worker.run_once(now_us()).unwrap();
+        assert_eq!(report.committed, 1);
+    }
+    let calls = captured.lock();
+    assert_eq!(
+        calls.len(),
+        3,
+        "two bounded attachment calls plus the parent entity, not one oversized request; calls: {calls:?}"
+    );
+    assert_eq!(
+        calls[0].len(),
+        mcpmem_indexer::MAX_INPUTS_PER_REQUEST,
+        "the first attachment call carries exactly the input cap"
+    );
+    assert_eq!(
+        calls[1].len(),
+        1,
+        "the overflow segment rides its own bounded call"
+    );
+    assert_eq!(calls[0][0], "segment 0");
+    assert_eq!(calls[1][0], format!("segment {}", count - 1));
+    assert_eq!(calls[2], vec!["owner\nThing".to_string()]);
+    drop(calls);
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let vectors: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunk_vector WHERE profile_id=?1 AND owner_kind='attachment' AND owner_id=9",
+            [profile.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        vectors,
+        count as i64,
+        "every segment is committed as a vector in chunk order"
+    );
+    let indexes: Vec<i64> = conn
+        .prepare(
+            "SELECT chunk_index FROM chunk_vector WHERE profile_id=?1 AND owner_kind='attachment' AND owner_id=9 ORDER BY chunk_index",
+        )
+        .unwrap()
+        .query_map([profile.id.to_string()], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(indexes.len(), count);
+    assert_eq!(indexes[0], 0);
+    assert_eq!(indexes[count - 1], (count - 1) as i64);
+    // The job is done and every stored segment has a vector at its exact
+    // chunk_index, so the full-scan gate verifies the split committed all
+    // vectors.
+    AnnGenerationRepository::new(&conn)
+        .verify_full_scan(profile.id)
+        .unwrap();
 }
