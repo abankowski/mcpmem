@@ -844,3 +844,169 @@ async fn the_global_mcp_request_limit_remains_sixteen_mib() {
         StatusCode::PAYLOAD_TOO_LARGE
     );
 }
+
+/// The attachment HTTP routes open the resolved graph directly, bypassing
+/// the lazy `WorkspaceHandles` initialization that migrates every other
+/// graph. A workspace whose file predates the attachments migration (no
+/// `attachment` tables, no migration-15 ledger row) must be upgraded before
+/// the first attachment SQL runs, or the request dies with
+/// `no such table: attachment`.
+#[tokio::test]
+async fn attachment_routes_upgrade_a_pre_attachment_workspace() {
+    let fx = fixture(true).await;
+    // Roll the workspace's graph back to before migration 15 (attachments):
+    // drop the attachment schema and the migration's ledger row.
+    let conn = graph(&fx);
+    conn.execute_batch(
+        "DELETE FROM schema_migration WHERE version=15;
+         DROP TABLE IF EXISTS attachment_upload_chunk;
+         DROP TABLE IF EXISTS attachment_upload;
+         DROP TABLE IF EXISTS attachment_job;
+         DROP TABLE IF EXISTS attachment_chunk;
+         DROP TABLE IF EXISTS attachment_text;
+         DROP TABLE IF EXISTS attachment;",
+    )
+    .expect("roll the graph back before the attachments migration");
+    drop(conn);
+
+    let list = send(
+        &fx.server,
+        &fx.owner,
+        "GET",
+        &format!("/ui/attachments?workspaceId={}&entityName=Alice", fx.workspace),
+        Body::empty(),
+        None,
+    )
+    .await;
+    let (status, body) = {
+        let (parts, body) = list.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        (
+            parts.status,
+            serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+        )
+    };
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the route must bootstrap the graph before reading attachment tables: {body}"
+    );
+    assert_eq!(body["attachments"], json!([]));
+
+    // The bootstrap re-applied migration 15, so the table exists again.
+    let migrated: i64 = graph(&fx)
+        .query_row("SELECT count(*) FROM attachment", [], |row| row.get(0))
+        .expect("migration 15 must be re-applied");
+    assert_eq!(migrated, 0);
+}
+
+/// The spool bound is process-wide: many partial chunked uploads must not be
+/// able to hold more than [`MAX_CONCURRENT_ATTACHMENT_SPOOLS`] anonymous
+/// spool files at once. A new upload is rejected with 503 while the bound is
+/// full, and the capacity returns when the stalls disconnect.
+#[tokio::test]
+async fn concurrent_upload_spools_hit_a_process_wide_bound_and_release() {
+    let server = spawn_child_server();
+    let created = mcp_call(
+        server.port,
+        r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_workspace","arguments":{"name":"fixture","visibility":"private"}},"id":1}"#,
+    );
+    let workspace = created["result"]["workspace"]["workspaceId"]
+        .as_str()
+        .expect("the workspace id")
+        .to_owned();
+    let seeded = mcp_call(
+        server.port,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"workspaceId":"{workspace}","entities":[{{"name":"Alice","entityType":"person","observations":[]}}]}}}},"id":2}}"#
+        ),
+    );
+    assert!(
+        seeded.get("error").is_none() && seeded["result"]["isError"].as_bool() != Some(true),
+        "seeding failed: {seeded}"
+    );
+
+    // Open more stalled chunked uploads than the process-wide spool bound.
+    // Each sends one chunk and leaves the body unterminated, so its handler
+    // parks on the next frame; the bound admits at most the constant's worth
+    // of them before later uploads are rejected.
+    let stalls: Vec<TcpStream> = (0..mcpmem::http::MAX_CONCURRENT_ATTACHMENT_SPOOLS * 2)
+        .map(|index| {
+            open_stalled_upload(
+                server.port,
+                &format!(
+                    "/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=stalled-{index}.txt"
+                ),
+                "text/plain",
+            )
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // With the bound full, a fresh complete upload must be rejected with 503.
+    let mut rejected = None;
+    for attempt in 0..200 {
+        let (status, _, body) = raw_chunked_upload(
+            server.port,
+            &format!(
+                "/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=probe-{attempt}.txt"
+            ),
+            "text/plain",
+            &[b"abc".to_vec()],
+        );
+        if status == 503 {
+            rejected = Some(body);
+            break;
+        }
+        assert_eq!(
+            status,
+            201,
+            "an upload that did not hit the spool bound must still succeed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let rejected = rejected.expect("the process-wide spool bound never filled");
+    let rejected: Value = serde_json::from_slice(&rejected).expect("a json rejection body");
+    assert!(
+        rejected["error"]
+            .as_str()
+            .unwrap()
+            .contains("spool capacity"),
+        "the rejection must name the spool bound: {rejected}"
+    );
+
+    // Disconnecting the stalled uploads must free their capacity.
+    drop(stalls);
+    std::thread::sleep(Duration::from_millis(300));
+    let (status, _, body) = raw_chunked_upload(
+        server.port,
+        &format!(
+            "/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=after-disconnect.txt"
+        ),
+        "text/plain",
+        &[b"abc".to_vec()],
+    );
+    assert_eq!(
+        status,
+        201,
+        "abandoned uploads must release their spool capacity: {}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+/// Send one chunk of a chunked upload and keep the connection open with no
+/// terminating chunk, so the handler parks holding its spool and permit.
+fn open_stalled_upload(port: u16, path: &str, mime: &str) -> TcpStream {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .unwrap();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer attachment-http-test-bearer\r\nContent-Type: {mime}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).unwrap();
+    write!(&mut stream, "1\r\nx\r\n").unwrap();
+    stream.flush().unwrap();
+    stream
+}
