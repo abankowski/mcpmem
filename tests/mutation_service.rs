@@ -1927,3 +1927,158 @@ fn parent_delete_cascades_incomplete_sessions_and_completed_attachment_data() {
         0
     );
 }
+
+#[test]
+fn merge_refuses_a_source_that_owns_attachments_or_unfinished_uploads() {
+    use mcpmem_core::attachments::{AttachmentLimits, AttachmentRepository};
+    use sha2::{Digest, Sha256};
+    use std::io::Cursor;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("merge.db");
+    let graph = GraphHandle::new(
+        &path,
+        Durability::Sync,
+        SqliteTuning::default(),
+        NonZeroUsize::new(32).unwrap(),
+        2,
+    )
+    .unwrap();
+    graph
+        .create_entities(&[entity("source"), entity("target")])
+        .unwrap();
+    graph
+        .create_relations(&[relation_input("source", "target", "defines")])
+        .unwrap();
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::AddObservations {
+                observations: vec![ObservationUpdate {
+                    entity_name: "source".into(),
+                    contents: vec!["only-on-source".into()],
+                }],
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    let source: i64 = conn
+        .query_row("SELECT id FROM entity WHERE name='source'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let limits = AttachmentLimits {
+        max_bytes: 100,
+        workspace_byte_budget: 100,
+        allow_mime: vec!["text/*".into()],
+    };
+    let attachments = AttachmentRepository::new(&conn);
+    let stored = attachments
+        .store_reader(
+            source,
+            "file.txt",
+            "text/plain",
+            &mut Cursor::new(b"abc"),
+            3,
+            &Sha256::digest(b"abc").into(),
+            &limits,
+            100,
+        )
+        .unwrap();
+    let session = attachments
+        .begin_upload_at(
+            "alice",
+            source,
+            "waiting.txt",
+            "text/plain",
+            7,
+            &Sha256::digest(b"1234567").into(),
+            100,
+            3_600_000_100,
+            &limits,
+        )
+        .unwrap();
+    attachments
+        .append_chunk("alice", session, 0, b"123", 100)
+        .unwrap();
+
+    let refused = MutationService::new(&graph)
+        .apply(
+            MutationRequest::MergeEntities {
+                source: "source".into(),
+                target: "target".into(),
+            },
+            MutationContext::local(),
+        )
+        .unwrap_err();
+    assert!(refused.to_string().contains("merge refused"), "{refused}");
+    // The refusal is deterministic: a retry fails the same way.
+    let again = MutationService::new(&graph)
+        .apply(
+            MutationRequest::MergeEntities {
+                source: "source".into(),
+                target: "target".into(),
+            },
+            MutationContext::local(),
+        )
+        .unwrap_err();
+    assert!(again.to_string().contains("merge refused"), "{again}");
+    // Nothing moved and nothing was deleted: the source keeps its file, its
+    // session and its observation; the relation still points at the source.
+    assert!(graph.get_entity("source").unwrap().is_some());
+    let target = graph.get_entity("target").unwrap().unwrap();
+    assert_eq!(
+        target
+            .observations
+            .iter()
+            .map(|o| o.body.as_str())
+            .collect::<Vec<_>>(),
+        ["original"]
+    );
+    assert_eq!(graph.get_relation_count().unwrap(), 1);
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM attachment WHERE entity_id=?1",
+            [source],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM attachment_upload WHERE entity_id=?1 AND attachment_id IS NULL",
+            [source],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    let bytes: Vec<u8> = conn
+        .query_row("SELECT content FROM attachment WHERE id=?1", [stored], |r| r
+            .get(0))
+        .unwrap();
+    assert_eq!(bytes, b"abc");
+    // Once the file and the session are gone, the same merge succeeds.
+    attachments.cancel_upload("alice", session, 100).unwrap();
+    attachments.delete_attachment(stored).unwrap();
+    MutationService::new(&graph)
+        .apply(
+            MutationRequest::MergeEntities {
+                source: "source".into(),
+                target: "target".into(),
+            },
+            MutationContext::local(),
+        )
+        .unwrap();
+    assert!(graph.get_entity("source").unwrap().is_none());
+    let merged = graph.get_entity("target").unwrap().unwrap();
+    assert_eq!(
+        merged
+            .observations
+            .iter()
+            .map(|o| o.body.as_str())
+            .collect::<Vec<_>>(),
+        ["original", "only-on-source"]
+    );
+}

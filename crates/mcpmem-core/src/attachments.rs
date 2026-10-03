@@ -43,6 +43,8 @@ pub enum AttachmentError {
     ExpiredSession,
     #[error("attachment chunks are out of order or replay contents differ")]
     Order,
+    #[error("attachment chunk must not be empty")]
+    EmptyChunk,
     #[error("attachment byte count is incomplete or differs from the declaration")]
     Incomplete,
     #[error("attachment SHA-256 does not match")]
@@ -124,6 +126,7 @@ fn check_budget(
     conn: &Connection,
     size: i64,
     excluded_upload: Option<Uuid>,
+    now_us: i64,
     limits: &AttachmentLimits,
 ) -> AttachmentResult<()> {
     let total: i64 = conn
@@ -131,8 +134,8 @@ fn check_budget(
             "SELECT
                 (SELECT COALESCE(SUM(size_bytes),0) FROM attachment)
                 + (SELECT COALESCE(SUM(expected_bytes),0) FROM attachment_upload
-                   WHERE attachment_id IS NULL AND upload_id!=?1)",
-            [excluded_upload.unwrap_or_else(Uuid::nil).to_string()],
+                   WHERE attachment_id IS NULL AND upload_id!=?1 AND expires_us>?2)",
+            params![excluded_upload.unwrap_or_else(Uuid::nil).to_string(), now_us],
             |row| row.get(0),
         )
         .map_err(db)?;
@@ -216,7 +219,7 @@ fn write_attachment(
     excluded_upload: Option<Uuid>,
 ) -> AttachmentResult<i64> {
     validate_file(conn, entity_id, filename, mime, expected_bytes, limits)?;
-    check_budget(conn, expected_bytes, excluded_upload, limits)?;
+    check_budget(conn, expected_bytes, excluded_upload, now_us, limits)?;
     conn.execute(
         "INSERT INTO attachment(entity_id,filename,mime,size_bytes,sha256,content,status,revision,created_us)
          VALUES(?1,?2,?3,?4,?5,zeroblob(?4),'uploaded',1,?6)",
@@ -307,7 +310,10 @@ impl<'a> AttachmentRepository<'a> {
         Self { conn }
     }
 
-    /// The caller must pass `expires_us = now_us + UPLOAD_TTL_US` for a one-hour session.
+    /// The caller must pass `expires_us = now_us + UPLOAD_TTL_US` for a
+    /// one-hour session; quota admission uses the derived admission time
+    /// `expires_us - UPLOAD_TTL_US`. New code must call [`begin_upload_at`]
+    /// and pass the admission time explicitly.
     /// The caller must resolve the graph and grant before it calls this method.
     // Eight distinct values are the approved MCP wire contract (R2, R16);
     // an options struct would rename, not reduce, the seam.
@@ -323,9 +329,41 @@ impl<'a> AttachmentRepository<'a> {
         expires_us: i64,
         limits: &AttachmentLimits,
     ) -> AttachmentResult<Uuid> {
+        self.begin_upload_at(
+            principal_id,
+            entity_id,
+            filename,
+            mime,
+            expected_bytes,
+            expected_sha256,
+            expires_us.saturating_sub(UPLOAD_TTL_US),
+            expires_us,
+            limits,
+        )
+    }
+
+    /// The caller passes the admission time `now_us`; the quota counts only
+    /// sessions whose `expires_us` is still after `now_us`, so an expired
+    /// reservation never blocks a new upload without the extractor sweep.
+    /// The caller must pass `expires_us = now_us + UPLOAD_TTL_US` for a
+    /// one-hour session.
+    /// The caller must resolve the graph and grant before it calls this method.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_upload_at(
+        &self,
+        principal_id: &str,
+        entity_id: i64,
+        filename: &str,
+        mime: &str,
+        expected_bytes: i64,
+        expected_sha256: &[u8; 32],
+        now_us: i64,
+        expires_us: i64,
+        limits: &AttachmentLimits,
+    ) -> AttachmentResult<Uuid> {
         let tx = TxGuard::begin(self.conn)?;
         validate_file(self.conn, entity_id, filename, mime, expected_bytes, limits)?;
-        check_budget(self.conn, expected_bytes, None, limits)?;
+        check_budget(self.conn, expected_bytes, None, now_us, limits)?;
         let upload_id = Uuid::new_v4();
         self.conn
             .execute(
@@ -358,6 +396,9 @@ impl<'a> AttachmentRepository<'a> {
     ) -> AttachmentResult<(i64, i64)> {
         if content.len() > CHUNK_BYTES {
             return Err(AttachmentError::Size);
+        }
+        if content.is_empty() {
+            return Err(AttachmentError::EmptyChunk);
         }
         let key = upload_key(upload_id);
         let tx = TxGuard::begin(self.conn)?;
@@ -474,13 +515,14 @@ impl<'a> AttachmentRepository<'a> {
         &self,
         principal_id: &str,
         upload_id: Uuid,
+        // Kept for interface stability; the owner may cancel at any time.
+        #[allow(unused_variables)]
         now_us: i64,
     ) -> AttachmentResult<()> {
         let tx = TxGuard::begin(self.conn)?;
-        let upload = session(self.conn, upload_id, principal_id)?;
-        if upload.attachment_id.is_none() && upload.expires_us <= now_us {
-            return Err(AttachmentError::ExpiredSession);
-        }
+        session(self.conn, upload_id, principal_id)?;
+        // The owning principal may cancel an expired unfinished session; the
+        // reservation must not wait for the optional extractor sweep.
         self.conn
             .execute(
                 "DELETE FROM attachment_upload_chunk WHERE upload_id=?1",
@@ -801,6 +843,20 @@ impl<'a> AttachmentJobRepository<'a> {
     }
 }
 
+/// True when the entity owns stored attachment files or unfinished upload
+/// sessions. The entity-delete cascade discards such rows, so mutation code
+/// that deletes the entity must refuse first when the rows cannot move.
+pub fn entity_has_attachments(conn: &Connection, entity_id: i64) -> AttachmentResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM attachment WHERE entity_id=?1)
+              OR EXISTS(SELECT 1 FROM attachment_upload
+                        WHERE entity_id=?1 AND attachment_id IS NULL)",
+        [entity_id],
+        |r| r.get(0),
+    )
+    .map_err(db)
+}
+
 /// Remove an entity's incomplete uploads inside its graph mutation transaction.
 pub fn delete_incomplete_uploads_for_entity(
     conn: &Connection,
@@ -1005,11 +1061,8 @@ mod tests {
             repository.finish_upload("alice", expired, 101, &limits(50, 10)),
             Err(AttachmentError::ExpiredSession)
         ));
-        assert!(matches!(
-            repository.cancel_upload("alice", expired, 101),
-            Err(AttachmentError::ExpiredSession)
-        ));
-        assert_eq!(repository.expire_uploads(101).unwrap(), 1);
+        repository.cancel_upload("alice", expired, 101).unwrap();
+        assert_eq!(repository.expire_uploads(101).unwrap(), 0);
         assert_eq!(count(&conn, "attachment_upload"), 0);
         repository
             .begin_upload(
@@ -1511,4 +1564,102 @@ mod tests {
             .verify_full_scan(candidate.id)
             .unwrap();
     }
-}
+
+    #[test]
+    fn expired_reservations_do_not_block_the_quota_and_the_owner_can_cancel_them() {
+        let conn = fixture();
+        let repository = AttachmentRepository::new(&conn);
+        upload(&conn, 1, "first.txt", b"123456");
+        let stale = repository
+            .begin_upload_at(
+                "alice",
+                1,
+                "stale.txt",
+                "text/plain",
+                61,
+                &hash(&b"x".repeat(61)),
+                100,
+                200,
+                &limits(70, 70),
+            )
+            .unwrap();
+        // Admission after the stale reservation's expiry must ignore it.
+        repository
+            .begin_upload_at(
+                "alice",
+                2,
+                "live.txt",
+                "text/plain",
+                4,
+                &hash(b"abcd"),
+                250,
+                300,
+                &limits(70, 70),
+            )
+            .unwrap();
+        assert_eq!(count(&conn, "attachment_upload"), 2);
+        // The fence still rejects chunks on an expired session...
+        assert!(matches!(
+            repository.append_chunk("alice", stale, 0, b"x", 250),
+            Err(AttachmentError::ExpiredSession)
+        ));
+        // ...but the owning principal can cancel the expired session.
+        repository.cancel_upload("alice", stale, 250).unwrap();
+        assert_eq!(count(&conn, "attachment_upload"), 1);
+        assert_eq!(repository.expire_uploads(250).unwrap(), 0);
+    }
+
+    #[test]
+    fn empty_chunks_are_rejected_and_zero_byte_uploads_finish_without_chunks() {
+        let conn = fixture();
+        let repo = AttachmentRepository::new(&conn);
+        let limits = limits(50, 100);
+        let blank = repo
+            .begin_upload_at(
+                "alice",
+                1,
+                "blank.txt",
+                "text/plain",
+                0,
+                &hash(b""),
+                100,
+                3_600_000_100,
+                &limits,
+            )
+            .unwrap();
+        assert!(matches!(
+            repo.append_chunk("alice", blank, 0, b"", 100),
+            Err(AttachmentError::EmptyChunk)
+        ));
+        assert_eq!(count(&conn, "attachment_upload_chunk"), 0);
+        let attachment = repo.finish_upload("alice", blank, 100, &limits).unwrap();
+        let bytes: Vec<u8> = conn
+            .query_row("SELECT content FROM attachment WHERE id=?1", [attachment], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bytes, b"");
+        let memo = repo
+            .begin_upload_at(
+                "alice",
+                2,
+                "memo.txt",
+                "text/plain",
+                3,
+                &hash(b"abc"),
+                100,
+                3_600_000_100,
+                &limits,
+            )
+            .unwrap();
+        // An empty append must not advance a non-empty upload either.
+        assert!(matches!(
+            repo.append_chunk("alice", memo, 0, b"", 100),
+            Err(AttachmentError::EmptyChunk)
+        ));
+        assert_eq!(count(&conn, "attachment_upload_chunk"), 0);
+        assert_eq!(
+            repo.append_chunk("alice", memo, 0, b"abc", 100).unwrap(),
+            (1, 3)
+        );
+    }
+
+    }
