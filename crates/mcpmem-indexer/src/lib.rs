@@ -27,6 +27,13 @@ const LEASE_US: i64 = 30_000_000;
 /// Failures allowed before a job is dead-lettered. Mirrors the webhook
 /// worker's bound; a poisoned entity must not occupy the queue forever.
 const MAX_ATTEMPTS: i64 = 8;
+/// The most inputs one provider request may carry. The OpenAI-compatible
+/// API rejects a request with more than 2048 inputs. An attachment at the
+/// upload limit extracts into more segments than that: a 3,278,400-character
+/// ASCII file yields 2049 segments of 1600 characters, so a whole-owner
+/// request would fail on every retry and the job would die. The worker
+/// splits one owner into bounded provider calls instead.
+pub const MAX_INPUTS_PER_REQUEST: usize = 2048;
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct RunReport {
@@ -388,6 +395,12 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
     /// renewal, mirroring the pre-embed and pre-commit renewals of the
     /// document flow. Both owner kinds share this code so the lease and
     /// normalization gates cannot diverge.
+    ///
+    /// The provider rejects a request with more than
+    /// [`MAX_INPUTS_PER_REQUEST`] inputs, and an attachment at the upload
+    /// limit extracts into more segments than that. The owner's texts are
+    /// therefore embedded in bounded batches, with the lease renewed between
+    /// batches; every vector lands in the one fenced commit at the end.
     fn embed_chunks_and_commit<Renew, Commit>(
         &self,
         profile: &IndexProfile,
@@ -400,34 +413,44 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
         Commit: FnOnce(&[&(ChunkKind, &[f32])]) -> Result<bool, String>,
     {
         let texts: Vec<String> = chunks.iter().map(|(_, text)| text.clone()).collect();
-        let mut vectors = self
-            .provider
-            .embed_texts(profile, &texts)
-            .map_err(|error| error.to_string())?;
-        if vectors.len() != texts.len() {
-            return Err("provider returned wrong embedding count".into());
-        }
-        // The profile's L2 contract is a promise the worker
-        // makes before storing: OpenAI returns vectors that
-        // are only *roughly* unit-norm (measured off by up
-        // to 5e-4), and the stored-vector validation demands
-        // |norm-1| < 1e-4. Normalize here so a provider's
-        // approximation cannot fail the gate. A zero vector
-        // cannot be normalized and will be rejected by the
-        // stored-vector validation.
-        if profile.normalization == Normalization::L2 {
-            for vector in &mut vectors {
-                let norm: f64 = vector
-                    .iter()
-                    .map(|value| f64::from(*value).powi(2))
-                    .sum::<f64>()
-                    .sqrt();
-                if norm > 0.0 {
-                    for value in vector {
-                        *value = (f64::from(*value) / norm) as f32;
+        let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        for (batch_index, batch) in texts.chunks(MAX_INPUTS_PER_REQUEST).enumerate() {
+            // Renew between batches: a batch that ran past the lease must
+            // not start another provider request, and a lost claim must not
+            // accumulate vectors toward a commit that is no longer ours.
+            if batch_index > 0 && !renew()? {
+                return Ok(false);
+            }
+            let mut batch_vectors = self
+                .provider
+                .embed_texts(profile, batch)
+                .map_err(|error| error.to_string())?;
+            if batch_vectors.len() != batch.len() {
+                return Err("provider returned wrong embedding count".into());
+            }
+            // The profile's L2 contract is a promise the worker
+            // makes before storing: OpenAI returns vectors that
+            // are only *roughly* unit-norm (measured off by up
+            // to 5e-4), and the stored-vector validation demands
+            // |norm-1| < 1e-4. Normalize here so a provider's
+            // approximation cannot fail the gate. A zero vector
+            // cannot be normalized and will be rejected by the
+            // stored-vector validation.
+            if profile.normalization == Normalization::L2 {
+                for vector in &mut batch_vectors {
+                    let norm: f64 = vector
+                        .iter()
+                        .map(|value| f64::from(*value).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    if norm > 0.0 {
+                        for value in vector {
+                            *value = (f64::from(*value) / norm) as f32;
+                        }
                     }
                 }
             }
+            vectors.append(&mut batch_vectors);
         }
         if !renew()? {
             return Ok(false);
