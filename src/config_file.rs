@@ -212,8 +212,7 @@ impl AttachmentsSection {
         }
         if self.max_bytes > self.workspace_byte_budget {
             return Err(MCSError::InvalidParams(
-                "config 'attachments.max-bytes': exceeds attachments.workspace-byte-budget"
-                    .into(),
+                "config 'attachments.max-bytes': exceeds attachments.workspace-byte-budget".into(),
             ));
         }
         Ok(())
