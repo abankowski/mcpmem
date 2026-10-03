@@ -186,6 +186,7 @@ fn load_chunk_snapshot_vectors(
                 owner_kind: match owner_kind.as_str() {
                     "entity" => OwnerKind::Entity,
                     "relation" => OwnerKind::Relation,
+                    "attachment" => OwnerKind::Attachment,
                     _ => return Err(MCSError::MemoryError("invalid chunk owner kind".into())),
                 },
                 owner_id,
@@ -193,6 +194,7 @@ fn load_chunk_snapshot_vectors(
                     "identity" => ChunkKind::Identity,
                     "observation" => ChunkKind::Observation,
                     "relation" => ChunkKind::Relation,
+                    "attachment" => ChunkKind::Attachment,
                     _ => return Err(MCSError::MemoryError("invalid chunk kind".into())),
                 },
                 chunk_index,
@@ -462,6 +464,32 @@ impl VectorStore {
         fetch_k: usize,
         filter_kind: Option<&str>,
         filter_type: Option<&str>,
+        allow_attachments: bool,
+    ) -> Result<Vec<ChunkHit>> {
+        self.rank_chunks(query, fetch_k, filter_kind, filter_type, allow_attachments, false)
+    }
+
+    /// Rank owners by their best matching segment before the candidate limit.
+    /// A long file must not consume every slot with its own segments.
+    pub fn search_best_chunks(
+        &self,
+        query: &[f32],
+        fetch_k: usize,
+        filter_kind: Option<&str>,
+        filter_type: Option<&str>,
+        allow_attachments: bool,
+    ) -> Result<Vec<ChunkHit>> {
+        self.rank_chunks(query, fetch_k, filter_kind, filter_type, allow_attachments, true)
+    }
+
+    fn rank_chunks(
+        &self,
+        query: &[f32],
+        fetch_k: usize,
+        filter_kind: Option<&str>,
+        filter_type: Option<&str>,
+        allow_attachments: bool,
+        best_only: bool,
     ) -> Result<Vec<ChunkHit>> {
         let Some(snapshot) = self.managed_snapshot.read().clone() else {
             return Ok(Vec::new());
@@ -477,7 +505,11 @@ impl VectorStore {
             ));
         }
         let mut matches: Vec<ChunkHit> = Vec::new();
+        let mut owner_indices = best_only.then(std::collections::HashMap::<(&str, i64), usize>::new);
         for sv in &snapshot.vectors {
+            if !allow_attachments && sv.owner_kind == OwnerKind::Attachment {
+                continue;
+            }
             if let Some(kind) = filter_kind
                 && sv.owner_kind.as_str() != kind
             {
@@ -488,14 +520,30 @@ impl VectorStore {
             {
                 continue;
             }
-            matches.push(ChunkHit {
+            let hit = ChunkHit {
                 owner_kind: sv.owner_kind,
                 owner_id: sv.owner_id,
                 chunk_kind: sv.chunk_kind,
                 chunk_index: sv.chunk_index,
                 type_id: sv.type_id,
                 dist: managed_distance(snapshot.metric, query, &sv.vector),
-            });
+            };
+            if let Some(indices) = owner_indices.as_mut() {
+                match indices.entry((sv.owner_kind.as_str(), sv.owner_id)) {
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        let current = &mut matches[*entry.get()];
+                        if hit.dist < current.dist {
+                            *current = hit;
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(matches.len());
+                        matches.push(hit);
+                    }
+                }
+            } else {
+                matches.push(hit);
+            }
         }
         matches.sort_by(|a, b| a.dist.total_cmp(&b.dist));
         matches.truncate(fetch_k.clamp(1, 1000));
@@ -602,6 +650,21 @@ impl VectorStore {
                 .map(|b| f32::from_le_bytes(*b))
                 .collect::<Vec<_>>(),
         ))
+    }
+
+    /// Read the vector of the selected segment from the same immutable
+    /// snapshot that produced the hit. Attachments have no identity chunk.
+    pub fn matched_chunk_vector(&self, hit: &ChunkHit) -> Result<Option<Vec<f32>>> {
+        let snapshot = self.managed_snapshot.read();
+        Ok(snapshot.as_ref().and_then(|snapshot| {
+            snapshot.vectors.iter().find_map(|vector| {
+                (vector.owner_kind == hit.owner_kind
+                    && vector.owner_id == hit.owner_id
+                    && vector.chunk_kind == hit.chunk_kind
+                    && vector.chunk_index == hit.chunk_index)
+                    .then(|| vector.vector.clone())
+            })
+        }))
     }
 
     /// The profile id `search_chunks` and the identity helpers read, mirroring
@@ -933,7 +996,7 @@ impl VectorStore {
         // Over-fetch chunks before aggregating, so one owner's many near
         // chunks cannot crowd the other owners out of top_k.
         let fetch = top_k.saturating_mul(3).clamp(top_k, 100);
-        let hits = self.search_chunks(query, fetch, Some("entity"), None)?;
+        let hits = self.search_chunks(query, fetch, Some("entity"), None, false)?;
         let owners = self.aggregate_owners(&hits, top_k);
         if owners.is_empty() {
             return Ok(r#"{"results":[],"count":0}"#.to_string());
@@ -1180,7 +1243,43 @@ impl VectorStore {
                 Ok(row
                     .map(|(f, ty, t)| (format!("{f} -> {ty} -> {t}"), ty, "relation".to_string())))
             }
+            OwnerKind::Attachment => {
+                let conn = self.db.lock();
+                let row: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT a.filename, COALESCE(t.name, '') FROM attachment a
+                         JOIN entity e ON e.id=a.entity_id
+                         LEFT JOIN type_dict t ON t.id=e.type_id
+                         WHERE a.id=?1 AND a.status='ready' AND e.flags=0",
+                        [owner_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(sqlite_err)?;
+                Ok(row.map(|(filename, ty)| (filename, ty, "attachment".to_string())))
+            }
         }
+    }
+
+    /// Return the page and exact embedded segment for a live ready file.
+    /// Its segment index is not its page number.
+    pub fn attachment_segment(&self, hit: &ChunkHit) -> Option<(i64, String)> {
+        if hit.owner_kind != OwnerKind::Attachment || hit.chunk_kind != ChunkKind::Attachment {
+            return None;
+        }
+        let conn = self.db.lock();
+        conn.query_row(
+            "SELECT c.page, c.text FROM attachment_chunk c
+             JOIN attachment a ON a.id=c.attachment_id
+             JOIN entity e ON e.id=a.entity_id
+             WHERE c.attachment_id=?1 AND c.chunk_index=?2
+               AND a.status='ready' AND e.flags=0",
+            params![hit.owner_id, hit.chunk_index],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten()
     }
 
     /// The stored text of one chunk, reassembled from SQL for `includeChunks`.
@@ -1257,6 +1356,7 @@ impl VectorStore {
                     .flatten()
                 }
             },
+            OwnerKind::Attachment => self.attachment_segment(hit).map(|(_, text)| text),
         }
     }
 
@@ -1824,7 +1924,7 @@ mod tests {
         env.vs.reconcile_managed_snapshot().unwrap();
         let hits = env
             .vs
-            .search_chunks(&[1.0, 0.0, 0.0, 0.0], 10, Some("entity"), Some("Person"))
+            .search_chunks(&[1.0, 0.0, 0.0, 0.0], 10, Some("entity"), Some("Person"), false)
             .unwrap();
         assert_eq!(hits.len(), 2, "Person chunks only");
         for hit in &hits {
@@ -1877,7 +1977,7 @@ mod tests {
         env.vs.reconcile_managed_snapshot().unwrap();
         let hits = env
             .vs
-            .search_chunks(&[1.0, 0.0, 0.0, 0.0], 10, Some("entity"), Some("Person"))
+            .search_chunks(&[1.0, 0.0, 0.0, 0.0], 10, Some("entity"), Some("Person"), false)
             .unwrap();
         let owners = env.vs.aggregate_owners(&hits, 10);
         assert_eq!(owners.len(), 2, "ada and bob now both match Person");

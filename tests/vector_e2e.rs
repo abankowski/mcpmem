@@ -595,3 +595,83 @@ fn test_vector_e2e_kg_tools_still_work() {
     let text = c.tool_text("graph_stats", &serde_json::json!({}));
     assert!(text.contains("entities"), "KG stats should work: {text}");
 }
+
+#[test]
+fn attachment_search_over_stdio_uses_stored_page_and_optional_consent() {
+    let mut c = spawn_vec_server();
+    c.tool_text(
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "ada", "entityType": "Person", "observations": []},
+            {"name": "bob", "entityType": "Person", "observations": []}
+        ]}),
+    );
+    seed_chunk_rows(
+        &mut c,
+        &[
+            ("ada", "Person", "identity", &[0.8, 0.2, 0.0, 0.0]),
+            ("bob", "Person", "identity", &[0.7, 0.3, 0.0, 0.0]),
+        ],
+    );
+    let conn = rusqlite::Connection::open(&c.db_path).unwrap();
+    let (parent, parent_type): (i64, i64) = conn
+        .query_row(
+            "SELECT id,type_id FROM entity WHERE name='ada'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO attachment(entity_id,filename,mime,size_bytes,sha256,content,status,revision,created_us)
+         VALUES(?1,'pages.txt','text/plain',5,?2,?3,'ready',1,1)",
+        rusqlite::params![parent, vec![0u8; 32], b"pages"],
+    )
+    .unwrap();
+    let id = conn.last_insert_rowid();
+    for (index, page, segment, text, vector) in [
+        (0, 1, 0, "first", [0.0f32, 1.0]),
+        (1, 1, 1, "second", [0.1, 0.9]),
+        (2, 2, 0, "third-page text", [1.0, 0.0]),
+    ] {
+        conn.execute(
+            "INSERT INTO attachment_chunk(attachment_id,chunk_index,page,segment_index,text)
+             VALUES(?1,?2,?3,?4,?5)",
+            rusqlite::params![id, index, page, segment, text],
+        )
+        .unwrap();
+        let blob = [vector[0], vector[1], 0.0, 0.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        conn.execute(
+            "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+             VALUES('11111111-2222-3333-4444-555555555555','attachment','attachment',?1,?2,?3,1,?4,1,'test')",
+            rusqlite::params![id, index, parent_type, blob],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    wait_for_stats(&mut c, r#""embeddingCount":5"#);
+
+    let query = serde_json::json!({
+        "embedding": [1.0, 0.0, 0.0, 0.0], "topK": 1,
+        "filter": {"kind": "attachment", "type": "Person"}
+    });
+    let text = c.tool_text("vector_search_entities", &query);
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["results"][0]["filename"], "pages.txt", "{text}");
+    assert_eq!(value["results"][0]["page"], 2, "{text}");
+    assert_eq!(value["results"][0]["excerpt"], "third-page text", "{text}");
+
+    let text = c.tool_text(
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": [1.0, 0.0, 0.0, 0.0],
+            "topK": 2,
+            "includeAttachments": false
+        }),
+    );
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["count"], 2, "{text}");
+    assert!(value["results"].as_array().unwrap().iter().all(|row| row["kind"] == "entity"));
+}
