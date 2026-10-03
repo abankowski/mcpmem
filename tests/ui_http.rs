@@ -1229,3 +1229,60 @@ async fn attachment_inspector_reads_extracted_page_by_character_offset() {
     assert_eq!(second["nextOffset"], 6);
     assert_eq!(second["eof"], true);
 }
+
+/// A zero-byte text file is a valid upload: the browser produces a body of
+/// exactly zero bytes for an empty file, and the repository stores
+/// `expectedBytes == 0` the same way the MCP contract does (zero segments,
+/// no vector work).
+#[tokio::test]
+async fn attachment_inspector_accepts_a_zero_byte_text_file() {
+    let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
+    let ws = seed_graph(srv.port, Some(TEST_BEARER));
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}/ui/attachments", srv.port);
+
+    let uploaded = client
+        .post(format!("{base}?workspaceId={ws}&entityName=Alice&filename=empty.txt"))
+        .bearer_auth(TEST_BEARER)
+        .header(reqwest::header::CONTENT_TYPE, "text/plain")
+        .body("")
+        .send()
+        .await
+        .expect("zero-byte upload request");
+    assert_eq!(
+        uploaded.status(),
+        reqwest::StatusCode::CREATED,
+        "a zero-byte text file must upload"
+    );
+    let payload: serde_json::Value = uploaded.json().await.unwrap();
+    let id = payload["attachmentId"].as_i64().expect("attachmentId");
+    assert_eq!(payload["status"], "uploaded");
+
+    let list_url = format!("{base}?workspaceId={ws}&entityName=Alice");
+    let list: serde_json::Value = client
+        .get(&list_url)
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["attachments"][0]["attachmentId"], id);
+    assert_eq!(list["attachments"][0]["sizeBytes"], 0);
+    assert_eq!(list["attachments"][0]["pageCount"], 0);
+    assert_eq!(list["attachments"][0]["status"], "uploaded");
+
+    let downloaded = client
+        .get(format!("{base}/{id}/download?workspaceId={ws}"))
+        .bearer_auth(TEST_BEARER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(downloaded.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        downloaded.bytes().await.unwrap().as_ref(),
+        b"",
+        "the zero-byte file downloads empty"
+    );
+}

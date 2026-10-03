@@ -99,6 +99,14 @@ const MAX_UI_EXPAND_DEPTH: u32 = 3;
 /// SQLite operation. The MCP JSON-RPC body limit is unchanged.
 const ATTACHMENT_STREAM_CHUNK: usize = 64 * 1024;
 
+/// The number of upload bodies that may hold an anonymous spool in this
+/// process at once. Each spool can hold up to `max_bytes` of uncommitted
+/// body bytes, so this bound caps the aggregate temporary disk a burst of
+/// concurrent chunked uploads can consume at
+/// `MAX_CONCURRENT_ATTACHMENT_SPOOLS * max_bytes`. A new upload is rejected
+/// before it opens a spool file when the bound is full.
+pub const MAX_CONCURRENT_ATTACHMENT_SPOOLS: usize = 4;
+
 /// The `Server` response header carried on every HTTP response,
 /// `mcpmem <version>`. An operator can identify the running build from any
 /// reply — `curl -i http://host:port/` answers before any MCP handshake.
@@ -121,6 +129,11 @@ pub struct HttpState {
     pub(crate) oauth: Option<Arc<OauthState>>,
     /// The per-file cap, workspace budget, and MIME policy for attachment routes.
     attachment_limits: Arc<AttachmentLimits>,
+    /// The process-wide cap on concurrently spooling upload bodies. One permit
+    /// is held from just before the spool opens until the storing transaction
+    /// finishes, so abandoned or disconnected uploads cannot stack anonymous
+    /// spool files past the bound.
+    attachment_spools: Arc<tokio::sync::Semaphore>,
 }
 
 /// What a test wants its [`HttpState`] to hold. Named fields, because
@@ -222,6 +235,9 @@ impl HttpState {
             enabled_categories: Arc::from(enabled_categories),
             oauth,
             attachment_limits,
+            attachment_spools: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_ATTACHMENT_SPOOLS,
+            )),
         }
     }
 }
@@ -361,6 +377,9 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
         bearer_scopes,
         enabled_categories,
         attachment_limits: attachment_limits(attachments),
+        attachment_spools: Arc::new(tokio::sync::Semaphore::new(
+            MAX_CONCURRENT_ATTACHMENT_SPOOLS,
+        )),
         oauth,
     };
 
@@ -1076,7 +1095,9 @@ async fn delete_attachment_handler(
 /// hashing every byte. [`tempfile::tempfile`] creates the file already
 /// unlinked, so a dropped request, an error, or a panic removes the spool
 /// with the handle — no path survives. The per-frame copy keeps a full file
-/// out of Rust memory; the byte counter alone bounds the upload.
+/// out of Rust memory; the byte counter alone bounds the upload. An empty
+/// body spools as a valid zero-byte file: the repository stores it exactly
+/// like the MCP contract's `expectedBytes == 0` upload.
 async fn spool_body(
     body: Body,
     limits: &AttachmentLimits,
@@ -1133,9 +1154,6 @@ async fn spool_body(
             hasher.update(&rest[..amount]);
             rest = &rest[amount..];
         }
-    }
-    if count == 0 {
-        return Err(Box::new(bad_request("attachment body is empty")));
     }
     if let Err(error) = spool.seek(SeekFrom::Start(0)) {
         error!("attachment spool seek error: {error}");
@@ -1210,6 +1228,18 @@ async fn post_attachment_handler(
             "attachment exceeds the per-file size limit",
         );
     }
+    // One permit per in-flight spool, held until the storing transaction
+    // finishes. A full bound rejects the upload before it opens a spool file,
+    // so many partial chunked uploads cannot stack arbitrary temporary disk.
+    let _spool = match state.attachment_spools.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "attachment spool capacity is full; retry later",
+            )
+        }
+    };
     let (spool, count, digest) = match spool_body(body, &state.attachment_limits).await {
         Ok(spooled) => spooled,
         Err(response) => return *response,
@@ -2823,6 +2853,14 @@ fn attachment_db_error(error: &rusqlite::Error) -> Box<Response> {
     ))
 }
 
+fn attachment_bootstrap_error(error: &mcpmem_core::errors::MCSError) -> Box<Response> {
+    error!("attachment graph bootstrap error: {error}");
+    Box::new(json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "attachment storage error",
+    ))
+}
+
 fn attachment_failure(error: AttachmentError) -> Box<Response> {
     let status = match error {
         AttachmentError::DuplicateFilename => StatusCode::CONFLICT,
@@ -2873,6 +2911,24 @@ where
         let conn = Connection::open(path).map_err(|error| attachment_db_error(&error))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|error| attachment_db_error(&error))?;
+        // The registry migrates only the legacy graph at startup; every other
+        // graph initializes lazily through the WorkspaceHandles get path,
+        // which these routes bypass by opening the file directly. Bootstrap
+        // the resolved graph here so a first request against a pre-upgrade
+        // workspace does not fail with `no such table: attachment`. The
+        // existence check keeps the common already-migrated path to one read
+        // with no write transaction.
+        let migrated: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='attachment')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| attachment_db_error(&error))?;
+        if !migrated {
+            mcpmem_core::schema::initialize_database(&conn)
+                .map_err(|error| attachment_bootstrap_error(&error))?;
+        }
         operation(&conn)
     })
     .await
@@ -2941,6 +2997,9 @@ mod tests {
             enabled_categories: Arc::from(&[ToolCategory::GraphRead, ToolCategory::GraphWrite][..]),
             oauth: None,
             attachment_limits: attachment_limits(Config::default().attachments),
+            attachment_spools: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_ATTACHMENT_SPOOLS,
+            )),
         }
     }
 
