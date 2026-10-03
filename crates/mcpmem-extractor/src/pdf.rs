@@ -430,9 +430,7 @@ fn run_with_deadline(
 /// (`Page size: 612 x 792 pts` or `Page N size: ...`). The conversion rounds
 /// every fractional point up, so a page can never slip under the cap.
 fn size_line_pixels(line: &str) -> Option<i64> {
-    let Some((head, body)) = line.trim().split_once(" size:") else {
-        return None;
-    };
+    let (head, body) = line.trim().split_once(" size:")?;
     if head != "Page" && !head.starts_with("Page ") {
         return None;
     }
@@ -701,14 +699,16 @@ mod tests {
         // must stay safely below the claim lease. The vision deadline used
         // to be 60 seconds against a 30-second lease, which lost successful
         // responses at the fence; the two deadlines now fit with a margin.
-        assert!(
-            RENDER_DEADLINE_US + VISION_TIMEOUT_US < LEASE_US,
-            "every in-flight render and vision request must fit inside the claim lease"
-        );
-        assert!(
-            VISION_TIMEOUT_US < LEASE_US,
-            "a live vision request must always fit inside the claim lease"
-        );
+        const {
+            assert!(
+                RENDER_DEADLINE_US + VISION_TIMEOUT_US < LEASE_US,
+                "every in-flight render and vision request must fit inside the claim lease"
+            );
+            assert!(
+                VISION_TIMEOUT_US < LEASE_US,
+                "a live vision request must always fit inside the claim lease"
+            );
+        }
     }
 
     struct CountingOcr {
@@ -718,7 +718,7 @@ mod tests {
     impl OcrProvider for CountingOcr {
         fn transcribe_page(&self, _image: &[u8], _mime: &str) -> Result<String, OcrError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            Ok(format!("transcribed page {call}").into())
+            Ok(format!("transcribed page {call}"))
         }
     }
 
