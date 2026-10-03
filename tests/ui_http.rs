@@ -480,7 +480,7 @@ fn test_ui_assets_served_with_content_types() {
     );
     assert!(!body.is_empty(), "stylesheet should not be empty");
 
-    let (status, headers, body) = get(srv.port, "/ui/graph.js", None);
+    let (status, headers, _body) = get(srv.port, "/ui/graph.js", None);
     assert_eq!(status, 200, "GET /ui/graph.js should succeed");
     assert!(
         headers.to_lowercase().contains("javascript"),
@@ -1004,13 +1004,7 @@ async fn attachment_inspector_routes_keep_files_in_the_selected_workspace() {
     let create = format!(
         r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"workspaceId":"{other}","entities":[{{"name":"Alice","entityType":"person","observations":[]}}]}}}},"id":4}}"#
     );
-    let (status, _, body) = request(
-        srv.port,
-        "POST",
-        "/mcp",
-        Some(&create),
-        Some(TEST_BEARER),
-    );
+    let (status, _, body) = request(srv.port, "POST", "/mcp", Some(&create), Some(TEST_BEARER));
     assert_eq!(status, 200, "seed second workspace: {body}");
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}/ui/attachments", srv.port);
@@ -1048,7 +1042,7 @@ async fn attachment_inspector_routes_keep_files_in_the_selected_workspace() {
     let list = |ws: &str, name: &str| {
         format!(
             "{base}?workspaceId={ws}&entityName={}",
-            url::form_urlencoded::byte_serialize(name.as_bytes())
+            url::form_urlencoded::byte_serialize(name.as_bytes()).collect::<String>()
         )
     };
     let first_list: serde_json::Value = client
@@ -1104,7 +1098,10 @@ async fn attachment_inspector_routes_keep_files_in_the_selected_workspace() {
     assert_eq!(metadata["entityName"], "Alice");
     assert_eq!(metadata["filename"], "notes.txt");
     assert_eq!(metadata["attachmentId"], id);
-    assert!(metadata.get("content").is_none(), "metadata excludes the blob");
+    assert!(
+        metadata.get("content").is_none(),
+        "metadata excludes the blob"
+    );
 
     let downloaded = client
         .get(format!("{base}/{id}/download?workspaceId={first}"))
@@ -1158,7 +1155,8 @@ async fn attachment_inspector_routes_keep_files_in_the_selected_workspace() {
 #[cfg(feature = "extractor")]
 #[tokio::test]
 async fn attachment_inspector_reads_extracted_page_by_character_offset() {
-    let srv = spawn_http_server_with_role(&["--enable-all"], Some(TEST_BEARER), Some("mcp,extractor"));
+    let srv =
+        spawn_http_server_with_role(&["--enable-all"], Some(TEST_BEARER), Some("mcp,extractor"));
     let ws = seed_graph(srv.port, Some(TEST_BEARER));
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}/ui/attachments", srv.port);
@@ -1195,7 +1193,10 @@ async fn attachment_inspector_reads_extracted_page_by_character_offset() {
             break;
         }
         assert_ne!(row["status"], "error", "text extraction failed: {metadata}");
-        assert!(Instant::now() < deadline, "text extraction timed out: {metadata}");
+        assert!(
+            Instant::now() < deadline,
+            "text extraction timed out: {metadata}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 

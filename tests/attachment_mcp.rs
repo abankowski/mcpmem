@@ -8,7 +8,7 @@ use axum::http::{Request, StatusCode};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use mcpmem::authz::{Principal, local_principal};
 use mcpmem::config::Config;
-use mcpmem::server::{HttpOutcome, MCPServer, MAX_REQUEST_BYTES, dispatch_http_body};
+use mcpmem::server::{HttpOutcome, MAX_REQUEST_BYTES, MCPServer, dispatch_http_body};
 use mcpmem::tools::{ATTACHMENT_TOOL_NAMES, ToolCategory};
 use mcpmem::workspace::{Visibility, WorkspaceAccess, WorkspaceHandles, WorkspaceRegistry};
 use rusqlite::Connection;
@@ -32,7 +32,11 @@ impl Fixture {
     fn with_limits(budget: Option<i64>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config {
-            memory_file_path: dir.path().join("memory.sqlite").to_string_lossy().into_owned(),
+            memory_file_path: dir
+                .path()
+                .join("memory.sqlite")
+                .to_string_lossy()
+                .into_owned(),
             legacy_owner_id: Some("machine:local".into()),
             enabled_categories: vec![
                 ToolCategory::GraphRead,
@@ -64,11 +68,13 @@ impl Fixture {
     }
 
     fn call(&self, principal: &Principal, name: &str, arguments: Value) -> Value {
+        let mut params = json!({"name": name});
+        params["arguments"] = arguments;
         body_of(self.request(
             principal,
             &json!({
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": name, "arguments": arguments}
+                "params": params
             }),
         ))
     }
@@ -96,7 +102,9 @@ impl Fixture {
     fn count(&self, table: &str) -> i64 {
         Connection::open(&self.path)
             .unwrap()
-            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
             .unwrap()
     }
 }
@@ -192,7 +200,10 @@ fn fifty_mebibyte_calls_are_byte_exact_and_pending_until_extracted() {
     assert_eq!(metadata["sizeBytes"], bytes.len());
     assert_eq!(metadata["pageCount"], 0);
     assert_eq!(metadata["status"], "uploaded");
-    assert!(metadata.get("content").is_none(), "metadata must not include raw bytes");
+    assert!(
+        metadata.get("content").is_none(),
+        "metadata must not include raw bytes"
+    );
     let list = result(&fixture.call(
         &principal,
         "list_attachments",
@@ -310,9 +321,12 @@ fn attachment_tools_require_separate_consent_even_inside_a_batch() {
         HttpOutcome::InsufficientScope(scopes) if scopes == ["attachments"]
     ));
 
-    let listed = body_of(fixture.request(&writer, &json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/list"
-    })));
+    let listed = body_of(fixture.request(
+        &writer,
+        &json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+        }),
+    ));
     let names: Vec<&str> = listed["result"]["tools"]
         .as_array()
         .unwrap()
@@ -322,12 +336,18 @@ fn attachment_tools_require_separate_consent_even_inside_a_batch() {
     for tool in ATTACHMENT_TOOL_NAMES {
         assert!(!names.contains(tool), "missing scope exposes {tool}");
     }
-    let owner_list = body_of(fixture.request(&local_principal(), &json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/list"
-    })));
+    let owner_list = body_of(fixture.request(
+        &local_principal(),
+        &json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+        }),
+    ));
     let tools = owner_list["result"]["tools"].as_array().unwrap();
     for tool in ATTACHMENT_TOOL_NAMES {
-        assert!(tools.iter().any(|entry| entry["name"] == *tool), "missing {tool}");
+        assert!(
+            tools.iter().any(|entry| entry["name"] == *tool),
+            "missing {tool}"
+        );
     }
 }
 
@@ -359,7 +379,10 @@ fn upload_session_is_bound_to_principal_and_current_workspace() {
         .registry
         .grant("machine:local", &second.workspace_id, &alice.id, "writer")
         .unwrap();
-    fixture.registry.set_default(&alice.id, &second.workspace_id).unwrap();
+    fixture
+        .registry
+        .set_default(&alice.id, &second.workspace_id)
+        .unwrap();
     assert_error(
         &fixture.call(
             &alice,
@@ -376,7 +399,9 @@ fn upload_session_is_bound_to_principal_and_current_workspace() {
         .graph_path;
     let other = Connection::open(second_path).unwrap();
     let stray: i64 = other
-        .query_row("SELECT count(*) FROM attachment_upload", [], |row| row.get(0))
+        .query_row("SELECT count(*) FROM attachment_upload", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(stray, 0);
     let resumed = result(&fixture.call(
@@ -413,7 +438,12 @@ fn workspace_reader_can_read_but_not_upload_or_delete() {
         json!({"workspaceId": fixture.workspace_id, "attachmentId": id,
             "offset": 0, "length": 5}),
     ));
-    assert_eq!(STANDARD.decode(content["content"].as_str().unwrap()).unwrap(), b"hello");
+    assert_eq!(
+        STANDARD
+            .decode(content["content"].as_str().unwrap())
+            .unwrap(),
+        b"hello"
+    );
     assert_error(
         &fixture.call(
             &reader,

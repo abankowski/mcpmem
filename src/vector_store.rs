@@ -466,7 +466,14 @@ impl VectorStore {
         filter_type: Option<&str>,
         allow_attachments: bool,
     ) -> Result<Vec<ChunkHit>> {
-        self.rank_chunks(query, fetch_k, filter_kind, filter_type, allow_attachments, false)
+        self.rank_chunks(
+            query,
+            fetch_k,
+            filter_kind,
+            filter_type,
+            allow_attachments,
+            false,
+        )
     }
 
     /// Rank owners by their best matching segment before the candidate limit.
@@ -479,7 +486,14 @@ impl VectorStore {
         filter_type: Option<&str>,
         allow_attachments: bool,
     ) -> Result<Vec<ChunkHit>> {
-        self.rank_chunks(query, fetch_k, filter_kind, filter_type, allow_attachments, true)
+        self.rank_chunks(
+            query,
+            fetch_k,
+            filter_kind,
+            filter_type,
+            allow_attachments,
+            true,
+        )
     }
 
     fn rank_chunks(
@@ -505,7 +519,8 @@ impl VectorStore {
             ));
         }
         let mut matches: Vec<ChunkHit> = Vec::new();
-        let mut owner_indices = best_only.then(std::collections::HashMap::<(&str, i64), usize>::new);
+        let mut owner_indices =
+            best_only.then(std::collections::HashMap::<(&str, i64), usize>::new);
         for sv in &snapshot.vectors {
             if !allow_attachments && sv.owner_kind == OwnerKind::Attachment {
                 continue;
@@ -1924,7 +1939,13 @@ mod tests {
         env.vs.reconcile_managed_snapshot().unwrap();
         let hits = env
             .vs
-            .search_chunks(&[1.0, 0.0, 0.0, 0.0], 10, Some("entity"), Some("Person"), false)
+            .search_chunks(
+                &[1.0, 0.0, 0.0, 0.0],
+                10,
+                Some("entity"),
+                Some("Person"),
+                false,
+            )
             .unwrap();
         assert_eq!(hits.len(), 2, "Person chunks only");
         for hit in &hits {
@@ -1977,7 +1998,13 @@ mod tests {
         env.vs.reconcile_managed_snapshot().unwrap();
         let hits = env
             .vs
-            .search_chunks(&[1.0, 0.0, 0.0, 0.0], 10, Some("entity"), Some("Person"), false)
+            .search_chunks(
+                &[1.0, 0.0, 0.0, 0.0],
+                10,
+                Some("entity"),
+                Some("Person"),
+                false,
+            )
             .unwrap();
         let owners = env.vs.aggregate_owners(&hits, 10);
         assert_eq!(owners.len(), 2, "ada and bob now both match Person");

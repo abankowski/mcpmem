@@ -59,7 +59,11 @@ async fn fixture(enabled_attachments: bool) -> Fixture {
             iss: "https://idp.invalid".into(),
             sub: sub.into(),
             label: None,
-            scopes: vec!["graph-read".into(), "graph-write".into(), "attachments".into()],
+            scopes: vec![
+                "graph-read".into(),
+                "graph-write".into(),
+                "attachments".into(),
+            ],
         });
     }
     oauth.principals[0].scopes.push("attachments".into());
@@ -69,16 +73,16 @@ async fn fixture(enabled_attachments: bool) -> Fixture {
     }
     let server = support::server(
         Some(oauth.clone()),
-        support::Scopes { bearer: Vec::new(), enabled },
+        support::Scopes {
+            bearer: Vec::new(),
+            enabled,
+        },
         None,
     )
     .await;
     let (owner, reader, writer_without_scope) = server.oauth().with_store(|store| {
         let id = |index: usize| {
-            mcpmem::principals::human_id(
-                &oauth.principals[index].iss,
-                &oauth.principals[index].sub,
-            )
+            mcpmem::principals::human_id(&oauth.principals[index].iss, &oauth.principals[index].sub)
         };
         (
             plant(store, &id(0), &["graph-read", "graph-write", "attachments"]),
@@ -114,10 +118,8 @@ async fn fixture(enabled_attachments: bool) -> Fixture {
         seeded.get("error").is_none() && seeded["result"]["isError"].as_bool() != Some(true),
         "seeding failed: {seeded}"
     );
-    let reader_id = mcpmem::principals::human_id(
-        &oauth.principals[1].iss,
-        &oauth.principals[1].sub,
-    );
+    let reader_id =
+        mcpmem::principals::human_id(&oauth.principals[1].iss, &oauth.principals[1].sub);
     let grant = mcp(
         &server,
         &owner,
@@ -126,7 +128,13 @@ async fn fixture(enabled_attachments: bool) -> Fixture {
     )
     .await;
     assert_eq!(grant["result"]["grant"]["role"], "reader", "{grant}");
-    Fixture { server, owner, reader, writer_without_scope, workspace }
+    Fixture {
+        server,
+        owner,
+        reader,
+        writer_without_scope,
+        workspace,
+    }
 }
 
 async fn mcp(server: &support::Server, token: &str, tool: &str, arguments: Value) -> Value {
@@ -135,10 +143,13 @@ async fn mcp(server: &support::Server, token: &str, tool: &str, arguments: Value
             Request::post("/mcp")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(json!({
-                    "jsonrpc":"2.0","id":1,"method":"tools/call",
-                    "params":{"name":tool,"arguments":arguments}
-                }).to_string()))
+                .body(Body::from(
+                    json!({
+                        "jsonrpc":"2.0","id":1,"method":"tools/call",
+                        "params":{"name":tool,"arguments":arguments}
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await;
@@ -160,15 +171,10 @@ async fn send(
 ) -> Response<Body> {
     let mut builder = Request::builder().method(method).uri(path);
     if !token.is_empty() {
-        builder.headers_mut().insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
     if let Some(mime) = mime {
-        builder
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, mime.parse().unwrap());
+        builder = builder.header(header::CONTENT_TYPE, mime);
     }
     server.request(builder.body(body).unwrap()).await
 }
@@ -178,7 +184,10 @@ async fn data(response: Response<Body>) -> Value {
 }
 
 fn graph(fixture: &Fixture) -> Connection {
-    let registry_path = format!("{}.workspaces.sqlite", fixture.server.memory_db_path().display());
+    let registry_path = format!(
+        "{}.workspaces.sqlite",
+        fixture.server.memory_db_path().display()
+    );
     let registry = Connection::open(registry_path).unwrap();
     let path: String = registry
         .query_row(
@@ -191,7 +200,9 @@ fn graph(fixture: &Fixture) -> Connection {
 }
 
 fn attachment_count(fixture: &Fixture) -> i64 {
-    graph(fixture).query_row("SELECT count(*) FROM attachment", [], |row| row.get(0)).unwrap()
+    graph(fixture)
+        .query_row("SELECT count(*) FROM attachment", [], |row| row.get(0))
+        .unwrap()
 }
 
 /// The real-transport smoke: a spawned `mcpmem` binary served over HTTP/1.1
@@ -231,8 +242,8 @@ fn spawn_child_server() -> ChildServer {
     let pid = std::process::id();
     let db_path = format!("/tmp/attachment_http_{pid}_{port}.db");
     let log_path = format!("/tmp/attachment_http_{pid}_{port}.log");
-    let bin = std::env::var("CARGO_BIN_EXE_mcpmem")
-        .unwrap_or_else(|_| "target/debug/mcpmem".into());
+    let bin =
+        std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut child = Command::new(bin)
         .arg("-f")
         .arg(&db_path)
@@ -255,11 +266,17 @@ fn spawn_child_server() -> ChildServer {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return ChildServer { child, port, db_path, log_path };
+            return ChildServer {
+                child,
+                port,
+                db_path,
+                log_path,
+            };
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     let _ = child.kill();
+    let _ = child.wait();
     panic!("mcpmem child did not start serving on 127.0.0.1:{port}");
 }
 
@@ -272,7 +289,9 @@ fn raw_request(
     body: Option<&[u8]>,
 ) -> (u16, String, Vec<u8>) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer attachment-http-test-bearer\r\n"
     );
@@ -313,7 +332,9 @@ fn raw_chunked_upload(
     frames: &[Vec<u8>],
 ) -> (u16, String, Vec<u8>) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .unwrap();
     let head = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer attachment-http-test-bearer\r\nContent-Type: {mime}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
     );
@@ -380,16 +401,16 @@ fn real_server_streams_a_fifty_mib_upload_and_download() {
     let frames: Vec<Vec<u8>> = (0..800)
         .map(|frame| vec![(frame / 16) as u8; 64 * 1024])
         .collect();
-    let upload_path = format!(
-        "/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=real.bin"
+    let upload_path =
+        format!("/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=real.bin");
+    let (status, _, body) =
+        raw_chunked_upload(server.port, &upload_path, "application/pdf", &frames);
+    assert_eq!(
+        status,
+        201,
+        "the real upload must be accepted: {}",
+        String::from_utf8_lossy(&body)
     );
-    let (status, _, body) = raw_chunked_upload(
-        server.port,
-        &upload_path,
-        "application/pdf",
-        &frames,
-    );
-    assert_eq!(status, 201, "the real upload must be accepted: {}", String::from_utf8_lossy(&body));
     let upload: Value = serde_json::from_slice(&body).expect("an upload reply");
     assert_eq!(upload["status"], "uploaded");
     let id = upload["attachmentId"].as_i64().expect("an attachment id");
@@ -403,7 +424,9 @@ fn real_server_streams_a_fifty_mib_upload_and_download() {
     );
     assert_eq!(status, 200);
     assert!(
-        headers.to_lowercase().contains("content-type: application/pdf"),
+        headers
+            .to_lowercase()
+            .contains("content-type: application/pdf"),
         "{headers}"
     );
     assert_eq!(bytes.len(), FILE_BYTES);
@@ -427,19 +450,28 @@ fn chunked_body(chunks: usize, bytes_per_chunk: usize) -> Body {
 async fn fifty_mib_upload_and_download_have_identical_bytes_without_a_full_buffer() {
     let fx = fixture(true).await;
     let post = send(
-        &fx.server, &fx.owner, "POST", &upload_path(&fx.workspace, "Alice", "large.txt"),
-        chunked_body(50, CHUNK), Some("text/plain"),
-    ).await;
+        &fx.server,
+        &fx.owner,
+        "POST",
+        &upload_path(&fx.workspace, "Alice", "large.txt"),
+        chunked_body(50, CHUNK),
+        Some("text/plain"),
+    )
+    .await;
     assert_eq!(post.status(), StatusCode::CREATED);
     let body = data(post).await;
     assert_eq!(body["status"], "uploaded");
     let id = body["attachmentId"].as_i64().unwrap();
 
     let download = send(
-        &fx.server, &fx.owner, "GET",
+        &fx.server,
+        &fx.owner,
+        "GET",
         &format!("/ui/attachments/{id}/download?workspaceId={}", fx.workspace),
-        Body::empty(), None,
-    ).await;
+        Body::empty(),
+        None,
+    )
+    .await;
     assert_eq!(download.status(), StatusCode::OK);
     assert_eq!(download.headers()[header::CONTENT_TYPE], "text/plain");
     assert_eq!(
@@ -450,7 +482,10 @@ async fn fifty_mib_upload_and_download_have_identical_bytes_without_a_full_buffe
     let mut offset = 0;
     while let Some(frame) = body.frame().await {
         let data = frame.unwrap().into_data().unwrap();
-        assert!(data.len() <= 64 * 1024, "a download frame must stay bounded");
+        assert!(
+            data.len() <= 64 * 1024,
+            "a download frame must stay bounded"
+        );
         for (within, byte) in data.iter().enumerate() {
             assert_eq!(*byte, ((offset + within) / CHUNK) as u8);
         }
@@ -470,7 +505,12 @@ async fn byte_after_limit_is_rejected_even_with_a_false_short_length() {
         .unwrap();
     let response = fx.server.request(request).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(data(response).await["error"].as_str().unwrap().contains("per-file"));
+    assert!(
+        data(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("per-file")
+    );
     assert_eq!(attachment_count(&fx), 0);
 }
 
@@ -478,9 +518,14 @@ async fn byte_after_limit_is_rejected_even_with_a_false_short_length() {
 async fn missing_length_is_allowed_and_advertised_oversize_reads_no_bytes() {
     let fx = fixture(true).await;
     let response = send(
-        &fx.server, &fx.owner, "POST", &upload_path(&fx.workspace, "Alice", "short.txt"),
-        chunked_body(1, 3), Some("text/plain"),
-    ).await;
+        &fx.server,
+        &fx.owner,
+        "POST",
+        &upload_path(&fx.workspace, "Alice", "short.txt"),
+        chunked_body(1, 3),
+        Some("text/plain"),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let polled = Arc::new(AtomicUsize::new(0));
     let read = Arc::clone(&polled);
@@ -492,8 +537,12 @@ async fn missing_length_is_allowed_and_advertised_oversize_reads_no_bytes() {
         .header(header::AUTHORIZATION, format!("Bearer {}", fx.owner))
         .header(header::CONTENT_TYPE, "text/plain")
         .header(header::CONTENT_LENGTH, (FILE_BYTES + 1).to_string())
-        .body(body).unwrap();
-    assert_eq!(fx.server.request(request).await.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        .body(body)
+        .unwrap();
+    assert_eq!(
+        fx.server.request(request).await.status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
     assert_eq!(polled.load(Ordering::SeqCst), 0);
     assert_eq!(attachment_count(&fx), 1);
 }
@@ -503,12 +552,20 @@ async fn disconnected_upload_does_not_create_an_attachment_or_a_job() {
     let fx = fixture(true).await;
     let body = Body::from_stream(stream::iter([
         Ok(Bytes::from_static(b"partial")),
-        Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "disconnect")),
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "disconnect",
+        )),
     ]));
     let response = send(
-        &fx.server, &fx.owner, "POST", &upload_path(&fx.workspace, "Alice", "partial.txt"),
-        body, Some("text/plain"),
-    ).await;
+        &fx.server,
+        &fx.owner,
+        "POST",
+        &upload_path(&fx.workspace, "Alice", "partial.txt"),
+        body,
+        Some("text/plain"),
+    )
+    .await;
     assert!(!response.status().is_success());
     assert_eq!(attachment_count(&fx), 0);
     let jobs: i64 = graph(&fx)
@@ -530,7 +587,12 @@ async fn mime_duplicate_and_entity_rules_leave_the_original_intact() {
     )
     .await;
     assert_eq!(invalid.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    assert!(data(invalid).await["error"].as_str().unwrap().contains("MIME"));
+    assert!(
+        data(invalid).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("MIME")
+    );
     let first = send(
         &fx.server,
         &fx.owner,
@@ -552,7 +614,12 @@ async fn mime_duplicate_and_entity_rules_leave_the_original_intact() {
     )
     .await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
-    assert!(data(duplicate).await["error"].as_str().unwrap().contains("duplicate"));
+    assert!(
+        data(duplicate).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate")
+    );
     let second = send(
         &fx.server,
         &fx.owner,
@@ -593,7 +660,10 @@ async fn every_route_refuses_a_disabled_category_before_it_reads_a_body() {
         ),
         (
             "GET",
-            format!("/ui/attachments?workspaceId={}&entityName=Alice", fx.workspace),
+            format!(
+                "/ui/attachments?workspaceId={}&entityName=Alice",
+                fx.workspace
+            ),
             Body::empty(),
             None,
         ),
@@ -605,7 +675,10 @@ async fn every_route_refuses_a_disabled_category_before_it_reads_a_body() {
         ),
         (
             "GET",
-            format!("/ui/attachments/1/pages?workspaceId={}&page=1", fx.workspace),
+            format!(
+                "/ui/attachments/1/pages?workspaceId={}&page=1",
+                fx.workspace
+            ),
             Body::empty(),
             None,
         ),
@@ -655,11 +728,12 @@ async fn scope_and_workspace_gates_deny_before_any_upload_read() {
         .await;
         assert_eq!(response.status(), expected_status);
         if expected_status == StatusCode::FORBIDDEN {
-            assert!(response
-                .headers()[header::WWW_AUTHENTICATE]
-                .to_str()
-                .unwrap()
-                .contains("attachments"));
+            assert!(
+                response.headers()[header::WWW_AUTHENTICATE]
+                    .to_str()
+                    .unwrap()
+                    .contains("attachments")
+            );
         }
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }
@@ -689,7 +763,10 @@ async fn a_scoped_reader_reads_metadata_and_page_but_cannot_delete() {
         &fx.server,
         &fx.reader,
         "GET",
-        &format!("/ui/attachments?workspaceId={}&entityName=Alice", fx.workspace),
+        &format!(
+            "/ui/attachments?workspaceId={}&entityName=Alice",
+            fx.workspace
+        ),
         Body::empty(),
         None,
     )

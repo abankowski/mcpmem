@@ -130,6 +130,15 @@ fn count(conn: &Connection, table: &str) -> i64 {
     .unwrap()
 }
 
+fn count_where(conn: &Connection, table: &str, column: &str, id: i64) -> i64 {
+    conn.query_row(
+        &format!("SELECT count(*) FROM {table} WHERE {column}=?1"),
+        rusqlite::params![id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
 // ── Fake vision endpoint ─────────────────────────────────────────────────
 
 /// A one-shot HTTP server that records every request's Authorization header
@@ -156,7 +165,7 @@ impl FakeVision {
                         continue;
                     };
                     let state = Arc::clone(&thread_state);
-                    std::thread::spawn(move || serve_vision(conn, state));
+                    std::thread::spawn(move || serve_vision(conn, &state));
                 }
             });
         Self {
@@ -172,7 +181,7 @@ impl FakeVision {
     }
 }
 
-fn serve_vision(mut conn: TcpStream, state: Arc<Mutex<Vec<(String, String)>>>) {
+fn serve_vision(mut conn: TcpStream, state: &Arc<Mutex<Vec<(String, String)>>>) {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut headers_end = None;
@@ -250,7 +259,10 @@ impl EnvSetter<'_> {
                 // removed on drop, also under the lock.
                 unsafe { std::env::set_var(key, value) }
             }
-            None => std::env::remove_var(key),
+            None => {
+                // SAFETY: guarded by ENV_LOCK; see new().
+                unsafe { std::env::remove_var(key) }
+            }
         }
         EnvSetter {
             key,
@@ -266,7 +278,8 @@ impl Drop for EnvSetter<'_> {
             // SAFETY: guarded by ENV_LOCK, see new().
             unsafe { std::env::set_var(self.key, self.prior.as_ref().unwrap()) }
         } else {
-            std::env::remove_var(self.key);
+            // SAFETY: guarded by ENV_LOCK, see new().
+            unsafe { std::env::remove_var(self.key) }
         }
     }
 }
@@ -276,7 +289,7 @@ impl Drop for EnvSetter<'_> {
 /// ambient key to prove the environment-over-file precedence.
 fn with_embedding_env(run: impl FnOnce(), api_key: Option<&str>) {
     let _guard = ENV_LOCK.lock();
-    let _key = EnvSetter::new("MCP_MEMORY_OPENAI_API_KEY", api_key.unwrap_or(""));
+    let _key = EnvSetter::new("MCP_MEMORY_OPENAI_API_KEY", api_key);
     let _url = EnvSetter::new("MCP_MEMORY_OPENAI_URL", Some(""));
     let _ollama = EnvSetter::new("MCP_MEMORY_OLLAMA_URL", Some(""));
     run();
@@ -574,7 +587,11 @@ fn explicit_openai_key_file_errors_are_terminal_config_and_text_still_extracts()
                 .is_some_and(|error| error.contains("api-key-file")),
             "{key_path}: the failure names the key file rule: {error:?}"
         );
-        assert_eq!(count(&conn, "attachment_text"), 0);
+        assert_eq!(
+            count_where(&conn, "attachment_text", "attachment_id", attachment),
+            0,
+            "a config failure publishes no page rows"
+        );
 
         // The same settings leave text extraction untouched.
         let text_id = upload(
@@ -586,7 +603,7 @@ fn explicit_openai_key_file_errors_are_terminal_config_and_text_still_extracts()
         );
         let text_worker = ExtractionWorker::new(
             &path,
-            Some(resolve_ocr(
+            resolve_ocr(
                 Some(&OcrConfig {
                     provider: "openai".into(),
                     model: None,
@@ -594,7 +611,7 @@ fn explicit_openai_key_file_errors_are_terminal_config_and_text_still_extracts()
                     api_key_file: Some(key_path),
                 }),
                 &PrimaryProvider::default(),
-            )),
+            ),
         );
         assert_eq!(text_worker.run_once(now_us()).unwrap().committed, 1);
         assert_eq!(attachment_status(&path, text_id), "ready");
@@ -873,7 +890,7 @@ fn pdf_page_renewal_moves_the_lease_deadline_past_the_claim_time() {
         &path,
         Some(Arc::new(
             VisionOcr::new(VisionSettings {
-                endpoint: vision.url.clone(),
+                endpoint: vision.url,
                 api_key: "vision-key".into(),
                 model: "gpt-4o-mini".into(),
             })
@@ -978,7 +995,11 @@ fn transient_provider_failure_retains_extracting_then_succeeds() {
         .unwrap();
     assert_eq!(stage, None, "success clears the previous error badge");
     assert_eq!(error, None);
-    assert_eq!(count(&conn, "attachment_text"), 1);
+    assert_eq!(
+        count(&conn, "attachment_text"),
+        2,
+        "both PDF pages commit after the retry succeeds"
+    );
 }
 
 #[cfg(feature = "extractor")]
@@ -1151,17 +1172,17 @@ fn render_failures_record_the_render_stage_and_publish_nothing() {
         let ocr = Arc::new(UncalledOcr {
             called: AtomicBool::new(false),
         });
-        let worker = ExtractionWorker::new(&path, Some(Arc::clone(&ocr)));
         let ocr_ref = Arc::clone(&ocr);
-        let report = with_path(&bin.to_string_lossy(), || {
-            worker.run_once(now_us()).unwrap()
+        let worker = ExtractionWorker::new(&path, Some(Arc::clone(&ocr) as Arc<dyn OcrProvider>));
+        let mut report = ExtractionReport::default();
+        with_path(&bin.to_string_lossy(), || {
+            report = worker.run_once(now_us()).unwrap();
         });
         assert_eq!(report.retried, 1, "{name}: a render failure is transient");
         assert_eq!(report.committed, 0);
         assert_eq!(report.dead, 0);
-        assert_eq!(
-            ocr_ref.called.load(Ordering::SeqCst),
-            false,
+        assert!(
+            !ocr_ref.called.load(Ordering::SeqCst),
             "{name}: no OCR call"
         );
 
@@ -1226,17 +1247,34 @@ fn expired_upload_sessions_are_swept_on_an_idle_turn() {
 
 /// Drains a child's stderr on a background thread into a shared line list,
 /// so the child can never block on a full pipe while the test polls.
-fn drain_lines(output: std::process::ChildStderr) -> Arc<Mutex<Vec<String>>> {
+fn drain_lines(mut output: std::process::ChildStderr) -> Arc<Mutex<Vec<String>>> {
     let lines = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&lines);
     std::thread::spawn(move || {
-        let mut reader = std::io::BufReader::new(output);
-        let mut line = String::new();
+        let mut buffer = [0_u8; 4096];
+        let mut line = Vec::<u8>::new();
         loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => return,
-                Ok(_) => captured.lock().push(line.trim_end().to_owned()),
+            match output.read(&mut buffer) {
+                Ok(0) | Err(_) => {
+                    if !line.is_empty() {
+                        captured
+                            .lock()
+                            .push(String::from_utf8_lossy(&line).trim_end().to_owned());
+                    }
+                    return;
+                }
+                Ok(count) => {
+                    for byte in &buffer[..count] {
+                        if *byte == b'\n' {
+                            captured
+                                .lock()
+                                .push(String::from_utf8_lossy(&line).trim_end().to_owned());
+                            line.clear();
+                        } else {
+                            line.push(*byte);
+                        }
+                    }
+                }
             }
         }
     });
