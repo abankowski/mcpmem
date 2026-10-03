@@ -16,6 +16,7 @@ struct FusedRow {
     text_score: f64,
     vec_score: f64,
     chunk: Option<ChunkDetail>,
+    attachment: Option<AttachmentDetail>,
 }
 
 /// The matched chunk of one result row for `includeChunks`: its kind, its
@@ -24,6 +25,13 @@ struct ChunkDetail {
     kind: String,
     text: String,
     score: f64,
+}
+
+/// An attachment hit uses the persisted page and the exact matched segment.
+struct AttachmentDetail {
+    page: i64,
+    excerpt: String,
+    chunk_score: f64,
 }
 
 const MAX_EMBEDDING_DIMS: usize = 4096;
@@ -85,9 +93,9 @@ fn opt_f64(params: &Value, key: &str, default: f64) -> Result<f64> {
     }
 }
 
-/// Owner-level filter shared by the four search tools. `kind` limits the owner
-/// kind ("entity" or "relation"); `type` matches the chunk type name in
-/// `type_dict` exactly. `type` without `kind` matches either dict kind.
+/// Owner-level filter shared by the five search tools. `kind` limits the
+/// owner kind ("entity", "relation", or "attachment"); `type` matches the
+/// stored parent entity type for an attachment.
 #[derive(Clone, Debug, Default)]
 pub struct SearchFilter {
     pub kind: Option<String>,
@@ -112,9 +120,7 @@ fn filter_member<'a>(
     }
 }
 
-/// Parse the `filter` argument. `None` when the argument is absent or null.
-/// The `kind` whitelist is exactly "entity" and "relation"; anything else is
-/// refused before any search runs.
+/// Parse the `filter` argument. Only the three stored owner kinds are valid.
 fn parse_filter(params: &Value) -> Result<Option<SearchFilter>> {
     let Some(f) = params.get("filter").filter(|v| !v.is_null()) else {
         return Ok(None);
@@ -123,9 +129,9 @@ fn parse_filter(params: &Value) -> Result<Option<SearchFilter>> {
         .as_object()
         .ok_or_else(|| MCSError::InvalidParams("'filter' must be an object".into()))?;
     let kind = filter_member(object, "kind")?;
-    if kind.is_some_and(|k| k != "entity" && k != "relation") {
+    if kind.is_some_and(|k| k != "entity" && k != "relation" && k != "attachment") {
         return Err(MCSError::InvalidParams(
-            "'filter.kind' must be \"entity\" or \"relation\"".into(),
+            "'filter.kind' must be \"entity\", \"relation\", or \"attachment\"".into(),
         ));
     }
     let ftype = filter_member(object, "type")?;
@@ -133,6 +139,14 @@ fn parse_filter(params: &Value) -> Result<Option<SearchFilter>> {
         kind: kind.map(str::to_string),
         r#type: ftype.map(str::to_string),
     }))
+}
+
+fn include_attachments(params: &Value, allow_attachments: bool) -> bool {
+    allow_attachments
+        && params
+            .get("includeAttachments")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
 }
 
 fn text_content(text: &str) -> Value {
@@ -152,15 +166,21 @@ fn build_content_response(inner_json: &str) -> String {
     out
 }
 
-/// One owner-level result row of the shared search: display triple, owner
-/// score (the best chunk's distance), and the matched chunk for
-/// `includeChunks`.
-type OwnerRow = (String, String, String, f64, Option<ChunkDetail>);
+/// One owner-level result row of the shared search.
+struct OwnerRow {
+    name: String,
+    entity_type: String,
+    kind: String,
+    score: f64,
+    chunk: Option<ChunkDetail>,
+    attachment: Option<AttachmentDetail>,
+}
 
-/// Search owners by their best chunk. The owner set, the filter, the
-/// kind-marked rows, and the chunk detail are the shared contract of the four
-/// search tools; `exclude` drops one owner from the results (the query entity
-/// itself in `vector_search_by_entity`) while still returning `top_k` rows.
+/// Search owners by their best chunk. Exclude a reference entity without
+/// letting it consume a result slot.
+// The callers pass the parsed filter and both inclusion flags from one
+// argument object; a struct would only move the same arity to the callers.
+#[allow(clippy::too_many_arguments)]
 fn search_owners(
     vs: &VectorStore,
     query: &[f32],
@@ -168,17 +188,24 @@ fn search_owners(
     exclude: Option<(OwnerKind, i64)>,
     filter: Option<&SearchFilter>,
     include_chunks: bool,
+    allow_attachments: bool,
 ) -> Result<String> {
-    Ok(build_owner_results(&search_owner_rows(
-        vs,
-        query,
-        top_k,
-        exclude,
-        filter,
+    Ok(build_owner_results(
+        &search_owner_rows(
+            vs,
+            query,
+            top_k,
+            exclude,
+            filter,
+            include_chunks,
+            allow_attachments,
+        )?,
         include_chunks,
-    )?))
+    ))
 }
 
+// Same arity as [`search_owners`]; a struct would move it to the callers.
+#[allow(clippy::too_many_arguments)]
 fn search_owner_rows(
     vs: &VectorStore,
     query: &[f32],
@@ -186,79 +213,99 @@ fn search_owner_rows(
     exclude: Option<(OwnerKind, i64)>,
     filter: Option<&SearchFilter>,
     include_chunks: bool,
+    allow_attachments: bool,
 ) -> Result<Vec<OwnerRow>> {
-    // Ask for one owner more than returned so dropping the excluded owner
-    // (which ranks first, its own identity chunk is the query) still leaves a
-    // full result set. The final truncate covers the case where the excluded
-    // owner is not in the ranked set at all.
-    let target = top_k.saturating_add(usize::from(exclude.is_some()));
     let kind = filter.and_then(|f| f.kind.as_deref());
     let ftype = filter.and_then(|f| f.r#type.as_deref());
-    let mut rows: Vec<OwnerRow> = Vec::with_capacity(target);
+    let mut rows = Vec::with_capacity(top_k);
 
-    // Chunk-serving store: overfetch chunks so owners whose best chunk sits
-    // past `top_k` still rank, then reduce to one best chunk per owner.
-    // Truncating at the chunk level first would let one owner's many near
-    // chunks crowd out the other owners and under-fill the result set.
-    let fetch = (target * 8).clamp(target, 1000);
-    let hits = vs.search_chunks(query, fetch, kind, ftype)?;
-    let owners = vs.aggregate_owners(&hits, target);
-    for (owner_kind, owner_id, dist, _best_idx) in owners {
-        if exclude == Some((owner_kind, owner_id)) {
+    // Rank distinct owners first. A file with many pages cannot crowd out
+    // graph owners. Resolve live rows before the final topK limit.
+    let hits = vs.search_best_chunks(query, 1000, kind, ftype, allow_attachments)?;
+    for hit in &hits {
+        if exclude == Some((hit.owner_kind, hit.owner_id)) {
             continue;
         }
-        let Some((name, etype, kind_label)) = vs.resolve_owner(owner_kind, owner_id)? else {
+        let Some((name, entity_type, kind)) = vs.resolve_owner(hit.owner_kind, hit.owner_id)?
+        else {
             continue;
         };
-        let chunk = if include_chunks {
-            hits.iter()
-                .find(|h| h.owner_kind == owner_kind && h.owner_id == owner_id)
-                .and_then(|h| {
-                    vs.chunk_text(h).map(|text| ChunkDetail {
-                        kind: h.chunk_kind.as_str().to_string(),
-                        text,
-                        score: f64::from(h.dist),
-                    })
-                })
+        if ftype.is_some_and(|want| entity_type != want) {
+            continue;
+        }
+        let attachment = if hit.owner_kind == OwnerKind::Attachment {
+            let Some((page, excerpt)) = vs.attachment_segment(hit) else {
+                continue;
+            };
+            Some(AttachmentDetail { page, excerpt, chunk_score: f64::from(hit.dist) })
         } else {
             None
         };
-        rows.push((name, etype, kind_label, f64::from(dist), chunk));
+        let chunk = if include_chunks && attachment.is_none() {
+            vs.chunk_text(hit).map(|text| ChunkDetail {
+                kind: hit.chunk_kind.as_str().to_string(),
+                text,
+                score: f64::from(hit.dist),
+            })
+        } else {
+            None
+        };
+        rows.push(OwnerRow {
+            name,
+            entity_type,
+            kind,
+            score: f64::from(hit.dist),
+            chunk,
+            attachment,
+        });
+        if rows.len() == top_k {
+            break;
+        }
     }
-    rows.truncate(top_k);
     Ok(rows)
 }
 
 /// Append one `"chunk":{...}` member to a result row.
-fn write_chunk_detail(out: &mut String, chunk: &ChunkDetail) {
+fn write_chunk_detail(out: &mut String, kind: &str, text: &str, score: f64) {
     use std::fmt::Write;
     out.push_str(r#","chunk":{"kind":"#);
-    push_json_str(out, &chunk.kind);
+    push_json_str(out, kind);
     out.push_str(r#","text":"#);
-    push_json_str(out, &chunk.text);
-    write!(out, r#","score":{:.6}}}"#, chunk.score).unwrap();
+    push_json_str(out, text);
+    write!(out, r#","score":{score:.6}}}"#).unwrap();
 }
 
-/// Render owner rows `(name, entityType, kind, score, chunk?)` as the standard
-/// results JSON: `{"results":[{name, entityType, kind, score, chunk?}],
-/// "count":N}`.
-fn build_owner_results(rows: &[OwnerRow]) -> String {
+fn write_attachment_detail(out: &mut String, filename: &str, detail: &AttachmentDetail) {
+    use std::fmt::Write;
+    out.push_str(r#","filename":"#);
+    push_json_str(out, filename);
+    write!(out, r#","page":{},"excerpt":"#, detail.page).unwrap();
+    push_json_str(out, &detail.excerpt);
+}
+
+/// Render owner rows with file metadata, and optional matched chunk detail.
+fn build_owner_results(rows: &[OwnerRow], include_chunks: bool) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(128 + rows.len() * 96);
     out.push_str(r#"{"results":["#);
-    for (i, (name, etype, kind, score, chunk)) in rows.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
         out.push_str(r#"{"name":"#);
-        push_json_str(&mut out, name);
+        push_json_str(&mut out, &row.name);
         out.push_str(r#","entityType":"#);
-        push_json_str(&mut out, etype);
+        push_json_str(&mut out, &row.entity_type);
         out.push_str(r#","kind":"#);
-        push_json_str(&mut out, kind);
-        write!(out, r#","score":{score:.6}"#).unwrap();
-        if let Some(chunk) = chunk {
-            write_chunk_detail(&mut out, chunk);
+        push_json_str(&mut out, &row.kind);
+        write!(out, r#","score":{:.6}"#, row.score).unwrap();
+        if let Some(detail) = &row.attachment {
+            write_attachment_detail(&mut out, &row.name, detail);
+            if include_chunks {
+                write_chunk_detail(&mut out, "attachment", &detail.excerpt, row.score);
+            }
+        } else if let Some(chunk) = &row.chunk {
+            write_chunk_detail(&mut out, &chunk.kind, &chunk.text, chunk.score);
         }
         out.push('}');
     }
@@ -274,6 +321,7 @@ const fn owner_key(kind: OwnerKind) -> u8 {
     match kind {
         OwnerKind::Entity => 0,
         OwnerKind::Relation => 1,
+        OwnerKind::Attachment => 2,
     }
 }
 
@@ -281,6 +329,7 @@ pub fn handle_vector_search_entities(
     vs: &VectorStore,
     _kg: &GraphHandle,
     args: Option<&Value>,
+    allow_attachments: bool,
 ) -> Result<String> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
 
@@ -300,7 +349,10 @@ pub fn handle_vector_search_entities(
     let json = with_scratch(|buf| {
         buf.reserve(embedding.len());
         buf.extend(embedding.iter().map(|&v| v as f32));
-        search_owners(vs, buf, top_k, None, filter.as_ref(), include_chunks)
+        search_owners(
+            vs, buf, top_k, None, filter.as_ref(), include_chunks,
+            include_attachments(params, allow_attachments),
+        )
     })?;
 
     Ok(build_content_response(&json))
@@ -310,6 +362,7 @@ pub fn handle_hybrid_search(
     vs: &VectorStore,
     kg: &GraphHandle,
     args: Option<&Value>,
+    allow_attachments: bool,
 ) -> Result<String> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
 
@@ -341,18 +394,19 @@ pub fn handle_hybrid_search(
             top_k,
             filter: filter.as_ref(),
             include_chunks,
+            allow_attachments: include_attachments(params, allow_attachments),
         };
         perform_hybrid_search(vs, kg, query_text, buf, &params)
     })?;
 
-    Ok(build_content_response(&build_fused_results(&results)))
+    Ok(build_content_response(&build_fused_results(&results, include_chunks)))
 }
 
 /// Render fused rows as the standard results JSON. `hybrid_search` and
 /// `semantic_search` fuse the same two rankings, so a client parses one shape
 /// for both. Rows are kind-marked, and `includeChunks` attaches the best
 /// vector chunk of the owner.
-fn build_fused_results(results: &[FusedRow]) -> String {
+fn build_fused_results(results: &[FusedRow], include_chunks: bool) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(128 + results.len() * 96);
     out.push_str(r#"{"results":["#);
@@ -372,8 +426,13 @@ fn build_fused_results(results: &[FusedRow]) -> String {
             row.score, row.text_score, row.vec_score
         )
         .unwrap();
-        if let Some(chunk) = &row.chunk {
-            write_chunk_detail(&mut out, chunk);
+        if let Some(detail) = &row.attachment {
+            write_attachment_detail(&mut out, &row.name, detail);
+            if include_chunks {
+                write_chunk_detail(&mut out, "attachment", &detail.excerpt, detail.chunk_score);
+            }
+        } else if let Some(chunk) = &row.chunk {
+            write_chunk_detail(&mut out, &chunk.kind, &chunk.text, chunk.score);
         }
         out.push('}');
     }
@@ -396,16 +455,16 @@ fn perform_hybrid_search(
     let kind = params.filter.and_then(|f| f.kind.as_deref());
     let ftype = params.filter.and_then(|f| f.r#type.as_deref());
 
-    // The vector half runs at owner level: chunk hits aggregate to one best
-    // chunk per owner, so one owner's many chunks cannot crowd out the others.
-    let hits = vs.search_chunks(query_emb, fetch_k, kind, ftype)?;
+    // Rank one best segment per owner before the candidate limit.
+    let hits = vs.search_best_chunks(
+        query_emb, fetch_k, kind, ftype, params.allow_attachments,
+    )?;
     let vec_owners = vs.aggregate_owners(&hits, fetch_k);
 
-    // The FTS half matches entities only. A relation-kind filter excludes it
-    // (relation rows enter the fusion with their vector rank only), and a type
-    // filter applies to the entity type, mirroring the chunk-level predicate.
+    // FTS matches entities only. Other owner kinds enter by vector rank.
+    // A type filter applies to the entity type in both candidate feeds.
     let mut text_matches: Vec<(u8, i64)> = Vec::new();
-    if kind != Some("relation") {
+    if kind.is_none_or(|value| value == "entity") {
         let kg_results = kg.search_nodes_filtered(query_text, None, 0, fetch_k);
         for entity in &kg_results {
             let Some(id) = vs.entity_id_of(&entity.name)? else {
@@ -481,32 +540,60 @@ fn perform_hybrid_search(
     }
 
     let mut results = Vec::with_capacity(top_k.min(scored.len()));
-    for entry in scored.iter().take(top_k) {
-        let Some((name, etype, kind_label)) = vs.resolve_owner(entry.kind, entry.owner_id)? else {
+    for entry in &scored {
+        let Some((name, entity_type, kind)) = vs.resolve_owner(entry.kind, entry.owner_id)?
+        else {
             continue;
         };
-        let chunk = if params.include_chunks {
-            hits.iter()
-                .find(|h| h.owner_kind == entry.kind && h.owner_id == entry.owner_id)
-                .and_then(|h| {
-                    vs.chunk_text(h).map(|text| ChunkDetail {
-                        kind: h.chunk_kind.as_str().to_string(),
-                        text,
-                        score: f64::from(h.dist),
-                    })
+        if ftype.is_some_and(|want| entity_type != want) {
+            continue;
+        }
+        let best = hits
+            .iter()
+            .find(|h| h.owner_kind == entry.kind && h.owner_id == entry.owner_id);
+        let attachment = if entry.kind == OwnerKind::Attachment {
+            let candidate: Option<(i64, String)> = best
+                .as_ref()
+                .and_then(|hit| vs.attachment_segment(hit));
+            let Some((page, excerpt)) = candidate else {
+                continue;
+            };
+            Some(AttachmentDetail {
+                page,
+                excerpt,
+                chunk_score: best
+                    .as_ref()
+                    .and_then(|hit| Some(f64::from(hit.dist)))
+                    .ok()
+                    .unwrap_or(0.0),
+            })
+        } else {
+            None
+        };
+        let chunk = if params.include_chunks && attachment.is_none() {
+            best.and_then(|hit| {
+                vs.chunk_text(hit).map(|text| ChunkDetail {
+                    kind: hit.chunk_kind.as_str().to_string(),
+                    text,
+                    score: f64::from(hit.dist),
                 })
+            })
         } else {
             None
         };
         results.push(FusedRow {
             name,
-            entity_type: etype,
-            kind: kind_label,
+            entity_type,
+            kind,
             score: entry.total,
             text_score: entry.text_score,
             vec_score: entry.vec_score,
             chunk,
+            attachment,
         });
+        if results.len() == top_k {
+            break;
+        }
     }
 
     Ok(results)
@@ -529,6 +616,7 @@ struct HybridParams<'a> {
     top_k: usize,
     filter: Option<&'a SearchFilter>,
     include_chunks: bool,
+    allow_attachments: bool,
 }
 
 pub fn handle_refresh_graph_cache(
@@ -586,12 +674,15 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f64 {
     if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
-/// Render resolved `(name, entityType, score)` rows as the standard results JSON.
-fn build_named_results(rows: &[(String, String, f64)]) -> String {
+/// Render resolved rows as the standard results JSON, with the attachment
+/// metadata (filename, page, excerpt) on file rows.
+fn build_named_results(
+    rows: &[(String, String, String, f64, Option<AttachmentDetail>)],
+) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(64 + rows.len() * 64);
     out.push_str(r#"{"results":["#);
-    for (i, (name, etype, score)) in rows.iter().enumerate() {
+    for (i, (name, etype, kind, score, attachment)) in rows.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
@@ -599,7 +690,13 @@ fn build_named_results(rows: &[(String, String, f64)]) -> String {
         push_json_str(&mut out, name);
         out.push_str(r#","entityType":"#);
         push_json_str(&mut out, etype);
-        write!(out, r#","score":{score:.6}}}"#).unwrap();
+        out.push_str(r#","kind":"#);
+        push_json_str(&mut out, kind);
+        write!(out, r#","score":{score:.6}"#).unwrap();
+        if let Some(detail) = attachment {
+            write_attachment_detail(&mut out, name, detail);
+        }
+        out.push('}');
     }
     out.push_str(r#"],"count":"#);
     out.push_str(&rows.len().to_string());
@@ -613,6 +710,7 @@ pub fn handle_vector_search_by_entity(
     vs: &VectorStore,
     _kg: &GraphHandle,
     args: Option<&Value>,
+    allow_attachments: bool,
 ) -> Result<String> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
     let name = params
@@ -646,18 +744,23 @@ pub fn handle_vector_search_by_entity(
     } else {
         None
     };
-    let json = search_owners(vs, &query, top_k, exclude, filter.as_ref(), include_chunks)?;
+    let json = search_owners(
+        vs, &query, top_k, exclude, filter.as_ref(), include_chunks,
+        include_attachments(params, allow_attachments),
+    )?;
     Ok(build_content_response(&json))
 }
 
 /// Maximal Marginal Relevance search: diversified semantic retrieval.
-/// `{ embedding, topK?, fetchK?, lambda?, entityType? }`. `lambda` in `[0,1]`
-/// trades relevance (1.0) against diversity (0.0). Reduces near-duplicate hits —
-/// a common RAG context-selection step. The reported `score` is the MMR score.
+/// `{ embedding, topK?, fetchK?, lambda?, filter?, includeAttachments? }`.
+/// `lambda` in `[0,1]` trades relevance (1.0) against diversity (0.0).
+/// Reduces near-duplicate hits — a common RAG context-selection step.
+/// The reported `score` is the MMR score.
 pub fn handle_vector_mmr_search(
     vs: &VectorStore,
     _kg: &GraphHandle,
     args: Option<&Value>,
+    allow_attachments: bool,
 ) -> Result<String> {
     let params = args.ok_or_else(|| MCSError::InvalidParams("Missing parameters".into()))?;
     let embedding = parse_embedding(
@@ -668,44 +771,72 @@ pub fn handle_vector_mmr_search(
     let top_k = opt_usize(params, "topK", DEFAULT_TOP_K)?.clamp(1, MAX_TOP_K);
     let fetch_k = opt_usize(params, "fetchK", (top_k * 4).max(20))?.clamp(top_k, MAX_TOP_K);
     let lambda = opt_f64(params, "lambda", 0.5)?.clamp(0.0, 1.0);
-    let entity_type = params
-        .get("entityType")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+    let parsed_filter = parse_filter(params)?;
+    let kind = parsed_filter.as_ref().and_then(|f| f.kind.as_deref());
+    let ftype = parsed_filter.as_ref().and_then(|f| f.r#type.as_deref());
 
     let query = to_f32(&embedding);
+    let include_files = include_attachments(params, allow_attachments);
 
-    // The candidate pool is owner-level: chunk hits aggregate to one best
-    // chunk per owner, so one owner's many chunks cannot crowd out the others.
-    let mut pool: Vec<(OwnerKind, i64, f32)> = Vec::new();
-    let hits = vs.search_chunks(&query, fetch_k, Some("entity"), entity_type)?;
-    for (kind, id, dist, _) in vs.aggregate_owners(&hits, fetch_k) {
-        pool.push((kind, id, dist));
+    // The pool holds the best segment per owner across every stored kind,
+    // then narrows by the kind filter. A long file cannot crowd out the
+    // other owners.
+    let hits = vs.search_best_chunks(
+        &query,
+        fetch_k,
+        None,
+        ftype.as_ref(),
+        include_files,
+    )?;
+    let mut visited: std::collections::HashSet<(u8, i64)> = std::collections::HashSet::new();
+    for hit in &hits {
+        let key = (owner_key(hit.owner_kind), hit.owner_id);
+        if !visited.insert(key) {
+            continue;
+        }
+        if kind.as_deref().is_some_and(|want| hit.owner_kind.as_str() != want) {
+            continue;
+        }
+        pool.push((hit.owner_kind, hit.owner_id, hit.dist));
     }
 
     let mut cands: Vec<MmrCand> = Vec::with_capacity(pool.len());
-    for (kind, id, dist) in pool {
-        let Some((name, etype, _)) = vs.resolve_owner(kind, id)? else {
+    for (owner_kind, owner_id, dist) in pool {
+        let Some((name, etype, _)) = vs.resolve_owner(owner_kind, owner_id)? else {
             continue;
         };
-        if let Some(ft) = entity_type
-            && etype != ft
-        {
+        if ftype.as_deref().is_some_and(|want| etype != want) {
             continue;
         }
         // Diversity compares the owner's identity chunk against the already
-        // selected ones. Without a vector the owner cannot be diversified, so
-        // it drops out of the pool.
-        let emb = match vs.owner_identity_vector(kind, id)? {
-            Some(v) => v,
-            None => continue,
+        // selected ones. An attachment has no identity chunk, so its best
+        // matched segment vector plays that role.
+        let emb: Option<Vec<f32>> = if owner_kind == OwnerKind::Attachment {
+            let hit = hits.iter().find(|h| h.owner_kind == owner_kind && h.owner_id == owner_id);
+            hit.as_ref()
+                .and_then(|h| vs.matched_chunk_vector(h)?
+                .ok())
+                .unwrap_or(None)
+        } else {
+            vs.owner_identity_vector(owner_kind, owner_id)?.ok()
+        };
+        let Some(matched) = emb else {
+            continue;
         };
         let rel = -f64::from(dist);
+        let segment = if owner_kind == OwnerKind::Attachment {
+            let hit = hits.iter().find(|h| h.owner_kind == owner_kind && h.owner_id == owner_id);
+            hit.as_ref().and_then(|h| vs.attachment_segment(h))
+        } else {
+            None
+        };
         cands.push(MmrCand {
             name,
             etype,
-            emb,
+            kind: owner_kind.as_str().to_string(),
+            emb: matched,
             rel,
+            segment,
         });
     }
 
@@ -730,19 +861,29 @@ pub fn handle_vector_mmr_search(
         scores.push(best_mmr);
     }
 
-    let named: Vec<(String, String, f64)> = selected
-        .into_iter()
-        .zip(scores)
-        .map(|(c, s)| (c.name, c.etype, s))
-        .collect();
+    let mut named: Vec<(String, String, String, f64, Option<AttachmentDetail>)> =
+        Vec::with_capacity(selected.len());
+    for (&c, s) in selected.iter().zip(scores) {
+        let attachment = c
+            .segment
+            .as_ref()
+            .map(|&(page, excerpt)| AttachmentDetail {
+                page,
+                excerpt: excerpt.clone(),
+                chunk_score: s,
+            });
+        named.push((c.name.clone(), c.etype.clone(), c.kind.clone(), s, attachment));
+    }
     Ok(build_content_response(&build_named_results(&named)))
 }
 
 struct MmrCand {
     name: String,
     etype: String,
+    kind: String,
     emb: Vec<f32>,
     rel: f64,
+    segment: Option<(i64, String)>,
 }
 
 /// Scale a vector to unit length in place.
@@ -781,6 +922,7 @@ pub fn handle_semantic_search(
     vs: &VectorStore,
     kg: &GraphHandle,
     args: Option<&Value>,
+    allow_attachments: bool,
 ) -> Result<String> {
     use mcpmem_core::jobs::Normalization;
     use mcpmem_indexer::EmbeddingProvider;
@@ -878,12 +1020,16 @@ pub fn handle_semantic_search(
             top_k,
             filter: filter.as_ref(),
             include_chunks,
+            allow_attachments: include_attachments(params, allow_attachments),
         };
         let results = perform_hybrid_search(vs, kg, query_text, &query, &params)?;
-        return Ok(build_content_response(&build_fused_results(&results)));
+        return Ok(build_content_response(&build_fused_results(&results, include_chunks)));
     }
 
-    let json = search_owners(vs, &query, top_k, None, filter.as_ref(), include_chunks)?;
+    let json = search_owners(
+        vs, &query, top_k, None, filter.as_ref(), include_chunks,
+        include_attachments(params, allow_attachments),
+    )?;
     Ok(build_content_response(&json))
 }
 
@@ -906,9 +1052,10 @@ mod tests {
                 text: "ada\nPerson".to_string(),
                 score: 0.25,
             }),
+            None,
         )];
         assert_eq!(
-            build_owner_results(&rows),
+            build_owner_results(&rows, true),
             r#"{"results":[{"name":"ada","entityType":"Person","kind":"entity","score":0.250000,"chunk":{"kind":"identity","text":"ada\nPerson","score":0.250000}}],"count":1}"#
         );
     }
@@ -922,8 +1069,9 @@ mod tests {
             "entity".to_string(),
             0.5,
             None,
+            None,
         )];
-        let json = build_owner_results(&rows);
+        let json = build_owner_results(&rows, false);
         assert_eq!(
             json,
             r#"{"results":[{"name":"acme","entityType":"Company","kind":"entity","score":0.500000}],"count":1}"#
@@ -946,8 +1094,9 @@ mod tests {
                 text: "a \"quoted\" \\ path\nline".to_string(),
                 score: 0.0,
             }),
+            None,
         )];
-        let json = build_owner_results(&rows);
+        let json = build_owner_results(&rows, true);
         assert!(
             json.contains(
                 r#""chunk":{"kind":"relation","text":"a \"quoted\" \\ path\nline","score":0.000000}"#
@@ -977,10 +1126,45 @@ mod tests {
                 text: "writes rust".to_string(),
                 score: 0.1,
             }),
+            attachment: None,
         }];
         assert_eq!(
-            build_fused_results(&rows),
+            build_fused_results(&rows, true),
             r#"{"results":[{"name":"ada","entityType":"Person","kind":"entity","score":1.000000,"textScore":0.500000,"vecScore":0.500000,"chunk":{"kind":"observation","text":"writes rust","score":0.100000}}],"count":1}"#
+        );
+    }
+
+    /// An attachment row carries filename, page and excerpt in place of the
+    /// chunk member, because the segment is the row itself. The excerpt
+    /// repeats inside the chunk detail when the caller asked for chunks.
+    #[test]
+    fn owner_rows_render_attachment_metadata() {
+        let rows = vec![OwnerRow {
+            name: "notes.txt".to_string(),
+            entity_type: "Person".to_string(),
+            kind: "attachment".to_string(),
+            score: 0.3,
+            chunk: None,
+            attachment: Some(AttachmentDetail {
+                page: 2,
+                excerpt: "PAGE TWO exact excerpt".to_string(),
+                chunk_score: 0.3,
+            }),
+        }];
+        let json = build_owner_results(&rows, true);
+        assert_eq!(
+            json,
+            r#"{"results":[{"name":"notes.txt","entityType":"Person","kind":"attachment","score":0.300000,"filename":"notes.txt","page":2,"excerpt":"PAGE TWO exact excerpt","chunk":{"kind":"attachment","text":"PAGE TWO exact excerpt","score":0.300000}}],"count":1}"#,
+            "{json}"
+        );
+        let json = build_owner_results(&rows, false);
+        assert!(
+            !json.contains("\"chunk\""),
+            "the excerpt stays, the chunk detail goes: {json}"
+        );
+        assert!(
+            json.contains(r#","filename":"notes.txt","page":2,"excerpt":"PAGE TWO exact excerpt"}"#),
+            "file metadata stays without chunk detail: {json}"
         );
     }
 }

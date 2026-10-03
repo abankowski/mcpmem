@@ -153,11 +153,16 @@ fn the_manifest_declares_semantic_search() {
         schema["properties"]["entityType"].is_null(),
         "entityType is replaced by filter: {tool}"
     );
-    // The filter whitelist is exactly the two owner kinds.
+    // The filter permits all three owner kinds.
     assert_eq!(
         schema["properties"]["filter"]["properties"]["kind"]["enum"],
-        serde_json::json!(["entity", "relation"]),
+        serde_json::json!(["entity", "relation", "attachment"]),
         "the filter kind enum: {tool}"
+    );
+    assert_eq!(
+        schema["properties"]["includeAttachments"]["default"],
+        Value::Bool(true),
+        "attachment inclusion defaults to true: {tool}"
     );
     // The clamp is one constant in `vector_actions`, so the advertised cap must
     // be the cap the sibling vector tools advertise.
@@ -972,4 +977,293 @@ fn relation_observation_chain_serves_include_chunks() {
         Some("braids her hair"),
         "includeChunks must reassemble the observation body: {text}"
     );
+}
+
+/// This fixture gives page 1 two segments and page 2 one segment. Page 2
+/// matches the query exactly. The graph rows have weaker vectors.
+fn seed_attachment_search(dir: &tempfile::TempDir, s: &TestServer) -> (i64, i64) {
+    let created = call_tool(
+        s,
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "ada", "entityType": "Person", "observations": []},
+            {"name": "bob", "entityType": "Person", "observations": []}
+        ]}),
+    );
+    assert!(created["error"].is_null(), "{created}");
+    let linked = call_tool(
+        s,
+        "create_relations",
+        &serde_json::json!({"relations": [
+            {"from": "ada", "to": "bob", "relationType": "knows"}
+        ]}),
+    );
+    assert!(linked["error"].is_null(), "{linked}");
+
+    let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+    let profile = "11111111-2222-3333-4444-555555555555";
+    activate_test_profile(&conn, profile, DIMS);
+    let (ada, person_type): (i64, i64) = conn
+        .query_row(
+            "SELECT id,type_id FROM entity WHERE name='ada' AND flags=0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let (bob, bob_type): (i64, i64) = conn
+        .query_row(
+            "SELECT id,type_id FROM entity WHERE name='bob' AND flags=0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let (relation, relation_type): (i64, i64) = conn
+        .query_row(
+            "SELECT id,type_id FROM taxonomy_relation WHERE from_id=?1 AND to_id=?2",
+            rusqlite::params![ada, bob],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO attachment(entity_id,filename,mime,size_bytes,sha256,content,status,revision,created_us)
+         VALUES(?1,'notes.txt','text/plain',5,?2,?3,'ready',1,1)",
+        rusqlite::params![ada, vec![0u8; 32], b"notes"],
+    )
+    .unwrap();
+    let attachment = conn.last_insert_rowid();
+    for (index, page, segment, text) in [
+        (0, 1, 0, "first half"),
+        (1, 1, 1, "second half"),
+        (2, 2, 0, "PAGE TWO exact excerpt"),
+    ] {
+        conn.execute(
+            "INSERT INTO attachment_chunk(attachment_id,chunk_index,page,segment_index,text)
+             VALUES(?1,?2,?3,?4,?5)",
+            rusqlite::params![attachment, index, page, segment, text],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO attachment(entity_id,filename,mime,size_bytes,sha256,content,status,revision,created_us)
+         VALUES(?1,'empty.txt','text/plain',0,?2,?3,'ready',1,1)",
+        rusqlite::params![bob, vec![0u8; 32], Vec::<u8>::new()],
+    )
+    .unwrap();
+    let empty_attachment = conn.last_insert_rowid();
+    for (kind, id, ty, vector) in [
+        ("entity", ada, person_type, [0.8, 0.2]),
+        ("entity", bob, bob_type, [1.0, 0.0]),
+        ("relation", relation, relation_type, [0.7, 0.3]),
+    ] {
+        let blob = [vector[0], vector[1], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        conn.execute(
+            "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+             VALUES(?1,?2,?3,?4,0,?5,1,?6,1,'test')",
+            rusqlite::params![
+                profile,
+                if kind == "relation" { "relation" } else { "identity" },
+                kind,
+                id,
+                ty,
+                blob
+            ],
+        )
+        .unwrap();
+    }
+    for (index, vector) in [(0, [0.0, 1.0]), (1, [0.1, 0.9]), (2, [1.0, 0.0])] {
+        let blob = [vector[0], vector[1], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        conn.execute(
+            "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+             VALUES(?1,'attachment','attachment',?2,?3,?4,1,?5,1,'test')",
+            rusqlite::params![profile, attachment, index, person_type, blob],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    s.vs.reconcile_managed_snapshot().unwrap();
+    (attachment, empty_attachment)
+}
+
+fn direct_search_rows(text: &str) -> Vec<Value> {
+    let envelope: Value = serde_json::from_str(text).expect("tool response");
+    let body = envelope["content"][0]["text"].as_str().expect("result text");
+    serde_json::from_str::<Value>(body).expect("result JSON")["results"]
+        .as_array()
+        .expect("result rows")
+        .clone()
+}
+
+#[test]
+fn attachment_search_returns_stored_page_and_obeys_consent_before_ranking() {
+    use mcpmem::vector_actions::{
+        handle_hybrid_search, handle_vector_mmr_search, handle_vector_search_by_entity,
+        handle_vector_search_entities,
+    };
+    use mcpmem::workspace::WorkspaceAccess;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = vector_server(&dir);
+    let (attachment, empty_attachment) = seed_attachment_search(&dir, &s);
+    let record = s
+        .registry
+        .resolve("machine:local", None, WorkspaceAccess::Read)
+        .unwrap();
+    let kg = s.handles.get(&record).unwrap().kg;
+    let query = serde_json::json!([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+
+    for chunks in [false, true] {
+        let vector = serde_json::json!({
+            "embedding": query, "topK": 4, "includeChunks": chunks
+        });
+        let hybrid = serde_json::json!({
+            "queryText": "ada", "queryEmbedding": query, "topK": 4,
+            "includeChunks": chunks
+        });
+        let by_entity = serde_json::json!({
+            "entityName": "bob", "topK": 4, "includeChunks": chunks
+        });
+        for response in [
+            handle_vector_search_entities(&s.vs, &kg, Some(&vector), true).unwrap(),
+            handle_hybrid_search(&s.vs, &kg, Some(&hybrid), true).unwrap(),
+            handle_vector_search_by_entity(&s.vs, &kg, Some(&by_entity), true).unwrap(),
+        ] {
+            let rows = direct_search_rows(&response);
+            let file = rows.iter().find(|row| row["kind"] == "attachment").unwrap();
+            assert_eq!(file["filename"], "notes.txt", "{response}");
+            assert_eq!(file["entityType"], "Person", "{response}");
+            assert_eq!(file["page"], 2, "{response}");
+            assert_eq!(file["excerpt"], "PAGE TWO exact excerpt", "{response}");
+            assert_eq!(file["chunk"]["text"].is_string(), chunks, "{response}");
+            assert_eq!(file["chunk"]["text"], if chunks { Value::from("PAGE TWO exact excerpt") } else { Value::Null });
+            assert_eq!(rows.iter().filter(|row| row["kind"] == "attachment").count(), 1);
+        }
+    }
+
+    let mmr = serde_json::json!({"embedding": query, "topK": 4, "lambda": 1.0});
+    let mmr_rows = direct_search_rows(
+        &handle_vector_mmr_search(&s.vs, &kg, Some(&mmr), true).unwrap(),
+    );
+    let file = mmr_rows.iter().find(|row| row["kind"] == "attachment").unwrap();
+    assert_eq!(file["filename"], "notes.txt");
+    assert_eq!(file["page"], 2);
+    assert_eq!(file["excerpt"], "PAGE TWO exact excerpt");
+
+    for (include, consent) in [(false, true), (true, false)] {
+        let args = serde_json::json!({
+            "embedding": query, "topK": 2, "includeAttachments": include
+        });
+        let rows = direct_search_rows(
+            &handle_vector_search_entities(&s.vs, &kg, Some(&args), consent).unwrap(),
+        );
+        assert_eq!(rows.len(), 2, "attachment must not consume topK: {rows:?}");
+        assert!(rows.iter().all(|r| r["kind"] != "attachment" && r.get("excerpt").is_none()));
+        assert!(rows.iter().any(|r| r["kind"] == "entity"));
+        let hybrid_args = serde_json::json!({
+            "queryText": "ada", "queryEmbedding": query,
+            "topK": 4, "includeAttachments": include
+        });
+        let hybrid_rows = direct_search_rows(
+            &handle_hybrid_search(&s.vs, &kg, Some(&hybrid_args), consent).unwrap(),
+        );
+        assert!(hybrid_rows.iter().all(|r| r["kind"] != "attachment"));
+        assert!(hybrid_rows.iter().any(|r| r["kind"] == "relation"));
+        let by_entity_args = serde_json::json!({
+            "entityName": "bob", "includeAttachments": include
+        });
+        assert!(direct_search_rows(
+            &handle_vector_search_by_entity(&s.vs, &kg, Some(&by_entity_args), consent).unwrap()
+        ).iter().all(|r| r["kind"] != "attachment"));
+        let mmr_args = serde_json::json!({
+            "embedding": query, "includeAttachments": include, "topK": 3
+        });
+        assert!(direct_search_rows(
+            &handle_vector_mmr_search(&s.vs, &kg, Some(&mmr_args), consent).unwrap()
+        ).iter().all(|r| r["kind"] != "attachment"));
+    }
+
+    let attachment_only = serde_json::json!({
+        "embedding": query, "filter": {"kind": "attachment", "type": "Person"}
+    });
+    let rows = direct_search_rows(
+        &handle_vector_search_entities(&s.vs, &kg, Some(&attachment_only), true).unwrap(),
+    );
+    assert_eq!(rows.len(), 1, "attachment rows only: {rows:?}");
+    assert_eq!(rows[0]["kind"], "attachment", "{rows:?}");
+    let hybrid_attachment = serde_json::json!({
+        "queryText": "ada", "queryEmbedding": query,
+        "filter": {"kind": "attachment"}, "topK": 1
+    });
+    let rows = direct_search_rows(
+        &handle_hybrid_search(&s.vs, &kg, Some(&hybrid_attachment), true).unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["kind"], "attachment", "entity FTS must not enter: {rows:?}");
+    assert_eq!(rows[0]["textScore"], 0.0);
+
+    // A vector without its stored segment is not a searchable page.
+    let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+    conn.execute("DELETE FROM attachment_chunk WHERE attachment_id=?1", [attachment])
+        .unwrap();
+    assert!(direct_search_rows(
+        &handle_vector_search_entities(&s.vs, &kg, Some(&attachment_only), true).unwrap()
+    ).is_empty());
+    assert!(conn.query_row(
+        "SELECT COUNT(*) FROM attachment_chunk WHERE attachment_id=?1",
+        [empty_attachment],
+        |r| r.get::<_, i64>(0)
+    ).unwrap() == 0);
+}
+
+#[test]
+fn attachment_type_filter_reads_current_parent_and_discards_missing_parent() {
+    use mcpmem::vector_actions::handle_vector_search_entities;
+    use mcpmem::workspace::WorkspaceAccess;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = vector_server(&dir);
+    let (attachment, _) = seed_attachment_search(&dir, &s);
+    let record = s
+        .registry
+        .resolve("machine:local", None, WorkspaceAccess::Read)
+        .unwrap();
+    let kg = s.handles.get(&record).unwrap().kg;
+    let query = serde_json::json!([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let result = |ftype: &str| {
+        direct_search_rows(
+            &handle_vector_search_entities(
+                &s.vs, &kg,
+                Some(&serde_json::json!({
+                    "embedding": query, "filter": {"kind": "attachment", "type": ftype}
+                })),
+                true,
+            )
+            .unwrap(),
+        )
+    };
+    assert_eq!(result("Person").len(), 1);
+    let changed = call_tool(
+        &s,
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "ada", "entityType": "Scholar", "observations": []}
+        ]}),
+    );
+    assert!(changed["error"].is_null(), "{changed}");
+    s.vs.reconcile_managed_snapshot().unwrap();
+    assert!(result("Person").is_empty());
+    assert_eq!(result("Scholar")[0]["entityType"], "Scholar");
+
+    let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+    conn.execute(
+        "UPDATE entity SET flags=1 WHERE id=(SELECT entity_id FROM attachment WHERE id=?1)",
+        [attachment],
+    )
+    .unwrap();
+    assert!(result("Scholar").is_empty(), "a deleted parent must not leak its file");
 }

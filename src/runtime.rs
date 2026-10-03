@@ -798,7 +798,7 @@ mod workspace_indexer_tests {
             .unwrap()
             .vs
             .unwrap()
-            .search_chunks(&[1.0, 0.0], 10, Some("entity"), None)
+            .search_chunks(&[1.0, 0.0], 10, Some("entity"), None, false)
             .unwrap()
             .into_iter()
             .filter(|hit| hit.chunk_kind == ChunkKind::Identity)
@@ -1096,7 +1096,7 @@ mod workspace_indexer_tests {
         standalone.load_managed_snapshot().unwrap();
         assert_eq!(
             standalone
-                .search_chunks(&[1.0, 0.0], 10, Some("entity"), None)
+                .search_chunks(&[1.0, 0.0], 10, Some("entity"), None, false)
                 .unwrap()
                 .into_iter()
                 .map(|hit| hit.owner_id)
@@ -1121,7 +1121,7 @@ mod workspace_indexer_tests {
         );
         assert_eq!(
             reopened
-                .search_chunks(&[1.0, 0.0], 10, Some("entity"), None)
+                .search_chunks(&[1.0, 0.0], 10, Some("entity"), None, false)
                 .unwrap()
                 .into_iter()
                 .map(|hit| hit.owner_id)

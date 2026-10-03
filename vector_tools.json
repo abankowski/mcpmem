@@ -2,7 +2,7 @@
 
   {
     "name": "vector_search_entities",
-    "description": "Search entities and relations by vector similarity over the serving chunk index. Finds the top-K owners whose chunks are closest to the query embedding, one row per owner, ranked by the best matching chunk. Result rows carry 'kind' ('entity' or 'relation'); a relation row displays 'from -> TYPE -> to' and its relation type in 'entityType'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'.",
+    "description": "Search entities, relations, and attachments by vector similarity over the serving chunk index. Finds the top-K owners whose chunks are closest to the query embedding, one row per owner, ranked by the best matching chunk. Result rows carry 'kind' ('entity', 'relation', or 'attachment'); a relation row displays 'from -> TYPE -> to' and its relation type in 'entityType'; an attachment row adds 'filename', 'page', and 'excerpt' (the matched segment text). Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. 'includeAttachments' defaults to true and requires the caller's 'attachments' consent; without consent, attachment candidates are excluded before ranking and never consume topK.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -21,16 +21,21 @@
         "filter": {
           "type": "object",
           "properties": {
-            "kind": { "type": "string", "enum": ["entity", "relation"] },
+            "kind": { "type": "string", "enum": ["entity", "relation", "attachment"] },
             "type": { "type": "string" }
           },
           "additionalProperties": false,
-          "description": "Optional: 'kind' limits the owner kind ('entity' or 'relation'); 'type' matches the owner type name exactly. 'type' without 'kind' matches either kind."
+          "description": "Optional: 'kind' limits the owner kind ('entity', 'relation', or 'attachment'); 'type' matches the owner type name exactly. 'type' without 'kind' matches any kind."
         },
         "includeChunks": {
           "type": "boolean",
           "default": false,
           "description": "Optional: attach the matched chunk (kind, reassembled text, score) to each result row"
+        },
+        "includeAttachments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Optional: include attachment rows, which have no 'chunk' detail unless includeChunks is true. Never overrides missing 'attachments' consent."
         }
       },
       "required": ["embedding"]
@@ -40,7 +45,7 @@
 
   {
     "name": "hybrid_search",
-    "description": "Combined vector + full-text search with Reciprocal Rank Fusion, fused at owner level: the vector half ranks owners by their best chunk, the FTS5 half matches entities only, so relation rows enter the fusion with their vector rank only. Results are boosted by graph centrality whenever the graph mirror holds nodes, for entity rows only; there is no flag to disable the boost. Result rows carry 'kind' ('entity' or 'relation'). Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. queryText is never embedded: the vector half needs queryEmbedding.",
+    "description": "Combined vector + full-text search with Reciprocal Rank Fusion, fused at owner level: the vector half ranks owners by their best chunk, the FTS5 half matches entities only, so relation and attachment rows enter the fusion with their vector rank only. Results are boosted by graph centrality whenever the graph mirror holds nodes, for entity rows only; there is no flag to disable the boost. Result rows carry 'kind' ('entity', 'relation', or 'attachment'); an attachment row adds 'filename', 'page', and 'excerpt'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. 'includeAttachments' defaults to true and requires the caller's 'attachments' consent. queryText is never embedded: the vector half needs queryEmbedding.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -71,16 +76,21 @@
         "filter": {
           "type": "object",
           "properties": {
-            "kind": { "type": "string", "enum": ["entity", "relation"] },
+            "kind": { "type": "string", "enum": ["entity", "relation", "attachment"] },
             "type": { "type": "string" }
           },
           "additionalProperties": false,
-          "description": "Optional: 'kind' limits the owner kind ('entity' or 'relation'); 'type' matches the owner type name exactly. 'type' without 'kind' matches either kind."
+          "description": "Optional: 'kind' limits the owner kind ('entity', 'relation', or 'attachment'); 'type' matches the owner type name exactly. 'type' without 'kind' matches any kind."
         },
         "includeChunks": {
           "type": "boolean",
           "default": false,
           "description": "Optional: attach the matched vector chunk (kind, reassembled text, score) to each result row"
+        },
+        "includeAttachments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Optional: include attachment rows, which have no 'chunk' detail unless includeChunks is true. Never overrides missing 'attachments' consent."
         }
       },
       "required": ["queryText", "queryEmbedding"]
@@ -114,7 +124,7 @@
 
   {
     "name": "vector_search_by_entity",
-    "description": "'More like this': search by the identity chunk of a given entity (its name and type), ranking owners by how close their best chunk is. The reference entity itself is excluded by default (excludeSelf). Result rows carry 'kind' ('entity' or 'relation'); a relation row displays 'from -> TYPE -> to' and its relation type in 'entityType'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'.",
+    "description": "'More like this': search by the identity chunk of a given entity (its name and type), ranking owners by how close their best chunk is. The reference entity itself is excluded by default (excludeSelf). Result rows carry 'kind' ('entity', 'relation', or 'attachment'); an attachment row adds 'filename', 'page', and 'excerpt'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. 'includeAttachments' defaults to true and requires the caller's 'attachments' consent.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -124,16 +134,21 @@
         "filter": {
           "type": "object",
           "properties": {
-            "kind": { "type": "string", "enum": ["entity", "relation"] },
+            "kind": { "type": "string", "enum": ["entity", "relation", "attachment"] },
             "type": { "type": "string" }
           },
           "additionalProperties": false,
-          "description": "Optional: 'kind' limits the owner kind ('entity' or 'relation'); 'type' matches the owner type name exactly. 'type' without 'kind' matches either kind."
+          "description": "Optional: 'kind' limits the owner kind ('entity', 'relation', or 'attachment'); 'type' matches the owner type name exactly. 'type' without 'kind' matches any kind."
         },
         "includeChunks": {
           "type": "boolean",
           "default": false,
           "description": "Optional: attach the matched chunk (kind, reassembled text, score) to each result row"
+        },
+        "includeAttachments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Optional: include attachment rows, which have no 'chunk' detail unless includeChunks is true. Never overrides missing 'attachments' consent."
         },
         "excludeSelf": { "type": "boolean", "description": "Exclude the reference entity from results (default true)" }
       },
@@ -144,7 +159,7 @@
 
   {
     "name": "vector_mmr_search",
-    "description": "Diversified semantic search via Maximal Marginal Relevance (MMR). Retrieves a candidate pool (fetchK) for the query embedding, then greedily selects topK results balancing relevance to the query against novelty versus already-selected results. 'lambda' in [0,1] trades relevance (1.0) for diversity (0.0); default 0.5. Reduces near-duplicate hits — a standard RAG context-selection step. 'score' is the MMR score.",
+    "description": "Diversified semantic search via Maximal Marginal Relevance (MMR). Retrieves a candidate pool (fetchK) for the query embedding, then greedily selects topK results balancing relevance to the query against novelty versus already-selected results. 'lambda' in [0,1] trades relevance (1.0) for diversity (0.0); default 0.5. Reduces near-duplicate hits — a standard RAG context-selection step. 'score' is the MMR score. Attachment candidates use their best matched segment vector for diversity and carry 'filename', 'page', and 'excerpt' in their rows. 'includeAttachments' defaults to true and requires the caller's 'attachments' consent.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -153,7 +168,20 @@
         "topK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of diversified results (default 10)" },
         "fetchK": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Candidate pool size to diversify from (default max(20, 4*topK))" },
         "lambda": { "type": "number", "minimum": 0, "maximum": 1, "description": "Relevance/diversity trade-off (default 0.5)" },
-        "entityType": { "type": "string", "description": "Optional: only return entities of this type" }
+        "filter": {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "enum": ["entity", "relation", "attachment"] },
+            "type": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "description": "Optional: 'kind' limits the owner kind ('entity', 'relation', or 'attachment'); 'type' matches the owner type name exactly. 'type' without 'kind' matches any kind."
+        },
+        "includeAttachments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Optional: include attachment rows, which carry 'filename', 'page', and 'excerpt'. Never overrides missing 'attachments' consent."
+        }
       },
       "required": ["embedding"]
     },
@@ -162,7 +190,7 @@
 
   {
     "name": "semantic_search",
-    "description": "Search entities and relations by meaning, with text only. Send 'queryText' and the server embeds it; the client needs no embedding service and sends no vector. The server embeds the query with the model named by the serving index profile — the same model that embedded the stored owners — so the query and the index agree. That model comes from the [indexer] section of the server configuration file, never from this call. Returns the topK owners whose best chunks are closest to the query, one row per owner; result rows carry 'kind' ('entity' or 'relation') and a relation row displays 'from -> TYPE -> to' with its relation type in 'entityType'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. Set 'textWeight' or 'vecWeight' to fuse the vector result with the FTS5 text result, exactly as 'hybrid_search' does; leave both unset for a pure vector search. The server must be built with the 'indexer' feature and must have a configured embedding provider. Without either one the tool is absent from tools/list and a call to it is refused.",
+"description": "Search entities, relations, and attachments by meaning, with text only. Send 'queryText' and the server embeds it; the client needs no embedding service and sends no vector. The server embeds the query with the model named by the serving index profile — the same model that embedded the stored owners — so the query and the index agree. That model comes from the [indexer] section of the server configuration file, never from this call. Returns the topK owners whose best chunks are closest to the query, one row per owner; result rows carry 'kind' ('entity', 'relation', or 'attachment'), a relation row displays 'from -> TYPE -> to' with its relation type in 'entityType', and an attachment row adds 'filename', 'page', and 'excerpt'. Optionally narrow the owner set with 'filter' (kind and/or type) and attach the matched chunk text with 'includeChunks'. 'includeAttachments' defaults to true and requires the caller's 'attachments' consent.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -172,16 +200,21 @@
         "filter": {
           "type": "object",
           "properties": {
-            "kind": { "type": "string", "enum": ["entity", "relation"] },
+            "kind": { "type": "string", "enum": ["entity", "relation", "attachment"] },
             "type": { "type": "string" }
           },
           "additionalProperties": false,
-          "description": "Optional: 'kind' limits the owner kind ('entity' or 'relation'); 'type' matches the owner type name exactly. 'type' without 'kind' matches either kind."
+          "description": "Optional: 'kind' limits the owner kind ('entity', 'relation', or 'attachment'); 'type' matches the owner type name exactly. 'type' without 'kind' matches any kind."
         },
         "includeChunks": {
           "type": "boolean",
           "default": false,
           "description": "Optional: attach the matched chunk (kind, reassembled text, score) to each result row"
+        },
+        "includeAttachments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Optional: include attachment rows, which have no 'chunk' detail unless includeChunks is true. Never overrides missing 'attachments' consent."
         },
         "textWeight": { "type": "number", "description": "Optional weight for the FTS5 text rank (default 0.5). Setting this or 'vecWeight' turns on fusion." },
         "vecWeight": { "type": "number", "description": "Optional weight for the vector rank (default 0.5). Setting this or 'textWeight' turns on fusion." }

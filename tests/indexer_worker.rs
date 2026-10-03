@@ -769,7 +769,7 @@ fn persistent_failure_dead_letters_and_stops_blocking_the_full_scan() {
     let vectors = VectorStore::new(&database, 2).unwrap();
     vectors.reconcile_managed_snapshot().unwrap();
     let hits = vectors
-        .search_chunks(&[1.0f32, 1.0f32], 10, None, None)
+        .search_chunks(&[1.0f32, 1.0f32], 10, None, None, true)
         .unwrap();
     assert!(
         hits.is_empty(),
