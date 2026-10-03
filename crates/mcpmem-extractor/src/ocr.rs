@@ -29,6 +29,14 @@ const DEFAULT_VISION_HOST: &str = "api.openai.com";
 /// page before the worker truncates it.
 const MAX_PAGE_CHARS: usize = 100_000;
 
+/// The vision request deadline. It is deliberately shorter than the
+/// extractor's job lease: the worker renews its lease only after a request
+/// returns, and a request that outlived the lease would fail the renewal
+/// fence and discard the transcription. `pdf.rs` pins this invariant against
+/// the lease and the render deadline in a test, so the two cannot drift
+/// apart.
+pub const VISION_TIMEOUT_US: i64 = 15_000_000;
+
 #[derive(Debug, Error)]
 pub enum OcrError {
     /// The OCR configuration is invalid. The job fails at stage `config` and
@@ -233,7 +241,7 @@ impl VisionOcr {
         // and OAuth egress clients.
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_millis((VISION_TIMEOUT_US / 1_000) as u64))
             .build()
             .map_err(|error| {
                 OcrError::Provider(format!("cannot build the vision client: {error}"))
@@ -281,6 +289,20 @@ impl OcrProvider for VisionOcr {
         }
         let value: serde_json::Value = serde_json::from_str(&text)
             .map_err(|error| OcrError::Provider(format!("vision response is not JSON: {error}")))?;
+        // `finish_reason=length` means the model stopped at the token
+        // limit: the transcription is a partial page and must not be
+        // published as complete. An absent finish_reason is accepted — some
+        // compatible endpoints omit it.
+        let finish_reason = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("stop");
+        if finish_reason == "length" {
+            return Err(OcrError::Provider(
+                "the vision response hit the token limit; the page transcription is truncated"
+                    .into(),
+            ));
+        }
         let content = value
             .pointer("/choices/0/message/content")
             .and_then(serde_json::Value::as_str)
