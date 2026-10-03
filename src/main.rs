@@ -47,6 +47,25 @@ async fn inner_main() -> Result<()> {
         info!("Tool categories enabled: {}", slugs.join(", "));
     }
 
+    // Uploads stay durably queued without a local extractor role, so this is
+    // a warning, never a refusal. It names the prerequisite without claiming
+    // that a remote extractor process actually exists.
+    if config
+        .enabled_categories
+        .contains(&mcpmem::tools::ToolCategory::Attachments)
+        && !config
+            .roles
+            .roles()
+            .contains(&runtime::RuntimeRole::Extractor)
+    {
+        tracing::warn!(
+            "attachment tools are enabled, but this process runs no `extractor` role: uploaded \
+             attachments stay durably queued until another process with --role extractor works \
+             the same workspace graph. Add the role or start that process; this warning does \
+             not prove that any extractor process exists. Uploads remain accepted."
+        );
+    }
+
     let mcp_server = Arc::new(server::MCPServer::new(
         (*config).clone(),
         args.vector_config(),
@@ -199,6 +218,24 @@ async fn inner_main() -> Result<()> {
                  --role mcp,indexer, or run the `indexer` role in another process."
             );
         }
+        services
+    };
+    // The extractor role leases one attachment job per registered graph
+    // turn. OCR resolution never fails startup: an invalid `[ocr]` section
+    // fails PDF jobs at stage `config`, while text extraction keeps working.
+    #[cfg(feature = "extractor")]
+    let services = if config
+        .roles
+        .roles()
+        .contains(&runtime::RuntimeRole::Extractor)
+    {
+        let ocr =
+            runtime::ocr_provider(config.ocr.as_ref(), file.as_ref().map(|(_, loaded)| loaded));
+        services.with_extractor(Arc::new(runtime::ExtractorService::with_workspaces(
+            mcp_server.workspace_registry(),
+            ocr,
+        )))
+    } else {
         services
     };
     let services = Arc::new(services);

@@ -15,6 +15,7 @@ pub enum RuntimeRole {
     Mcp,
     Indexer,
     Webhooks,
+    Extractor,
 }
 
 impl RuntimeRole {
@@ -23,6 +24,7 @@ impl RuntimeRole {
             Self::Mcp => "mcp",
             Self::Indexer => "indexer",
             Self::Webhooks => "webhooks",
+            Self::Extractor => "extractor",
         }
     }
 
@@ -31,6 +33,7 @@ impl RuntimeRole {
             Self::Mcp => true,
             Self::Indexer => cfg!(feature = "indexer"),
             Self::Webhooks => cfg!(feature = "webhooks"),
+            Self::Extractor => cfg!(feature = "extractor"),
         }
     }
 }
@@ -95,6 +98,7 @@ impl RoleSet {
             "mcp" => Ok(RuntimeRole::Mcp),
             "indexer" => Ok(RuntimeRole::Indexer),
             "webhooks" => Ok(RuntimeRole::Webhooks),
+            "extractor" => Ok(RuntimeRole::Extractor),
             "" => Err(ConfigError::EmptyRoleName),
             unknown => Err(ConfigError::UnknownRole(unknown.to_owned())),
         }
@@ -118,6 +122,8 @@ pub struct AppServices {
     indexer: Arc<dyn RoleService>,
     #[cfg(feature = "webhooks")]
     webhooks: Arc<dyn RoleService>,
+    #[cfg(feature = "extractor")]
+    extractor: Arc<dyn RoleService>,
 }
 
 impl AppServices {
@@ -128,6 +134,8 @@ impl AppServices {
             indexer: Arc::new(NoopService),
             #[cfg(feature = "webhooks")]
             webhooks: Arc::new(NoopService),
+            #[cfg(feature = "extractor")]
+            extractor: Arc::new(NoopService),
         }
     }
     #[cfg(feature = "webhooks")]
@@ -139,6 +147,12 @@ impl AppServices {
     #[cfg(feature = "indexer")]
     pub fn with_indexer(mut self, indexer: Arc<dyn RoleService>) -> Self {
         self.indexer = indexer;
+        self
+    }
+
+    #[cfg(feature = "extractor")]
+    pub fn with_extractor(mut self, extractor: Arc<dyn RoleService>) -> Self {
+        self.extractor = extractor;
         self
     }
 }
@@ -165,6 +179,8 @@ impl RuntimeComposition {
             indexer,
             #[cfg(feature = "webhooks")]
             webhooks,
+            #[cfg(feature = "extractor")]
+            extractor,
         } = Arc::unwrap_or_clone(services);
         let mut tasks = JoinSet::new();
         let lifecycle = roles
@@ -180,6 +196,10 @@ impl RuntimeComposition {
                     RuntimeRole::Webhooks => webhooks.clone(),
                     #[cfg(not(feature = "webhooks"))]
                     RuntimeRole::Webhooks => Arc::new(NoopService),
+                    #[cfg(feature = "extractor")]
+                    RuntimeRole::Extractor => extractor.clone(),
+                    #[cfg(not(feature = "extractor"))]
+                    RuntimeRole::Extractor => Arc::new(NoopService),
                 };
                 tasks.spawn(async move { (role, service.run().await) });
                 RoleLifecycle {
