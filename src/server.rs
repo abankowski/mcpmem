@@ -12,6 +12,7 @@ use tracing::error;
 #[cfg(feature = "code")]
 use crate::actions::code as code_actions;
 use crate::actions::memory;
+use crate::attachment_actions;
 #[cfg(feature = "webhooks")]
 use crate::actions::webhooks as webhooks_actions;
 use crate::authz::{self, Principal};
@@ -128,14 +129,13 @@ const NEWLINE: &[u8] = b"\n";
 /// Maximum size of a single inbound JSON-RPC message (shared by all transports).
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
-/// Process-wide exposure flags for the knowledge-graph tool categories, set once
-/// at startup from `config.enabled_categories`. KG tools carry no per-request
-/// state, so a global flag avoids threading the enabled set through every
-/// dispatch signature (mirrors `CODE_ENABLED`). Vectors are gated by the
-/// presence of the `VectorStore`, code by `CODE_ENABLED`.
+/// Process-wide exposure flags for graph and attachment categories. The graph
+/// and attachment handlers consult these flags after the scope gate.
 static GRAPH_READ_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static GRAPH_WRITE_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static ATTACHMENTS_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Whether read-only knowledge-graph access is enabled. Exposed to the HTTP
@@ -148,6 +148,11 @@ pub(crate) fn graph_read_enabled() -> bool {
 #[inline]
 fn graph_write_enabled() -> bool {
     GRAPH_WRITE_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether this process offers attachment tools and attachment search results.
+pub(crate) fn attachments_enabled() -> bool {
+    ATTACHMENTS_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 enum LineRead {
@@ -500,6 +505,13 @@ impl MCPServer {
                 .contains(&ToolCategory::GraphWrite),
             std::sync::atomic::Ordering::Relaxed,
         );
+        ATTACHMENTS_ENABLED.store(
+            config
+                .enabled_categories
+                .contains(&ToolCategory::Attachments),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        attachment_actions::configure(&registry, &config.attachments, config.busy_timeout_ms);
 
         #[cfg(feature = "code")]
         {
@@ -621,6 +633,7 @@ impl MCPServer {
             // existed; `--static-bearer-scopes` narrows it.
             bearer_scopes: Arc::from(self.config.bearer_scopes.clone()),
             enabled_categories: Arc::from(self.config.enabled_categories.clone()),
+            attachments: self.config.attachments.clone(),
             oauth,
             tls_cert: self.config.tls_cert.clone(),
             tls_key: self.config.tls_key.clone(),
@@ -925,19 +938,25 @@ fn webhook_tools() -> &'static Vec<Value> {
     &HOOKS
 }
 
-/// `tools/list` response. Each tool is advertised only when its category is
-/// enabled *and* the caller's scopes cover it, so the server never lists a
-/// tool it would reject. Knowledge-graph tools are gated by the graph-read /
-/// graph-write flags; vector and code tools by their subsystems being
-/// enabled; webhook tools by graph-write too, since they share its scope
-/// rather than adding one of their own.
+/// `tools/list` advertises a tool only when its category is enabled and the
+/// caller holds its scope. Attachment tools have their own category; they do
+/// not inherit graph-read or graph-write from their operation type.
 fn handle_tools_list(vs: Option<&VectorStore>, principal: &Principal) -> Value {
-    let (read, write) = (graph_read_enabled(), graph_write_enabled());
+    let (read, write, attachments) = (
+        graph_read_enabled(),
+        graph_write_enabled(),
+        attachments_enabled(),
+    );
     let mut all: Vec<Value> = base_tools()
         .iter()
         .filter(|t| {
             t.get("name").and_then(Value::as_str).is_some_and(|n| {
-                let category_on = if tools::is_write_tool(n) { write } else { read };
+                let category_on = match tools::category_of(n) {
+                    Some(tools::ToolCategory::GraphRead) => read,
+                    Some(tools::ToolCategory::GraphWrite) => write,
+                    Some(tools::ToolCategory::Attachments) => attachments,
+                    _ => false,
+                };
                 // The machine-admin tools need an admin human or local stdio
                 // in addition to their graph-write category. Listing them for
                 // a caller whose call would be refused is a false promise.
@@ -1167,13 +1186,19 @@ fn handle_tools_call(
                 "{tool_name} (vector support disabled; start the server with --enable-vectors)"
             )));
         };
+        let allow_attachments =
+            attachments_enabled() && principal.scopes.contains("attachments");
         let result = match tool_name {
             "vector_search_entities" => {
-                vector_actions::handle_vector_search_entities(vs, kg, tool_args)
+                vector_actions::handle_vector_search_entities(
+                    vs, kg, tool_args, allow_attachments,
+                )
+                .map(HandlerResult::RawResult)
+            }
+            "hybrid_search" => {
+                vector_actions::handle_hybrid_search(vs, kg, tool_args, allow_attachments)
                     .map(HandlerResult::RawResult)
             }
-            "hybrid_search" => vector_actions::handle_hybrid_search(vs, kg, tool_args)
-                .map(HandlerResult::RawResult),
             "vector_refresh_graph_cache" => {
                 vector_actions::handle_refresh_graph_cache(vs, kg, tool_args)
                     .map(HandlerResult::Value)
@@ -1181,14 +1206,20 @@ fn handle_tools_call(
             "vector_store_stats" => vector_actions::handle_vector_store_stats(vs, kg, tool_args)
                 .map(HandlerResult::Value),
             "vector_search_by_entity" => {
-                vector_actions::handle_vector_search_by_entity(vs, kg, tool_args)
+                vector_actions::handle_vector_search_by_entity(
+                    vs, kg, tool_args, allow_attachments,
+                )
+                .map(HandlerResult::RawResult)
+            }
+            "vector_mmr_search" => {
+                vector_actions::handle_vector_mmr_search(vs, kg, tool_args, allow_attachments)
                     .map(HandlerResult::RawResult)
             }
-            "vector_mmr_search" => vector_actions::handle_vector_mmr_search(vs, kg, tool_args)
-                .map(HandlerResult::RawResult),
             #[cfg(feature = "indexer")]
-            tools::SEMANTIC_SEARCH => vector_actions::handle_semantic_search(vs, kg, tool_args)
-                .map(HandlerResult::RawResult),
+            tools::SEMANTIC_SEARCH => vector_actions::handle_semantic_search(
+                vs, kg, tool_args, allow_attachments,
+            )
+            .map(HandlerResult::RawResult),
             // The name is a vector tool on every build, so dispatch must answer
             // for it here. Without the feature there is no handler, and a bare
             // "method not found" would not say why.
@@ -1302,6 +1333,36 @@ fn handle_tools_call(
                 HandlerResult::Value(tool_error(&e.to_string()))
             }));
         }
+    }
+
+    if tools::is_attachment_tool_name(tool_name) {
+        if !attachments_enabled() {
+            return Err(MCSError::MethodNotFound(tool_name.to_owned()));
+        }
+        let access = match tool_name {
+            "begin_attachment_upload" | "append_attachment_chunk" | "finish_attachment_upload"
+            | "cancel_attachment_upload" | "delete_attachment" => WorkspaceAccess::Write,
+            _ => WorkspaceAccess::Read,
+        };
+        let (record, _entry) =
+            match selected_handles(tool_args, principal, registry, handles, access) {
+                Ok(pair) => pair,
+                Err(err) => return Ok(HandlerResult::Value(err)),
+            };
+        let result = attachment_actions::settings(registry).and_then(|settings| {
+            attachment_actions::handle(
+                tool_name,
+                tool_args,
+                &principal.id,
+                &record.graph_path,
+                &settings.limits,
+                settings.busy_timeout_ms,
+            )
+        });
+        return Ok(HandlerResult::Value(result.unwrap_or_else(|error| {
+            error!("Tool '{tool_name}' error: {error}");
+            tool_error(&error.to_string())
+        })));
     }
 
     // Knowledge-graph category gate: a KG tool is reachable only if it exists

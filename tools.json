@@ -742,5 +742,142 @@
       "additionalProperties": false
     },
     "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true }
+  },
+  {
+    "name": "begin_attachment_upload",
+    "description": "Reserve space for a file on a live workspace entity. Send file bytes with ordered calls to append_attachment_chunk, then finish the upload.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Selected workspace. Omit only if the saved default selects the file's graph." },
+        "entityName": { "type": "string", "description": "Name of the live parent entity" },
+        "filename": { "type": "string", "description": "Non-empty filename, unique on this entity" },
+        "mime": { "type": "string", "description": "Allowed MIME type such as text/plain or application/pdf" },
+        "expectedBytes": { "type": "integer", "minimum": 0, "description": "File size in raw bytes; the default limit is 52,428,800" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Lowercase SHA-256 of the complete file" }
+      },
+      "required": ["entityName", "filename", "mime", "expectedBytes", "sha256"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false }
+  },
+  {
+    "name": "append_attachment_chunk",
+    "description": "Append at most 1,048,576 decoded bytes to an upload. Indexes start at zero. An exact replay of the previous chunk is safe.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Workspace that holds this upload session" },
+        "uploadId": { "type": "string", "description": "Upload session ID returned by begin_attachment_upload" },
+        "index": { "type": "integer", "minimum": 0, "description": "Next consecutive chunk index" },
+        "content": { "type": "string", "contentEncoding": "base64", "maxLength": 1398104, "description": "Base64 for at most 1,048,576 raw bytes" }
+      },
+      "required": ["uploadId", "index", "content"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
+  },
+  {
+    "name": "finish_attachment_upload",
+    "description": "Check file size and SHA-256, store the file, and queue extraction. Returns the same attachment on replay.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Workspace that holds this upload session" },
+        "uploadId": { "type": "string", "description": "Upload session ID returned by begin_attachment_upload" }
+      },
+      "required": ["uploadId"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true }
+  },
+  {
+    "name": "cancel_attachment_upload",
+    "description": "Remove an upload session and its uncommitted bytes to release its reserved space.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Workspace that holds this upload session" },
+        "uploadId": { "type": "string", "description": "Upload session ID returned by begin_attachment_upload" }
+      },
+      "required": ["uploadId"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false }
+  },
+  {
+    "name": "list_attachments",
+    "description": "List attachment metadata for one live entity. File bytes are not returned.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Workspace that holds the entity" },
+        "entityName": { "type": "string", "description": "Name of the live parent entity" }
+      },
+      "required": ["entityName"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "get_attachment",
+    "description": "Read one attachment's metadata and parent name without reading its file bytes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Workspace that holds the attachment" },
+        "attachmentId": { "type": "integer", "minimum": 1, "description": "Attachment ID returned by finish_attachment_upload" }
+      },
+      "required": ["attachmentId"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "read_attachment_chunk",
+    "description": "Read at most 1,048,576 file bytes as base64. Offsets count raw bytes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Workspace that holds the attachment" },
+        "attachmentId": { "type": "integer", "minimum": 1, "description": "Attachment ID returned by finish_attachment_upload" },
+        "offset": { "type": "integer", "minimum": 0, "description": "Starting raw byte offset" },
+        "length": { "type": "integer", "minimum": 0, "maximum": 1048576, "description": "Maximum raw bytes in this response" }
+      },
+      "required": ["attachmentId", "offset", "length"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "get_attachment_page",
+    "description": "Read up to 4,096 Unicode scalar characters of stored text from one page. Pages start at one.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Workspace that holds the attachment" },
+        "attachmentId": { "type": "integer", "minimum": 1, "description": "Attachment ID returned by finish_attachment_upload" },
+        "page": { "type": "integer", "minimum": 1, "description": "One-based page number" },
+        "offset": { "type": "integer", "minimum": 0, "description": "Starting Unicode scalar offset; defaults to zero" },
+        "maxChars": { "type": "integer", "minimum": 0, "maximum": 4096, "description": "Maximum Unicode scalar characters; defaults to 4,096" }
+      },
+      "required": ["attachmentId", "page"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "delete_attachment",
+    "description": "Delete an attachment, its text, its upload data, and its vector data from the selected graph.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspaceId": { "type": "string", "description": "Workspace that holds the attachment" },
+        "attachmentId": { "type": "integer", "minimum": 1, "description": "Attachment ID returned by finish_attachment_upload" }
+      },
+      "required": ["attachmentId"],
+      "additionalProperties": false
+    },
+    "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false }
   }
 ]
