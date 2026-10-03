@@ -160,11 +160,11 @@ pub struct FileConfig {
 pub const DEFAULT_ATTACHMENT_MAX_BYTES: i64 = 52_428_800;
 pub const DEFAULT_WORKSPACE_BYTE_BUDGET: i64 = 268_435_456;
 
-fn default_max_bytes() -> i64 {
+const fn default_max_bytes() -> i64 {
     DEFAULT_ATTACHMENT_MAX_BYTES
 }
 
-fn default_workspace_byte_budget() -> i64 {
+const fn default_workspace_byte_budget() -> i64 {
     DEFAULT_WORKSPACE_BYTE_BUDGET
 }
 

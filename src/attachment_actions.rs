@@ -29,8 +29,8 @@ pub(crate) struct ToolSettings {
 
 // A dispatch receives a registry, not the MCPServer. Key the settings by that
 // registry so independent server instances cannot borrow each other's limits.
-static SETTINGS: LazyLock<Mutex<Vec<(Weak<WorkspaceRegistry>, ToolSettings)>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
+type SettingsEntry = (Weak<WorkspaceRegistry>, ToolSettings);
+static SETTINGS: LazyLock<Mutex<Vec<SettingsEntry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub(crate) fn configure(
     registry: &Arc<WorkspaceRegistry>,
@@ -101,8 +101,7 @@ fn nonnegative(args: &Value, name: &str) -> Result<i64> {
 }
 
 fn upload_id(args: &Value) -> Result<Uuid> {
-    Uuid::parse_str(string(args, "uploadId")?)
-        .map_err(|_| invalid("'uploadId' must be a UUID"))
+    Uuid::parse_str(string(args, "uploadId")?).map_err(|_| invalid("'uploadId' must be a UUID"))
 }
 
 fn attachment_id(args: &Value) -> Result<i64> {
@@ -120,10 +119,13 @@ fn sha256(args: &Value) -> Result<[u8; 32]> {
             .iter()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
-        return Err(invalid("'sha256' must be 64 lowercase hexadecimal characters"));
+        return Err(invalid(
+            "'sha256' must be 64 lowercase hexadecimal characters",
+        ));
     }
     let mut bytes = [0; 32];
-    for (value, pair) in bytes.iter_mut().zip(hex.chunks_exact(2)) {
+    let (pairs, _) = hex.as_chunks::<2>();
+    for (value, pair) in bytes.iter_mut().zip(pairs) {
         let digit = |byte: u8| match byte {
             b'0'..=b'9' => byte - b'0',
             b'a'..=b'f' => byte - b'a' + 10,
@@ -138,8 +140,8 @@ fn open_graph(path: &Path, busy_timeout_ms: u64) -> Result<Connection> {
     // The selected WorkspaceHandles entry already initialized and migrated this
     // graph. READ_WRITE without CREATE refuses a missing file instead of making
     // an empty graph after a concurrent workspace removal.
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(sql_error)?;
+    let conn =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(sql_error)?;
     conn.busy_timeout(Duration::from_millis(busy_timeout_ms))
         .map_err(sql_error)?;
     Ok(conn)
@@ -187,7 +189,7 @@ fn live_attachment(conn: &Connection, id: i64) -> Result<Value> {
     .ok_or_else(|| invalid("attachment not found"))
 }
 
-fn text_response(body: Value) -> Result<Value> {
+fn text_response(body: &Value) -> Result<Value> {
     Ok(json!({"content": [{"type": "text", "text": body.to_string()}]}))
 }
 
@@ -264,7 +266,10 @@ pub fn handle(
             let mut attachments = Vec::new();
             for id in ids {
                 let mut metadata = live_attachment(&conn, id.map_err(sql_error)?)?;
-                metadata.as_object_mut().expect("metadata is an object").remove("entityName");
+                metadata
+                    .as_object_mut()
+                    .expect("metadata is an object")
+                    .remove("entityName");
                 attachments.push(metadata);
             }
             json!({"attachments": attachments})
@@ -280,7 +285,7 @@ pub fn handle(
         }
         _ => return Err(MCSError::MethodNotFound(name.to_owned())),
     };
-    text_response(response)
+    text_response(&response)
 }
 
 fn validate_session_limits(
@@ -327,7 +332,9 @@ fn validate_session_limits(
 fn read_chunk(conn: &Connection, args: &Value) -> Result<Value> {
     let id = attachment_id(args)?;
     let metadata = live_attachment(conn, id)?;
-    let size = metadata["sizeBytes"].as_i64().expect("stored size is an integer");
+    let size = metadata["sizeBytes"]
+        .as_i64()
+        .expect("stored size is an integer");
     let offset = nonnegative(args, "offset")?;
     let length = nonnegative(args, "length")?;
     if length > CHUNK_BYTES as i64 {

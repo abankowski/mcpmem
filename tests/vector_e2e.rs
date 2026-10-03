@@ -673,5 +673,11 @@ fn attachment_search_over_stdio_uses_stored_page_and_optional_consent() {
     );
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(value["count"], 2, "{text}");
-    assert!(value["results"].as_array().unwrap().iter().all(|row| row["kind"] == "entity"));
+    assert!(
+        value["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["kind"] == "entity")
+    );
 }

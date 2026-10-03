@@ -12,9 +12,9 @@ use tracing::error;
 #[cfg(feature = "code")]
 use crate::actions::code as code_actions;
 use crate::actions::memory;
-use crate::attachment_actions;
 #[cfg(feature = "webhooks")]
 use crate::actions::webhooks as webhooks_actions;
+use crate::attachment_actions;
 use crate::authz::{self, Principal};
 use crate::config::Config;
 use crate::errors::{MCSError, Result};
@@ -1186,14 +1186,11 @@ fn handle_tools_call(
                 "{tool_name} (vector support disabled; start the server with --enable-vectors)"
             )));
         };
-        let allow_attachments =
-            attachments_enabled() && principal.scopes.contains("attachments");
+        let allow_attachments = attachments_enabled() && principal.scopes.contains("attachments");
         let result = match tool_name {
             "vector_search_entities" => {
-                vector_actions::handle_vector_search_entities(
-                    vs, kg, tool_args, allow_attachments,
-                )
-                .map(HandlerResult::RawResult)
+                vector_actions::handle_vector_search_entities(vs, kg, tool_args, allow_attachments)
+                    .map(HandlerResult::RawResult)
             }
             "hybrid_search" => {
                 vector_actions::handle_hybrid_search(vs, kg, tool_args, allow_attachments)
@@ -1206,20 +1203,18 @@ fn handle_tools_call(
             "vector_store_stats" => vector_actions::handle_vector_store_stats(vs, kg, tool_args)
                 .map(HandlerResult::Value),
             "vector_search_by_entity" => {
-                vector_actions::handle_vector_search_by_entity(
-                    vs, kg, tool_args, allow_attachments,
-                )
-                .map(HandlerResult::RawResult)
+                vector_actions::handle_vector_search_by_entity(vs, kg, tool_args, allow_attachments)
+                    .map(HandlerResult::RawResult)
             }
             "vector_mmr_search" => {
                 vector_actions::handle_vector_mmr_search(vs, kg, tool_args, allow_attachments)
                     .map(HandlerResult::RawResult)
             }
             #[cfg(feature = "indexer")]
-            tools::SEMANTIC_SEARCH => vector_actions::handle_semantic_search(
-                vs, kg, tool_args, allow_attachments,
-            )
-            .map(HandlerResult::RawResult),
+            tools::SEMANTIC_SEARCH => {
+                vector_actions::handle_semantic_search(vs, kg, tool_args, allow_attachments)
+                    .map(HandlerResult::RawResult)
+            }
             // The name is a vector tool on every build, so dispatch must answer
             // for it here. Without the feature there is no handler, and a bare
             // "method not found" would not say why.
@@ -1340,8 +1335,11 @@ fn handle_tools_call(
             return Err(MCSError::MethodNotFound(tool_name.to_owned()));
         }
         let access = match tool_name {
-            "begin_attachment_upload" | "append_attachment_chunk" | "finish_attachment_upload"
-            | "cancel_attachment_upload" | "delete_attachment" => WorkspaceAccess::Write,
+            "begin_attachment_upload"
+            | "append_attachment_chunk"
+            | "finish_attachment_upload"
+            | "cancel_attachment_upload"
+            | "delete_attachment" => WorkspaceAccess::Write,
             _ => WorkspaceAccess::Read,
         };
         let (record, _entry) =
