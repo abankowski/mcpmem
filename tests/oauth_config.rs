@@ -47,7 +47,10 @@ fn attachment_scope_survives_principal_validation_and_oauth_consent() {
         &mcpmem::principals::human_id(&principal.iss, &principal.sub),
         with.into_iter().collect(),
     );
-    assert_eq!(mcpmem::authz::missing_scope(&token, "list_attachments"), None);
+    assert_eq!(
+        mcpmem::authz::missing_scope(&token, "list_attachments"),
+        None
+    );
     assert_eq!(
         mcpmem::authz::missing_scope(
             &mcpmem::authz::oauth_principal("human:without", without.into_iter().collect()),
@@ -70,7 +73,10 @@ fn default_bearer_scope_includes_attachments_but_graph_write_alone_does_not() {
         mcpmem::authz::missing_scope(&token, "begin_attachment_upload"),
         Some("attachments")
     );
-    assert_eq!(mcpmem::authz::missing_scope(&token, "create_entities"), None);
+    assert_eq!(
+        mcpmem::authz::missing_scope(&token, "create_entities"),
+        None
+    );
     let scoped = Config::from_args(&args(&[
         "--static-bearer-scopes",
         "graph-write,attachments",

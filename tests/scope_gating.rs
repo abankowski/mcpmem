@@ -327,7 +327,10 @@ fn denied_attachment_scope_refuses_a_batch_before_its_graph_write() {
          "params":{"name":"create_entities","arguments":{"entities":[
             {"name":"blocked-by-attachment","entityType":"thing","observations":[]}]}}}"#;
     let result = body_of(dispatch(&s, &writer, alone).unwrap());
-    assert!(result["error"].is_null(), "the graph write is valid: {result}");
+    assert!(
+        result["error"].is_null(),
+        "the graph write is valid: {result}"
+    );
     let present = body_of(dispatch(&s, &local_principal(), check).unwrap());
     assert!(
         present.to_string().contains("blocked-by-attachment"),

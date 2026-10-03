@@ -110,7 +110,10 @@ fn attachment_flag_and_file_key_enable_only_attachment_tools() {
     let flag = merge(&["--enable-attachments"], "[tools]\nattachments = false\n");
     assert_eq!(flag.enabled_categories(), vec![ToolCategory::Attachments]);
     let all = merge(&["--enable-all"], "[tools]\nattachments = false\n");
-    assert!(all.enabled_categories().contains(&ToolCategory::Attachments));
+    assert!(
+        all.enabled_categories()
+            .contains(&ToolCategory::Attachments)
+    );
 }
 
 #[test]

@@ -245,15 +245,20 @@ mod attachment_migration_tests {
             .unwrap();
         }
         assert_eq!(
-            conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
+            conn.query_row("SELECT max(version) FROM schema_migration", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
             14
         );
         conn
     }
 
     fn rows(conn: &Connection, table: &str) -> Vec<Vec<Value>> {
-        let mut statement = conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid")).unwrap();
+        let mut statement = conn
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .unwrap();
         let column_count = statement.column_count();
         statement
             .query_map([], |row| {
@@ -348,10 +353,7 @@ mod attachment_migration_tests {
             [],
         )
         .unwrap();
-        for (kind, owner_kind) in [
-            ("invalid", "attachment"),
-            ("attachment", "invalid"),
-        ] {
+        for (kind, owner_kind) in [("invalid", "attachment"), ("attachment", "invalid")] {
             assert!(
                 conn.execute(
                     "INSERT INTO chunk_vector VALUES ('profile',?1,?2,31,0,4,1,x'01',1,'invalid')",
@@ -477,11 +479,8 @@ mod attachment_migration_tests {
             [],
         )
         .unwrap();
-        conn.execute(
-            "UPDATE attachment SET status='error' WHERE id=1",
-            [],
-        )
-        .unwrap();
+        conn.execute("UPDATE attachment SET status='error' WHERE id=1", [])
+            .unwrap();
         conn.execute(
             "UPDATE attachment SET status='ready',error_stage=NULL,last_error=NULL WHERE id=1",
             [],
@@ -496,8 +495,11 @@ mod attachment_migration_tests {
             "page numbers start at one"
         );
         assert!(
-            conn.execute("UPDATE attachment_job SET state='unknown' WHERE attachment_id=1", [])
-                .is_err()
+            conn.execute(
+                "UPDATE attachment_job SET state='unknown' WHERE attachment_id=1",
+                []
+            )
+            .is_err()
         );
         assert!(
             conn.execute(
