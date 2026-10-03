@@ -1743,8 +1743,7 @@ fn oversized_attachment_splits_into_bounded_provider_calls_and_commits_all() {
         )
         .unwrap();
     assert_eq!(
-        vectors,
-        count as i64,
+        vectors, count as i64,
         "every segment is committed as a vector in chunk order"
     );
     let indexes: Vec<i64> = conn

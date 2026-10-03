@@ -1242,7 +1242,9 @@ async fn attachment_inspector_accepts_a_zero_byte_text_file() {
     let base = format!("http://127.0.0.1:{}/ui/attachments", srv.port);
 
     let uploaded = client
-        .post(format!("{base}?workspaceId={ws}&entityName=Alice&filename=empty.txt"))
+        .post(format!(
+            "{base}?workspaceId={ws}&entityName=Alice&filename=empty.txt"
+        ))
         .bearer_auth(TEST_BEARER)
         .header(reqwest::header::CONTENT_TYPE, "text/plain")
         .body("")

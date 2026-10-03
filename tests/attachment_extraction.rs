@@ -940,7 +940,9 @@ fn serve_inline_vision(mut conn: TcpStream, finish_reason: Option<&str>, hold: D
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
         }
         if headers_end.is_none() {
-            headers_end = buf.windows(4).position(|window| window == b"\r\n\r\n".as_slice());
+            headers_end = buf
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n".as_slice());
         }
         let Some(end) = headers_end else { continue };
         let head = String::from_utf8_lossy(&buf[..end]);
@@ -961,8 +963,11 @@ fn serve_inline_vision(mut conn: TcpStream, finish_reason: Option<&str>, hold: D
         }
     }
     std::thread::sleep(hold);
-    let reason = finish_reason.map(|value| format!("\"finish_reason\":\"{value}\",")).unwrap_or_default();
-    let payload = format!("{{\"choices\":[{{{reason}\"message\":{{\"content\":\"transcribed page 1\"}}}}]}}");
+    let reason = finish_reason
+        .map(|value| format!("\"finish_reason\":\"{value}\","))
+        .unwrap_or_default();
+    let payload =
+        format!("{{\"choices\":[{{{reason}\"message\":{{\"content\":\"transcribed page 1\"}}}}]}}");
     let _ = conn.write_all(
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
@@ -986,7 +991,9 @@ fn truncated_vision_server() -> String {
             let Some((conn, _)) = listener.accept().ok() else {
                 continue;
             };
-            std::thread::spawn(move || serve_inline_vision(conn, Some("length"), Duration::from_secs(0)));
+            std::thread::spawn(move || {
+                serve_inline_vision(conn, Some("length"), Duration::from_secs(0))
+            });
         }
     });
     format!("http://{addr}/v1/chat/completions")
@@ -1050,7 +1057,11 @@ fn length_truncated_vision_is_a_provider_retry_and_publishes_nothing() {
         "the failure names the truncation rule: {error:?}"
     );
     assert_eq!(count(&conn, "attachment_text"), 0, "no partial page rows");
-    assert_eq!(count(&conn, "attachment_chunk"), 0, "no partial segment rows");
+    assert_eq!(
+        count(&conn, "attachment_chunk"),
+        0,
+        "no partial segment rows"
+    );
 }
 
 #[cfg(feature = "extractor")]

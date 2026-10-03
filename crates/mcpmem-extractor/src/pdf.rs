@@ -124,7 +124,15 @@ impl ExtractionWorker {
             [job.attachment_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        match extract_attachment(self.ocr.as_deref(), &conn, &jobs, &job, &mime, &content, now_us) {
+        match extract_attachment(
+            self.ocr.as_deref(),
+            &conn,
+            &jobs,
+            &job,
+            &mime,
+            &content,
+            now_us,
+        ) {
             Ok(ExtractionOutcome::Pages(pages)) => {
                 if jobs.complete(&job, current_us(now_us), &pages)? {
                     report.committed = 1;
@@ -401,14 +409,21 @@ fn run_with_deadline(
             let _ = child.kill();
             return Err(transient(
                 "render",
-                format!("{program} exceeded the {}-second deadline", deadline_us / 1_000_000),
+                format!(
+                    "{program} exceeded the {}-second deadline",
+                    deadline_us / 1_000_000
+                ),
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
     };
     let stdout = out_reader.and_then(|h| h.join().ok()).unwrap_or_default();
     let stderr = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
-    Ok(RunOutput { status, stdout, stderr })
+    Ok(RunOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Parse the rendered pixel count from one pdfinfo size line
@@ -460,7 +475,11 @@ fn check_image_size(image: &[u8]) -> Result<(), ExtractionFailure> {
 }
 
 fn pdf_page_count(pdf_path: &Path) -> Result<i64, ExtractionFailure> {
-    let output = run_with_deadline("pdfinfo", Command::new("pdfinfo").arg(pdf_path), RENDER_DEADLINE_US)?;
+    let output = run_with_deadline(
+        "pdfinfo",
+        Command::new("pdfinfo").arg(pdf_path),
+        RENDER_DEADLINE_US,
+    )?;
     if !output.status.success() {
         return Err(transient(
             "render",
@@ -564,14 +583,19 @@ fn transcribed_pages(
     let pages: Vec<(i64, String)> = conn
         .prepare("SELECT page, text FROM attachment_text WHERE attachment_id=?1 ORDER BY page")
         .map_err(|error| {
-            transient("storage", format!("cannot read transcription checkpoints: {error}"))
+            transient(
+                "storage",
+                format!("cannot read transcription checkpoints: {error}"),
+            )
         })?
-        .query_map(
-            [attachment_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )
+        .query_map([attachment_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| {
-            transient("storage", format!("cannot read transcription checkpoints: {error}"))
+            transient(
+                "storage",
+                format!("cannot read transcription checkpoints: {error}"),
+            )
         })?
         .map(Result::unwrap)
         .collect::<Vec<_>>();
@@ -610,7 +634,10 @@ fn checkpoint_page(
         ],
     )
     .map_err(|error| {
-        transient("storage", format!("cannot checkpoint the transcribed page: {error}"))
+        transient(
+            "storage",
+            format!("cannot checkpoint the transcribed page: {error}"),
+        )
     })?;
     Ok(())
 }
