@@ -244,7 +244,7 @@ pub fn handle(
             if content.len() > CHUNK_BYTES {
                 return Err(invalid("attachment chunk exceeds 1,048,576 decoded bytes"));
             }
-            validate_session_limits(&conn, upload, limits)?;
+            validate_session_limits(&conn, upload, limits, now_us())?;
             let (next_index, received_bytes) =
                 repository.append_chunk(principal_id, upload, index, &content, now_us())?;
             json!({"nextIndex": next_index, "receivedBytes": received_bytes})
@@ -295,6 +295,7 @@ fn validate_session_limits(
     conn: &Connection,
     upload: Uuid,
     limits: &AttachmentLimits,
+    now_us: i64,
 ) -> Result<()> {
     let (mime, expected): (String, i64) = conn
         .query_row(
@@ -321,8 +322,8 @@ fn validate_session_limits(
         .query_row(
             "SELECT (SELECT COALESCE(SUM(size_bytes),0) FROM attachment) +
                     (SELECT COALESCE(SUM(expected_bytes),0) FROM attachment_upload
-                     WHERE attachment_id IS NULL)",
-            [],
+                     WHERE attachment_id IS NULL AND expires_us>?1)",
+            [now_us],
             |row| row.get(0),
         )
         .map_err(sql_error)?;

@@ -8,6 +8,7 @@
 //! fenced completion publishes all page rows in one transaction or none.
 
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -384,6 +385,10 @@ fn run_with_deadline(
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Own process group: the deadline path kills the whole group, so an
+        // orphaned grandchild of the renderer cannot hold the pipes open
+        // and stall the drain join after the kill.
+        .process_group(0)
         .spawn()
         .map_err(|error| transient("render", format!("cannot run {program}: {error}")))?;
     let out_reader = child.stdout.take().map(|mut pipe| {
@@ -421,14 +426,32 @@ fn run_with_deadline(
             break status;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            return Err(transient(
-                "render",
+            // Kill the whole process group: the renderer may own helper
+            // children that inherited the pipes, and an orphan would keep
+            // them open. Reap the direct child so no zombie outlives the
+            // worker; the drain threads then see EOF once every group
+            // member is dead. Dropping a Child without wait() leaves a
+            // zombie of the long-lived worker, and every stall would
+            // accumulate one.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.wait();
+            let _stdout = out_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+            let stderr = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+            let detail = stderr_excerpt(&stderr);
+            let message = if detail.is_empty() {
                 format!(
                     "{program} exceeded the {}-second deadline",
                     deadline_us / 1_000_000
-                ),
-            ));
+                )
+            } else {
+                format!(
+                    "{program} exceeded the {}-second deadline: {detail}",
+                    deadline_us / 1_000_000
+                )
+            };
+            return Err(transient("render", message));
         }
         std::thread::sleep(Duration::from_millis(20));
     };
@@ -442,8 +465,10 @@ fn run_with_deadline(
 }
 
 /// Parse the rendered pixel count from one pdfinfo size line
-/// (`Page size: 612 x 792 pts` or `Page N size: ...`). The conversion rounds
-/// every fractional point up, so a page can never slip under the cap.
+/// (`Page size: 612 x 792 pts` or `Page N size: ...`). Poppler prints the
+/// box in points with `%g`, so fractional values are the norm (A4 prints
+/// `595.276 x 841.89 pts`). The conversion rounds every fractional value
+/// up, so a page can never slip under the cap.
 fn size_line_pixels(line: &str) -> Option<i64> {
     let (head, body) = line.trim().split_once(" size:")?;
     if head != "Page" && !head.starts_with("Page ") {
@@ -453,11 +478,11 @@ fn size_line_pixels(line: &str) -> Option<i64> {
     if tokens.len() < 3 {
         return None;
     }
-    let w = tokens[0].parse::<i64>().ok()?;
-    let h = tokens[2].parse::<i64>().ok()?;
-    // ceil(pts * dpi / 72) in integer arithmetic; the +1 covers the
-    // truncation of a fractional source value.
-    let px = |pts: i64| (pts * RENDER_DPI_NUM + 71) / 72 + 1;
+    let w = tokens[0].parse::<f64>().ok()?;
+    let h = tokens[2].parse::<f64>().ok()?;
+    // ceil(pts * dpi / 72); the +1 covers the truncation of the fractional
+    // source value so a page can never slip under the cap.
+    let px = |pts: f64| (pts * RENDER_DPI_NUM as f64 / 72.0).ceil() as i64 + 1;
     Some(px(w) * px(h))
 }
 
@@ -547,6 +572,7 @@ fn render_page(pdf_path: &Path, dir: &Path, page: i64) -> Result<Vec<u8>, Extrac
                 "-png",
                 "-r",
                 RENDER_DPI,
+                "-cropbox",
                 "-f",
                 &page.to_string(),
                 "-l",
@@ -673,6 +699,25 @@ mod tests {
     use super::*;
     use crate::ocr::VISION_TIMEOUT_US;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn size_line_pixels_accepts_fractional_point_boxes() {
+        // Poppler prints A4 as "595.276 x 841.89 pts". The integer-only
+        // parser refused every fractional PDF before the render gate and
+        // dead-lettered the attachment after eight retries.
+        let pixels = size_line_pixels("Page size: 595.276 x 841.89 pts").expect("A4 parses");
+        let w = (595.276_f64 * RENDER_DPI_NUM as f64 / 72.0).ceil() as i64 + 1;
+        let h = (841.89_f64 * RENDER_DPI_NUM as f64 / 72.0).ceil() as i64 + 1;
+        assert_eq!(pixels, w * h);
+    }
+
+    #[test]
+    fn size_line_pixels_keeps_the_integer_cap_arithmetic() {
+        let pixels = size_line_pixels("Page size: 612 x 792 pts").expect("letter parses");
+        let w = (612_i64 * RENDER_DPI_NUM + 71) / 72 + 1;
+        let h = (792_i64 * RENDER_DPI_NUM + 71) / 72 + 1;
+        assert_eq!(pixels, w * h);
+    }
 
     #[test]
     fn text_decode_removes_a_bom_and_normalizes_crlf() {
