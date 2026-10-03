@@ -71,12 +71,14 @@ flowchart LR
 | 0 | T1, T2 | T1: migration, `events.rs`, `workspace.rs`, `tests/workspace_registry.rs`, `tests/workspace_identity.rs`, `tests/workspace_workers.rs`, `tests/event_outbox.rs`; T2: config, auth/scope, CLI and related tests. |
 | 1 | T3 | Core attachment repository, core jobs, mutation cascade, core manifest, and mutation tests. |
 | 2 | T4, T5 | T4: extractor/runtime crate, root manifest and lock, runtime role and tests, release scripts; T5: indexer crate and indexer worker tests. |
-| 3 | T6, T7, T8, T9 | T6: MCP actions, server dispatch, and tool tests; T7: HTTP routes and tests; T8: search and vector tests; T9: inspector assets and UI tests. |
-| 4 | T10 | Root README, CHANGES, CI/release checks, and final acceptance evidence. |
+| 3 | T6, T7, T8, T9, T10 docs | The four code scopes are separate. T10 owns README, CHANGES, CI workflows, and the preflight rule. |
+| 4 | T10 acceptance | Run the full checks, local smoke, browser review, and release-target renderer check after code integration. |
 
 T4 and T5 never edit each other's crates. T6 and T8 never edit each other's manifests or tests. T6 owns the `src/server.rs` search-dispatch consent argument. T8 owns the search-handler parameter and candidate filter. Both use the pinned `allow_attachments: bool` seam. T2 owns `src/tools.rs` for the full feature; T6 consumes its constants without changing it. T4 owns `Cargo.toml` and `Cargo.lock`; T6 uses the already-declared dependencies. T9 may add a browser test dependency to root `Cargo.toml` only after T4 finishes. T10 does not edit code from an earlier wave. No worker edits an excluded shared file. Workers report any incorrect path or seam instead of silently substituting a file.
 
 T6 defines `server::attachments_enabled()` from the process category flags. T7 uses this gate before it reads an HTTP upload body. T7 and T9 use the fixed HTTP routes in the approved design. Run their integration tests after all four tasks finish.
+
+The approved design fixes the public behavior and test names. T10 can write docs and CI checks now. Final acceptance still needs integrated code.
 
 ## Task 1: Migration 15 and graph marker
 
@@ -215,6 +217,8 @@ T6 defines `server::attachments_enabled()` from the process category flags. T7 u
 **Depends on:** T4, T7, T8, T9. **Requirements:** R1–R28, especially R18.
 
 **Files:** Modify `README.md`, `CHANGES.md`, `.github/workflows/ci.yml`, `.github/workflows/release.yml`, and `.omp/AGENTS.md`. T4 owns the extractor crate README and release scripts; coordinate the release checks without editing those files concurrently. Extend the preflight role matrix in `.omp/AGENTS.md` to include the extractor feature.
+
+T10 starts the public docs and CI checks from the approved design after T4. The controller completes T10 acceptance only after T6–T9 integration.
 
 - [ ] Add the complete attachment section to README in the same feature delivery. Include the 50 MiB streamed HTTP and chunked MCP protocol, the 16 MiB MCP cap, status/error stages, per-entity duplicate policy, workspace and `attachments` scope gates, Poppler installation, separate vision URL with its first-party and compatible-provider rule, and the extractor role. State the startup warning meaning: the current process lacks an extractor role and another process must run one. Name a separate extractor process as the remote-worker prerequisite. Do not claim that a warning proves a worker exists. Update CHANGES with the same behavior.
 - [ ] Add Poppler provisioning and the real-PDF fixture smoke to CI/release workflows for builds that exercise `--features extractor`. Do not raise workflow `permissions:`. The runtime dependency must be listed in the release notes even though crates.io does not package it. If a release target lacks both `pdfinfo` and `pdftoppm`, block the PDF-enabled release rather than treating the test as skipped.
