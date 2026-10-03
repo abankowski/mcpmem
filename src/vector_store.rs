@@ -118,6 +118,12 @@ struct ManagedSnapshot {
     durable_generation: i64,
     metric: DistanceMetric,
     vectors: Vec<SnapshotVector>,
+    /// Live `attachment.created_us` of every attachment that has vectors in
+    /// this snapshot, keyed by the attachment id. Attachment ids are SQLite
+    /// rowids, so deleting the last row lets a later upload reuse the id:
+    /// the id alone cannot identify an incarnation. A resolve must match
+    /// this stamp against the live row before returning its name or text.
+    attachment_incarnations: std::collections::HashMap<i64, i64>,
 }
 
 /// One match of [`VectorStore::search_chunks`], with the frame that makes the
@@ -203,6 +209,31 @@ fn load_chunk_snapshot_vectors(
             })
         })
         .collect::<Result<Vec<_>>>()
+}
+
+/// The incarnation stamps of one profile's attachment vectors: live
+/// `attachment.created_us` by attachment id, captured at snapshot build
+/// time. A later resolve of a hit must match this stamp, so a deleted file
+/// whose id a new upload reused cannot masquerade as the old match.
+fn load_attachment_incarnations(
+    conn: &Connection,
+    profile_id: uuid::Uuid,
+) -> Result<std::collections::HashMap<i64, i64>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT a.id, a.created_us FROM chunk_vector cv
+             JOIN attachment a ON a.id=cv.owner_id
+             WHERE cv.profile_id=?1 AND cv.owner_kind='attachment'",
+        )
+        .map_err(sqlite_err)?;
+    let rows = statement
+        .query_map([profile_id.to_string()], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(sqlite_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(sqlite_err)?;
+    Ok(rows.into_iter().collect())
 }
 
 fn load_taxonomy_snapshot_vectors(
@@ -741,6 +772,7 @@ impl VectorStore {
             durable_generation: generation.durable_generation,
             metric: profile.distance_metric,
             vectors,
+            attachment_incarnations: load_attachment_incarnations(&conn, profile_id)?,
         }));
         Ok(())
     }
@@ -811,6 +843,7 @@ impl VectorStore {
             durable_generation,
             metric: profile.distance_metric,
             vectors,
+            attachment_incarnations: load_attachment_incarnations(&conn, profile_id)?,
         }));
         Ok(())
     }
@@ -1259,14 +1292,17 @@ impl VectorStore {
                     .map(|(f, ty, t)| (format!("{f} -> {ty} -> {t}"), ty, "relation".to_string())))
             }
             OwnerKind::Attachment => {
+                let Some(fence) = self.attachment_incarnation(owner_id) else {
+                    return Ok(None);
+                };
                 let conn = self.db.lock();
                 let row: Option<(String, String)> = conn
                     .query_row(
                         "SELECT a.filename, COALESCE(t.name, '') FROM attachment a
                          JOIN entity e ON e.id=a.entity_id
                          LEFT JOIN type_dict t ON t.id=e.type_id
-                         WHERE a.id=?1 AND a.status='ready' AND e.flags=0",
-                        [owner_id],
+                         WHERE a.id=?1 AND a.status='ready' AND a.created_us=?2 AND e.flags=0",
+                        params![owner_id, fence],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional()
@@ -1276,20 +1312,62 @@ impl VectorStore {
         }
     }
 
+    /// The incarnation stamp the serving snapshot recorded for one
+    /// attachment: the live `attachment.created_us` the snapshot was built
+    /// against. `None` when the snapshot holds no vectors for the owner, so
+    /// no resolve can verify the row against its incarnation.
+    fn attachment_incarnation(&self, owner_id: i64) -> Option<i64> {
+        self.managed_snapshot
+            .read()
+            .as_ref()
+            .and_then(|snapshot| snapshot.attachment_incarnations.get(&owner_id).copied())
+    }
+
+    /// The live file row of one attachment hit, fenced on the incarnation
+    /// the snapshot was built against: `(attachment_id, filename, parent
+    /// entity name, parent entity type name)`. `None` when the file is gone,
+    /// not ready, superseded by a newer incarnation that reused its id, or
+    /// its parent is gone.
+    pub fn attachment_owner(
+        &self,
+        hit: &ChunkHit,
+    ) -> Result<Option<(i64, String, String, String)>> {
+        if hit.owner_kind != OwnerKind::Attachment {
+            return Ok(None);
+        }
+        let Some(fence) = self.attachment_incarnation(hit.owner_id) else {
+            return Ok(None);
+        };
+        let conn = self.db.lock();
+        conn.query_row(
+            "SELECT a.id, a.filename, e.name, COALESCE(t.name, '') FROM attachment a
+             JOIN entity e ON e.id=a.entity_id
+             LEFT JOIN type_dict t ON t.id=e.type_id
+             WHERE a.id=?1 AND a.status='ready' AND a.created_us=?2 AND e.flags=0",
+            params![hit.owner_id, fence],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(sqlite_err)
+    }
+
     /// Return the page and exact embedded segment for a live ready file.
     /// Its segment index is not its page number.
     pub fn attachment_segment(&self, hit: &ChunkHit) -> Option<(i64, String)> {
         if hit.owner_kind != OwnerKind::Attachment || hit.chunk_kind != ChunkKind::Attachment {
             return None;
         }
+        let Some(fence) = self.attachment_incarnation(hit.owner_id) else {
+            return None;
+        };
         let conn = self.db.lock();
         conn.query_row(
             "SELECT c.page, c.text FROM attachment_chunk c
              JOIN attachment a ON a.id=c.attachment_id
              JOIN entity e ON e.id=a.entity_id
              WHERE c.attachment_id=?1 AND c.chunk_index=?2
-               AND a.status='ready' AND e.flags=0",
-            params![hit.owner_id, hit.chunk_index],
+               AND a.status='ready' AND a.created_us=?3 AND e.flags=0",
+            params![hit.owner_id, hit.chunk_index, fence],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()

@@ -27,8 +27,13 @@ struct ChunkDetail {
     score: f64,
 }
 
-/// An attachment hit uses the persisted page and the exact matched segment.
+/// An attachment hit uses the persisted page and the exact matched segment,
+/// plus the file id and parent entity name that identify the match: `name`
+/// is only the filename, which is unique within one entity alone, and
+/// `get_attachment` addresses the file by id.
 struct AttachmentDetail {
+    attachment_id: i64,
+    parent_name: String,
     page: i64,
     excerpt: String,
     chunk_score: f64,
@@ -234,10 +239,15 @@ fn search_owner_rows(
             continue;
         }
         let attachment = if hit.owner_kind == OwnerKind::Attachment {
+            let Some((id, _filename, parent, _etype)) = vs.attachment_owner(hit)? else {
+                continue;
+            };
             let Some((page, excerpt)) = vs.attachment_segment(hit) else {
                 continue;
             };
             Some(AttachmentDetail {
+                attachment_id: id,
+                parent_name: parent,
                 page,
                 excerpt,
                 chunk_score: f64::from(hit.dist),
@@ -283,6 +293,13 @@ fn write_attachment_detail(out: &mut String, filename: &str, detail: &Attachment
     use std::fmt::Write;
     out.push_str(r#","filename":"#);
     push_json_str(out, filename);
+    write!(
+        out,
+        r#","attachmentId":{},"entityName":"#,
+        detail.attachment_id
+    )
+    .unwrap();
+    push_json_str(out, &detail.parent_name);
     write!(out, r#","page":{},"excerpt":"#, detail.page).unwrap();
     push_json_str(out, &detail.excerpt);
 }
@@ -561,15 +578,21 @@ fn perform_hybrid_search(
             .iter()
             .find(|h| h.owner_kind == entry.kind && h.owner_id == entry.owner_id);
         let attachment = if entry.kind == OwnerKind::Attachment {
-            let candidate: Option<(i64, String)> =
-                best.as_ref().and_then(|hit| vs.attachment_segment(hit));
-            let Some((page, excerpt)) = candidate else {
+            let Some(hit) = best.as_ref() else {
+                continue;
+            };
+            let Some((id, _filename, parent, _etype)) = vs.attachment_owner(hit)? else {
+                continue;
+            };
+            let Some((page, excerpt)) = vs.attachment_segment(hit) else {
                 continue;
             };
             Some(AttachmentDetail {
+                attachment_id: id,
+                parent_name: parent,
                 page,
                 excerpt,
-                chunk_score: best.as_ref().map(|hit| f64::from(hit.dist)).unwrap_or(0.0),
+                chunk_score: f64::from(hit.dist),
             })
         } else {
             None
@@ -785,10 +808,10 @@ pub fn handle_vector_mmr_search(
     let query = to_f32(&embedding);
     let include_files = include_attachments(params, allow_attachments);
 
-    // The pool holds the best segment per owner across every stored kind,
-    // then narrows by the kind filter. A long file cannot crowd out the
-    // other owners.
-    let hits = vs.search_best_chunks(&query, fetch_k, None, ftype, include_files)?;
+    // The kind filter enters the candidate search itself, so fetchK cannot
+    // exhaust the pool on nearer owners of another kind. A long file cannot
+    // crowd out the other owners.
+    let hits = vs.search_best_chunks(&query, fetch_k, kind, ftype, include_files)?;
     let mut pool: Vec<(OwnerKind, i64, f32)> = Vec::new();
     let mut visited: std::collections::HashSet<(u8, i64)> = std::collections::HashSet::new();
     for hit in &hits {
@@ -811,17 +834,18 @@ pub fn handle_vector_mmr_search(
             continue;
         }
         // Diversity compares the owner's identity chunk against the already
-        // selected ones. An attachment has no identity chunk, so its best
-        // matched segment vector plays that role.
-        let emb: Option<Vec<f32>> = if owner_kind == OwnerKind::Attachment {
+        // selected ones. Relations and attachments store no identity chunk
+        // (their chunk kinds are 'relation' and 'attachment'), so the
+        // matched segment vector plays that role for them.
+        let emb: Option<Vec<f32>> = if owner_kind == OwnerKind::Entity {
+            vs.owner_identity_vector(owner_kind, owner_id)
+                .ok()
+                .unwrap_or(None)
+        } else {
             let hit = hits
                 .iter()
                 .find(|h| h.owner_kind == owner_kind && h.owner_id == owner_id);
             hit.as_ref().and_then(|h| vs.matched_chunk_vector(h).ok()?)
-        } else {
-            vs.owner_identity_vector(owner_kind, owner_id)
-                .ok()
-                .unwrap_or(None)
         };
         let Some(matched) = emb else {
             continue;
@@ -835,6 +859,26 @@ pub fn handle_vector_mmr_search(
         } else {
             None
         };
+        // The other search paths drop a file whose segment vanished between
+        // the hit and the resolve. MMR must do the same, or a just-deleted
+        // file surfaces with a cached name and score.
+        if owner_kind == OwnerKind::Attachment && segment.is_none() {
+            continue;
+        }
+        let (attachment_id, parent) = if owner_kind == OwnerKind::Attachment {
+            let hit = hits
+                .iter()
+                .find(|h| h.owner_kind == owner_kind && h.owner_id == owner_id);
+            let Some(hit) = hit else {
+                continue;
+            };
+            let Some((id, _filename, parent, _etype)) = vs.attachment_owner(hit)? else {
+                continue;
+            };
+            (Some(id), Some(parent))
+        } else {
+            (None, None)
+        };
         cands.push(MmrCand {
             name,
             etype,
@@ -842,6 +886,8 @@ pub fn handle_vector_mmr_search(
             emb: matched,
             rel,
             segment,
+            attachment_id,
+            parent,
         });
     }
 
@@ -869,14 +915,16 @@ pub fn handle_vector_mmr_search(
     let mut named: Vec<(String, String, String, f64, Option<AttachmentDetail>)> =
         Vec::with_capacity(selected.len());
     for (c, s) in selected.iter().zip(scores) {
-        let attachment = c
-            .segment
-            .as_ref()
-            .map(|&(page, ref excerpt)| AttachmentDetail {
-                page,
+        let attachment = match (&c.segment, c.attachment_id, &c.parent) {
+            (Some((page, excerpt)), Some(id), Some(parent)) => Some(AttachmentDetail {
+                attachment_id: id,
+                parent_name: parent.clone(),
+                page: *page,
                 excerpt: excerpt.clone(),
                 chunk_score: s,
-            });
+            }),
+            _ => None,
+        };
         named.push((
             c.name.clone(),
             c.etype.clone(),
@@ -895,6 +943,10 @@ struct MmrCand {
     emb: Vec<f32>,
     rel: f64,
     segment: Option<(i64, String)>,
+    /// Attachment rows only: the live file id and parent entity name the
+    /// snapshot-consistent resolve returned.
+    attachment_id: Option<i64>,
+    parent: Option<String>,
 }
 
 /// Scale a vector to unit length in place.
@@ -1153,9 +1205,10 @@ mod tests {
         );
     }
 
-    /// An attachment row carries filename, page and excerpt in place of the
-    /// chunk member, because the segment is the row itself. The excerpt
-    /// repeats inside the chunk detail when the caller asked for chunks.
+    /// An attachment row carries filename, attachmentId, parent entityName,
+    /// page and excerpt in place of the chunk member, because the segment is
+    /// the row itself. The excerpt repeats inside the chunk detail when the
+    /// caller asked for chunks.
     #[test]
     fn owner_rows_render_attachment_metadata() {
         let rows = vec![OwnerRow {
@@ -1165,6 +1218,8 @@ mod tests {
             score: 0.3,
             chunk: None,
             attachment: Some(AttachmentDetail {
+                attachment_id: 7,
+                parent_name: "ada".to_string(),
                 page: 2,
                 excerpt: "PAGE TWO exact excerpt".to_string(),
                 chunk_score: 0.3,
@@ -1173,7 +1228,7 @@ mod tests {
         let json = build_owner_results(&rows, true);
         assert_eq!(
             json,
-            r#"{"results":[{"name":"notes.txt","entityType":"Person","kind":"attachment","score":0.300000,"filename":"notes.txt","page":2,"excerpt":"PAGE TWO exact excerpt","chunk":{"kind":"attachment","text":"PAGE TWO exact excerpt","score":0.300000}}],"count":1}"#,
+            r#"{"results":[{"name":"notes.txt","entityType":"Person","kind":"attachment","score":0.300000,"filename":"notes.txt","attachmentId":7,"entityName":"ada","page":2,"excerpt":"PAGE TWO exact excerpt","chunk":{"kind":"attachment","text":"PAGE TWO exact excerpt","score":0.300000}}],"count":1}"#,
             "{json}"
         );
         let json = build_owner_results(&rows, false);
@@ -1183,7 +1238,7 @@ mod tests {
         );
         assert!(
             json.contains(
-                r#","filename":"notes.txt","page":2,"excerpt":"PAGE TWO exact excerpt"}"#
+                r#","filename":"notes.txt","attachmentId":7,"entityName":"ada","page":2,"excerpt":"PAGE TWO exact excerpt"}"#
             ),
             "file metadata stays without chunk detail: {json}"
         );

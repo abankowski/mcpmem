@@ -1312,3 +1312,324 @@ fn attachment_type_filter_reads_current_parent_and_discards_missing_parent() {
         "a deleted parent must not leak its file"
     );
 }
+
+/// MMR must apply the kind filter inside the candidate search: a filter
+/// applied after the fetchK limit lets nearer owners of another kind exhaust
+/// the pool, and a valid farther attachment never reaches it.
+#[test]
+fn mmr_kind_filter_applies_before_the_candidate_limit() {
+    use mcpmem::vector_actions::handle_vector_mmr_search;
+    use mcpmem::workspace::WorkspaceAccess;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = vector_server(&dir);
+    let created = call_tool(
+        &s,
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "e1", "entityType": "Person", "observations": []},
+            {"name": "e2", "entityType": "Person", "observations": []}
+        ]}),
+    );
+    assert!(created["error"].is_null(), "{created}");
+
+    let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+    let profile = "11111111-2222-3333-4444-555555555555";
+    activate_test_profile(&conn, profile, DIMS);
+    let (e1, e1_type): (i64, i64) = conn
+        .query_row(
+            "SELECT id,type_id FROM entity WHERE name='e1' AND flags=0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let (e2, _): (i64, i64) = conn
+        .query_row(
+            "SELECT id,type_id FROM entity WHERE name='e2' AND flags=0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let blob = |a: f32, b: f32| {
+        [a, b, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    // Two entity owners are nearer than the attachment, so fetchK=2 must
+    // not let the post-limit kind filter starve the pool of the attachment.
+    for (entity_id, vector) in [(e1, blob(0.99, 0.01)), (e2, blob(0.98, 0.02))] {
+        conn.execute(
+            "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+             VALUES(?1,'identity','entity',?2,0,?3,1,?4,1,'test')",
+            rusqlite::params![profile, entity_id, e1_type, vector],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO attachment(entity_id,filename,mime,size_bytes,sha256,content,status,revision,created_us)
+         VALUES(?1,'far.txt','text/plain',3,?2,?3,'ready',1,1)",
+        rusqlite::params![e1, vec![0u8; 32], b"far"],
+    )
+    .unwrap();
+    let attachment = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO attachment_chunk(attachment_id,chunk_index,page,segment_index,text)
+         VALUES(?1,0,1,0,'near enough')",
+        [attachment],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+         VALUES(?1,'attachment','attachment',?2,0,?3,1,?4,1,'test')",
+        rusqlite::params![profile, attachment, e1_type, blob(0.5, 0.5)],
+    )
+    .unwrap();
+    drop(conn);
+    s.vs.reconcile_managed_snapshot().unwrap();
+    let record = s
+        .registry
+        .resolve("machine:local", None, WorkspaceAccess::Read)
+        .unwrap();
+    let kg = s.handles.get(&record).unwrap().kg;
+    let query = serde_json::json!([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let rows = direct_search_rows(
+        &handle_vector_mmr_search(
+            &s.vs,
+            &kg,
+            Some(&serde_json::json!({
+                "embedding": query, "topK": 2, "fetchK": 2,
+                "filter": { "kind": "attachment" }
+            })),
+            true,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        rows.len(),
+        1,
+        "the farther attachment must survive fetchK=2: {rows:?}"
+    );
+    assert_eq!(rows[0]["kind"], "attachment", "{rows:?}");
+    assert_eq!(rows[0]["name"], "far.txt", "{rows:?}");
+}
+
+/// MMR advertises `kind: "relation"` in its filter, so a relation that only
+/// has a relation chunk (never an identity chunk) must still reach the
+/// diversified pool through the matched chunk vector.
+#[test]
+fn mmr_kind_relation_returns_relations() {
+    use mcpmem::vector_actions::handle_vector_mmr_search;
+    use mcpmem::workspace::WorkspaceAccess;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = vector_server(&dir);
+    seed_attachment_search(&dir, &s);
+    let record = s
+        .registry
+        .resolve("machine:local", None, WorkspaceAccess::Read)
+        .unwrap();
+    let kg = s.handles.get(&record).unwrap().kg;
+    let query = serde_json::json!([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let rows = direct_search_rows(
+        &handle_vector_mmr_search(
+            &s.vs,
+            &kg,
+            Some(&serde_json::json!({
+                "embedding": query, "topK": 2, "filter": { "kind": "relation" }
+            })),
+            true,
+        )
+        .unwrap(),
+    );
+    assert_eq!(rows.len(), 1, "the relation must not vanish: {rows:?}");
+    assert_eq!(rows[0]["kind"], "relation", "{rows:?}");
+    assert_eq!(rows[0]["name"], "ada -> knows -> bob", "{rows:?}");
+}
+
+/// Attachment hits must carry the attachment id and the parent entity name:
+/// filenames are unique only within one entity, and get_attachment needs
+/// the id to address the file.
+#[test]
+fn attachment_hits_carry_attachment_id_and_parent_entity_name() {
+    use mcpmem::vector_actions::{
+        handle_hybrid_search, handle_vector_mmr_search, handle_vector_search_entities,
+    };
+    use mcpmem::workspace::WorkspaceAccess;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = vector_server(&dir);
+    let (attachment, _) = seed_attachment_search(&dir, &s);
+    let record = s
+        .registry
+        .resolve("machine:local", None, WorkspaceAccess::Read)
+        .unwrap();
+    let kg = s.handles.get(&record).unwrap().kg;
+    let query = serde_json::json!([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let vector = serde_json::json!({"embedding": query, "topK": 4});
+    let hybrid = serde_json::json!({"queryText": "ada", "queryEmbedding": query, "topK": 4});
+    let mmr = serde_json::json!({"embedding": query, "topK": 4, "lambda": 1.0});
+    for response in [
+        handle_vector_search_entities(&s.vs, &kg, Some(&vector), true).unwrap(),
+        handle_hybrid_search(&s.vs, &kg, Some(&hybrid), true).unwrap(),
+        handle_vector_mmr_search(&s.vs, &kg, Some(&mmr), true).unwrap(),
+    ] {
+        let rows = direct_search_rows(&response);
+        let file = rows
+            .iter()
+            .find(|row| row["kind"] == "attachment")
+            .unwrap_or_else(|| panic!("an attachment row is expected: {response}"));
+        assert_eq!(file["attachmentId"], attachment, "{response}");
+        assert_eq!(file["entityName"], "ada", "{response}");
+        assert_eq!(file["name"], "notes.txt", "{response}");
+    }
+}
+
+/// MMR must drop an attachment whose segment vanished between the hit and
+/// the resolve, exactly like the other search paths: a just-deleted file
+/// must not surface with a cached name and score.
+#[test]
+fn mmr_skips_an_attachment_whose_segment_disappeared() {
+    use mcpmem::vector_actions::handle_vector_mmr_search;
+    use mcpmem::workspace::WorkspaceAccess;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = vector_server(&dir);
+    let (attachment, _) = seed_attachment_search(&dir, &s);
+    let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+    conn.execute(
+        "DELETE FROM attachment_chunk WHERE attachment_id=?1",
+        [attachment],
+    )
+    .unwrap();
+    drop(conn);
+    let record = s
+        .registry
+        .resolve("machine:local", None, WorkspaceAccess::Read)
+        .unwrap();
+    let kg = s.handles.get(&record).unwrap().kg;
+    let query = serde_json::json!([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let rows = direct_search_rows(
+        &handle_vector_mmr_search(
+            &s.vs,
+            &kg,
+            Some(&serde_json::json!({"embedding": query, "topK": 4, "lambda": 1.0})),
+            true,
+        )
+        .unwrap(),
+    );
+    assert!(
+        rows.iter().all(|r| r["kind"] != "attachment"),
+        "a deleted file must not surface through MMR: {rows:?}"
+    );
+}
+
+/// Attachment ids are SQLite rowids: deleting the last row lets a new file
+/// reuse the id. The managed snapshot refreshes asynchronously, so the
+/// resolver must not join a stale hit to the new incarnation by numeric id
+/// and chunk index alone: the resolve is fenced on the incarnation the
+/// snapshot recorded.
+#[test]
+fn a_reused_attachment_id_never_resolves_against_a_stale_snapshot() {
+    use mcpmem::vector_actions::handle_vector_search_entities;
+    use mcpmem::workspace::WorkspaceAccess;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = vector_server(&dir);
+    let created = call_tool(
+        &s,
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "ada", "entityType": "Person", "observations": []}
+        ]}),
+    );
+    assert!(created["error"].is_null(), "{created}");
+
+    let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+    let profile = "11111111-2222-3333-4444-555555555555";
+    activate_test_profile(&conn, profile, DIMS);
+    let (ada, ada_type): (i64, i64) = conn
+        .query_row(
+            "SELECT id,type_id FROM entity WHERE name='ada' AND flags=0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let blob = [1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    conn.execute(
+        "INSERT INTO attachment(entity_id,filename,mime,size_bytes,sha256,content,status,revision,created_us)
+         VALUES(?1,'old.txt','text/plain',3,?2,?3,'ready',1,1)",
+        rusqlite::params![ada, vec![0u8; 32], b"old"],
+    )
+    .unwrap();
+    let attachment = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO attachment_chunk(attachment_id,chunk_index,page,segment_index,text)
+         VALUES(?1,0,1,0,'OLD SECRET')",
+        [attachment],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+         VALUES(?1,'attachment','attachment',?2,0,?3,1,?4,1,'test')",
+        rusqlite::params![profile, attachment, ada_type, blob],
+    )
+    .unwrap();
+    drop(conn);
+    s.vs.reconcile_managed_snapshot().unwrap();
+
+    // The file is deleted and a new file reuses its id, exactly the state a
+    // real delete plus re-upload leaves behind. The snapshot still holds the
+    // old vector (refresh is async); the live rows now describe the new
+    // incarnation with a fresh created_us.
+    let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+    conn.execute(
+        "DELETE FROM attachment_chunk WHERE attachment_id=?1",
+        [attachment],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM attachment WHERE id=?1", [attachment])
+        .unwrap();
+    conn.execute(
+        "INSERT INTO attachment(id,entity_id,filename,mime,size_bytes,sha256,content,status,revision,created_us)
+         VALUES(?1,?2,'new.txt','text/plain',3,?3,?4,'ready',1,2)",
+        rusqlite::params![attachment, ada, vec![0u8; 32], b"new"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO attachment_chunk(attachment_id,chunk_index,page,segment_index,text)
+         VALUES(?1,0,1,0,'NEW SECRET')",
+        [attachment],
+    )
+    .unwrap();
+    drop(conn);
+
+    let record = s
+        .registry
+        .resolve("machine:local", None, WorkspaceAccess::Read)
+        .unwrap();
+    let kg = s.handles.get(&record).unwrap().kg;
+    let query = serde_json::json!([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let rows = direct_search_rows(
+        &handle_vector_search_entities(
+            &s.vs,
+            &kg,
+            Some(&serde_json::json!({
+                "embedding": query, "topK": 4, "includeAttachments": true
+            })),
+            true,
+        )
+        .unwrap(),
+    );
+    assert!(
+        rows.iter().all(|r| r["kind"] != "attachment"),
+        "the deleted file's vector must not surface the new file: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| r["name"] != "new.txt"),
+        "the new file must not carry the old vector: {rows:?}"
+    );
+}
