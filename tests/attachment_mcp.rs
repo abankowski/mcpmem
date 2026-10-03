@@ -584,6 +584,66 @@ fn page_reads_count_unicode_scalars_and_bound_responses() {
     );
 }
 
+#[test]
+fn max_chars_zero_returns_an_empty_slice_not_the_whole_page() {
+    let fixture = Fixture::new();
+    fixture.create("doc");
+    let owner = local_principal();
+    let upload = begin(&fixture, &owner, "page.txt", b"four");
+    result(&fixture.call(
+        &owner,
+        "append_attachment_chunk",
+        json!({"workspaceId": fixture.workspace_id, "uploadId": upload,
+            "index": 0, "content": STANDARD.encode(b"four")}),
+    ));
+    let id = result(&fixture.call(
+        &owner,
+        "finish_attachment_upload",
+        json!({"workspaceId": fixture.workspace_id, "uploadId": upload}),
+    ))["attachmentId"]
+        .as_i64()
+        .unwrap();
+    let conn = Connection::open(&fixture.path).unwrap();
+    conn.execute(
+        "INSERT INTO attachment_text(attachment_id,page,text,chars) VALUES(?1,1,?2,4)",
+        rusqlite::params![id, "four"],
+    )
+    .unwrap();
+    let page = result(&fixture.call(
+        &owner,
+        "get_attachment_page",
+        json!({"workspaceId": fixture.workspace_id, "attachmentId": id,
+            "page": 1, "offset": 0, "maxChars": 0}),
+    ));
+    assert_eq!(
+        page,
+        json!({"page": 1, "text": "", "offset": 0, "nextOffset": 0, "eof": false})
+    );
+}
+
+#[test]
+fn empty_chunk_is_refused_while_a_zero_byte_file_finishes_without_chunks() {
+    let fixture = Fixture::new();
+    fixture.create("doc");
+    let owner = local_principal();
+    let upload = begin(&fixture, &owner, "zero.txt", b"");
+    let appended = fixture.call(
+        &owner,
+        "append_attachment_chunk",
+        json!({"workspaceId": fixture.workspace_id, "uploadId": upload,
+            "index": 0, "content": ""}),
+    );
+    assert_error(&appended, "empty");
+    assert_eq!(fixture.count("attachment_upload_chunk"), 0);
+    let finished = result(&fixture.call(
+        &owner,
+        "finish_attachment_upload",
+        json!({"workspaceId": fixture.workspace_id, "uploadId": upload}),
+    ));
+    assert_eq!(finished["status"], "uploaded");
+    assert_eq!(fixture.count("attachment_chunk"), 0);
+}
+
 #[tokio::test]
 async fn oversized_single_mcp_body_still_fails_at_sixteen_mebibytes() {
     let dir = tempfile::tempdir().unwrap();

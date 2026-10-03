@@ -238,6 +238,9 @@ pub fn handle(
             let content = STANDARD
                 .decode(encoded)
                 .map_err(|_| invalid("'content' must be base64"))?;
+            if content.is_empty() {
+                return Err(invalid("attachment chunk must not be empty"));
+            }
             if content.len() > CHUNK_BYTES {
                 return Err(invalid("attachment chunk exceeds 1,048,576 decoded bytes"));
             }
@@ -383,6 +386,13 @@ fn read_page(conn: &Connection, args: &Value) -> Result<Value> {
         .ok_or_else(|| invalid("attachment page not found"))?;
     if offset > chars {
         return Err(invalid("'offset' exceeds attachment page length"));
+    }
+    if max_chars == 0 {
+        // A zero cap must not read through the page: the loop counter would
+        // go negative and the whole page would come back, bypassing the
+        // advertised 4,096-character response cap.
+        return Ok(json!({"page": page, "text": "", "offset": offset,
+            "nextOffset": offset, "eof": offset == chars}));
     }
     let mut selected = String::new();
     let mut next_offset = offset;
