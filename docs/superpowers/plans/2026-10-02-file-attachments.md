@@ -68,12 +68,12 @@ flowchart LR
 
 | Wave | Independent tasks | Disjoint complete scopes |
 |---|---|---|
-| 0 | T1, T2 | T1: migration, `events.rs`, `workspace.rs`, `tests/workspace_registry.rs`; T2: config, auth/scope, CLI and related tests. |
+| 0 | T1, T2 | T1: migration, `events.rs`, `workspace.rs`, `tests/workspace_registry.rs`, `tests/workspace_identity.rs`, `tests/workspace_workers.rs`, `tests/event_outbox.rs`; T2: config, auth/scope, CLI and related tests. |
 | 1 | T3 | Core attachment repository, core jobs, mutation cascade, core manifest, and mutation tests. |
 | 2 | T4, T5 | T4: extractor/runtime crate, root manifest and lock, runtime role and tests, release scripts; T5: indexer crate and indexer worker tests. |
 | 3 | T6, T8 | T6: attachment MCP actions, server dispatcher and search consent argument, tool manifest, and MCP tests; T8: vector store/actions, vector manifest, and search tests. |
 | 4 | T7 | HTTP router and HTTP attachment tests. |
-| 5 | T9 | Inspector HTML, JS, CSS, and UI HTTP tests. |
+| 5 | T9 | Inspector HTML, JS, CSS, admin scope picker, and UI HTTP tests. |
 | 6 | T10 | Root README, CHANGES, CI/release checks, and final acceptance evidence. |
 
 T4 and T5 never edit each other's crates. T6 and T8 never edit each other's manifests or tests. T6 owns the `src/server.rs` search-dispatch consent argument. T8 owns the search-handler parameter and candidate filter. Both use the pinned `allow_attachments: bool` seam. T2 owns `src/tools.rs` for the full feature; T6 consumes its constants without changing it. T4 owns `Cargo.toml` and `Cargo.lock`; T6 uses the already-declared dependencies. T9 may add a browser test dependency to root `Cargo.toml` only after T4 finishes. T10 does not edit code from an earlier wave. No worker edits an excluded shared file. Workers report any incorrect path or seam instead of silently substituting a file.
@@ -82,7 +82,7 @@ T4 and T5 never edit each other's crates. T6 and T8 never edit each other's mani
 
 **Depends on:** None. **Requirements:** R3, R9, R10, R13.
 
-**Files:** Create `crates/mcpmem-core/migrations/0015_attachments.sql`. Modify `crates/mcpmem-core/src/events.rs`, `src/workspace.rs`, and `tests/workspace_registry.rs`. Core migration tests stay inline in `events.rs`.
+**Files:** Create `crates/mcpmem-core/migrations/0015_attachments.sql`. Modify `crates/mcpmem-core/src/events.rs`, `src/workspace.rs`, `tests/workspace_registry.rs`, `tests/workspace_identity.rs`, `tests/workspace_workers.rs`, and `tests/event_outbox.rs`. Core migration tests stay inline in `events.rs`.
 
 **Interface:** Six new tables, including `attachment_chunk(attachment_id,chunk_index,page,segment_index,text)`, have the spec's columns and keys. Both vector tables admit the `attachment` owner; `chunk_vector.kind` admits `attachment`.
 
@@ -200,12 +200,13 @@ T4 and T5 never edit each other's crates. T6 and T8 never edit each other's mani
 
 **Depends on:** T2, T7. **Requirements:** R4, R5, R17, R27.
 
-**Files:** Modify `src/ui/index.html`, `src/ui/graph.js`, `src/ui/graph.css`, and `tests/ui_http.rs`. Do not edit `src/ui/admin.html` or `src/ui/admin.js`.
+**Files:** Modify `src/ui/index.html`, `src/ui/graph.js`, `src/ui/graph.css`, `src/ui/admin.js`, and `tests/ui_http.rs`. The only `admin.js` change adds `attachments` to its principal scope picker. Do not put the entity inspector in the admin SPA or edit `src/ui/admin.html`.
 
 **Interface:** The inspector binds to the selected workspace and entity. It uses the T7 HTTP routes and the spec's metadata fields. It keeps the viewer's existing `graph-read` login and requests `attachments` as a separate OAuth consent. A read-only workspace grant can view attachments but not upload or delete.
 
 - [ ] Add the inspector panel, picker, list, status/error badges, page viewer, download, and delete. Upload a browser `File` directly as the raw HTTP body; do not convert 50 MiB to base64 or a single JSON string. Use an Authorization header; never put an OAuth token in a query parameter.
 - [ ] Add a separate `attachments` consent path to the graph viewer. It must request the added scope when needed and retain `graph-read` for the rest of the graph. Do not assume that an OAuth token with only `graph-read` can upload. A 403 must name the missing scope without initiating a write.
+- [ ] Add `attachments` to the admin principal scope picker at `src/ui/admin.js:301`. Keep it a scope choice, not an admin attachment panel.
 - [ ] Poll while status is `uploaded` or `extracting`. Show `error_stage` and `last_error` as an error badge while `extracting` after a transient failure. Keep polling after that failure; stop only at `ready` or terminal `error`. Clear the badge on success. Cancel pending fetches and polling on node/workspace switches with the existing generation and abort-controller pattern. Render untrusted filenames and page text as text, not HTML. A stale upload response must not populate a different node's inspector.
 - [ ] Extend `tests/ui_http.rs` for static asset and HTTP contract coverage. Verify the actual `/ui` surface in a browser with an OAuth writer, an OAuth reader, a duplicate filename, a failed PDF render badge, a page read, a download, and a workspace switch. Use a browser to prove retry-to-success: fail the first extraction attempt, observe the polling inspector show the `config` or `render` error badge while status stays `extracting`, let the next attempt succeed, and assert `ready` with no error badge. The browser check, not an asset-string assertion, proves the interaction.
 
