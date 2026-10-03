@@ -1325,3 +1325,322 @@ fn reconcile_adopts_taxonomy_after_the_worker_cycle() {
         "the taxonomy commit does not disturb the entity chunk"
     );
 }
+
+/// Seed one live parent entity and one ready attachment with stored
+/// segments, exactly as the extraction worker publishes them: chunk_index
+/// runs across pages, segment_index restarts at zero per page.
+fn seed_attachment(
+    conn: &rusqlite::Connection,
+    attachment_id: i64,
+    revision: i64,
+    segments: &[(i64, i64, i64, &str)],
+) {
+    conn.execute(
+        "INSERT INTO type_dict(id, kind, name, revision) VALUES(1, 0, 'Thing', 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO entity(id, name_hash, name, type_id, created_us, updated_us)
+         VALUES(?1, 0, 'owner', 1, 1, 1)",
+        rusqlite::params![attachment_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO entity_revision VALUES(?1, 1, 0)",
+        rusqlite::params![attachment_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO attachment(id, entity_id, filename, mime, size_bytes, sha256, content, status, revision, created_us)
+         VALUES(?1, ?1, 'file.txt', 'text/plain', 1, zeroblob(32), X'61', 'ready', ?2, 1)",
+        rusqlite::params![attachment_id, revision],
+    )
+    .unwrap();
+    for (chunk_index, page, segment_index, text) in segments {
+        conn.execute(
+            "INSERT INTO attachment_chunk(attachment_id, chunk_index, page, segment_index, text)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![attachment_id, chunk_index, page, segment_index, text],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn worker_embeds_attachment_segments_in_chunk_order() {
+    use mcpmem_core::jobs::AnnGenerationRepository;
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        mcpmem_core::schema::initialize_database(&conn).unwrap();
+        // Three pages: page 1 splits into two segments, pages 2 and 3 carry
+        // one segment each.
+        seed_attachment(
+            &conn,
+            9,
+            2,
+            &[
+                (0, 1, 0, "page one, segment zero"),
+                (1, 1, 1, "page one, segment one"),
+                (2, 2, 0, "page two"),
+                (3, 3, 0, "page three"),
+            ],
+        );
+    }
+    let profile = seed_profile(&database);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let worker = IndexerWorker::new(
+        &database,
+        RecordingProvider(Arc::clone(&captured)),
+        Duration::from_secs(5),
+    );
+    // The rebuild also enqueued the parent entity; the attachment ownership
+    // kind sorts first in the claim order, so poll one claims the attachment
+    // and poll two the entity.
+    for _ in 0..2 {
+        let report = worker.run_once(now_us()).unwrap();
+        assert_eq!(report.committed, 1);
+    }
+    let texts = captured.lock();
+    assert_eq!(
+        &texts[..4],
+        &[
+            "page one, segment zero".to_string(),
+            "page one, segment one".to_string(),
+            "page two".to_string(),
+            "page three".to_string(),
+        ],
+        "the provider receives one text per stored segment in chunk_index order"
+    );
+    assert_eq!(
+        texts[4], "owner\nThing",
+        "the parent entity claims after the attachment"
+    );
+    drop(texts);
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let rows: Vec<(String, i64, i64, i64)> = conn
+        .prepare(
+            "SELECT kind, chunk_index, owner_revision, type_id FROM chunk_vector
+             WHERE profile_id=?1 AND owner_kind='attachment' ORDER BY chunk_index",
+        )
+        .unwrap()
+        .query_map([profile.id.to_string()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("attachment".to_string(), 0, 2, 1),
+            ("attachment".to_string(), 1, 2, 1),
+            ("attachment".to_string(), 2, 2, 1),
+            ("attachment".to_string(), 3, 2, 1),
+        ],
+        "chunk rows keep the stored chunk_index exactly, tagged with the attachment revision and the parent entity type"
+    );
+    // The full scan must verify: every stored segment has a matching vector
+    // at its exact chunk_index.
+    AnnGenerationRepository::new(&conn)
+        .verify_full_scan(profile.id)
+        .unwrap();
+}
+
+#[test]
+fn worker_commits_a_zero_segment_attachment_without_a_provider_request() {
+    use mcpmem_core::jobs::AnnGenerationRepository;
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        mcpmem_core::schema::initialize_database(&conn).unwrap();
+        seed_attachment(&conn, 9, 2, &[]);
+    }
+    let profile = seed_profile(&database);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let worker = IndexerWorker::new(
+        &database,
+        RecordingProvider(Arc::clone(&captured)),
+        Duration::from_secs(5),
+    );
+    for _ in 0..2 {
+        let report = worker.run_once(now_us()).unwrap();
+        assert_eq!(report.committed, 1);
+    }
+    let texts = captured.lock();
+    assert_eq!(
+        *texts,
+        vec!["owner\nThing".to_string()],
+        "the zero-segment attachment never reaches the provider"
+    );
+    drop(texts);
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let (state, vectors): (String, i64) = conn
+        .query_row(
+            "SELECT j.state, (SELECT COUNT(*) FROM chunk_vector v
+              WHERE v.profile_id=?1 AND v.owner_kind='attachment' AND v.owner_id=9)
+             FROM chunk_index_job j
+             WHERE j.profile_id=?1 AND j.owner_kind='attachment' AND j.owner_id=9",
+            [profile.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "done");
+    assert_eq!(vectors, 0);
+    // The mapping holds zero stored segments and the job is done, so the
+    // full scan verifies with no attachment vector at all.
+    AnnGenerationRepository::new(&conn)
+        .verify_full_scan(profile.id)
+        .unwrap();
+}
+
+#[test]
+fn stale_attachment_revision_retries_then_dead_letters_without_embedding() {
+    use mcpmem_core::jobs::AnnGenerationRepository;
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        mcpmem_core::schema::initialize_database(&conn).unwrap();
+        seed_attachment(&conn, 9, 5, &[(0, 1, 0, "stale text")]);
+    }
+    let profile = seed_profile(&database);
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        // A write bumped the attachment after the job was queued: the job
+        // still carries the old revision.
+        conn.execute(
+            "UPDATE chunk_index_job SET owner_revision=4 WHERE profile_id=?1 AND owner_kind='attachment' AND owner_id=9",
+            [profile.id.to_string()],
+        )
+        .unwrap();
+    }
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let worker = IndexerWorker::new(
+        &database,
+        RecordingProvider(Arc::clone(&captured)),
+        Duration::from_secs(1),
+    );
+    let start = now_us();
+    let mut dead_seen = false;
+    for i in 0..24 {
+        let report = worker.run_once(start + i * 2_000_000).unwrap();
+        dead_seen |= report.dead == 1;
+        if dead_seen {
+            break;
+        }
+    }
+    assert!(
+        dead_seen,
+        "a stale attachment must dead-letter after max attempts"
+    );
+    let texts = captured.lock();
+    assert_eq!(
+        *texts,
+        vec!["owner\nThing".to_string()],
+        "the stale text is never sent to the provider"
+    );
+    drop(texts);
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let (state, attempts): (String, i64) = conn
+        .query_row(
+            "SELECT state, attempts FROM chunk_index_job WHERE profile_id=?1 AND owner_kind='attachment' AND owner_id=9",
+            [profile.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "dead");
+    assert!(attempts >= 8);
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM chunk_vector WHERE owner_kind='attachment' AND owner_id=9",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0,
+        "a superseded attachment writes no vectors"
+    );
+    // The dead job still carries the stale revision while the live
+    // attachment sits at revision 5 with no vectors for it. The full-scan
+    // gate must keep the snapshot closed until the current revision is
+    // indexed; a dead job only clears the gate when it carries the current
+    // revision (the normal enqueue-then-fail flow).
+    assert!(
+        AnnGenerationRepository::new(&conn)
+            .verify_full_scan(profile.id)
+            .is_err(),
+        "a stale-dead attachment must keep the full-scan gate closed"
+    );
+}
+
+#[test]
+fn deleted_attachment_retries_without_a_vector_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("memory.db");
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        mcpmem_core::schema::initialize_database(&conn).unwrap();
+        seed_attachment(&conn, 9, 2, &[(0, 1, 0, "doomed text")]);
+    }
+    let profile = seed_profile(&database);
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        // The attachment vanished after its job was queued; the job row
+        // survives as an orphan.
+        conn.execute("DELETE FROM attachment WHERE id=9", [])
+            .unwrap();
+    }
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let worker = IndexerWorker::new(
+        &database,
+        RecordingProvider(Arc::clone(&captured)),
+        Duration::from_secs(5),
+    );
+    // The attachment ownership kind sorts first in the claim order, so the
+    // first poll claims the orphaned attachment job and must route it through
+    // the retry path; the second poll commits the parent entity.
+    let report = worker.run_once(now_us()).unwrap();
+    assert_eq!(report.retried, 1);
+    assert_eq!(worker.run_once(now_us()).unwrap().committed, 1);
+    let texts = captured.lock();
+    assert_eq!(
+        *texts,
+        vec!["owner\nThing".to_string()],
+        "the doomed text is never sent to the provider"
+    );
+    drop(texts);
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let last_error: String = conn
+        .query_row(
+            "SELECT last_error FROM chunk_index_job WHERE profile_id=?1 AND owner_kind='attachment' AND owner_id=9",
+            [profile.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        last_error.contains("vanished or was superseded"),
+        "the retry names the vanished owner: {last_error}"
+    );
+    let (state, attempts): (String, i64) = conn
+        .query_row(
+            "SELECT state, attempts FROM chunk_index_job WHERE profile_id=?1 AND owner_kind='attachment' AND owner_id=9",
+            [profile.id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((state.as_str(), attempts), ("pending", 1));
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM chunk_vector WHERE owner_kind='attachment' AND owner_id=9",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0,
+        "a vanished attachment writes no vectors"
+    );
+}

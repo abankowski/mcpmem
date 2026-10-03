@@ -16,10 +16,10 @@ mcpmem --role indexer              # a separate worker process
 ## How the work arrives
 
 Every effective graph change queues one `chunk_index_job` row per affected
-owner (an entity, or a relation mirror) per managed index profile, inside the
-same transaction as the graph write. A crash therefore loses no work. A second
-change to the same owner replaces the queued row and raises the lease epoch, so
-an in-flight worker cannot commit a stale revision.
+owner (an entity, a relation mirror, or a file attachment) per managed index
+profile, inside the same transaction as the graph write. A crash therefore
+loses no work. A second change to the same owner replaces the queued row and
+raises the lease epoch, so an in-flight worker cannot commit a stale revision.
 
 > ### The worker needs an index profile
 >
@@ -40,11 +40,20 @@ an in-flight worker cannot commit a stale revision.
 
 The commit is refused when the lease expired, when the owner revision moved,
 or when the profile is no longer writable. A repeated completion is a no-op.
+The revision fence runs on every commit, including the empty commit an
+attachment with zero stored segments gets: such an attachment skips the
+provider request and completes with no vectors.
+
+Attachment owners embed one chunk per stored segment of extracted page text,
+read from the mapping the extraction worker publishes — never from the
+uploaded blob. A profile rebuild re-embeds that stored text and never re-runs
+OCR.
 
 On any failure the worker records the error in `chunk_index_job.last_error`,
 returns the job to `pending`, and sets the next attempt one second later.
-Attempts are unlimited: the worker never dead-letters a job, so a provider
-outage delays the index instead of losing it.
+Attempts are bounded: the worker dead-letters the job after eight failed
+attempts, mirroring the webhook worker's bound, and drops its chunk rows so a
+poisoned owner cannot block the store or the full scan.
 
 ## Providers
 
@@ -70,9 +79,9 @@ Add a provider by implementing the `EmbeddingProvider` trait.
 
 `index_profile_registry` holds one state per store key: `LegacyCompat`,
 `Active`, `Rebuilding` or `Failed`. A profile is immutable and carries a
-fingerprint. A rebuild queues every live owner (entities and relation mirrors)
-against the candidate profile, and activation promotes the candidate only after
-the full scan is verified.
+fingerprint. A rebuild queues every live owner — entities, relation mirrors,
+and ready attachments — against the candidate profile, and activation promotes
+the candidate only after the full scan is verified.
 
 There are no client vector writes to refuse: the server's `vector_*` tools only
 read the snapshot the worker's chunks build, so the worker owns every embedding
