@@ -237,6 +237,8 @@ fn serve_vision(mut conn: TcpStream, state: &Arc<Mutex<Vec<(String, String)>>>) 
 // ── Environment isolation ────────────────────────────────────────────────
 
 /// Serializes process-environment mutations across the tests of this file.
+/// Tests that spawn Poppler from the ambient PATH also hold the lock, so a
+/// sibling's fake-renderer directory can never leak into their claims.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Sets one environment variable and restores the prior value on drop,
@@ -497,6 +499,9 @@ fn pdf_without_ocr_config_fails_at_config_stage() {
 #[cfg(feature = "extractor")]
 #[test]
 fn unknown_ocr_provider_fails_pdf_at_config_stage() {
+    // PATH is process-wide: hold the lock while this test spawns renderers,
+    // so a sibling's fake-renderer directory cannot leak into its claims.
+    let _guard = ENV_LOCK.lock();
     let dir = tempfile::tempdir().unwrap();
     let (path, entity_id) = test_graph(&dir);
     let attachment = upload(&path, entity_id, "scan.pdf", "application/pdf", PDF);
@@ -540,6 +545,7 @@ fn unknown_ocr_provider_fails_pdf_at_config_stage() {
 #[cfg(feature = "extractor")]
 #[test]
 fn explicit_openai_key_file_errors_are_terminal_config_and_text_still_extracts() {
+    let _guard = ENV_LOCK.lock();
     let dir = tempfile::tempdir().unwrap();
     let (path, entity_id) = test_graph(&dir);
     let missing_key = dir.path().join("missing-vision-key");
@@ -680,6 +686,8 @@ fn inherited_first_party_openai_resolves_the_default_vision_host() {
 #[cfg(feature = "extractor")]
 #[test]
 fn inherited_openai_compatible_key_reaches_only_the_vision_endpoint() {
+    // `with_embedding_env` holds ENV_LOCK around the whole body, which
+    // covers the renderer spawns inside it.
     with_embedding_env(
         || {
             let dir = tempfile::tempdir().unwrap();
@@ -783,6 +791,9 @@ fn environment_key_wins_over_the_file_for_inherited_ocr() {
 #[cfg(feature = "extractor")]
 #[test]
 fn pdf_render_routes_page_to_vision() {
+    // PATH is process-wide: hold the lock while this test spawns renderers,
+    // so a sibling's fake-renderer directory cannot leak into its claims.
+    let _guard = ENV_LOCK.lock();
     // This test must fail, not skip, when the external renderer is missing:
     // the deployment smoke depends on it. The command is identical in bash
     // and fish.
@@ -873,6 +884,7 @@ fn pdf_render_routes_page_to_vision() {
 #[cfg(feature = "extractor")]
 #[test]
 fn pdf_page_renewal_moves_the_lease_deadline_past_the_claim_time() {
+    let _guard = ENV_LOCK.lock();
     let dir = tempfile::tempdir().unwrap();
     let (path, entity_id) = test_graph(&dir);
     let attachment = upload(&path, entity_id, "renew.pdf", "application/pdf", PDF);
@@ -913,6 +925,285 @@ fn pdf_page_renewal_moves_the_lease_deadline_past_the_claim_time() {
     );
 }
 
+// ── Turn bounds, render caps, and slow or truncated providers ───────────
+
+/// Serves one connection: reads the request, answers it, and closes.
+/// `finish_reason`, when present, names the provider's stop reason.
+#[cfg(feature = "extractor")]
+fn serve_inline_vision(mut conn: TcpStream, finish_reason: Option<&str>, hold: Duration) {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut headers_end = None;
+    loop {
+        match conn.read(&mut chunk) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+        if headers_end.is_none() {
+            headers_end = buf.windows(4).position(|window| window == b"\r\n\r\n".as_slice());
+        }
+        let Some(end) = headers_end else { continue };
+        let head = String::from_utf8_lossy(&buf[..end]);
+        let header = |name: &str| {
+            head.lines().find_map(|line| {
+                let (line_name, value) = line.split_once(':')?;
+                line_name
+                    .trim()
+                    .eq_ignore_ascii_case(name)
+                    .then(|| value.trim().to_owned())
+            })
+        };
+        let content_length = header("Content-Length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        if buf.len() >= end + 4 + content_length {
+            break;
+        }
+    }
+    std::thread::sleep(hold);
+    let reason = finish_reason.map(|value| format!("\"finish_reason\":\"{value}\",")).unwrap_or_default();
+    let payload = format!("{{\"choices\":[{{{reason}\"message\":{{\"content\":\"transcribed page 1\"}}}}]}}");
+    let _ = conn.write_all(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        )
+        .as_bytes(),
+    );
+}
+
+/// One inline vision endpoint that answers every request with a
+/// `finish_reason` of `length`: the provider stopped at the token limit, so
+/// the transcription is incomplete.
+#[cfg(feature = "extractor")]
+fn truncated_vision_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the truncated vision listener");
+    let addr = listener.local_addr().expect("read back the vision port");
+    std::thread::spawn(move || {
+        loop {
+            let Some((conn, _)) = listener.accept().ok() else {
+                continue;
+            };
+            std::thread::spawn(move || serve_inline_vision(conn, Some("length"), Duration::from_secs(0)));
+        }
+    });
+    format!("http://{addr}/v1/chat/completions")
+}
+
+/// One inline vision endpoint that holds each request for `hold` before
+/// answering, to simulate a slow provider generation.
+#[cfg(feature = "extractor")]
+fn slow_vision_server(hold: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the slow vision listener");
+    let addr = listener.local_addr().expect("read back the vision port");
+    std::thread::spawn(move || {
+        loop {
+            let Some((conn, _)) = listener.accept().ok() else {
+                continue;
+            };
+            std::thread::spawn(move || serve_inline_vision(conn, None, hold));
+        }
+    });
+    format!("http://{addr}/v1/chat/completions")
+}
+
+#[cfg(feature = "extractor")]
+#[test]
+fn length_truncated_vision_is_a_provider_retry_and_publishes_nothing() {
+    let _guard = ENV_LOCK.lock();
+    let dir = tempfile::tempdir().unwrap();
+    let (path, entity_id) = test_graph(&dir);
+    let attachment = upload(&path, entity_id, "scan.pdf", "application/pdf", PDF);
+
+    let provider = VisionOcr::new(VisionSettings {
+        endpoint: truncated_vision_server(),
+        api_key: "vision-key".into(),
+        model: "gpt-4o-mini".into(),
+    })
+    .unwrap();
+    let worker = ExtractionWorker::new(&path, Some(Arc::new(provider)));
+    let report = worker.run_once(now_us()).unwrap();
+    assert_eq!(report.claimed, 1);
+    assert_eq!(
+        report.committed, 0,
+        "a truncated transcription must not publish a page"
+    );
+    assert_eq!(report.retried, 1, "the truncation is a provider failure");
+    assert_eq!(report.dead, 0);
+
+    let conn = Connection::open(&path).unwrap();
+    let (status, stage, error): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT status, error_stage, last_error FROM attachment WHERE id=?1",
+            [attachment],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "extracting");
+    assert_eq!(stage.as_deref(), Some("provider"));
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("token limit")),
+        "the failure names the truncation rule: {error:?}"
+    );
+    assert_eq!(count(&conn, "attachment_text"), 0, "no partial page rows");
+    assert_eq!(count(&conn, "attachment_chunk"), 0, "no partial segment rows");
+}
+
+#[cfg(feature = "extractor")]
+#[test]
+fn a_vision_response_past_the_lease_is_retried_not_lost() {
+    let _guard = ENV_LOCK.lock();
+    // A transcription longer than the claim lease used to arrive after the
+    // lease fence expired: the success was discarded as a lost lease. The
+    // vision deadline must sit below the lease so a slow success surfaces
+    // as a retryable provider failure instead.
+    let dir = tempfile::tempdir().unwrap();
+    let (path, entity_id) = test_graph(&dir);
+    let attachment = upload(&path, entity_id, "scan.pdf", "application/pdf", PDF);
+    let provider = VisionOcr::new(VisionSettings {
+        endpoint: slow_vision_server(Duration::from_secs(35)),
+        api_key: "vision-key".into(),
+        model: "gpt-4o-mini".into(),
+    })
+    .unwrap();
+    let worker = ExtractionWorker::new(&path, Some(Arc::new(provider)));
+    let report = worker.run_once(now_us()).unwrap();
+    assert_eq!(report.claimed, 1);
+    assert_eq!(report.committed, 0);
+    assert_eq!(
+        report.retried, 1,
+        "a response past the lease is a provider timeout, not a lost lease"
+    );
+    assert_eq!(report.dead, 0);
+
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(attachment_status(&path, attachment), "extracting");
+    assert_eq!(
+        conn.query_row(
+            "SELECT state FROM attachment_job WHERE attachment_id=?1",
+            [attachment],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "pending",
+        "the job returns to the queue"
+    );
+    assert_eq!(count(&conn, "attachment_text"), 0, "no partial page rows");
+}
+
+/// Chmods one installed helper script 0755.
+#[cfg(feature = "extractor")]
+fn make_executable(path: &std::path::PathBuf) {
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
+#[cfg(feature = "extractor")]
+#[test]
+fn oversized_pdf_page_counts_are_refused_before_render() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(
+        bin.join("pdfinfo"),
+        b"#!/bin/sh\nprintf 'Pages: 999\\nPage size: 612 x 792 pts\\n'\n",
+    )
+    .unwrap();
+    make_executable(&bin.join("pdfinfo"));
+
+    let (path, entity_id) = test_graph(&dir);
+    let attachment = upload(&path, entity_id, "scan.pdf", "application/pdf", PDF);
+    let ocr = Arc::new(UncalledOcr {
+        called: AtomicBool::new(false),
+    });
+    let ocr_ref = Arc::clone(&ocr);
+    let worker = ExtractionWorker::new(&path, Some(Arc::clone(&ocr) as Arc<dyn OcrProvider>));
+    let mut report = ExtractionReport::default();
+    with_path(&bin.to_string_lossy(), || {
+        report = worker.run_once(now_us()).unwrap();
+    });
+    assert_eq!(report.retried, 1);
+    assert_eq!(report.committed, 0);
+    assert!(
+        !ocr_ref.called.load(Ordering::SeqCst),
+        "the page-count cap refuses before any OCR call"
+    );
+
+    let conn = Connection::open(&path).unwrap();
+    let (status, stage, error): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT status, error_stage, last_error FROM attachment WHERE id=?1",
+            [attachment],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "extracting");
+    assert_eq!(stage.as_deref(), Some("render"));
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("maximum is")),
+        "the failure names the page-count cap: {error:?}"
+    );
+    assert_eq!(count(&conn, "attachment_text"), 0);
+}
+
+#[cfg(feature = "extractor")]
+#[test]
+fn oversized_pdf_page_areas_are_refused_before_render() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(
+        bin.join("pdfinfo"),
+        b"#!/bin/sh\nprintf 'Pages: 1\\nPage size: 100000 x 100000 pts\\n'\n",
+    )
+    .unwrap();
+    make_executable(&bin.join("pdfinfo"));
+
+    let (path, entity_id) = test_graph(&dir);
+    let attachment = upload(&path, entity_id, "scan.pdf", "application/pdf", PDF);
+    let ocr = Arc::new(UncalledOcr {
+        called: AtomicBool::new(false),
+    });
+    let ocr_ref = Arc::clone(&ocr);
+    let worker = ExtractionWorker::new(&path, Some(Arc::clone(&ocr) as Arc<dyn OcrProvider>));
+    let mut report = ExtractionReport::default();
+    with_path(&bin.to_string_lossy(), || {
+        report = worker.run_once(now_us()).unwrap();
+    });
+    assert_eq!(report.retried, 1);
+    assert_eq!(report.committed, 0);
+    assert!(
+        !ocr_ref.called.load(Ordering::SeqCst),
+        "the pixel cap refuses before any render or OCR call"
+    );
+
+    let conn = Connection::open(&path).unwrap();
+    let (status, stage, error): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT status, error_stage, last_error FROM attachment WHERE id=?1",
+            [attachment],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "extracting");
+    assert_eq!(stage.as_deref(), Some("render"));
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("maximum is")),
+        "the failure names the pixel cap: {error:?}"
+    );
+    assert_eq!(count(&conn, "attachment_text"), 0);
+}
+
 // ── Transient, terminal, and fenced states ───────────────────────────────
 
 #[cfg(feature = "extractor")]
@@ -934,6 +1225,7 @@ impl OcrProvider for FlakyOcr {
 #[cfg(feature = "extractor")]
 #[test]
 fn transient_provider_failure_retains_extracting_then_succeeds() {
+    let _guard = ENV_LOCK.lock();
     let dir = tempfile::tempdir().unwrap();
     let (path, entity_id) = test_graph(&dir);
     let attachment = upload(&path, entity_id, "scan.pdf", "application/pdf", PDF);
@@ -1015,6 +1307,7 @@ impl OcrProvider for AlwaysFailOcr {
 #[cfg(feature = "extractor")]
 #[test]
 fn eight_failed_attempts_set_terminal_error() {
+    let _guard = ENV_LOCK.lock();
     let dir = tempfile::tempdir().unwrap();
     let (path, entity_id) = test_graph(&dir);
     let attachment = upload(&path, entity_id, "scan.pdf", "application/pdf", PDF);
@@ -1086,6 +1379,7 @@ impl OcrProvider for StealingOcr {
 #[cfg(feature = "extractor")]
 #[test]
 fn a_lost_lease_publishes_no_pages() {
+    let _guard = ENV_LOCK.lock();
     let dir = tempfile::tempdir().unwrap();
     let (path, entity_id) = test_graph(&dir);
     let attachment = upload(&path, entity_id, "scan.pdf", "application/pdf", PDF);
@@ -1136,6 +1430,8 @@ impl OcrProvider for UncalledOcr {
 fn render_failures_record_the_render_stage_and_publish_nothing() {
     let cases: &[(&str, &str)] = &[
         // pdftoppm is absent from PATH; pdfinfo answers with two pages.
+        // The size line keeps the render past the pixel cap for every
+        // case, so the failures land at the renderer, not at the size check.
         ("absent-pdftoppm", "#!/bin/sh\nprintf 'Pages: 2\\n'\n"),
         // pdftoppm exists but exits nonzero with a diagnostic.
         (
@@ -1153,7 +1449,11 @@ fn render_failures_record_the_render_stage_and_publish_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
-        std::fs::write(bin.join("pdfinfo"), b"#!/bin/sh\nprintf 'Pages: 2\\n'\n").unwrap();
+        std::fs::write(
+            bin.join("pdfinfo"),
+            b"#!/bin/sh\nprintf 'Pages: 2\\nPage size: 612 x 792 pts\\n'\n",
+        )
+        .unwrap();
         if *name != "absent-pdftoppm" {
             std::fs::write(bin.join("pdftoppm"), script).unwrap();
         }
