@@ -25,13 +25,13 @@ findings (`src/config_file.rs` unused `BTreeSet`,
 real only under default features; CI itself lints `--all-features` and is
 green. Do not try to make the default run pass.
 
-The repository's pre-flight mirrors the CI pipeline in
-`.github/workflows/ci.yml`. Run it after all workers stop. This command is
-identical in Bash and fish; the Bash child runs the shared command string
-and writes the marker only after all checks succeed:
+The repository's pre-flight is the CI pipeline
+(`.github/workflows/ci.yml`), mirrored locally. Every leg of the workflow is
+part of the pre-flight; the chain below names each one. Run it with the marker
+write, exactly as one command:
 
 ```sh
-env OMP_PREFLIGHT_CMD='cargo fmt --all --check && scripts/check-release-version.sh && scripts/check-crate-includes.sh && command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-targets -- --test-threads=1 && cargo test --test indexer_worker --features indexer -- --test-threads=1 && cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1 && cargo test --test attachment_extraction --features extractor -- --test-threads=1 && cargo test --test attachment_extraction --features extractor pdf_render_routes_page_to_vision -- --exact --test-threads=1 && cargo test --test attachment_mcp --test attachment_http --features extractor -- --test-threads=1 && cargo test --test vector_e2e --test semantic_search --test ui_http --features extractor -- --test-threads=1 && cargo test --lib --features indexer -- --test-threads=1 && cargo test --test role_composition --no-default-features && cargo test --test role_composition --features indexer && cargo test --test role_composition --features webhooks && cargo test --test role_composition --features extractor && cargo test --test role_composition --no-default-features --features extractor && cargo test --test role_composition --features extractor,webhooks && cargo test --test role_composition --features indexer,webhooks && cargo test --test webhook_tools --test webhook_admin --features webhooks -- --test-threads=1 && cargo package -p mcpmem-core --locked --allow-dirty' bash -c 'eval "$OMP_PREFLIGHT_CMD" && git rev-parse HEAD > "$(git rev-parse --git-dir)/omp-preflight-pass"'
+env OMP_PREFLIGHT_CMD="cargo fmt --all --check && scripts/check-release-version.sh && scripts/check-crate-includes.sh && cargo package -p mcpmem-core --locked --allow-dirty && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace --all-targets -- --test-threads=1 && cargo test --test indexer_worker --features indexer -- --test-threads=1 && cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1 && cargo test --test attachment_extraction --features extractor -- --test-threads=1 && cargo test --test attachment_extraction --features extractor pdf_render_routes_page_to_vision -- --exact --test-threads=1 && cargo test --test attachment_mcp --test attachment_http --features extractor -- --test-threads=1 && cargo test --test vector_e2e --test semantic_search --test ui_http --features extractor -- --test-threads=1 && cargo test --lib --features indexer -- --test-threads=1 && cargo test --test role_composition --no-default-features && cargo test --test role_composition --features indexer && cargo test --test role_composition --features webhooks && cargo test --test role_composition --features extractor && cargo test --test role_composition --no-default-features --features extractor && cargo test --test role_composition --features extractor,webhooks && cargo test --test role_composition --features indexer,webhooks && cargo test --test webhook_tools --test webhook_admin --features webhooks -- --test-threads=1 && bash -c 'if cargo tree --no-default-features -e normal | rg -q \"(^| )(reqwest|aws-[a-z0-9-]+|aws_sdk_[a-z0-9_]+) v\"; then echo \"graph-only build unexpectedly includes an HTTP or AWS client\"; exit 1; fi' && git rev-parse HEAD > \"\$(git rev-parse --git-dir)/omp-preflight-pass\"" bash -c '<the same command>'
 ```
 
 The exact chain to run before every push/PR (identical in Bash and fish):
@@ -39,38 +39,23 @@ The exact chain to run before every push/PR (identical in Bash and fish):
 1. `cargo fmt --all --check`
 2. `scripts/check-release-version.sh`
 3. `scripts/check-crate-includes.sh`
-4. `command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v`
+4. `cargo package -p mcpmem-core --locked`
 5. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 6. `cargo test --workspace --all-targets -- --test-threads=1`
-7. `cargo test --test indexer_worker --features indexer -- --test-threads=1` and `cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1`
-8. `cargo test --test attachment_extraction --features extractor -- --test-threads=1` and `cargo test --test attachment_extraction --features extractor pdf_render_routes_page_to_vision -- --exact --test-threads=1`
+7. `cargo test --test indexer_worker --features indexer -- --test-threads=1` and `--no-default-features --features indexer`
+8. `cargo test --test attachment_extraction --features extractor -- --test-threads=1`, then the real-PDF leg `pdf_render_routes_page_to_vision -- --exact`
 9. `cargo test --test attachment_mcp --test attachment_http --features extractor -- --test-threads=1`
 10. `cargo test --test vector_e2e --test semantic_search --test ui_http --features extractor -- --test-threads=1`
-11. `cargo test --lib --features indexer -- --test-threads=1`
-12. `cargo test --test role_composition` for `--no-default-features`, `--features indexer`, `--features webhooks`, `--features extractor`, `--no-default-features --features extractor`, `--features extractor,webhooks`, and `--features indexer,webhooks`
+11. `cargo test --lib --features indexer -- --test-threads=1` (the taxonomy and workspace-indexer unit tests are gated on `indexer`; the workspace leg never builds them)
+12. `cargo test --test role_composition` for `--no-default-features`, `--features indexer`, `--features webhooks`, `--features extractor`, `--no-default-features --features extractor`, `--features extractor,webhooks`, `--features indexer,webhooks`
 13. `cargo test --test webhook_tools --test webhook_admin --features webhooks -- --test-threads=1`
-14. `cargo package -p mcpmem-core --locked --allow-dirty` — `--allow-dirty` because the local tree carries uncommitted integration work; CI's clean checkout uses plain `--locked`
-15. Write the marker only after success: `git rev-parse HEAD > "$(git rev-parse --git-dir)/omp-preflight-pass"`
+14. the graph-only dependency guard: `cargo tree --no-default-features -e normal` must not list `reqwest` or any `aws*` crate
+15. write the marker: `git rev-parse HEAD > "$(git rev-parse --git-dir)/omp-preflight-pass"`
 
-The `-D warnings` clippy must use `--all-features`; the plain default-feature
-run fails on pre-existing findings unrelated to the change.
-
-## Attachment tests need Poppler on PATH
-
-`cargo test --test attachment_extraction --features extractor` includes the
-real-PDF case `pdf_render_routes_page_to_vision`, which **fails** — it never
-skips — when the external Poppler commands are missing. Install the poppler
-package for your OS (`poppler-utils` on Debian/Ubuntu, `poppler` via
-Homebrew) and confirm both commands before running the attachment tests. The
-check command is identical in Bash and fish:
-
-```sh
-command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
-```
-
-The CI and release workflows install the package and run the same check; a
-release target without both commands blocks the release, because a missing
-renderer is an observable `render` failure, never a skipped test.
+Legs 8–10 need real Poppler (`pdfinfo`, `pdftoppm`) on the PATH; CI installs
+`poppler-utils` for them. The `-D warnings` clippy must use `--all-features`;
+the plain default-feature run fails on pre-existing findings unrelated to the
+change.
 
 ## Second Brain workflow
 
