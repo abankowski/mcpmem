@@ -120,7 +120,8 @@ This entry lists every change since that snapshot. The version line restarts at
   workspace budget. An unfinished session expires after one hour and stops
   counting against the budget; its owner can cancel it. Empty chunks are
   refused, and a zero-byte file finishes with none. At most four raw-body
-  uploads stream concurrently; a full spool answers HTTP 503. The attachment
+  uploads stream concurrently; a full spool answers HTTP 503, and an upload
+  idle for 10 seconds ends with HTTP 408 and releases its slot. The attachment
   blob, page text, and job remain in that
   workspace graph; there are no attachment-specific workspace grants.
 - **Separate `attachments` consent and inspector.** Attachment operations need

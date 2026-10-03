@@ -1032,6 +1032,78 @@ async fn concurrent_upload_spools_hit_a_process_wide_bound_and_release() {
     );
 }
 
+/// A stalled upload holds its spool permit only until the idle timeout.
+/// The slot must free by itself, without a disconnect, so four idle
+/// trickles cannot starve every upload forever.
+#[tokio::test]
+async fn idle_upload_times_out_and_releases_its_spool_permit() {
+    let server = spawn_child_server();
+    let created = mcp_call(
+        server.port,
+        r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create_workspace","arguments":{"name":"fixture","visibility":"private"}},"id":1}"#,
+    );
+    let workspace = created["result"]["workspace"]["workspaceId"]
+        .as_str()
+        .expect("the workspace id")
+        .to_owned();
+    let seeded = mcp_call(
+        server.port,
+        &format!(
+            r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"workspaceId":"{workspace}","entities":[{{"name":"Alice","entityType":"person","observations":[]}}]}}}},"id":2}}"#
+        ),
+    );
+    assert!(
+        seeded.get("error").is_none() && seeded["result"]["isError"].as_bool() != Some(true),
+        "seeding failed: {seeded}"
+    );
+
+    // One stalled upload holds a permit; the server answers 408 when the
+    // next frame does not arrive inside SPOOL_IDLE_TIMEOUT.
+    let mut stall = open_stalled_upload(
+        server.port,
+        &format!("/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=idle.txt"),
+        "text/plain",
+    );
+    let mut reply = Vec::new();
+    let mut buf = [0_u8; 1024];
+    let start = std::time::Instant::now();
+    loop {
+        match stall.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => reply.extend_from_slice(&buf[..n]),
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            break;
+        }
+    }
+    let reply = String::from_utf8_lossy(&reply);
+    assert!(
+        reply.contains("408"),
+        "an idle upload must time out with HTTP 408: {reply}"
+    );
+    assert!(
+        reply.contains("idle timeout"),
+        "the timeout must name the idle rule: {reply}"
+    );
+
+    // The permit is free again: a complete upload succeeds at once.
+    std::thread::sleep(Duration::from_millis(300));
+    let (status, _, body) = raw_chunked_upload(
+        server.port,
+        &format!(
+            "/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=after-idle.txt"
+        ),
+        "text/plain",
+        &[b"abc".to_vec()],
+    );
+    assert_eq!(
+        status,
+        201,
+        "an idle upload must release its spool capacity: {}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
 /// Send one chunk of a chunked upload and keep the connection open with no
 /// terminating chunk, so the handler parks holding its spool and permit.
 fn open_stalled_upload(port: u16, path: &str, mime: &str) -> TcpStream {

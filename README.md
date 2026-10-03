@@ -629,7 +629,8 @@ up to **50 MiB (52,428,800 bytes)** and returns
 `{"attachmentId":123,"status":"uploaded"}`; byte 52,428,801 fails with HTTP
 413. Disconnects and failed uploads commit no attachment. An empty body
 uploads a zero-byte file. At most four uploads stream concurrently; a full
-spool answers HTTP 503 and the client should retry later. This route does
+spool answers HTTP 503 and the client should retry later. An upload idle
+for 10 seconds ends with HTTP 408 and releases its slot. This route does
 not raise the **16 MiB JSON-RPC `/mcp` request cap**. Do not send a 50 MiB
 base64 value in one MCP call.
 

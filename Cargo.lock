@@ -2051,6 +2051,7 @@ name = "mcpmem-extractor"
 version = "2.1.6"
 dependencies = [
  "base64",
+ "libc",
  "mcpmem-core",
  "reqwest",
  "rusqlite",
