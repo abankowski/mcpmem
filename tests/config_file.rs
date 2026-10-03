@@ -102,6 +102,143 @@ fn a_boolean_flag_is_only_ever_turned_on_by_the_file_when_absent() {
 }
 
 #[test]
+fn attachment_flag_and_file_key_enable_only_attachment_tools() {
+    use mcpmem::tools::ToolCategory;
+
+    let file = merge(&[], "[tools]\nattachments = true\n");
+    assert_eq!(file.enabled_categories(), vec![ToolCategory::Attachments]);
+    let flag = merge(&["--enable-attachments"], "[tools]\nattachments = false\n");
+    assert_eq!(flag.enabled_categories(), vec![ToolCategory::Attachments]);
+    let all = merge(&["--enable-all"], "[tools]\nattachments = false\n");
+    assert!(all.enabled_categories().contains(&ToolCategory::Attachments));
+}
+
+#[test]
+fn attachment_bearer_scope_from_the_file_is_separate_from_graph_write() {
+    use mcpmem::tools::ToolCategory;
+
+    let graph_only = Config::from_args(&merge(
+        &[],
+        "[security]\nstatic-bearer-scopes = [\"graph-write\"]\n",
+    ))
+    .expect("graph-only bearer");
+    assert_eq!(graph_only.bearer_scopes, vec![ToolCategory::GraphWrite]);
+
+    let attached = Config::from_args(&merge(
+        &[],
+        "[security]\nstatic-bearer-scopes = [\"graph-write\", \"attachments\"]\n",
+    ))
+    .expect("attachment bearer");
+    assert_eq!(
+        attached.bearer_scopes,
+        vec![ToolCategory::GraphWrite, ToolCategory::Attachments]
+    );
+}
+
+#[test]
+fn attachment_limits_default_and_override_reach_server_config() {
+    let default = Config::from_args(&merge(&[], "")).expect("default config");
+    assert_eq!(default.attachments.max_bytes, 52_428_800);
+    assert_eq!(default.attachments.workspace_byte_budget, 268_435_456);
+    assert_eq!(
+        default.attachments.allow_mime,
+        vec!["text/*", "text/markdown", "application/pdf"]
+    );
+
+    let file = merge(
+        &[],
+        "[attachments]\nmax-bytes = 4096\nworkspace-byte-budget = 8192\n\
+         allow-mime = [\"text/markdown\"]\n",
+    );
+    let config = Config::from_args(&file).expect("attachment settings");
+    assert_eq!(config.attachments.max_bytes, 4096);
+    assert_eq!(config.attachments.workspace_byte_budget, 8192);
+    assert_eq!(config.attachments.allow_mime, vec!["text/markdown"]);
+
+    let partial = Config::from_args(&merge(&[], "[attachments]\nmax-bytes = 4096\n"))
+        .expect("partial attachment settings");
+    assert_eq!(partial.attachments.max_bytes, 4096);
+    assert_eq!(partial.attachments.workspace_byte_budget, 268_435_456);
+}
+
+#[test]
+fn attachment_limits_reject_zero_negative_and_a_file_larger_than_its_budget() {
+    for (text, field) in [
+        ("[attachments]\nmax-bytes = 0\n", "max-bytes"),
+        (
+            "[attachments]\nworkspace-byte-budget = -1\n",
+            "workspace-byte-budget",
+        ),
+        (
+            "[attachments]\nmax-bytes = 8193\nworkspace-byte-budget = 8192\n",
+            "max-bytes",
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_config(dir.path(), text);
+        let error = resolve(["mcpmem".into(), "--config".into(), path.into_os_string()])
+            .expect_err("invalid attachment limits must stop startup");
+        assert!(error.to_string().contains(field), "{error}");
+    }
+}
+
+#[test]
+fn ocr_is_absent_until_the_section_is_present_and_keeps_the_vision_url_optional() {
+    assert!(Config::from_args(&merge(&[], "")).unwrap().ocr.is_none());
+    let empty = Config::from_args(&merge(&[], "[ocr]\n")).expect("explicit empty section");
+    assert_eq!(empty.ocr.expect("section").provider, "inherit");
+
+    let inherited = Config::from_args(&merge(
+        &[],
+        "[indexer]\nprovider = \"openai-compatible\"\nmodel = \"embedding-model\"\n\
+         dimensions = 384\nopenai-url = \"https://embeddings.example/v1/embeddings\"\n\
+         [ocr]\nmodel = \"vision-independent-of-embedding\"\n",
+    ))
+    .expect("compatible provider without vision URL parses");
+    let inherited = inherited.ocr.expect("explicit OCR section");
+    assert_eq!(inherited.provider, "inherit");
+    assert_eq!(
+        inherited.model.as_deref(),
+        Some("vision-independent-of-embedding")
+    );
+    assert_eq!(inherited.vision_url, None, "never borrow an embedding URL");
+
+    let compatible = Config::from_args(&merge(
+        &[],
+        "[indexer]\nprovider = \"openai-compatible\"\nmodel = \"embedding-model\"\n\
+         dimensions = 384\nopenai-url = \"https://embeddings.example/v1/embeddings\"\n\
+         [ocr]\nprovider = \"inherit\"\nmodel = \"vision-model\"\n\
+         vision-url = \"https://vision.example/v1/chat/completions\"\n",
+    ))
+    .expect("explicit compatible vision endpoint parses");
+    assert_eq!(
+        compatible.ocr.expect("OCR section").vision_url.as_deref(),
+        Some("https://vision.example/v1/chat/completions")
+    );
+}
+
+#[test]
+fn an_unknown_ocr_provider_or_missing_key_does_not_block_text_startup() {
+    let unknown = Config::from_args(&merge(
+        &[],
+        "[ocr]\nprovider = \"not-installed\"\nmodel = \"vision\"\n",
+    ))
+    .expect("the PDF job decides whether this provider is supported");
+    assert_eq!(unknown.ocr.unwrap().provider, "not-installed");
+
+    let key = Config::from_args(&merge(
+        &[],
+        "[ocr]\nprovider = \"openai\"\nmodel = \"vision\"\n\
+         api-key-file = \"/missing/vision-key\"\n",
+    ))
+    .expect("the PDF job must report an unreadable key, not config parsing");
+    assert_eq!(
+        key.ocr.unwrap().api_key_file.as_deref(),
+        Some("/missing/vision-key")
+    );
+}
+
+#[test]
 fn roles_from_the_file_reach_the_config() {
     let args = merge(&[], "[server]\nroles = [\"mcp\"]\n");
     let config = Config::from_args(&args).expect("config");
@@ -392,16 +529,23 @@ fn the_shipped_example_changes_nothing_by_itself() {
     );
 }
 
-/// The example is the documentation surface for 45 keys. Parsing it while every
-/// key is commented out proves only that the seven section headers exist, so
-/// this test uncomments every key and parses the result. A misspelled key or a
-/// wrong enum spelling in the example fails here instead of failing an operator.
+/// The example documents the configuration keys. Parsing it while the keys
+/// stay commented proves only that section headers parse. This test enables
+/// each documented key and optional section. A wrong key then fails here
+/// instead of after an operator copies the example.
 #[test]
 fn every_key_documented_in_the_example_is_a_real_key() {
     let uncommented: String = example_text()
         .lines()
         .filter_map(|line| {
             let trimmed = line.trim_start();
+            // An optional section cannot be present in a safe example. The
+            // test still needs to parse every documented key under it.
+            if let Some(section) = trimmed.strip_prefix("# [")
+                && section.ends_with(']')
+            {
+                return Some(format!("[{section}"));
+            }
             if let Some(rest) = trimmed.strip_prefix("# ")
                 && rest.contains(" = ")
                 && rest.split(" = ").next().is_some_and(|key| {

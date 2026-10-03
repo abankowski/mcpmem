@@ -63,6 +63,11 @@ pub struct Config {
     pub oauth: Option<OAuthConfig>,
     /// Scopes granted to the static bearer principal.
     pub bearer_scopes: Vec<ToolCategory>,
+    /// Attachment limits applied to each selected workspace graph.
+    pub attachments: crate::config_file::AttachmentsSection,
+    /// An absent section leaves PDF OCR unconfigured. Text extraction does
+    /// not need this section.
+    pub ocr: Option<crate::config_file::OcrSection>,
 }
 
 /// Settings for the OAuth 2.1 authorization server. Present only when
@@ -268,6 +273,8 @@ impl Config {
             ));
         }
 
+        args.attachments.validate()?;
+
         let enabled_categories = args.enabled_categories();
         let roles = if args.roles.is_empty() {
             RoleSet::mcp_only()
@@ -429,6 +436,8 @@ impl Config {
             legacy_observations: args.legacy_observations,
             oauth,
             bearer_scopes,
+            attachments: args.attachments.clone(),
+            ocr: args.ocr.clone(),
         };
         if config.transport == crate::Transport::Http
             && config
@@ -469,6 +478,8 @@ impl Default for Config {
             legacy_observations: false,
             oauth: None,
             bearer_scopes: ToolCategory::ALL.to_vec(),
+            attachments: crate::config_file::AttachmentsSection::default(),
+            ocr: None,
         }
     }
 }

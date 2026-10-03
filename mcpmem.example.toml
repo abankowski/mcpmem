@@ -68,12 +68,24 @@
 
 
 [tools]
-# Nothing is exposed until its category is on. `all` overrides the other four.
+# Nothing is exposed until its category is on. `all` overrides the other five.
 # all = false
 # graph-read = false
 # graph-write = false
 # vectors = false
 # code = false
+# attachments = false
+
+
+[attachments]
+# The per-file cap for raw HTTP uploads and complete MCP sessions (50 MiB).
+# max-bytes = 52428800
+
+# Count stored bytes and active upload reservations in each workspace (256 MiB).
+# workspace-byte-budget = 268435456
+
+# The allowlist accepts MIME types, not filename extensions.
+# allow-mime = ["text/*", "text/markdown", "application/pdf"]
 
 
 [vectors]
@@ -179,6 +191,28 @@
 
 # "cosine", "inner-product" or "l2-squared". Shows its default.
 # metric = "cosine"
+
+
+# [ocr]
+# PDF OCR needs an extractor process and external Poppler commands (`pdfinfo`
+# and `pdftoppm`) on that process's PATH. They are not bundled with mcpmem.
+# Check both commands with this command (same in bash and fish):
+# command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
+# An absent [ocr] section leaves PDF OCR unconfigured; text files still work.
+# Model selection is independent of [indexer] embedding model.
+# model = "gpt-4o-mini"
+
+# "inherit" reuses a first-party OpenAI or OpenAI-compatible embedding key.
+# An explicit "openai" provider needs a readable api-key-file during PDF jobs.
+# provider = "inherit"
+
+# This is a full vision endpoint, not [indexer] openai-url (embeddings).
+# Inherited OpenAI-compatible providers need an explicit non-OpenAI vision URL.
+# Only first-party OpenAI may use the default OpenAI vision host.
+# vision-url = "https://vision.example/v1/chat/completions"
+
+# This key file is used by an explicit OCR provider, not by "inherit".
+# api-key-file = "/etc/mcpmem/vision-api-key"
 
 
 [workspaces]

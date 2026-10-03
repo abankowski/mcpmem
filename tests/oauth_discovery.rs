@@ -33,7 +33,7 @@ async fn an_unauthenticated_mcp_post_names_the_resource_metadata() {
         header,
         format!(
             "Bearer resource_metadata=\"{PUBLIC_URL}/.well-known/oauth-protected-resource\", \
-             scope=\"graph-read graph-write vectors code\""
+             scope=\"graph-read graph-write vectors code attachments\""
         )
     );
 }
@@ -82,9 +82,34 @@ async fn the_protected_resource_document_names_this_server() {
         json!({
             "resource": format!("{PUBLIC_URL}/mcp"),
             "authorization_servers": [PUBLIC_URL],
-            "scopes_supported": ["graph-read", "graph-write", "vectors", "code", "admin"],
+            "scopes_supported": ["graph-read", "graph-write", "vectors", "code", "attachments", "admin"],
             "bearer_methods_supported": ["header"]
         })
+    );
+}
+
+#[tokio::test]
+async fn an_attachment_scope_is_advertised_only_when_its_category_is_enabled() {
+    use mcpmem::tools::ToolCategory;
+
+    let server = support::server(
+        Some(support::oauth_config("https://idp.invalid")),
+        support::Scopes {
+            bearer: ToolCategory::ALL.to_vec(),
+            enabled: vec![ToolCategory::GraphRead, ToolCategory::GraphWrite],
+        },
+        None,
+    )
+    .await;
+    let res = server
+        .request(get("/.well-known/oauth-protected-resource"))
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = support::json(res).await;
+    assert_eq!(
+        body["scopes_supported"],
+        json!(["graph-read", "graph-write", "admin"]),
+        "a principal's credential alone must not advertise a disabled category"
     );
 }
 
@@ -145,7 +170,7 @@ async fn the_authorization_server_document_advertises_pkce_and_cimd() {
             "token_endpoint_auth_methods_supported": ["none"],
             "client_id_metadata_document_supported": true,
             "authorization_response_iss_parameter_supported": true,
-            "scopes_supported": ["graph-read", "graph-write", "vectors", "code", "admin"]
+            "scopes_supported": ["graph-read", "graph-write", "vectors", "code", "attachments", "admin"]
         })
     );
 }
@@ -448,7 +473,7 @@ async fn bearer_holds_narrows_the_credential_and_not_the_advertised_scopes() {
     let body: serde_json::Value = support::json(res).await;
     assert_eq!(
         body["scopes_supported"],
-        json!(["graph-read", "graph-write", "vectors", "code", "admin"]),
+        json!(["graph-read", "graph-write", "vectors", "code", "attachments", "admin"]),
         "the document advertises the enabled categories, not the credential"
     );
 }
