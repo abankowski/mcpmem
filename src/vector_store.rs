@@ -1357,9 +1357,7 @@ impl VectorStore {
         if hit.owner_kind != OwnerKind::Attachment || hit.chunk_kind != ChunkKind::Attachment {
             return None;
         }
-        let Some(fence) = self.attachment_incarnation(hit.owner_id) else {
-            return None;
-        };
+        let fence = self.attachment_incarnation(hit.owner_id)?;
         let conn = self.db.lock();
         conn.query_row(
             "SELECT c.page, c.text FROM attachment_chunk c
