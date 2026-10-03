@@ -1092,7 +1092,9 @@ fn seed_attachment_search(dir: &tempfile::TempDir, s: &TestServer) -> (i64, i64)
 
 fn direct_search_rows(text: &str) -> Vec<Value> {
     let envelope: Value = serde_json::from_str(text).expect("tool response");
-    let body = envelope["content"][0]["text"].as_str().expect("result text");
+    let body = envelope["content"][0]["text"]
+        .as_str()
+        .expect("result text");
     serde_json::from_str::<Value>(body).expect("result JSON")["results"]
         .as_array()
         .expect("result rows")
@@ -1140,16 +1142,30 @@ fn attachment_search_returns_stored_page_and_obeys_consent_before_ranking() {
             assert_eq!(file["page"], 2, "{response}");
             assert_eq!(file["excerpt"], "PAGE TWO exact excerpt", "{response}");
             assert_eq!(file["chunk"]["text"].is_string(), chunks, "{response}");
-            assert_eq!(file["chunk"]["text"], if chunks { Value::from("PAGE TWO exact excerpt") } else { Value::Null });
-            assert_eq!(rows.iter().filter(|row| row["kind"] == "attachment").count(), 1);
+            assert_eq!(
+                file["chunk"]["text"],
+                if chunks {
+                    Value::from("PAGE TWO exact excerpt")
+                } else {
+                    Value::Null
+                }
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row["kind"] == "attachment")
+                    .count(),
+                1
+            );
         }
     }
 
     let mmr = serde_json::json!({"embedding": query, "topK": 4, "lambda": 1.0});
-    let mmr_rows = direct_search_rows(
-        &handle_vector_mmr_search(&s.vs, &kg, Some(&mmr), true).unwrap(),
-    );
-    let file = mmr_rows.iter().find(|row| row["kind"] == "attachment").unwrap();
+    let mmr_rows =
+        direct_search_rows(&handle_vector_mmr_search(&s.vs, &kg, Some(&mmr), true).unwrap());
+    let file = mmr_rows
+        .iter()
+        .find(|row| row["kind"] == "attachment")
+        .unwrap();
     assert_eq!(file["filename"], "notes.txt");
     assert_eq!(file["page"], 2);
     assert_eq!(file["excerpt"], "PAGE TWO exact excerpt");
@@ -1162,7 +1178,10 @@ fn attachment_search_returns_stored_page_and_obeys_consent_before_ranking() {
             &handle_vector_search_entities(&s.vs, &kg, Some(&args), consent).unwrap(),
         );
         assert_eq!(rows.len(), 2, "attachment must not consume topK: {rows:?}");
-        assert!(rows.iter().all(|r| r["kind"] != "attachment" && r.get("excerpt").is_none()));
+        assert!(
+            rows.iter()
+                .all(|r| r["kind"] != "attachment" && r.get("excerpt").is_none())
+        );
         assert!(rows.iter().any(|r| r["kind"] == "entity"));
         let hybrid_args = serde_json::json!({
             "queryText": "ada", "queryEmbedding": query,
@@ -1176,15 +1195,24 @@ fn attachment_search_returns_stored_page_and_obeys_consent_before_ranking() {
         let by_entity_args = serde_json::json!({
             "entityName": "bob", "includeAttachments": include
         });
-        assert!(direct_search_rows(
-            &handle_vector_search_by_entity(&s.vs, &kg, Some(&by_entity_args), consent).unwrap()
-        ).iter().all(|r| r["kind"] != "attachment"));
+        assert!(
+            direct_search_rows(
+                &handle_vector_search_by_entity(&s.vs, &kg, Some(&by_entity_args), consent)
+                    .unwrap()
+            )
+            .iter()
+            .all(|r| r["kind"] != "attachment")
+        );
         let mmr_args = serde_json::json!({
             "embedding": query, "includeAttachments": include, "topK": 3
         });
-        assert!(direct_search_rows(
-            &handle_vector_mmr_search(&s.vs, &kg, Some(&mmr_args), consent).unwrap()
-        ).iter().all(|r| r["kind"] != "attachment"));
+        assert!(
+            direct_search_rows(
+                &handle_vector_mmr_search(&s.vs, &kg, Some(&mmr_args), consent).unwrap()
+            )
+            .iter()
+            .all(|r| r["kind"] != "attachment")
+        );
     }
 
     let attachment_only = serde_json::json!({
@@ -1203,21 +1231,34 @@ fn attachment_search_returns_stored_page_and_obeys_consent_before_ranking() {
         &handle_hybrid_search(&s.vs, &kg, Some(&hybrid_attachment), true).unwrap(),
     );
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["kind"], "attachment", "entity FTS must not enter: {rows:?}");
+    assert_eq!(
+        rows[0]["kind"], "attachment",
+        "entity FTS must not enter: {rows:?}"
+    );
     assert_eq!(rows[0]["textScore"], 0.0);
 
     // A vector without its stored segment is not a searchable page.
     let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
-    conn.execute("DELETE FROM attachment_chunk WHERE attachment_id=?1", [attachment])
-        .unwrap();
-    assert!(direct_search_rows(
-        &handle_vector_search_entities(&s.vs, &kg, Some(&attachment_only), true).unwrap()
-    ).is_empty());
-    assert!(conn.query_row(
-        "SELECT COUNT(*) FROM attachment_chunk WHERE attachment_id=?1",
-        [empty_attachment],
-        |r| r.get::<_, i64>(0)
-    ).unwrap() == 0);
+    conn.execute(
+        "DELETE FROM attachment_chunk WHERE attachment_id=?1",
+        [attachment],
+    )
+    .unwrap();
+    assert!(
+        direct_search_rows(
+            &handle_vector_search_entities(&s.vs, &kg, Some(&attachment_only), true).unwrap()
+        )
+        .is_empty()
+    );
+    assert!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM attachment_chunk WHERE attachment_id=?1",
+            [empty_attachment],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap()
+            == 0
+    );
 }
 
 #[test]
@@ -1237,7 +1278,8 @@ fn attachment_type_filter_reads_current_parent_and_discards_missing_parent() {
     let result = |ftype: &str| {
         direct_search_rows(
             &handle_vector_search_entities(
-                &s.vs, &kg,
+                &s.vs,
+                &kg,
                 Some(&serde_json::json!({
                     "embedding": query, "filter": {"kind": "attachment", "type": ftype}
                 })),
@@ -1249,7 +1291,7 @@ fn attachment_type_filter_reads_current_parent_and_discards_missing_parent() {
     assert_eq!(result("Person").len(), 1);
     let changed = call_tool(
         &s,
-        "create_entities",
+        "upsert_entities",
         &serde_json::json!({"entities": [
             {"name": "ada", "entityType": "Scholar", "observations": []}
         ]}),
@@ -1265,5 +1307,8 @@ fn attachment_type_filter_reads_current_parent_and_discards_missing_parent() {
         [attachment],
     )
     .unwrap();
-    assert!(result("Scholar").is_empty(), "a deleted parent must not leak its file");
+    assert!(
+        result("Scholar").is_empty(),
+        "a deleted parent must not leak its file"
+    );
 }

@@ -658,6 +658,7 @@ fn admin_gate(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AttachmentView {
     attachment_id: i64,
     filename: String,
@@ -674,12 +675,8 @@ fn attachment_row(
     conn: &Connection,
     id: i64,
     entity_name: bool,
-) -> std::result::Result<(AttachmentView, Option<String>), Response> {
-    let entity_select = if entity_name {
-        "e.name"
-    } else {
-        "NULL"
-    };
+) -> std::result::Result<(AttachmentView, Option<String>), Box<Response>> {
+    let entity_select = if entity_name { "e.name" } else { "NULL" };
     let (view, entity) = conn
         .query_row(
             &format!(
@@ -711,8 +708,8 @@ fn attachment_row(
             },
         )
         .optional()
-        .map_err(attachment_db_error)?
-        .ok_or_else(|| not_found())?;
+        .map_err(|error| attachment_db_error(&error))?
+        .ok_or_else(|| Box::new(not_found()))?;
     let entity = if entity_name { entity } else { None };
     Ok((view, entity))
 }
@@ -736,7 +733,7 @@ async fn list_attachments_handler(
     .await
     {
         Ok(path) => path,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let limit = params
         .get("limit")
@@ -744,7 +741,7 @@ async fn list_attachments_handler(
         .unwrap_or(100)
         .clamp(1, 1000);
     match attachment_result(path, move |conn| {
-        let rows = conn
+        let mut rows = conn
             .prepare(
                 "SELECT a.id,a.filename,a.mime,a.size_bytes,a.status,a.revision,
                         a.error_stage,a.last_error,
@@ -755,7 +752,7 @@ async fn list_attachments_handler(
                  WHERE e.name=?1 AND e.flags=0 AND r.deleted=0
                  ORDER BY a.id DESC LIMIT ?2",
             )
-            .map_err(attachment_db_error)?;
+            .map_err(|error| attachment_db_error(&error))?;
         let rows = rows
             .query_map(params![entity_name, limit], |row| {
                 Ok(AttachmentView {
@@ -770,16 +767,16 @@ async fn list_attachments_handler(
                     page_count: row.get(8)?,
                 })
             })
-            .map_err(attachment_db_error)?;
+            .map_err(|error| attachment_db_error(&error))?;
         let attachments = rows
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(attachment_db_error)?;
+            .map_err(|error| attachment_db_error(&error))?;
         Ok(Json(json!({ "attachments": attachments })))
     })
     .await
     {
         Ok(response) => response.into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -799,17 +796,20 @@ async fn get_attachment_handler(
     .await
     {
         Ok(path) => path,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let id = match attachment_id(&id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match attachment_result(path, move |conn| {
         let (view, entity_name) = attachment_row(conn, id, true)?;
         let mut payload = serde_json::to_value(view).map_err(|error| {
             error!("attachment metadata serialize error: {error}");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            Box::new(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+            ))
         })?;
         payload["entityName"] = serde_json::Value::String(entity_name.unwrap_or_default());
         Ok(Json(payload))
@@ -817,7 +817,7 @@ async fn get_attachment_handler(
     .await
     {
         Ok(response) => response.into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -837,22 +837,25 @@ async fn get_attachment_page_handler(
     .await
     {
         Ok(path) => path,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let id = match attachment_id(&id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let page = match attachment_query_number(&params, "page", None, 1) {
         Ok(page) => page,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let offset = match attachment_query_number(&params, "offset", Some(0), 0) {
         Ok(offset) => offset,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
-    let limit = match params.get("maxChars").and_then(|raw| raw.parse::<i64>().ok()) {
-        Some(limit) if limit >= 1 && limit <= 4096 => limit,
+    let limit = match params
+        .get("maxChars")
+        .and_then(|raw| raw.parse::<i64>().ok())
+    {
+        Some(limit) if (1..=4096).contains(&limit) => limit,
         Some(_) => return bad_request("'maxChars' must be between 1 and 4096"),
         None => 4096,
     };
@@ -869,15 +872,14 @@ async fn get_attachment_page_handler(
                 |row| row.get(0),
             )
             .optional()
-            .map_err(attachment_db_error)?;
+            .map_err(|error| attachment_db_error(&error))?;
         let Some(text) = text else {
-            return Ok((StatusCode::NOT_FOUND, Json(json!({ "error": "no such page" }))));
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "no such page" })),
+            ));
         };
-        let start: usize = text
-            .chars()
-            .take(offset as usize)
-            .map(char::len_utf8)
-            .sum();
+        let start: usize = text.chars().take(offset as usize).map(char::len_utf8).sum();
         let rest = &text[start..];
         let remaining = rest.chars().count();
         let taken = remaining.min(limit as usize);
@@ -895,7 +897,10 @@ async fn get_attachment_page_handler(
         Ok((StatusCode::OK, Json(response)))
     })
     .await
-    .map_or_else(|response| response, |(status, body)| (status, body).into_response())
+    .map_or_else(
+        |response| *response,
+        |(status, body)| (status, body).into_response(),
+    )
 }
 
 /// Read one bounded span of a stored blob through SQLite's incremental blob
@@ -905,22 +910,18 @@ fn read_blob_chunk(
     row_id: i64,
     offset: i64,
     amount: usize,
-) -> std::result::Result<Option<Vec<u8>>, Response> {
-    let mut blob = conn
-        .blob_open(
-            rusqlite::DatabaseName::Main,
-            "attachment",
-            "content",
-            row_id,
-            true,
-        )
-        .map_err(attachment_db_error)?;
-    if offset >= blob.len() {
+) -> std::result::Result<Option<Vec<u8>>, Box<Response>> {
+    let blob = conn
+        .blob_open("main", "attachment", "content", row_id, true)
+        .map_err(|error| attachment_db_error(&error))?;
+    if offset < 0 || offset as usize >= blob.len() {
         return Ok(None);
     }
-    let take = (blob.len() - offset).min(amount as i64) as usize;
+    let at = offset as usize;
+    let take = (blob.len() - at).min(amount);
     let mut buffer = vec![0_u8; take];
-    blob.read_at(&mut buffer, offset).map_err(attachment_db_error)?;
+    blob.read_at(&mut buffer, at)
+        .map_err(|error| attachment_db_error(&error))?;
     Ok(Some(buffer))
 }
 
@@ -958,16 +959,16 @@ async fn download_attachment_handler(
     .await
     {
         Ok(path) => path,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let id = match attachment_id(&id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let result = tokio::task::spawn_blocking(move || {
-        let conn = Connection::open(path).map_err(attachment_db_error)?;
+        let conn = Connection::open(path).map_err(|error| attachment_db_error(&error))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(attachment_db_error)?;
+            .map_err(|error| attachment_db_error(&error))?;
         let (mime, filename, size) = conn
             .query_row(
                 "SELECT a.mime,a.filename,a.size_bytes
@@ -985,14 +986,14 @@ async fn download_attachment_handler(
                 },
             )
             .optional()
-            .map_err(attachment_db_error)?
-            .ok_or_else(|| not_found())?;
-        Ok::<_, Response>((mime, filename, size, conn))
+            .map_err(|error| attachment_db_error(&error))?
+            .ok_or_else(|| Box::new(not_found()))?;
+        Ok::<_, Box<Response>>((mime, filename, size, conn))
     })
     .await;
     let (mime, filename, size, conn) = match result {
         Ok(Ok(row)) => row,
-        Ok(Err(response)) => return response,
+        Ok(Err(response)) => return *response,
         Err(error) => {
             error!("attachment download task panicked: {error}");
             return json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
@@ -1001,9 +1002,7 @@ async fn download_attachment_handler(
     let content_type = HeaderValue::from_str(&mime)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
     let stream = futures::stream::unfold(Some((conn, id, 0_i64, size)), |state| async move {
-        let Some((conn, row_id, offset, size)) = state else {
-            return None;
-        };
+        let (conn, row_id, offset, size) = state?;
         if offset >= size {
             return None;
         }
@@ -1054,11 +1053,11 @@ async fn delete_attachment_handler(
     .await
     {
         Ok(path) => path,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let id = match attachment_id(&id) {
         Ok(id) => id,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match attachment_result(path, move |conn| {
         AttachmentRepository::new(conn)
@@ -1069,7 +1068,7 @@ async fn delete_attachment_handler(
     .await
     {
         Ok(status) => status.into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -1081,12 +1080,15 @@ async fn delete_attachment_handler(
 async fn spool_body(
     body: Body,
     limits: &AttachmentLimits,
-) -> std::result::Result<(std::fs::File, i64, [u8; 32]), Response> {
+) -> std::result::Result<(std::fs::File, i64, [u8; 32]), Box<Response>> {
     let mut spool = match tempfile::tempfile() {
         Ok(spool) => spool,
         Err(error) => {
             error!("attachment spool create error: {error}");
-            return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"));
+            return Err(Box::new(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+            )));
         }
     };
     let mut count = 0_i64;
@@ -1097,44 +1099,50 @@ async fn spool_body(
             Ok(bytes) => bytes,
             Err(error) => {
                 error!("attachment upload stream error: {error}");
-                return Err(json_error(
+                return Err(Box::new(json_error(
                     StatusCode::BAD_REQUEST,
                     "attachment upload stream failed",
-                ));
+                )));
             }
         };
         count = match count.checked_add(bytes.len() as i64) {
             Some(count) => count,
             None => {
-                return Err(json_error(
+                return Err(Box::new(json_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "attachment exceeds the per-file size limit",
-                ));
+                )));
             }
         };
         if count > limits.max_bytes {
-            return Err(json_error(
+            return Err(Box::new(json_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "attachment exceeds the per-file size limit",
-            ));
+            )));
         }
         let mut rest = bytes.as_ref();
         while !rest.is_empty() {
             let amount = ATTACHMENT_STREAM_CHUNK.min(rest.len());
             if let Err(error) = spool.write_all(&rest[..amount]) {
                 error!("attachment spool write error: {error}");
-                return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"));
+                return Err(Box::new(json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error",
+                )));
             }
             hasher.update(&rest[..amount]);
             rest = &rest[amount..];
         }
     }
     if count == 0 {
-        return Err(bad_request("attachment body is empty"));
+        return Err(Box::new(bad_request("attachment body is empty")));
     }
     if let Err(error) = spool.seek(SeekFrom::Start(0)) {
         error!("attachment spool seek error: {error}");
-        return Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"));
+        return Err(Box::new(json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal error",
+        )));
     }
     Ok((spool, count, hasher.finalize().into()))
 }
@@ -1153,7 +1161,7 @@ impl Read for SpoolReader {
 }
 
 impl SpoolReader {
-    fn new(spool: std::fs::File) -> Self {
+    const fn new(spool: std::fs::File) -> Self {
         Self { file: spool }
     }
 }
@@ -1172,7 +1180,10 @@ async fn post_attachment_handler(
         Some(name) => name.clone(),
         None => return bad_request("missing 'entityName' parameter"),
     };
-    let mime = match headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()) {
+    let mime = match headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
         Some(mime) if !mime.is_empty() => mime.to_owned(),
         _ => return bad_request("missing Content-Type header"),
     };
@@ -1186,7 +1197,7 @@ async fn post_attachment_handler(
     .await
     {
         Ok(path) => path,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if let Some(length) = headers
         .get(header::CONTENT_LENGTH)
@@ -1201,7 +1212,7 @@ async fn post_attachment_handler(
     }
     let (spool, count, digest) = match spool_body(body, &state.attachment_limits).await {
         Ok(spooled) => spooled,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let limits = Arc::clone(&state.attachment_limits);
     let entity_name_copy = entity_name.clone();
@@ -1215,9 +1226,9 @@ async fn post_attachment_handler(
                 |row| row.get(0),
             )
             .optional()
-            .map_err(attachment_db_error)?;
+            .map_err(|error| attachment_db_error(&error))?;
         let Some(entity_id) = entity_id else {
-            return Err(not_found());
+            return Err(Box::new(not_found()));
         };
         let mut reader = SpoolReader::new(spool);
         let attachment_id = AttachmentRepository::new(conn)
@@ -1240,7 +1251,7 @@ async fn post_attachment_handler(
     .await
     {
         Ok(response) => (StatusCode::CREATED, response).into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -2763,12 +2774,12 @@ async fn attachment_path(
     params: &HashMap<String, String>,
     tool: &'static str,
     access: WorkspaceAccess,
-) -> std::result::Result<PathBuf, Response> {
+) -> std::result::Result<PathBuf, Box<Response>> {
     if !server::attachments_enabled() {
-        return Err(json_error(
+        return Err(Box::new(json_error(
             StatusCode::FORBIDDEN,
             "attachments tools are disabled",
-        ));
+        )));
     }
     let auth = state.clone();
     let headers = headers.clone();
@@ -2789,22 +2800,30 @@ async fn attachment_path(
     .await;
     match outcome {
         Ok(AttachmentPath::Path(path)) => Ok(path),
-        Ok(AttachmentPath::Unauthorized) => Err(unauthorized(state)),
-        Ok(AttachmentPath::MissingScope(scope)) => Err(insufficient_scope(state, &[scope])),
-        Ok(AttachmentPath::Workspace(error)) => Err(workspace_failure(&error)),
+        Ok(AttachmentPath::Unauthorized) => Err(Box::new(unauthorized(state))),
+        Ok(AttachmentPath::MissingScope(scope)) => {
+            Err(Box::new(insufficient_scope(state, &[scope])))
+        }
+        Ok(AttachmentPath::Workspace(error)) => Err(Box::new(workspace_failure(&error))),
         Err(error) => {
             error!("attachment access task panicked: {error}");
-            Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
+            Err(Box::new(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+            )))
         }
     }
 }
 
-fn attachment_db_error(error: rusqlite::Error) -> Response {
+fn attachment_db_error(error: &rusqlite::Error) -> Box<Response> {
     error!("attachment graph error: {error}");
-    json_error(StatusCode::INTERNAL_SERVER_ERROR, "attachment storage error")
+    Box::new(json_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "attachment storage error",
+    ))
 }
 
-fn attachment_failure(error: AttachmentError) -> Response {
+fn attachment_failure(error: AttachmentError) -> Box<Response> {
     let status = match error {
         AttachmentError::DuplicateFilename => StatusCode::CONFLICT,
         AttachmentError::Mime => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -2812,18 +2831,21 @@ fn attachment_failure(error: AttachmentError) -> Response {
         AttachmentError::NotFound | AttachmentError::WrongPrincipal => StatusCode::NOT_FOUND,
         AttachmentError::Storage(source) => {
             error!("attachment storage error: {source}");
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "attachment storage error");
+            return Box::new(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "attachment storage error",
+            ));
         }
         _ => StatusCode::BAD_REQUEST,
     };
-    json_error(status, error.to_string())
+    Box::new(json_error(status, error.to_string()))
 }
 
-fn attachment_id(raw: &str) -> std::result::Result<i64, Response> {
+fn attachment_id(raw: &str) -> std::result::Result<i64, Box<Response>> {
     raw.parse::<i64>()
         .ok()
         .filter(|id| *id > 0)
-        .ok_or_else(|| bad_request("attachment id must be a positive integer"))
+        .ok_or_else(|| Box::new(bad_request("attachment id must be a positive integer")))
 }
 
 fn attachment_query_number(
@@ -2831,23 +2853,26 @@ fn attachment_query_number(
     name: &str,
     default: Option<i64>,
     min: i64,
-) -> std::result::Result<i64, Response> {
+) -> std::result::Result<i64, Box<Response>> {
     let number = match params.get(name) {
         Some(raw) => raw.parse::<i64>().ok().filter(|value| *value >= min),
         None => default.filter(|value| *value >= min),
     };
-    number.ok_or_else(|| bad_request(format!("'{name}' must be an integer >= {min}")))
+    number.ok_or_else(|| Box::new(bad_request(format!("'{name}' must be an integer >= {min}"))))
 }
 
-async fn attachment_result<T, F>(path: PathBuf, operation: F) -> std::result::Result<T, Response>
+async fn attachment_result<T, F>(
+    path: PathBuf,
+    operation: F,
+) -> std::result::Result<T, Box<Response>>
 where
     T: Send + 'static,
-    F: FnOnce(&Connection) -> std::result::Result<T, Response> + Send + 'static,
+    F: FnOnce(&Connection) -> std::result::Result<T, Box<Response>> + Send + 'static,
 {
     match tokio::task::spawn_blocking(move || {
-        let conn = Connection::open(path).map_err(attachment_db_error)?;
+        let conn = Connection::open(path).map_err(|error| attachment_db_error(&error))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(attachment_db_error)?;
+            .map_err(|error| attachment_db_error(&error))?;
         operation(&conn)
     })
     .await
@@ -2855,7 +2880,10 @@ where
         Ok(result) => result,
         Err(error) => {
             error!("attachment graph task panicked: {error}");
-            Err(json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"))
+            Err(Box::new(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error",
+            )))
         }
     }
 }
