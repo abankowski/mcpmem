@@ -306,8 +306,26 @@ impl<P: EmbeddingProvider> IndexerWorker<P> {
                     OwnerKind::Relation => {
                         relation_chunks(&conn, job.owner_id, job.owner_revision)?
                     }
+                    OwnerKind::Attachment => {
+                        attachment_chunks(&conn, job.owner_id, job.owner_revision)?
+                    }
                 };
                 match chunks {
+                    // Zero stored segments: the extraction worker published
+                    // an empty mapping (an empty text file, or pages whose
+                    // extraction produced no text). There is nothing to
+                    // embed, so no provider request is made; the fenced
+                    // commit still runs with an empty vector set so the job
+                    // completes and the full-scan verification sees a done
+                    // job matching zero stored segments.
+                    Some(chunks) if chunks.is_empty() => {
+                        let commit = |vectors: &[&(ChunkKind, &[f32])]| {
+                            jobs.commit_chunks(&job, current_us(), Some(vectors), "indexer")
+                                .map_err(|error| error.to_string())
+                        };
+                        let none: [&(ChunkKind, &[f32]); 0] = [];
+                        commit(&none)
+                    }
                     Some(chunks) => self.embed_chunks_and_commit(
                         &profile,
                         &chunks,
@@ -649,6 +667,48 @@ pub fn relation_chunks(
     Ok(Some(chunks))
 }
 
+/// The stored segments of one attachment in chunk form: one
+/// `(ChunkKind::Attachment, text)` per non-empty `attachment_chunk` row in
+/// `chunk_index` order. The extraction worker publishes that mapping, so the
+/// worker reads stored text and never the uploaded blob, and a profile
+/// rebuild re-embeds it without re-running OCR. Fenced on
+/// `attachment.revision` and liveness: `None` means the attachment is
+/// missing, superseded, or not ready, and the worker routes that through the
+/// retry path. An empty list means zero stored segments (an empty text
+/// file, or pages whose extraction produced no text).
+pub fn attachment_chunks(
+    conn: &Connection,
+    attachment_id: i64,
+    expected_revision: i64,
+) -> Result<Option<Vec<(ChunkKind, String)>>, rusqlite::Error> {
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT status, revision FROM attachment WHERE id=?1",
+            [attachment_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((status, revision)) = row else {
+        return Ok(None);
+    };
+    if revision != expected_revision || status != "ready" {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT text FROM attachment_chunk
+         WHERE attachment_id=?1 AND text!='' ORDER BY chunk_index",
+    )?;
+    let segments: Vec<String> = stmt
+        .query_map([attachment_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(Some(
+        segments
+            .into_iter()
+            .map(|text| (ChunkKind::Attachment, text))
+            .collect(),
+    ))
+}
+
 /// Build the canonical document for a taxonomy subject, in the fencing style
 /// of [`canonical_document`].
 ///
@@ -887,6 +947,97 @@ mod tests {
             doc.observations
                 .iter()
                 .all(|line| line.ends_with(" relates_to target_type"))
+        );
+    }
+
+    /// One live entity and one ready attachment, the way the extraction
+    /// worker leaves them (the entity is the attachment's parent).
+    fn seed_attachment(conn: &Connection, id: i64, revision: i64) {
+        conn.execute(
+            "INSERT INTO entity(id, name_hash, name, type_id, created_us, updated_us)
+             VALUES(?1, 0, 'owner', ?1, 1, 1)",
+            params![id],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO entity_revision VALUES(?1, 1, 0)", params![id])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO attachment(id, entity_id, filename, mime, size_bytes, sha256, content, status, revision, created_us)
+             VALUES(?1, ?1, 'file.txt', 'text/plain', 1, zeroblob(32), X'61', 'ready', ?2, 1)",
+            params![id, revision],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn attachment_chunks_returns_stored_segments_in_chunk_order() {
+        let conn = test_db();
+        seed_attachment(&conn, 1, 2);
+        // Three pages: page 1 splits into two segments, pages 2 and 3 carry
+        // one each. Insert rows scrambled and include an empty-text row: a
+        // stored empty row is not a segment, mirroring the commit fence's
+        // non-empty count, and order comes from chunk_index alone.
+        for (chunk_index, page, segment_index, text) in [
+            (2, 2, 0, "page two"),
+            (0, 1, 0, "page one, segment zero"),
+            (4, 3, 1, ""),
+            (1, 1, 1, "page one, segment one"),
+            (3, 3, 0, "page three"),
+        ] {
+            conn.execute(
+                "INSERT INTO attachment_chunk(attachment_id, chunk_index, page, segment_index, text)
+                 VALUES(1, ?1, ?2, ?3, ?4)",
+                params![chunk_index, page, segment_index, text],
+            )
+            .unwrap();
+        }
+        let chunks = attachment_chunks(&conn, 1, 2)
+            .unwrap()
+            .expect("the ready attachment must canonicalize");
+        assert_eq!(
+            chunks,
+            vec![
+                (ChunkKind::Attachment, "page one, segment zero".to_string()),
+                (ChunkKind::Attachment, "page one, segment one".to_string()),
+                (ChunkKind::Attachment, "page two".to_string()),
+                (ChunkKind::Attachment, "page three".to_string()),
+            ],
+            "one chunk per non-empty stored segment, in chunk_index order"
+        );
+        assert_eq!(
+            attachment_chunks(&conn, 1, 2).unwrap().unwrap().len(),
+            4,
+            "the empty stored row never counts as a segment"
+        );
+    }
+
+    #[test]
+    fn attachment_chunks_fences_on_revision_and_liveness() {
+        let conn = test_db();
+        seed_attachment(&conn, 1, 2);
+        conn.execute(
+            "INSERT INTO attachment_chunk(attachment_id, chunk_index, page, segment_index, text)
+             VALUES(1, 0, 1, 0, 'hello')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            attachment_chunks(&conn, 1, 2).unwrap().is_some(),
+            "a matching revision canonicalizes"
+        );
+        assert!(
+            attachment_chunks(&conn, 1, 3).unwrap().is_none(),
+            "a superseded revision yields None so the worker retries"
+        );
+        assert!(
+            attachment_chunks(&conn, 99, 2).unwrap().is_none(),
+            "a vanished attachment yields None so the worker retries"
+        );
+        conn.execute("UPDATE attachment SET status='extracting' WHERE id=1", [])
+            .unwrap();
+        assert!(
+            attachment_chunks(&conn, 1, 2).unwrap().is_none(),
+            "a not-ready attachment must not embed provisional text"
         );
     }
 }
