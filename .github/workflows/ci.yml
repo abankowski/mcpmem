@@ -31,6 +31,10 @@ jobs:
           components: rustfmt, clippy
       # After the toolchain: the cache key includes the rustc version.
       - uses: Swatinem/rust-cache@v2
+      - name: Install external PDF renderer
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Check PDF renderer commands
+        run: command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
       - name: Workspace versions agree and are valid semver
         run: scripts/check-release-version.sh
       # The v1.0.0-rc.1 release failed while verifying the packaged crate,
@@ -50,6 +54,16 @@ jobs:
         run: |
           cargo test --test indexer_worker --features indexer -- --test-threads=1
           cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1
+      - name: Test attachment extraction and real PDF vision routing
+        run: |
+          cargo test --test attachment_extraction --features extractor -- --test-threads=1
+          cargo test --test attachment_extraction --features extractor pdf_render_routes_page_to_vision -- --exact --test-threads=1
+      - name: Test attachment MCP and HTTP interfaces
+        run: |
+          cargo test --test attachment_mcp --test attachment_http --features extractor -- --test-threads=1
+      - name: Test attachment search and inspector
+        run: |
+          cargo test --test vector_e2e --test semantic_search --test ui_http --features extractor -- --test-threads=1
       # The taxonomy unit tests are gated on the `indexer` feature, so the
       # default workspace run never builds them and the `--test indexer_worker`
       # leg does not run them. This leg executes them directly.
@@ -60,6 +74,9 @@ jobs:
           cargo test --test role_composition --no-default-features
           cargo test --test role_composition --features indexer
           cargo test --test role_composition --features webhooks
+          cargo test --test role_composition --features extractor
+          cargo test --test role_composition --no-default-features --features extractor
+          cargo test --test role_composition --features extractor,webhooks
           cargo test --test role_composition --features indexer,webhooks
       - name: Test webhook subscription feature
         run: |

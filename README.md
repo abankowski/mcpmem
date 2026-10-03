@@ -55,16 +55,18 @@ flowchart TB
     Mcp["mcp role — MCP tool dispatch"]
     OAuth["OAuth 2.1 server — discovery · consent · tokens<br/>(--oidc-issuer)"]
     Idx["indexer role — embedding worker<br/>(--features indexer)"]
+    Ext["extractor role — text + PDF extraction<br/>(--features extractor)"]
     Wbk["webhooks role — delivery outbox<br/>(--features webhooks)"]
     Gr["GraphHandle<br/>SQLite write path · read pool · FTS5"]
     Vc["VectorStore<br/>chunk snapshot · exact scan"]
-    Cd["Code index — tree-sitter<br/>symbol + call graph · 10 languages"]
+    Cd["Code index — tree-sitter<br/>symbol + call graph · 11 languages"]
     Sql[("SQLite — WAL · 4 KB pages<br/>graph tables · *_fts · chunk_vector")]
 
     Tr --> Mcp
     Mcp --> Gr & Vc & Cd
     Gr & Vc & Cd --> Sql
     OAuth -.-> Tr
+    Ext -.-> Gr
     Idx -.-> Vc
     Wbk -.-> Sql
   end
@@ -94,18 +96,19 @@ the runtime role that needs it refuses to start.
 | `code` | **on** | tree-sitter parsing for 11 languages and the `code_*` tools | 12 tree-sitter grammars, `ignore`, `blake3`, `notify` |
 | `oauth` | **on** | the OAuth 2.1 authorization server and the upstream OpenID Connect leg | `reqwest`, `url` |
 | `indexer` | off | the `indexer` role — a durable embedding worker with Ollama and OpenAI-compatible providers | `mcpmem-indexer`, `reqwest` |
-| `bedrock` | off | Amazon Titan Text Embeddings V2 as a third provider. Implies `indexer` | `aws-config`, `aws-sdk-bedrockruntime` |
+| `extractor` | off | the `extractor` role — durable text and PDF extraction. Implies `indexer`; PDF rendering also needs external Poppler commands at runtime | `mcpmem-extractor`, Poppler (`pdfinfo`, `pdftoppm`) on the extractor host |
 | `webhooks` | off | the `webhooks` role and the delivery outbox. Read the limitation below first | `mcpmem-webhook` |
 
-Recipes — identical in Bash and fish:
+These commands are identical in Bash and fish:
 
 ```sh
-cargo install mcpmem                                     # default: code + oauth
-cargo install mcpmem --features indexer                  # adds the embedding worker
-cargo install mcpmem --features indexer,webhooks
-cargo install mcpmem --features bedrock                  # implies indexer
-cargo install mcpmem --features indexer,webhooks,bedrock # everything on
-cargo install mcpmem --no-default-features               # lean graph-only binary
+cargo install mcpmem                                      # default: code + oauth
+cargo install mcpmem --features indexer                   # embedding worker
+cargo install mcpmem --features extractor                 # extraction + indexer
+cargo install mcpmem --features extractor,webhooks
+cargo install mcpmem --features bedrock                   # implies indexer
+cargo install mcpmem --features extractor,webhooks,bedrock # all features
+cargo install mcpmem --no-default-features                # lean graph-only binary
 cargo install mcpmem --no-default-features --features oauth
 ```
 
@@ -114,22 +117,23 @@ A `--no-default-features` build carries no tree-sitter grammars and no HTTP clie
 `--features oauth` back when a lean build still needs the OAuth endpoints. CI asserts that the
 graph-only build links neither an HTTP client nor an AWS client.
 
-`--features indexer,webhooks,bedrock` is every feature this crate has: `code` and `oauth` are
-already on by default, and `bedrock` pulls `indexer` with it. CI compiles and lints that whole
-set on every push.
+`--features extractor,webhooks,bedrock` is every feature this crate has: `code` and
+`oauth` are already on by default, and `extractor` pulls `indexer` with it. CI
+compiles and lints the full set on every push.
 
 Prebuilt binaries are attached to every GitHub release, one per target:
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
 and `x86_64-apple-darwin`. The release workflow builds them with
 `--all-features`, so each binary already contains the whole feature matrix —
-`code`, `oauth`, `indexer`, `webhooks` and `bedrock`. Nothing more to select at
-install time: what runs is decided at runtime by `roles`, the `--enable-*`
-categories and the `[oauth]` / `[indexer]` / `[webhooks]` configuration, never
-by the binary.
+`code`, `oauth`, `indexer`, `extractor`, `webhooks` and `bedrock`. Nothing more
+to select at install time: what runs is decided at runtime by `roles`, the
+`--enable-*` categories and the `[oauth]` / `[indexer]` / `[ocr]` /
+`[webhooks]` configuration, never by the binary. PDF extraction still needs
+Poppler installed separately on its host.
 
 `cargo binstall mcpmem` downloads that same artifact for your platform in one
-command. It is the recommended path when you need `indexer` or `webhooks`,
-because those two are not default features:
+command. It is the recommended path when you need `indexer`, `extractor` or
+`webhooks`, because those features are not enabled by default:
 
 ```sh
 # Identical in Bash and fish.
@@ -141,6 +145,8 @@ the `mcpmem-maintenance` operator tool and the `bench` benchmark — because
 binstall validates the archive against that set. Downloading by hand works too;
 extract `mcpmem` and ignore the rest:
 
+These commands are identical in Bash and fish:
+
 ```sh
 curl -fL -o mcpmem.tar.gz \
   "https://github.com/abankowski/mcpmem/releases/download/v2.1.0/mcpmem-v2.1.0-x86_64-unknown-linux-gnu.tar.gz"
@@ -148,13 +154,13 @@ tar -xzf mcpmem.tar.gz && sudo mv mcpmem /usr/local/bin/
 ```
 
 `cargo install mcpmem` stays an option, with one difference that matters for
-`indexer` and `webhooks`: it always recompiles from crates.io, which ships
+`indexer`, `extractor` and `webhooks`: it recompiles from crates.io, which ships
 source only, with the **default** features (`code`, `oauth`) unless you name
-more. A default build has no indexer and no webhook worker, and their roles
-refuse to start — pass `--features indexer,webhooks` explicitly when you
-install from source.
+more. A default build has no indexer, extractor or webhook worker, and their
+roles refuse to start — pass `--features extractor,webhooks` explicitly when
+you install from source and need both workers.
 
-To build from a clone instead of crates.io:
+To build from a clone instead of crates.io (identical in Bash and fish):
 
 ```sh
 git clone https://github.com/abankowski/mcpmem && cd mcpmem
@@ -173,16 +179,25 @@ alone, which is what every earlier version did.
 |---|---|---|
 | `mcp` | always compiled | the stdio or HTTP MCP transport |
 | `indexer` | `indexer` | the embedding worker: polls the index-job queue every 250 ms, then republishes the vector snapshot |
+| `extractor` | `extractor` | reads queued attachments from workspace graph files; extracts text or renders and OCRs PDF pages |
 | `webhooks` | `webhooks` | the delivery outbox poller |
-
 ```sh
+
+# Identical in Bash and fish.
 mcpmem                                   # the mcp role alone
 mcpmem --role mcp,indexer                # server and worker in one process
-mcpmem --role indexer                    # a worker-only process beside a separate server
+mcpmem --role mcp,indexer,extractor      # server and both attachment workers in one process
+mcpmem --role extractor                  # extraction beside a separate MCP server
+mcpmem --role indexer                    # the embedding worker beside a separate server
 ```
 
 Both deployment shapes use the same binary. There is no separate worker executable, and a
 worker-only process still opens the graph and the vector store.
+
+If attachment tools are enabled without the local `extractor` role, startup
+warns that another extractor process must run. The warning does not prove
+that a remote worker exists. Uploads still succeed and stay `uploaded` until
+an extractor process opens the same workspace graph.
 
 A wrong selection fails at startup. None of these is a silent no-op:
 
@@ -580,6 +595,117 @@ mcpmem --transport stdio --legacy-owner-id machine:local --enable-all
 That's it — your agent now has persistent memory and can index code. Trim `--enable-all` to just
 the categories you want (see below).
 
+## Entity attachments
+
+Attach UTF-8 text files and PDFs to live entities in a workspace graph.
+An attachment belongs to its parent entity in that workspace's SQLite file.
+Each entity can use a filename once; a second upload with the same filename
+conflicts without replacing the first attachment. Another entity can use the
+same filename. Supported text files become one normalized page (UTF-8 BOM
+removed, CRLF normalized). PDFs become numbered pages after rendering and
+vision OCR. Code-like text files use ordinary text extraction, not the code
+indexer.
+
+Enable the `attachments` tool category (`--enable-attachments` or
+`--enable-all`) and give the caller the separate `attachments` OAuth/tool scope.
+`graph-write` does **not** imply `attachments`. Every operation also checks
+the selected workspace: a reader can list, read pages, and download; a writer
+or owner can also upload and delete. Authentication, the enabled category,
+scope, and workspace grant are independent gates. `workspaceId` selects the
+graph per request; omission uses a saved default only if it selects that graph.
+The `/ui` entity inspector requests attachment consent separately from graph
+viewing. It has a file picker, status badges, page reader, download, and
+delete; the admin page has no attachment panel.
+
+### Upload and read limits
+
+Allowed MIME types are `text/*`, `text/markdown`, and `application/pdf`; a
+different type is refused with a named rule. HTTP
+`POST /ui/attachments?workspaceId=<uuid>&entityName=<name>&filename=<name>`
+takes the **raw file body** with its MIME type in `Content-Type`. It streams
+up to **50 MiB (52,428,800 bytes)** and returns
+`{"attachmentId":123,"status":"uploaded"}`; byte 52,428,801 fails with HTTP
+413. Disconnects and failed uploads commit no attachment. This route does
+not raise the **16 MiB JSON-RPC `/mcp` request cap**. Do not send a 50 MiB
+base64 value in one MCP call.
+
+For MCP, call `begin_attachment_upload` with `workspaceId`, `entityName`,
+`filename`, `mime`, `expectedBytes`, and a lowercase 64-character hex
+`sha256`. It returns `uploadId` and `nextIndex: 0`. Send consecutive,
+base64-encoded chunks with `append_attachment_chunk` (`uploadId`, `index`,
+`content`); each call carries at most **1 MiB (1,048,576 decoded bytes)**.
+A 50 MiB file takes **50 chunk calls**. `finish_attachment_upload` checks
+the count and digest, then returns `attachmentId` and `status: "uploaded"`.
+`cancel_attachment_upload` removes an unfinished session. Sessions are
+bound to the principal and graph; a changed workspace default does not move
+one. A completed finish can be repeated. Each workspace has a **256 MiB**
+budget for stored bytes plus incomplete upload reservations.
+
+Use `list_attachments` for an entity and `get_attachment` for metadata.
+`read_attachment_chunk` returns up to 1 MiB of base64 content at a raw-byte
+`offset`. `get_attachment_page` returns text at a Unicode-character `offset`
+with `maxChars` up to 4,096. `delete_attachment` removes the attachment and
+its text and vectors. The inspector uses `GET /ui/attachments`,
+`GET /ui/attachments/{id}`, `GET /ui/attachments/{id}/pages`,
+`GET /ui/attachments/{id}/download`, and `DELETE /ui/attachments/{id}` with
+`workspaceId` on each request.
+
+### Extraction, OCR, and search
+
+Upload completion commits a pending job, not extracted text. `uploaded`
+means queued; `extracting` means a worker has started. A transient failure
+keeps `extracting` and exposes `errorStage` and `lastError` while the worker
+retries. `ready` means page text is stored; `error` means extraction stopped.
+Error stages are `config` (OCR settings), `render` (PDF renderer), `provider`
+(vision service), `decode` (file or response), and `storage`. A terminal
+failure leaves the original file downloadable but publishes no partial pages
+or vectors. The inspector polls `uploaded` and `extracting` and stops at
+`ready` or `error`.
+
+Run `mcpmem --role mcp,indexer,extractor --enable-attachments --enable-vectors`
+with the required workspace and provider settings, or run `--role extractor`
+in a separate process against the same workspace graph as the MCP process.
+An MCP process without the local extractor role accepts uploads and warns
+at startup: **another extractor must run**. The warning is not evidence
+that one exists. The extractor stores page text; the `indexer` role embeds
+its segments. Profile rebuilds read that stored text and do not repeat OCR.
+Ready attachments appear in semantic, hybrid, vector, and MMR search when
+the caller has `vectors` **and** `attachments` scopes. Hits include
+`filename`, `page`, and `excerpt`, even without `includeChunks`. The optional
+`includeAttachments: false` excludes attachments before ranking and `topK`;
+without attachment consent, entity and relation search still works.
+
+PDF hosts need Poppler **outside** the Rust binary and crates.io package.
+Install `poppler-utils` on Debian/Ubuntu or `poppler` with Homebrew, and
+put both `pdfinfo` and `pdftoppm` on the extractor process's `PATH`.
+Check the commands before deployment (identical in Bash and fish):
+
+```sh
+command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
+```
+
+Configure a separate full vision endpoint, never the `[indexer] openai-url`
+embedding endpoint:
+
+```toml
+[ocr]
+model = "gpt-4o-mini"
+provider = "inherit"
+# vision-url = "https://api.openai.com/v1/chat/completions"
+# api-key-file = "/path/to/vision-key"
+```
+
+`inherit` uses the primary OpenAI or OpenAI-compatible embedding provider
+and its effective key. Only a first-party `openai` provider can default to
+`https://api.openai.com/v1/chat/completions`. An inherited
+`openai-compatible` provider needs an explicit `vision-url` outside the
+default OpenAI host; its key must never go to that host. An explicit
+`openai` OCR provider needs a readable `api-key-file` with a non-empty key.
+Missing or invalid OCR settings fail PDF jobs at `config` before any provider
+request. Text extraction does not need OCR settings or Poppler. Missing or
+failing `pdfinfo` or `pdftoppm` fails a PDF job at `render`, never with
+apparently successful OCR.
+
 ## Tools are opt-in by category
 
 **Nothing is exposed until you enable its category.** Disabled tools are hidden from `tools/list`
@@ -589,6 +715,7 @@ and rejected from `tools/call` as if they never existed — least privilege by d
 |------|----------|-------|
 | `--enable-graph-read` | **graph-read** | `read_graph`, `search_nodes`, `open_nodes`, `get_entity`, `graph_stats`, `search_relations`, `find_path`/`find_all_paths`, `get_neighbors`, `describe_entity`, `list_entity_types`, `list_relation_types`, `suggest_taxonomy`, `export_graph`, `extract_subgraph`, `batch_get_entities`, `entity_exists`, `degree` |
 | `--enable-graph-write` | **graph-write** | `create_entities`, `create_relations`, `add_observations`, `delete_entities`, `delete_observations`, `delete_relations`, `upsert_entities`, `merge_entities`, `rename_entity`, `set_type_description`, `compact` |
+| `--enable-attachments` | **attachments** | `begin_attachment_upload`, `append_attachment_chunk`, `finish_attachment_upload`, `cancel_attachment_upload`, `list_attachments`, `get_attachment`, `read_attachment_chunk`, `get_attachment_page`, `delete_attachment` |
 | `--enable-vectors` | **vectors** | `vector_*` + `hybrid_search` |
 | `--enable-code` | **code** | `code_index`, `code_outline`, `code_search`, `code_get_symbol`, `code_watch`, `code_embed`, `code_semantic_search` |
 | `--enable-all` | *(all)* | Every category. Overrides the individual flags. |
@@ -697,7 +824,7 @@ or `--oidc-issuer` below. Binding an open, unauthenticated graph is no longer po
 
 By default the token grants every enabled tool category. Narrow it with
 `--static-bearer-scopes`, a comma-separated list of category slugs
-(`graph-read`, `graph-write`, `vectors`, `code`); a call to a tool outside the
+(`graph-read`, `graph-write`, `vectors`, `attachments`, `code`); a call to a tool outside the
 list is refused. The list also gates the built-in graph viewer, with or without
 a token: omit `graph-read` and `/ui/graph`, `/ui/search`, `/ui/node` and
 `/ui/expand` answer 403, so the viewer loads and stays empty.
@@ -1088,10 +1215,11 @@ Each workspace has one owner, identified by a **stable ID**, never a display nam
 | machine accounts created over MCP | `machine:<uuid>` |
 
 `create_machine_account` issues a machine credential with tool-category scopes
-(`graph-read`, `graph-write`, `vectors`, `code`) and shows the random bearer token **exactly
-once**; the registry stores only its digest. `list_machine_accounts` and
-`revoke_machine_account` manage the accounts, and revocation stops the credential on its next
-request. Machine credentials can never hold `admin`; only an `admin` human or trusted local
+(`graph-read`, `graph-write`, `vectors`, `attachments`, `code`) and shows the
+random bearer token **exactly once**; the registry stores only its digest.
+`list_machine_accounts` and `revoke_machine_account` manage the accounts.
+Revocation stops the credential on its next request. Machine credentials
+can never hold `admin`; only an `admin` human or trusted local
 stdio may manage machine accounts. A principal that owns a workspace cannot be removed: the
 admin UI and MCP refuse the deletion.
 
@@ -1238,16 +1366,18 @@ no approximate index.
 ### Chunked embeddings
 
 The indexer splits each owner into chunks: an **identity chunk** per entity
-(its name and type), one chunk per **observation**, and one chunk per live
-**relation** (the triple `from -> TYPE -> to`). Chunk rows live in the
-`chunk_vector` table, keyed by serving profile and owner. Search ranks owners
-by their best matching chunk, so a hit says exactly which text matched.
+(its name and type), one chunk per **observation**, one chunk per live
+**relation** (the triple `from -> TYPE -> to`), and the persisted text
+segments of a ready attachment. A PDF page can have more than one segment.
+Chunk rows live in the `chunk_vector` table, keyed by serving profile and
+owner. Search ranks owners by their best matching chunk, so a hit identifies
+the page and exact segment that matched.
 
 - **Kind-marked rows and `filter`.** Every result row carries `kind` —
-  `"entity"` or `"relation"`. `vector_search_entities`, `hybrid_search`,
-  `semantic_search` and `vector_search_by_entity` accept a
-  `filter: { "kind": "…", "type": "…" }` object: `kind` limits the owner kind
-  and `type` matches the chunk's type name exactly, both applied before
+  `"entity"`, `"relation"`, or `"attachment"`. `vector_search_entities`,
+  `hybrid_search`, `semantic_search`, and `vector_search_by_entity` accept a
+  `filter: { "kind": "…", "type": "…" }` object: `kind` limits the owner kind,
+  and `type` matches the live parent type for attachments. Both apply before
   ranking.
 - **`includeChunks`.** The same four tools accept `includeChunks: true`; each
   result row then carries its best matching chunk — `kind`, the reassembled
@@ -1390,10 +1520,11 @@ rather than an error, so one file can serve several deployments.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--enable-all` | off | Every category. Overrides the four flags below |
+| `--enable-all` | off | Every category. Overrides the five flags below |
 | `--enable-graph-read` | off | Read-only graph tools |
 | `--enable-graph-write` | off | Graph mutation tools |
 | `--enable-vectors` | off | `vector_*` and `hybrid_search` |
+| `--enable-attachments` | off | Attachment tools and the `/ui` attachment routes; the `attachments` scope and workspace grant also apply |
 | `--enable-code` | off | The `code_*` tools. Needs the `code` build feature |
 
 ### Embedding dimensions
@@ -1634,6 +1765,13 @@ bench --help
 `list_machine_accounts`, `revoke_machine_account`. See
 [Workspaces](#workspaces-isolated-knowledge-graphs).
 
+### Attachments (`--enable-attachments`)
+
+`begin_attachment_upload`, `append_attachment_chunk`, `finish_attachment_upload`,
+`cancel_attachment_upload`, `list_attachments`, `get_attachment`,
+`read_attachment_chunk`, `get_attachment_page`, `delete_attachment`.
+See [Entity attachments](#entity-attachments).
+
 ### Vector (`--enable-vectors`)
 
 `vector_search_entities`, `vector_search_by_entity`, `vector_mmr_search`, `hybrid_search`,
@@ -1704,6 +1842,7 @@ Each library crate has its own README with the detail for that layer.
 | [`mcpmem-core`](crates/mcpmem-core/README.md) | The transactional SQLite graph, the schema bootstrap, the migrations, the change log and the relation repair |
 | [`mcpmem-runtime`](crates/mcpmem-runtime/README.md) | The role enumeration, the role parser and the supervisor |
 | [`mcpmem-indexer`](crates/mcpmem-indexer/README.md) | The durable embedding worker and its providers |
+| [`mcpmem-extractor`](crates/mcpmem-extractor/README.md) | The durable text and PDF extraction worker; PDF rendering needs external Poppler |
 | [`mcpmem-webhook`](crates/mcpmem-webhook/README.md) | The durable webhook delivery worker |
 | [`mcpmem-oauth`](crates/mcpmem-oauth/README.md) | The OAuth 2.1 authorization server: client registration, consent, the token lifecycle, the discovery documents and the upstream OpenID Connect leg |
 
@@ -1711,7 +1850,10 @@ Each library crate has its own README with the detail for that layer.
 
 | Parameter | Limit |
 |---|---|
-| Max request body | 16 MB |
+| Max JSON-RPC `/mcp` request body | 16 MiB |
+| Max streamed HTTP attachment | 50 MiB (52,428,800 bytes) |
+| Max decoded MCP attachment chunk | 1 MiB (1,048,576 bytes); 50 chunks for 50 MiB |
+| Attachment workspace budget | 256 MiB (268,435,456 bytes), including pending reservations |
 | Name max bytes | 1,024 |
 | Observation max bytes | 65,536 |
 | Max entities/relations/observations/names per request | 1,000 |
@@ -1736,6 +1878,7 @@ cargo run --release --bin bench  # standalone benchmark; pass --help for flags
 The suite covers protocol handling, every tool handler, CRUD/search/path persistence,
 concurrency, fuzzy invariant checks, the chunked vector store and its search tools (vector,
 by-entity, MMR, hybrid, semantic), category gating, code indexing across all 11 languages,
+durable attachment extraction against a real PDF renderer and fake vision endpoint,
 HTTP bearer-token authentication, and the OAuth 2.1 server end to end — discovery,
 registration, the upstream login, consent, the token grants, revocation and the startup
 refusals.
@@ -1745,19 +1888,25 @@ refusals.
 A push to `main` never publishes to crates.io. Publishing happens only for a published
 GitHub release, through `.github/workflows/release.yml`.
 
-All five workspace crates share one version. A tag is `v` plus that version, and the
-version is strict semver 2.0.0. `scripts/check-release-version.sh` enforces both, and CI
-runs it on every push.
+All seven workspace crates share one version. A tag is `v` plus that version;
+`scripts/check-release-version.sh` checks strict semver and matching crate
+versions. CI runs it on every push.
+
+The following commands are identical in Bash and fish:
 
 ```sh
 scripts/check-release-version.sh --registry v2.0.0   # tag, versions, crates.io
 gh release create v2.0.0 --target main --notes-file CHANGES.md
 ```
 
-The workflow re-runs the gate, requires a prerelease tag to carry a prerelease GitHub
-release, requires the commit to be on `main`, runs the suite, and then publishes in
-dependency order: `mcpmem-core`, then `mcpmem-runtime`, `mcpmem-indexer` and
-`mcpmem-webhook`, then `mcpmem`.
+The workflow re-runs the gate, requires a prerelease tag to carry a
+prerelease GitHub release, and requires the commit to be on `main`. Before
+any crate is published, each release target installs Poppler, checks
+`pdfinfo` and `pdftoppm`, and runs the real-PDF render-to-fake-vision test.
+No missing renderer is treated as a skipped test. The workflow then runs
+the suite and publishes in dependency order: `mcpmem-core`,
+`mcpmem-extractor`, `mcpmem-runtime`, `mcpmem-indexer`, `mcpmem-webhook`,
+`mcpmem-oauth`, then `mcpmem`.
 
 A successful release then advances the version on `main`: a candidate advances its
 counter (`1.0.0-rc.3` becomes `1.0.0-rc.4`), a stable release advances the patch

@@ -111,6 +111,40 @@ This entry lists every change since that snapshot. The version line restarts at
   existing memory file to its owner on the first migration and is required
   only then. Migration `0014` marks every graph file with the workspace
   schema version, and a pre-workspace binary refuses a marked file.
+- **Entity attachments in workspace graph files.** Attach UTF-8 text or PDF
+  files to a live entity through a 50 MiB raw-body HTTP stream or ordered MCP
+  chunks of at most 1 MiB each (50 calls for 50 MiB). The JSON-RPC request cap
+  remains 16 MiB. Each entity has one attachment per filename; a duplicate
+  conflicts without overwriting, while another entity may reuse the filename.
+  Stored attachments and unfinished upload reservations share a 256 MiB
+  workspace budget. The attachment blob, page text, and job remain in that
+  workspace graph; there are no attachment-specific workspace grants.
+- **Separate `attachments` consent and inspector.** Attachment operations need
+  an enabled `attachments` category and `attachments` OAuth/tool scope, plus
+  workspace read access for list, metadata, page, and download, or write
+  access for upload and delete. `graph-write` alone does not authorize an
+  attachment. The `/ui` entity inspector asks for attachment consent
+  separately, then shows upload, status, page text, download, and delete.
+- **Durable extraction and indexed attachment search.** Upload returns
+  `status: "uploaded"` with a pending job; `extracting` can show a transient
+  `errorStage` and `lastError`, while `ready` has stored page text and `error`
+  marks a terminal failure. Stages are `config`, `render`, `provider`,
+  `decode`, and `storage`. The new `extractor` feature and role extract text
+  or PDF pages. A server without a local extractor still accepts uploads
+  and warns at startup that another extractor process must run; the warning
+  does not prove that one exists. The `indexer` embeds stored page segments
+  and rebuilds without another OCR request. Attachment hits in semantic,
+  hybrid, vector, and MMR search report filename, page, and excerpt when
+  the caller has both `vectors` and `attachments` consent; without the
+  attachment scope, entity and relation search remains available.
+- **Poppler is a host dependency for PDF extraction.** The binary and
+  crates.io package do not bundle it. Install `pdfinfo` and `pdftoppm` on
+  the extractor host or PDF jobs fail at `render`. OCR calls a separate
+  vision URL, never the embedding URL. First-party OpenAI can use the
+  default OpenAI vision endpoint; an inherited compatible provider needs
+  an explicit non-OpenAI vision URL. An explicit OpenAI OCR provider needs
+  a readable, non-empty `api-key-file`. Invalid OCR settings fail PDFs at
+  `config` without a provider request; text extraction does not need OCR.
 
 ## 2.0.0
 
