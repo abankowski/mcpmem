@@ -873,7 +873,10 @@ async fn attachment_routes_upgrade_a_pre_attachment_workspace() {
         &fx.server,
         &fx.owner,
         "GET",
-        &format!("/ui/attachments?workspaceId={}&entityName=Alice", fx.workspace),
+        &format!(
+            "/ui/attachments?workspaceId={}&entityName=Alice",
+            fx.workspace
+        ),
         Body::empty(),
         None,
     )

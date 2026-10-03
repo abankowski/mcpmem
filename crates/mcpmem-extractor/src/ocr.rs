@@ -241,7 +241,9 @@ impl VisionOcr {
         // and OAuth egress clients.
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_millis((VISION_TIMEOUT_US / 1_000) as u64))
+            .timeout(std::time::Duration::from_millis(
+                (VISION_TIMEOUT_US / 1_000) as u64,
+            ))
             .build()
             .map_err(|error| {
                 OcrError::Provider(format!("cannot build the vision client: {error}"))

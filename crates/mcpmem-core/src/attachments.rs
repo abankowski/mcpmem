@@ -135,7 +135,10 @@ fn check_budget(
                 (SELECT COALESCE(SUM(size_bytes),0) FROM attachment)
                 + (SELECT COALESCE(SUM(expected_bytes),0) FROM attachment_upload
                    WHERE attachment_id IS NULL AND upload_id!=?1 AND expires_us>?2)",
-            params![excluded_upload.unwrap_or_else(Uuid::nil).to_string(), now_us],
+            params![
+                excluded_upload.unwrap_or_else(Uuid::nil).to_string(),
+                now_us
+            ],
             |row| row.get(0),
         )
         .map_err(db)?;
@@ -516,8 +519,7 @@ impl<'a> AttachmentRepository<'a> {
         principal_id: &str,
         upload_id: Uuid,
         // Kept for interface stability; the owner may cancel at any time.
-        #[allow(unused_variables)]
-        now_us: i64,
+        #[allow(unused_variables)] now_us: i64,
     ) -> AttachmentResult<()> {
         let tx = TxGuard::begin(self.conn)?;
         session(self.conn, upload_id, principal_id)?;
@@ -1634,7 +1636,11 @@ mod tests {
         assert_eq!(count(&conn, "attachment_upload_chunk"), 0);
         let attachment = repo.finish_upload("alice", blank, 100, &limits).unwrap();
         let bytes: Vec<u8> = conn
-            .query_row("SELECT content FROM attachment WHERE id=?1", [attachment], |r| r.get(0))
+            .query_row(
+                "SELECT content FROM attachment WHERE id=?1",
+                [attachment],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(bytes, b"");
         let memo = repo
@@ -1661,5 +1667,4 @@ mod tests {
             (1, 3)
         );
     }
-
-    }
+}
