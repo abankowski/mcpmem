@@ -113,11 +113,28 @@ fn webhook_turns_deliver_each_graphs_own_event_and_preserve_the_legacy_subscript
     drop(graph(&legacy_path));
     subscribe(&legacy_path, "legacy.example.test");
 
-    // The historical file has version 13's schema and subscription data.
+    // Remove migrations 14 and 15 to reproduce a version-13 graph.
     // Migration 14 changes OAuth rows but does not alter webhook tables.
     let historical = Connection::open(&legacy_path).unwrap();
     historical
-        .execute("DELETE FROM schema_migration WHERE version=14", [])
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             DROP TABLE attachment_upload_chunk;
+             DROP TABLE attachment_upload;
+             DROP TABLE attachment_job;
+             DROP TABLE attachment_chunk;
+             DROP TABLE attachment_text;
+             DROP TABLE attachment;
+             DROP TABLE chunk_vector;
+             DROP TABLE chunk_index_job;
+             COMMIT;",
+        )
+        .unwrap();
+    historical
+        .execute_batch(mcpmem_core::events::MIGRATIONS[8].1)
+        .unwrap();
+    historical
+        .execute("DELETE FROM schema_migration WHERE version IN (14,15)", [])
         .unwrap();
     assert_eq!(
         historical
@@ -136,7 +153,7 @@ fn webhook_turns_deliver_each_graphs_own_event_and_preserve_the_legacy_subscript
                 0
             ))
             .unwrap(),
-        14
+        15
     );
     assert_eq!(
         historical
