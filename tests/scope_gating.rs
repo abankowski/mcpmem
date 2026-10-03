@@ -114,7 +114,40 @@ fn every_tool_name() -> Vec<&'static str> {
         .chain(mcpmem::tools::CODE_TOOL_NAMES.iter().copied())
         .chain(mcpmem::tools::WEBHOOK_TOOL_NAMES.iter().copied())
         .chain(MANAGEMENT_TOOL_NAMES.iter().copied())
+        .chain(mcpmem::tools::ATTACHMENT_TOOL_NAMES.iter().copied())
         .collect()
+}
+
+#[test]
+fn attachment_tools_require_their_own_scope_not_graph_write() {
+    use mcpmem::tools::{ATTACHMENT_TOOL_NAMES, category_of, scope_of};
+
+    const EXPECTED: [&str; 9] = [
+        "begin_attachment_upload",
+        "append_attachment_chunk",
+        "finish_attachment_upload",
+        "cancel_attachment_upload",
+        "list_attachments",
+        "get_attachment",
+        "read_attachment_chunk",
+        "get_attachment_page",
+        "delete_attachment",
+    ];
+    assert_eq!(ATTACHMENT_TOOL_NAMES, EXPECTED.as_slice());
+    let writer = bearer_principal(&[ToolCategory::GraphWrite]);
+    let attached = bearer_principal(&[ToolCategory::Attachments]);
+    for name in EXPECTED {
+        assert_eq!(category_of(name), Some(ToolCategory::Attachments), "{name}");
+        assert_eq!(scope_of(name), Some("attachments"), "{name}");
+        assert_eq!(missing_scope(&writer, name), Some("attachments"), "{name}");
+        assert!(!allows_tool(&writer, name), "{name}");
+        assert!(allows_tool(&attached, name), "{name}");
+    }
+    assert!(allows_tool(&writer, "create_entities"));
+    assert_eq!(
+        missing_scope(&attached, "create_entities"),
+        Some("graph-write")
+    );
 }
 
 #[test]
@@ -264,6 +297,42 @@ fn a_batch_with_one_denied_call_applies_none_of_it() {
     body_of(dispatch(&s, &p, allowed).unwrap());
     let v = body_of(dispatch(&s, &local_principal(), check).unwrap());
     assert!(v.to_string().contains("beta"), "control failed: {v}");
+}
+
+#[test]
+fn denied_attachment_scope_refuses_a_batch_before_its_graph_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = test_graph(&dir);
+    let writer = bearer_principal(&[ToolCategory::GraphRead, ToolCategory::GraphWrite]);
+    let body = r#"[
+        {"jsonrpc":"2.0","id":1,"method":"tools/call",
+         "params":{"name":"create_entities","arguments":{"entities":[
+            {"name":"blocked-by-attachment","entityType":"thing","observations":[]}]}}},
+        {"jsonrpc":"2.0","id":2,"method":"tools/call",
+         "params":{"name":"begin_attachment_upload","arguments":{}}}
+    ]"#;
+    match dispatch(&s, &writer, body).expect("dispatch") {
+        HttpOutcome::InsufficientScope(scopes) => assert_eq!(scopes, vec!["attachments"]),
+        other => panic!("a denied attachment call must refuse the whole batch: {other:?}"),
+    }
+    let check = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"read_graph","arguments":{}}}"#;
+    let absent = body_of(dispatch(&s, &local_principal(), check).unwrap());
+    assert!(
+        !absent.to_string().contains("blocked-by-attachment"),
+        "no graph write may run before the scope decision: {absent}"
+    );
+
+    let alone = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call",
+         "params":{"name":"create_entities","arguments":{"entities":[
+            {"name":"blocked-by-attachment","entityType":"thing","observations":[]}]}}}"#;
+    let result = body_of(dispatch(&s, &writer, alone).unwrap());
+    assert!(result["error"].is_null(), "the graph write is valid: {result}");
+    let present = body_of(dispatch(&s, &local_principal(), check).unwrap());
+    assert!(
+        present.to_string().contains("blocked-by-attachment"),
+        "the allowed graph write must still work: {present}"
+    );
 }
 
 /// The refusal names every missing scope once, in order.
