@@ -651,7 +651,7 @@ async fn a_read_only_token_does_not_see_write_tools_in_the_list() {
 
 // ── The viewer's data endpoints ─────────────────────────────────────────────
 //
-// An OAuth token in the `Authorization` header reaches `/ui/graph` and its
+// An OAuth token in the `Authorization` header reaches `/ui/api/graph` and its
 // three neighbours. Before Task 8 they answered 401 for every OAuth
 // deployment with no static token, so this is the one externally reachable
 // authorization path this work adds, and these two tests are its whole
@@ -692,7 +692,7 @@ async fn a_graph_read_token_may_read_the_viewer_graph() {
     let workspace_id = owned_viewer_workspace(&authorized, &tokens);
     let res = authorized
         .get(
-            &format!("/ui/graph?workspaceId={workspace_id}"),
+            &format!("/ui/api/graph?workspaceId={workspace_id}"),
             Some(&tokens.access_token),
         )
         .await;
@@ -708,7 +708,7 @@ async fn a_graph_read_token_may_read_the_viewer_graph() {
 async fn a_write_only_token_is_refused_by_the_viewer() {
     let (authorized, tokens) = to_tokens(&["graph-write"]).await;
     let res = authorized
-        .get("/ui/graph", Some(&tokens.access_token))
+        .get("/ui/api/graph", Some(&tokens.access_token))
         .await;
     assert_eq!(res.status, StatusCode::FORBIDDEN);
     assert_eq!(
@@ -726,7 +726,7 @@ async fn a_write_only_token_is_refused_by_the_viewer() {
 #[tokio::test]
 async fn the_viewer_refuses_an_anonymous_request_with_the_challenge() {
     let (authorized, _tokens) = to_tokens(&["graph-read"]).await;
-    let res = authorized.get("/ui/graph", None).await;
+    let res = authorized.get("/ui/api/graph", None).await;
     assert_eq!(res.status, StatusCode::UNAUTHORIZED);
     assert!(
         res.www_authenticate.contains("resource_metadata="),
@@ -737,9 +737,9 @@ async fn the_viewer_refuses_an_anonymous_request_with_the_challenge() {
 
 /// The reserved graph-viewer client walks the whole browser login — no
 /// registration, because startup seeded the client. This is exactly what
-/// `src/ui/graph.js` drives on an OAuth server: authorize against the seeded
+/// the viewer app drives on an OAuth server: authorize against the seeded
 /// client and its `{public_url}/ui` redirect, through the provider, the
-/// consent page, the exchange — and the token it yields opens `/ui/graph`.
+/// consent page, the exchange — and the token it yields opens `/ui/api/graph`.
 /// A break in the seed or in the script's derivation of its own redirect
 /// shows up here as a refused authorization request, which is what the
 /// browser would see.
@@ -766,7 +766,7 @@ async fn the_reserved_graph_client_walks_the_viewer_login_and_reads_the_graph() 
     let workspace_id = owned_viewer_workspace(&authorized, &tokens);
     let res = authorized
         .get(
-            &format!("/ui/graph?workspaceId={workspace_id}"),
+            &format!("/ui/api/graph?workspaceId={workspace_id}"),
             Some(&tokens.access_token),
         )
         .await;

@@ -1,5 +1,5 @@
 //! HTTP-transport tests for the browser knowledge-graph viewer (`GET /ui` and
-//! `GET /ui/graph`). These exercise the routes added alongside the MCP handlers:
+//! `GET /ui/api/graph`). These exercise the routes added alongside the MCP handlers:
 //! the self-contained viewer shell, the JSON data endpoint it renders, and the
 //! two gates on that data — the `graph-read` permission and the bearer token.
 //!
@@ -430,6 +430,17 @@ fn seed_graph(port: u16, bearer: Option<&str>) -> String {
     ws
 }
 
+/// The built asset manifest, read from the repository the test runs in. The
+/// server embeds exactly this file, so the routes must answer it verbatim.
+fn ui_manifest() -> serde_json::Value {
+    let text = std::fs::read_to_string(format!(
+        "{}/ui/dist/ui-manifest.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("the built manifest ships with the repo");
+    serde_json::from_str(&text).expect("the manifest is JSON")
+}
+
 #[test]
 fn test_ui_shell_served_as_html() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
@@ -439,64 +450,65 @@ fn test_ui_shell_served_as_html() {
         headers.to_lowercase().contains("content-type: text/html"),
         "viewer must be served as HTML, headers: {headers}"
     );
+    // The React shell mounts its app and loads exactly the bundled assets the
+    // manifest lists; the legacy hand-written assets are gone.
+    let manifest = ui_manifest();
     assert!(
-        body.contains("<title>"),
-        "expected an HTML document: {body:.120}"
+        body.contains("<div id=\"root\">"),
+        "expected the React shell: {body:.120}"
     );
-    // The shell references its split CSS/JS assets by absolute path.
-    assert!(
-        body.contains("/ui/graph.css"),
-        "shell should link the stylesheet"
-    );
-    assert!(
-        body.contains("/ui/graph.js"),
-        "shell should load the script"
-    );
-    // The shell carries the shared topbar, linking the viewer and the
-    // administration SPA on every page.
-    assert!(
-        body.contains("/ui/nav.css"),
-        "shell should load the shared navigation stylesheet"
-    );
-    assert!(
-        body.contains("/ui/admin"),
-        "shell should link the administration SPA"
-    );
-    assert!(
-        body.contains("aria-current=\"page\""),
-        "shell should mark its own section as active"
-    );
+    for (path, _meta) in manifest["files"].as_object().unwrap() {
+        let name = path
+            .strip_prefix("/ui/assets/")
+            .expect("a manifest asset path keeps its prefix");
+        assert!(
+            body.contains(name),
+            "the shell should load the bundled asset {name}: {body:.120}"
+        );
+    }
+    for legacy in [
+        "/ui/graph.css",
+        "/ui/graph.js",
+        "/ui/nav.css",
+        "/ui/admin.js",
+        "/ui/admin.css",
+    ] {
+        assert!(
+            !body.contains(legacy),
+            "the shell must not reference the deleted legacy asset {legacy}"
+        );
+    }
 }
 
 #[test]
 fn test_ui_assets_served_with_content_types() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
 
-    let (status, headers, body) = get(srv.port, "/ui/graph.css", None);
-    assert_eq!(status, 200, "GET /ui/graph.css should succeed");
-    assert!(
-        headers.to_lowercase().contains("content-type: text/css"),
-        "CSS must be served as text/css, headers: {headers}"
-    );
-    assert!(!body.is_empty(), "stylesheet should not be empty");
+    for (path, meta) in ui_manifest()["files"].as_object().unwrap() {
+        let expected_type = meta["contentType"]
+            .as_str()
+            .expect("the manifest names a content type");
+        let expected_bytes = meta["bytes"]
+            .as_u64()
+            .expect("the manifest names a byte count") as usize;
+        let (status, headers, body) = get(srv.port, path.as_str(), None);
+        assert_eq!(status, 200, "GET {path} should serve the asset: {body:.80}");
+        assert!(
+            headers
+                .to_lowercase()
+                .contains(&format!("content-type: {}", expected_type)),
+            "{path} must keep its manifest content type: {headers}"
+        );
+        assert_eq!(
+            body.len(),
+            expected_bytes,
+            "{path} must serve exactly the built bytes"
+        );
+    }
 
-    let (status, headers, _body) = get(srv.port, "/ui/graph.js", None);
-    assert_eq!(status, 200, "GET /ui/graph.js should succeed");
-    assert!(
-        headers.to_lowercase().contains("javascript"),
-        "JS must be served with a javascript content-type, headers: {headers}"
-    );
-
-    let (status, headers, body) = get(srv.port, "/ui/nav.css", None);
-    assert_eq!(status, 200, "GET /ui/nav.css should succeed");
-    assert!(
-        headers.to_lowercase().contains("content-type: text/css"),
-        "nav.css must be served as text/css, headers: {headers}"
-    );
-    assert!(
-        body.contains("#sitenav"),
-        "the shared stylesheet styles the site navigation bar"
-    );
+    // An unknown asset name is a 404: the manifest is the checked list.
+    let (status, _headers, _body) = get(srv.port, "/ui/assets/nope-1234.js", None);
+    assert_eq!(status, 404, "an unknown asset name must be a 404");
 }
 
 #[test]
@@ -507,10 +519,10 @@ fn test_ui_expand_returns_neighborhood() {
     // Expanding Alice must return her plus her neighbour Acme and the edge.
     let (status, headers, body) = get(
         srv.port,
-        &format!("/ui/expand?workspaceId={ws}&name=Alice"),
+        &format!("/ui/api/expand?workspaceId={ws}&name=Alice"),
         Some(TEST_BEARER),
     );
-    assert_eq!(status, 200, "GET /ui/expand should succeed: {body}");
+    assert_eq!(status, 200, "GET /ui/api/expand should succeed: {body}");
     assert!(
         headers
             .to_lowercase()
@@ -543,7 +555,7 @@ fn test_ui_expand_unknown_entity_is_404() {
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
     let (status, _, _) = get(
         srv.port,
-        &format!("/ui/expand?workspaceId={ws}&name=DoesNotExist"),
+        &format!("/ui/api/expand?workspaceId={ws}&name=DoesNotExist"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 404, "expanding a missing entity should be 404");
@@ -556,21 +568,24 @@ fn test_ui_expand_requires_name_and_permission() {
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
     let (status, _, _) = get(
         srv.port,
-        &format!("/ui/expand?workspaceId={ws}"),
+        &format!("/ui/api/expand?workspaceId={ws}"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 400, "expand without a name should be 400");
     drop(srv);
 
-    // Read disabled → 403, same gate as /ui/graph.
+    // Read disabled → 403, same gate as /ui/api/graph.
     let srv = spawn_http_server(&["--enable-graph-write"], Some(TEST_BEARER));
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
     let (status, _, _) = get(
         srv.port,
-        &format!("/ui/expand?workspaceId={ws}&name=Alice"),
+        &format!("/ui/api/expand?workspaceId={ws}&name=Alice"),
         Some(TEST_BEARER),
     );
-    assert_eq!(status, 403, "graph-read disabled must forbid /ui/expand");
+    assert_eq!(
+        status, 403,
+        "graph-read disabled must forbid /ui/api/expand"
+    );
 }
 
 #[test]
@@ -580,10 +595,10 @@ fn test_ui_graph_returns_entities_and_relations() {
 
     let (status, headers, body) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}"),
+        &format!("/ui/api/graph?workspaceId={ws}"),
         Some(TEST_BEARER),
     );
-    assert_eq!(status, 200, "GET /ui/graph should succeed: {body}");
+    assert_eq!(status, 200, "GET /ui/api/graph should succeed: {body}");
     assert!(
         headers
             .to_lowercase()
@@ -628,7 +643,7 @@ fn test_ui_graph_entity_type_filter() {
 
     let (status, _, body) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}&entityType=company"),
+        &format!("/ui/api/graph?workspaceId={ws}&entityType=company"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 200, "filtered graph should succeed: {body}");
@@ -653,10 +668,10 @@ fn test_ui_graph_requires_graph_read() {
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
     let (status, _, body) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}"),
+        &format!("/ui/api/graph?workspaceId={ws}"),
         Some(TEST_BEARER),
     );
-    assert_eq!(status, 403, "graph-read disabled must forbid /ui/graph");
+    assert_eq!(status, 403, "graph-read disabled must forbid /ui/api/graph");
     assert!(
         body.contains("graph-read"),
         "403 body should explain the missing permission: {body}"
@@ -679,7 +694,7 @@ fn test_ui_graph_honours_static_bearer_scopes_not_enabled_categories() {
     // request names an id the scope gate must refuse before it is resolved.
     let (status, headers, body) = get(
         srv.port,
-        "/ui/graph?workspaceId=00000000-0000-0000-0000-000000000000",
+        "/ui/api/graph?workspaceId=00000000-0000-0000-0000-000000000000",
         Some(TEST_BEARER),
     );
     assert_eq!(
@@ -701,13 +716,13 @@ fn test_ui_graph_auth_gate() {
     let ws = seed_graph(srv.port, Some("s3cret"));
 
     // No credentials → 401.
-    let (status, _, _) = get(srv.port, &format!("/ui/graph?workspaceId={ws}"), None);
+    let (status, _, _) = get(srv.port, &format!("/ui/api/graph?workspaceId={ws}"), None);
     assert_eq!(status, 401, "missing token must be rejected");
 
     // Wrong token via query → 401.
     let (status, _, _) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}&token=nope"),
+        &format!("/ui/api/graph?workspaceId={ws}&token=nope"),
         None,
     );
     assert_eq!(status, 401, "wrong token must be rejected");
@@ -715,7 +730,7 @@ fn test_ui_graph_auth_gate() {
     // Correct token via the ?token= query fallback → 200.
     let (status, _, body) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}&token=s3cret"),
+        &format!("/ui/api/graph?workspaceId={ws}&token=s3cret"),
         None,
     );
     assert_eq!(status, 200, "query-param token should be accepted: {body}");
@@ -727,7 +742,7 @@ fn test_ui_graph_auth_gate() {
     // Correct token via the Authorization header → 200.
     let (status, _, _) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}"),
+        &format!("/ui/api/graph?workspaceId={ws}"),
         Some("s3cret"),
     );
     assert_eq!(status, 200, "bearer header token should be accepted");
@@ -744,7 +759,7 @@ fn test_ui_graph_auth_gate() {
 #[test]
 fn test_ui_graph_without_workspace_id_and_without_default_is_selection_required() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
-    let (status, _, body) = get(srv.port, "/ui/graph", Some(TEST_BEARER));
+    let (status, _, body) = get(srv.port, "/ui/api/graph", Some(TEST_BEARER));
     assert_eq!(
         status, 400,
         "no workspaceId and no default is the selection-required error, not a read: {body}"
@@ -765,21 +780,21 @@ fn test_ui_graph_unknown_workspace_id_is_not_found() {
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
     let (status, _, _) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}"),
+        &format!("/ui/api/graph?workspaceId={ws}"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 200, "the owned workspace id should read");
 
     let (status, _, _) = get(
         srv.port,
-        "/ui/graph?workspaceId=7f4c5a1e-0000-4000-8000-000000000000",
+        "/ui/api/graph?workspaceId=7f4c5a1e-0000-4000-8000-000000000000",
         Some(TEST_BEARER),
     );
     assert_eq!(status, 404, "an unknown workspace id must be not-found");
 
     let (status, _, _) = get(
         srv.port,
-        "/ui/graph?workspaceId=not-a-uuid",
+        "/ui/api/graph?workspaceId=not-a-uuid",
         Some(TEST_BEARER),
     );
     assert_eq!(
@@ -814,7 +829,7 @@ fn test_ui_graph_pagination_cursor() {
     // First page: 10 of 25, more to come.
     let (_, _, body) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}&limit=10&offset=0"),
+        &format!("/ui/api/graph?workspaceId={ws}&limit=10&offset=0"),
         Some(TEST_BEARER),
     );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -827,7 +842,7 @@ fn test_ui_graph_pagination_cursor() {
     // Last page: offset 20 leaves 5, no more.
     let (_, _, body) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}&limit=10&offset=20"),
+        &format!("/ui/api/graph?workspaceId={ws}&limit=10&offset=20"),
         Some(TEST_BEARER),
     );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -843,7 +858,7 @@ fn test_ui_search_paginated_nodes_only() {
 
     let (status, headers, body) = get(
         srv.port,
-        &format!("/ui/search?workspaceId={ws}&q=person&limit=10&offset=0"),
+        &format!("/ui/api/search?workspaceId={ws}&q=person&limit=10&offset=0"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 200, "search should succeed: {body}");
@@ -866,7 +881,7 @@ fn test_ui_search_paginated_nodes_only() {
     // Second page paginates the same query.
     let (_, _, body) = get(
         srv.port,
-        &format!("/ui/search?workspaceId={ws}&q=person&limit=10&offset=20"),
+        &format!("/ui/api/search?workspaceId={ws}&q=person&limit=10&offset=20"),
         Some(TEST_BEARER),
     );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -882,7 +897,7 @@ fn test_ui_search_prefix_and_permission() {
     // A prefix ("Ac") matches "Acme" — search-as-you-type behaviour.
     let (status, _, body) = get(
         srv.port,
-        &format!("/ui/search?workspaceId={ws}&q=Ac"),
+        &format!("/ui/api/search?workspaceId={ws}&q=Ac"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 200);
@@ -904,7 +919,7 @@ fn test_ui_search_prefix_and_permission() {
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
     let (status, _, _) = get(
         srv.port,
-        &format!("/ui/search?workspaceId={ws}&q=x"),
+        &format!("/ui/api/search?workspaceId={ws}&q=x"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 403, "search must require graph-read");
@@ -917,7 +932,7 @@ fn test_ui_graph_omits_observation_bodies() {
 
     let (status, _, body) = get(
         srv.port,
-        &format!("/ui/graph?workspaceId={ws}"),
+        &format!("/ui/api/graph?workspaceId={ws}"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 200, "graph should succeed: {body}");
@@ -928,7 +943,7 @@ fn test_ui_graph_omits_observation_bodies() {
         .iter()
         .find(|e| e["name"] == "Alice")
         .expect("Alice present");
-    // The list payload carries a count, not the bodies — those lazy-load via /ui/node.
+    // The list payload carries a count, not the bodies — those lazy-load via /ui/api/node.
     assert_eq!(
         alice["obsCount"], 1,
         "Alice's observation count should be present"
@@ -946,7 +961,7 @@ fn test_ui_node_lazy_loads_observations() {
 
     let (status, headers, body) = get(
         srv.port,
-        &format!("/ui/node?workspaceId={ws}&name=Alice"),
+        &format!("/ui/api/node?workspaceId={ws}&name=Alice"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 200, "node fetch should succeed: {body}");
@@ -976,7 +991,7 @@ fn test_ui_node_lazy_loads_observations() {
     // Unknown entity → 404.
     let (status, _, _) = get(
         srv.port,
-        &format!("/ui/node?workspaceId={ws}&name=DoesNotExist"),
+        &format!("/ui/api/node?workspaceId={ws}&name=DoesNotExist"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 404, "unknown entity should be 404");
@@ -988,10 +1003,10 @@ fn test_ui_node_requires_graph_read() {
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
     let (status, _, _) = get(
         srv.port,
-        &format!("/ui/node?workspaceId={ws}&name=Alice"),
+        &format!("/ui/api/node?workspaceId={ws}&name=Alice"),
         Some(TEST_BEARER),
     );
-    assert_eq!(status, 403, "graph-read disabled must forbid /ui/node");
+    assert_eq!(status, 403, "graph-read disabled must forbid /ui/api/node");
 }
 
 /// A filename belongs to one entity in one workspace. A different workspace
@@ -1007,7 +1022,7 @@ async fn attachment_inspector_routes_keep_files_in_the_selected_workspace() {
     let (status, _, body) = request(srv.port, "POST", "/mcp", Some(&create), Some(TEST_BEARER));
     assert_eq!(status, 200, "seed second workspace: {body}");
     let client = reqwest::Client::new();
-    let base = format!("http://127.0.0.1:{}/ui/attachments", srv.port);
+    let base = format!("http://127.0.0.1:{}/ui/api/attachments", srv.port);
     let file = "notes for Alice\nαβγ\n";
     let first_url = format!("{base}?workspaceId={first}&entityName=Alice&filename=notes.txt");
 
@@ -1159,7 +1174,7 @@ async fn attachment_inspector_reads_extracted_page_by_character_offset() {
         spawn_http_server_with_role(&["--enable-all"], Some(TEST_BEARER), Some("mcp,extractor"));
     let ws = seed_graph(srv.port, Some(TEST_BEARER));
     let client = reqwest::Client::new();
-    let base = format!("http://127.0.0.1:{}/ui/attachments", srv.port);
+    let base = format!("http://127.0.0.1:{}/ui/api/attachments", srv.port);
     let uploaded = client
         .post(format!(
             "{base}?workspaceId={ws}&entityName=Alice&filename=greek.txt"
@@ -1239,7 +1254,7 @@ async fn attachment_inspector_accepts_a_zero_byte_text_file() {
     let srv = spawn_http_server(&["--enable-all"], Some(TEST_BEARER));
     let ws = seed_graph(srv.port, Some(TEST_BEARER));
     let client = reqwest::Client::new();
-    let base = format!("http://127.0.0.1:{}/ui/attachments", srv.port);
+    let base = format!("http://127.0.0.1:{}/ui/api/attachments", srv.port);
 
     let uploaded = client
         .post(format!(

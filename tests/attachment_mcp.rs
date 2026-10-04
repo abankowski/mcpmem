@@ -655,6 +655,7 @@ async fn oversized_single_mcp_body_still_fails_at_sixteen_mebibytes() {
         bearer_scopes: vec![ToolCategory::Attachments],
         enabled_categories: vec![ToolCategory::Attachments],
         now_us: None,
+        ui_enabled: true,
     });
     let call = json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",

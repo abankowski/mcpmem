@@ -924,17 +924,13 @@ async fn a_non_admin_grant_is_refused() {
     );
 }
 
-/// `GET /ui/admin` and its two assets are static, like the viewer: the shell
-/// and the stylesheet/script hold no data, so they are served without auth.
-/// The JSON endpoints are the gate.
+/// `GET /ui/admin` and the callback are static, like the viewer: the React
+/// shell holds no data, so it is served without auth, and its assets come
+/// from the checked manifest. The JSON endpoints are the gate.
 #[tokio::test]
 async fn the_admin_page_and_assets_are_served() {
     let (server, _token) = admin_server().await;
-    for (path, kind) in [
-        ("/ui/admin", "text/html"),
-        ("/ui/admin.js", "text/javascript"),
-        ("/ui/admin.css", "text/css"),
-    ] {
+    for path in ["/ui/admin", "/ui/admin/callback"] {
         let res = server
             .request(Request::get(path).body(Body::empty()).unwrap())
             .await;
@@ -945,7 +941,32 @@ async fn the_admin_page_and_assets_are_served() {
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(ct.starts_with(kind), "{path} content type is {ct}");
+        assert!(ct.starts_with("text/html"), "{path} content type is {ct}");
+    }
+    let manifest = std::fs::read_to_string(format!(
+        "{}/ui/dist/ui-manifest.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("the built manifest ships with the repo");
+    let manifest_value: serde_json::Value =
+        serde_json::from_str::<serde_json::Value>(&manifest).expect("the manifest is JSON");
+    let files: serde_json::Value = manifest_value["files"].clone();
+    for (path, meta) in files.as_object().unwrap() {
+        let expected = meta["contentType"]
+            .as_str()
+            .expect("a manifest content type")
+            .to_owned();
+        let res = server
+            .request(Request::get(path.as_str()).body(Body::empty()).unwrap())
+            .await;
+        assert_eq!(res.status(), 200, "{path} serves the bundled asset");
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(ct, expected, "{path} content type is {ct}");
     }
 }
 

@@ -11,7 +11,7 @@
 //!
 //! The viewer routes do not resolve `workspaceId` yet (Task 5 step 3), so the
 //! requests below answer from the legacy graph — empty, and wrong. A comment
-//! marks every assertion that is red for that reason. `/ui/workspaces` does
+//! marks every assertion that is red for that reason. `/ui/api/workspaces` does
 //! not exist yet and answers 404. The tests turn green when Task 5 resolves
 //! one graph per viewer request and adds the workspace list route.
 
@@ -195,7 +195,7 @@ async fn get(srv: &support::Server, token: &str, path: &str) -> (StatusCode, Str
     (status, String::from_utf8_lossy(&bytes).to_string())
 }
 
-/// The `workspaceId`s on one `/ui/workspaces` JSON body.
+/// The `workspaceId`s on one `/ui/api/workspaces` JSON body.
 fn listed_ids(body: &str) -> Vec<String> {
     let v: Value = serde_json::from_str(body).expect("workspace list payload is JSON");
     v["workspaces"]
@@ -206,7 +206,7 @@ fn listed_ids(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// RED: `/ui/workspaces` does not exist yet, so every listing below is a 404;
+/// RED: `/ui/api/workspaces` does not exist yet, so every listing below is a 404;
 /// the assertions about rows cannot even run until the route lands. A public
 /// graph appears in an unrelated caller's list; a private graph does not.
 #[tokio::test]
@@ -214,7 +214,7 @@ async fn list_shows_public_and_hides_private_from_an_unrelated_caller() {
     let fx = viewer().await;
 
     // The owner sees both of their graphs.
-    let (status, body) = get(&fx.srv, &fx.owner, "/ui/workspaces?limit=100").await;
+    let (status, body) = get(&fx.srv, &fx.owner, "/ui/api/workspaces?limit=100").await;
     assert_eq!(status, 200, "the owner list should answer: {body}");
     let ids = listed_ids(&body);
     assert!(
@@ -224,7 +224,7 @@ async fn list_shows_public_and_hides_private_from_an_unrelated_caller() {
 
     // The unrelated reader sees the public graph — with its name, visibility
     // and the caller's role — and never the private one.
-    let (status, body) = get(&fx.srv, &fx.reader, "/ui/workspaces?limit=100").await;
+    let (status, body) = get(&fx.srv, &fx.reader, "/ui/api/workspaces?limit=100").await;
     assert_eq!(status, 200, "an authed caller can list workspaces: {body}");
     let v: Value = serde_json::from_str(&body).unwrap();
     let workspaces = v["workspaces"].as_array().unwrap();
@@ -258,7 +258,7 @@ async fn viewer_read_on_an_inaccessible_graph_is_not_found() {
     let (status, _) = get(
         &fx.srv,
         &fx.reader,
-        &format!("/ui/graph?workspaceId={}", fx.private_id),
+        &format!("/ui/api/graph?workspaceId={}", fx.private_id),
     )
     .await;
     assert_eq!(
@@ -270,7 +270,7 @@ async fn viewer_read_on_an_inaccessible_graph_is_not_found() {
     let (status, _) = get(
         &fx.srv,
         &fx.reader,
-        "/ui/graph?workspaceId=00000000-0000-0000-0000-000000000000",
+        "/ui/api/graph?workspaceId=00000000-0000-0000-0000-000000000000",
     )
     .await;
     assert_eq!(
@@ -282,7 +282,7 @@ async fn viewer_read_on_an_inaccessible_graph_is_not_found() {
     let (status, _) = get(
         &fx.srv,
         &fx.reader,
-        &format!("/ui/search?workspaceId={}&q=Alice", fx.private_id),
+        &format!("/ui/api/search?workspaceId={}&q=Alice", fx.private_id),
     )
     .await;
     assert_eq!(
@@ -316,7 +316,7 @@ async fn revoking_a_grant_changes_the_next_viewer_response() {
     let (status, body) = get(
         &fx.srv,
         &fx.reader,
-        &format!("/ui/graph?workspaceId={}", fx.private_id),
+        &format!("/ui/api/graph?workspaceId={}", fx.private_id),
     )
     .await;
     assert_eq!(
@@ -332,7 +332,7 @@ async fn revoking_a_grant_changes_the_next_viewer_response() {
     let (status, body) = get(
         &fx.srv,
         &fx.reader,
-        &format!("/ui/node?workspaceId={}&name=Alice", fx.private_id),
+        &format!("/ui/api/node?workspaceId={}&name=Alice", fx.private_id),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "node read after grant: {body}");
@@ -344,7 +344,7 @@ async fn revoking_a_grant_changes_the_next_viewer_response() {
     let (status, body) = get(
         &fx.srv,
         &fx.reader,
-        &format!("/ui/expand?workspaceId={}&name=Alice", fx.private_id),
+        &format!("/ui/api/expand?workspaceId={}&name=Alice", fx.private_id),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "expand after grant: {body}");
@@ -353,7 +353,7 @@ async fn revoking_a_grant_changes_the_next_viewer_response() {
         "the neighbourhood is the private graph's: {body}"
     );
 
-    let (status, body) = get(&fx.srv, &fx.reader, "/ui/workspaces?limit=100").await;
+    let (status, body) = get(&fx.srv, &fx.reader, "/ui/api/workspaces?limit=100").await;
     assert_eq!(status, StatusCode::OK, "the list after grant: {body}");
     assert!(
         listed_ids(&body).contains(&fx.private_id),
@@ -380,7 +380,7 @@ async fn revoking_a_grant_changes_the_next_viewer_response() {
     let (status, _) = get(
         &fx.srv,
         &fx.reader,
-        &format!("/ui/graph?workspaceId={}", fx.private_id),
+        &format!("/ui/api/graph?workspaceId={}", fx.private_id),
     )
     .await;
     assert_eq!(
@@ -395,19 +395,19 @@ async fn revoking_a_grant_changes_the_next_viewer_response() {
     let (status, _) = get(
         &fx.srv,
         &fx.reader,
-        &format!("/ui/node?workspaceId={}&name=Alice", fx.private_id),
+        &format!("/ui/api/node?workspaceId={}&name=Alice", fx.private_id),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "node read after revocation");
     let (status, _) = get(
         &fx.srv,
         &fx.reader,
-        &format!("/ui/expand?workspaceId={}&name=Alice", fx.private_id),
+        &format!("/ui/api/expand?workspaceId={}&name=Alice", fx.private_id),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "expand after revocation");
 
-    let (status, body) = get(&fx.srv, &fx.reader, "/ui/workspaces?limit=100").await;
+    let (status, body) = get(&fx.srv, &fx.reader, "/ui/api/workspaces?limit=100").await;
     assert_eq!(status, StatusCode::OK, "the list after revoke: {body}");
     assert!(
         !listed_ids(&body).contains(&fx.private_id),
@@ -423,7 +423,7 @@ async fn revoking_a_grant_changes_the_next_viewer_response() {
 async fn missing_workspace_id_without_a_default_is_selection_required() {
     let fx = viewer().await;
 
-    let (status, body) = get(&fx.srv, &fx.reader, "/ui/graph").await;
+    let (status, body) = get(&fx.srv, &fx.reader, "/ui/api/graph").await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -434,7 +434,7 @@ async fn missing_workspace_id_without_a_default_is_selection_required() {
         "the error is the distinct selection-required shape: {body}"
     );
 
-    let (status, body) = get(&fx.srv, &fx.reader, "/ui/search?q=Alice").await;
+    let (status, body) = get(&fx.srv, &fx.reader, "/ui/api/search?q=Alice").await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -457,7 +457,7 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
     let (status, body) = get(
         &fx.srv,
         &fx.owner,
-        &format!("/ui/graph?workspaceId={}", fx.private_id),
+        &format!("/ui/api/graph?workspaceId={}", fx.private_id),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "private graph read: {body}");
@@ -473,7 +473,7 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
     let (status, body) = get(
         &fx.srv,
         &fx.owner,
-        &format!("/ui/graph?workspaceId={}", fx.public_id),
+        &format!("/ui/api/graph?workspaceId={}", fx.public_id),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "public graph read: {body}");
@@ -490,7 +490,7 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
     let (status, body) = get(
         &fx.srv,
         &fx.owner,
-        &format!("/ui/search?workspaceId={}&q=Ali", fx.private_id),
+        &format!("/ui/api/search?workspaceId={}&q=Ali", fx.private_id),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "private search: {body}");
@@ -502,7 +502,7 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
     let (status, body) = get(
         &fx.srv,
         &fx.owner,
-        &format!("/ui/search?workspaceId={}&q=Zed", fx.public_id),
+        &format!("/ui/api/search?workspaceId={}&q=Zed", fx.public_id),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "public search: {body}");
@@ -515,7 +515,7 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
     let (status, body) = get(
         &fx.srv,
         &fx.owner,
-        &format!("/ui/node?workspaceId={}&name=Alice", fx.private_id),
+        &format!("/ui/api/node?workspaceId={}&name=Alice", fx.private_id),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "node in the private graph: {body}");
@@ -526,7 +526,7 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
     let (status, _) = get(
         &fx.srv,
         &fx.owner,
-        &format!("/ui/node?workspaceId={}&name=Alice", fx.public_id),
+        &format!("/ui/api/node?workspaceId={}&name=Alice", fx.public_id),
     )
     .await;
     assert_eq!(
@@ -539,7 +539,7 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
     let (status, body) = get(
         &fx.srv,
         &fx.owner,
-        &format!("/ui/expand?workspaceId={}&name=Alice", fx.private_id),
+        &format!("/ui/api/expand?workspaceId={}&name=Alice", fx.private_id),
     )
     .await;
     assert_eq!(
@@ -554,7 +554,7 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
     let (status, _) = get(
         &fx.srv,
         &fx.owner,
-        &format!("/ui/expand?workspaceId={}&name=Alice", fx.public_id),
+        &format!("/ui/api/expand?workspaceId={}&name=Alice", fx.public_id),
     )
     .await;
     assert_eq!(

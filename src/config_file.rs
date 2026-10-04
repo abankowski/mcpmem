@@ -450,11 +450,7 @@ impl FileConfig {
             server.legacy_observations,
             cli.absent("legacy_observations"),
         );
-        assign(
-            &mut args.ui,
-            server.ui.map(Some),
-            cli.absent("ui"),
-        );
+        assign(&mut args.ui, server.ui.map(Some), cli.absent("ui"));
         assign(
             &mut args.stdio_concurrency,
             server.stdio_concurrency,

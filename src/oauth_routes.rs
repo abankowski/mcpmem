@@ -183,11 +183,11 @@ impl OauthState {
     /// mutex rather than a stalled reactor — but it is a wait, and the rule
     /// above would read as a denial of it.
     ///
-    /// So it is named instead. `POST /mcp` — every tool call this server
+    /// `POST /mcp` — every tool call this server
     /// answers — resolves its caller inside the blocking task it already has
     /// (`crate::http::post_handler`), so the hottest path takes this lock off
     /// the reactor. The SSE `GET /mcp`, which is one request per session, and
-    /// the four `/ui` data endpoints, whose gate runs before the payload
+    /// the `/ui/api` data endpoints, whose gate runs before the payload
     /// builder they spawn, still validate inline. Moving those would put the
     /// authorization decision of four handlers into blocking tasks for a
     /// microsecond lookup, which buys less than the gate ordering it would
@@ -257,44 +257,9 @@ impl OauthState {
         let conn = rusqlite::Connection::open(db_path).map_err(|e| open_failed(&e))?;
         conn.busy_timeout(Duration::from_millis(busy_timeout_ms))
             .map_err(|e| open_failed(&e))?;
-        let now = now_us();
         let store = mcpmem_oauth::store::Store::new(conn);
-        // The browser UIs are public PKCE clients of this server's own AS:
-        // the admin SPA and the graph viewer. Seed each once; put_client
-        // upserts, so a repeat start only refreshes the row, and the same
-        // clock reading stamps `created_us` and `last_used_us`.
-        store
-            .put_client(&mcpmem_oauth::store::ClientRecord {
-                client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
-                client_name: "mcpmem admin UI".to_owned(),
-                redirect_uris: vec![format!("{}/ui/admin/callback", config.public_url)],
-                source: mcpmem_oauth::store::ClientRecord::RESERVED.to_owned(),
-                created_us: now,
-                last_used_us: now,
-            })
-            .map_err(|e| {
-                crate::errors::MCSError::MemoryError(format!(
-                    "failed to seed the admin UI client: {e}"
-                ))
-            })?;
-        // The viewer's redirect is the shell page itself (`/ui`), where
-        // `graph.js` completes the exchange when the provider sends `?code=`
-        // back. It is registered byte-for-byte, and the script derives it
-        // from its own path so a path-prefixed --public-url stays intact.
-        store
-            .put_client(&mcpmem_oauth::store::ClientRecord {
-                client_id: mcpmem_oauth::GRAPH_CLIENT_ID.to_owned(),
-                client_name: "mcpmem graph viewer".to_owned(),
-                redirect_uris: vec![format!("{}/ui", config.public_url)],
-                source: mcpmem_oauth::store::ClientRecord::RESERVED.to_owned(),
-                created_us: now,
-                last_used_us: now,
-            })
-            .map_err(|e| {
-                crate::errors::MCSError::MemoryError(format!(
-                    "failed to seed the graph UI client: {e}"
-                ))
-            })?;
+        // The browser UIs are seeded by the caller only when the UI is on;
+        // see [`OauthState::seed_browser_clients`].
         // The runtime store opens the same file on its own connection, like
         // every other holder of this database. It must not change the file's
         // durability setting — the OAuth store and the graph each set what
@@ -325,6 +290,62 @@ impl OauthState {
             provider: tokio::sync::OnceCell::new(),
             metadata_fetch: default_metadata_fetch(),
         })
+    }
+
+    /// Seed the two reserved browser clients, or leave the store alone.
+    ///
+    /// The browser UIs are public PKCE clients of this server's own AS: the
+    /// admin SPA and the graph viewer. The caller supplies the runtime
+    /// `ui_enabled` flag, and the `ui` feature must be compiled: a build
+    /// without the feature can never seed, whatever the flag says.
+    ///
+    /// `put_client` upserts, so a repeat start only refreshes the row, and
+    /// the same clock reading stamps `created_us` and `last_used_us`.
+    /// Existing stored rows are never deleted when the flag is off.
+    pub fn seed_browser_clients(&self, ui_enabled: bool) -> Result<()> {
+        #[cfg(feature = "ui")]
+        {
+            if !ui_enabled {
+                return Ok(());
+            }
+            let now = (self.now_us)();
+            self.with_store(|store| {
+                store
+                    .put_client(&mcpmem_oauth::store::ClientRecord {
+                        client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
+                        client_name: "mcpmem admin UI".to_owned(),
+                        redirect_uris: vec![format!(
+                            "{}/ui/admin/callback",
+                            self.config.public_url
+                        )],
+                        source: mcpmem_oauth::store::ClientRecord::RESERVED.to_owned(),
+                        created_us: now,
+                        last_used_us: now,
+                    })
+                    .map_err(|e| {
+                        MCSError::MemoryError(format!("failed to seed the admin UI client: {e}"))
+                    })?;
+                // The viewer's redirect is the shell page itself (`/ui`),
+                // where the viewer app completes the exchange when the
+                // provider sends `?code=` back. It is registered
+                // byte-for-byte, and the app derives it from its own path so
+                // a path-prefixed --public-url stays intact.
+                store
+                    .put_client(&mcpmem_oauth::store::ClientRecord {
+                        client_id: mcpmem_oauth::GRAPH_CLIENT_ID.to_owned(),
+                        client_name: "mcpmem graph viewer".to_owned(),
+                        redirect_uris: vec![format!("{}/ui", self.config.public_url)],
+                        source: mcpmem_oauth::store::ClientRecord::RESERVED.to_owned(),
+                        created_us: now,
+                        last_used_us: now,
+                    })
+                    .map_err(|e| {
+                        MCSError::MemoryError(format!("failed to seed the graph UI client: {e}"))
+                    })?;
+                Ok::<(), MCSError>(())
+            })?;
+        }
+        Ok::<(), MCSError>(())
     }
 
     /// Read client identifier metadata documents with `fetch` instead of the
@@ -1950,6 +1971,7 @@ mod tests {
             bearer_scopes: vec![ToolCategory::GraphRead],
             enabled_categories: ToolCategory::ALL.to_vec(),
             now_us: Some(Arc::new(|| FIXED)),
+            ui_enabled: true,
         });
         let oauth = state.oauth().expect("oauth is on");
         assert_eq!((oauth.now_us)(), FIXED);
@@ -1968,6 +1990,7 @@ mod tests {
             bearer_scopes: ToolCategory::ALL.to_vec(),
             enabled_categories: ToolCategory::ALL.to_vec(),
             now_us: None,
+            ui_enabled: true,
         });
         let oauth = state.oauth().expect("oauth is on");
         let observed = (oauth.now_us)();

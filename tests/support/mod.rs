@@ -304,6 +304,9 @@ async fn build(
         bearer_scopes: scopes.bearer,
         enabled_categories: scopes.enabled,
         now_us: clock.as_ref().map(Clock::as_fn),
+        // The fixture stands in for the default switch state: the reserved
+        // browser clients exist, and the `/ui` module is registered.
+        ui_enabled: true,
     });
     let router = mcpmem::http::router(state.clone());
 
