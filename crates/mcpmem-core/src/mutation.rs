@@ -106,6 +106,22 @@ pub enum MutationRequest {
     DeleteObservations {
         observations: Vec<ObservationUpdate>,
     },
+    EditObservation {
+        entity_name: String,
+        observation_id: i64,
+        body: String,
+        occurred_at_us: Option<i64>,
+    },
+    DeleteObservationById {
+        entity_name: String,
+        observation_id: i64,
+    },
+    DeleteRelationObservationById {
+        from: String,
+        to: String,
+        relation_type: String,
+        observation_id: i64,
+    },
     MergeEntities {
         source: String,
         target: String,
@@ -285,6 +301,62 @@ impl<'a> MutationService<'a> {
         self.apply_inner(request, context, Some(fingerprint))
     }
 
+    /// Replace the body and fact time of one observation row, keyed by its
+    /// stable id. The write time and origin of the row stay untouched.
+    /// The FTS projection is reindexed inside the same transaction.
+    pub fn edit_observation(
+        &self,
+        entity_name: &str,
+        observation_id: i64,
+        body: &str,
+        occurred_at_us: Option<i64>,
+    ) -> Result<()> {
+        self.apply(
+            MutationRequest::EditObservation {
+                entity_name: entity_name.into(),
+                observation_id,
+                body: body.into(),
+                occurred_at_us,
+            },
+            MutationContext::local(),
+        )
+        .map(|_| ())
+    }
+
+    /// Delete exactly one observation row of one entity, keyed by its id.
+    /// A foreign or already-deleted id is a no-op, like the body-keyed delete.
+    pub fn delete_observation_by_id(&self, entity_name: &str, observation_id: i64) -> Result<()> {
+        self.apply(
+            MutationRequest::DeleteObservationById {
+                entity_name: entity_name.into(),
+                observation_id,
+            },
+            MutationContext::local(),
+        )
+        .map(|_| ())
+    }
+
+    /// Delete exactly one observation row of one relation triple, keyed by
+    /// its id. The relation must exist; the id must belong to that triple.
+    pub fn delete_relation_observation_by_id(
+        &self,
+        from: &str,
+        to: &str,
+        relation_type: &str,
+        observation_id: i64,
+    ) -> Result<()> {
+        self.apply(
+            MutationRequest::DeleteRelationObservationById {
+                from: from.into(),
+                to: to.into(),
+                relation_type: relation_type.into(),
+                observation_id,
+            },
+            MutationContext::local(),
+        )
+        .map(|_| ())
+    }
+
     fn apply_inner(
         &self,
         request: MutationRequest,
@@ -332,6 +404,7 @@ impl<'a> MutationService<'a> {
                 | MutationRequest::DeleteAttributes { .. }
                 | MutationRequest::AddRelationObservations { .. }
                 | MutationRequest::DeleteRelationObservations { .. }
+                | MutationRequest::DeleteRelationObservationById { .. }
         );
         let names = affected_names(&conn, &request)?;
         let before = capture(&conn, &names)?;
@@ -392,10 +465,10 @@ pub(crate) fn read_entity(conn: &Connection, name: &str) -> Result<Option<Entity
     ).optional().map_err(sql_error)?;
     row.map(|(entity_id, name, entity_type)| {
         let mut stmt = conn
-            .prepare_cached("SELECT body,created_us,occurred_us,origin_entity_name FROM observation WHERE entity_id=?1 ORDER BY idx, id")
+            .prepare_cached("SELECT body,created_us,occurred_us,origin_entity_name,id FROM observation WHERE entity_id=?1 ORDER BY idx, id")
             .map_err(sql_error)?;
         let observations = stmt
-            .query_map([entity_id], |row| Ok(Observation { body: row.get(0)?, created_at_us: Some(row.get(1)?), occurred_at_us: row.get(2)?, origin_entity_name: row.get(3)? }))
+            .query_map([entity_id], |row| Ok(Observation { body: row.get(0)?, created_at_us: Some(row.get(1)?), occurred_at_us: row.get(2)?, origin_entity_name: row.get(3)?, observation_id: Some(row.get(4)?) }))
             .map_err(sql_error)?
             .collect::<rusqlite::Result<Vec<Observation>>>()
             .map_err(sql_error)?;
@@ -463,6 +536,10 @@ fn affected_names(conn: &Connection, request: &MutationRequest) -> Result<BTreeS
         | MutationRequest::DeleteObservations { observations } => {
             observations.iter().map(|o| o.entity_name.clone()).collect()
         }
+        MutationRequest::EditObservation { entity_name, .. }
+        | MutationRequest::DeleteObservationById { entity_name, .. } => {
+            [entity_name.clone()].into()
+        }
         // Attribute writes and relation observation writes persist quiet
         // events: they emit a change_event and match subscriptions, but they
         // never bump entity_revision and never enqueue an index job
@@ -475,6 +552,9 @@ fn affected_names(conn: &Connection, request: &MutationRequest) -> Result<BTreeS
             .iter()
             .map(|update| update.relation.from.clone())
             .collect(),
+        MutationRequest::DeleteRelationObservationById { from, .. } => {
+            [from.clone()].into()
+        }
         MutationRequest::SetAttributes { targets } => targets
             .iter()
             .filter_map(|target| match target.owner_kind.as_str() {
@@ -566,7 +646,7 @@ fn mirror_detail(conn: &Connection, relation: &Relation) -> Result<Option<(i64, 
     };
     let mut stmt = conn
         .prepare_cached(
-            "SELECT body, created_us, occurred_us
+            "SELECT body, created_us, occurred_us, id
              FROM relation_observation WHERE relation_id=?1
              ORDER BY idx, id",
         )
@@ -578,6 +658,7 @@ fn mirror_detail(conn: &Connection, relation: &Relation) -> Result<Option<(i64, 
                 created_at_us: Some(row.get(1)?),
                 occurred_at_us: row.get(2)?,
                 origin_entity_name: None,
+                observation_id: Some(row.get(3)?),
             })
         })
         .map_err(sql_error)?
@@ -838,8 +919,9 @@ fn insert_observations(
             ));
         }
         let created_at_us = now_us();
+        let observation_id = graph.next_obs_id();
         stmt.execute(params![
-            graph.next_obs_id(),
+            observation_id,
             id,
             idx + offset as i64 + 1,
             observation.body,
@@ -852,6 +934,7 @@ fn insert_observations(
             created_at_us: Some(created_at_us),
             occurred_at_us: observation.occurred_at_us,
             origin_entity_name: None,
+            observation_id: Some(observation_id),
         });
     }
     Ok(inserted)
@@ -909,8 +992,9 @@ fn insert_relation_observations(
             ));
         }
         let created_at_us = now_us();
+        let observation_id = graph.next_rel_obs_id();
         stmt.execute(params![
-            graph.next_rel_obs_id(),
+            observation_id,
             relation_id,
             idx + offset as i64 + 1,
             observation.body,
@@ -923,6 +1007,7 @@ fn insert_relation_observations(
             created_at_us: Some(created_at_us),
             occurred_at_us: observation.occurred_at_us,
             origin_entity_name: None,
+            observation_id: Some(observation_id),
         });
     }
     if !inserted.is_empty() {
@@ -1369,6 +1454,94 @@ fn execute(
                     )
                     .map_err(sql_error)?;
                 }
+            }
+            Ok(MutationResult::Unit)
+        }
+        MutationRequest::EditObservation {
+            entity_name,
+            observation_id,
+            body,
+            occurred_at_us,
+        } => {
+            if occurred_at_us.is_some_and(|time| time < 0) {
+                return Err(MCSError::InvalidParams(
+                    "occurredAtUs must be non-negative".into(),
+                ));
+            }
+            let entity = require_entity(conn, &entity_name)?;
+            let old_body: Option<String> = conn
+                .query_row(
+                    "SELECT body FROM observation WHERE id=?1 AND entity_id=?2",
+                    params![observation_id, entity.entity_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sql_error)?;
+            let Some(old_body) = old_body else {
+                return Err(MCSError::InvalidParams(
+                    "observation not found".into(),
+                ));
+            };
+            conn.execute(
+                "UPDATE observation SET body=?1, occurred_us=?2 WHERE id=?3 AND entity_id=?4",
+                params![body, occurred_at_us, observation_id, entity.entity_id],
+            )
+            .map_err(sql_error)?;
+            // obs_fts has an insert trigger and a before-delete trigger but
+            // no update trigger, so an edit reindexes its row by hand.
+            conn.execute(
+                "INSERT INTO obs_fts(obs_fts, rowid, body) VALUES ('delete', ?1, ?2)",
+                params![observation_id, old_body],
+            )
+            .map_err(sql_error)?;
+            conn.execute(
+                "INSERT INTO obs_fts(rowid, body) VALUES (?1, ?2)",
+                params![observation_id, body],
+            )
+            .map_err(sql_error)?;
+            Ok(MutationResult::Unit)
+        }
+        MutationRequest::DeleteObservationById {
+            entity_name,
+            observation_id,
+        } => {
+            let entity = require_entity(conn, &entity_name)?;
+            // The before-delete trigger removes the row from obs_fts.
+            conn.execute(
+                "DELETE FROM observation WHERE id=?1 AND entity_id=?2",
+                params![observation_id, entity.entity_id],
+            )
+            .map_err(sql_error)?;
+            Ok(MutationResult::Unit)
+        }
+        MutationRequest::DeleteRelationObservationById {
+            from,
+            to,
+            relation_type,
+            observation_id,
+        } => {
+            let mirror_id = resolve_relation_mirror(
+                conn,
+                &Relation {
+                    from,
+                    to,
+                    relation_type,
+                },
+            )?;
+            // The before-delete trigger removes the row from rel_obs_fts.
+            let deleted = conn
+                .execute(
+                    "DELETE FROM relation_observation WHERE id=?1 AND relation_id=?2",
+                    params![observation_id, mirror_id],
+                )
+                .map_err(sql_error)? as i64;
+            if deleted > 0 {
+                conn.execute(
+                    "UPDATE graph_stat SET value=value-?1 WHERE key='relation_obs'",
+                    [deleted],
+                )
+                .map_err(sql_error)?;
+                bump_relation_revision_enqueue(conn, mirror_id)?;
             }
             Ok(MutationResult::Unit)
         }
