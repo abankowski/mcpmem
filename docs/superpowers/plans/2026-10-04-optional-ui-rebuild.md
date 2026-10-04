@@ -963,6 +963,7 @@ Commit the four files with the reason, tests, token count, and approximate cost.
 - Create: `ui/src/components/*.tsx` for Button, Tag, Count, TopBar, WorkspaceSwitcher, CommandPalette, Sheet, ConfirmDialog, Toast, SegmentedControl
 - Modify: `ui/src/app.tsx`; add `ui/src/features/*/page.tsx` in later screen tasks.
 - Check: `ui/package.json` already runs the manifest check and `tsc --noEmit` through `npm run check`.
+- Modify: `ui/src/index.html`, `ui/vite.config.ts` for the path-prefix-safe asset bootstrap.
 
 **Interfaces:**
 - Consumes: `ui/dist/ui-manifest.json` for final paths; the spec contract tables for `/ui/api/session`, `/ui/api/workspaces`, `/ui/api/search`, `/ui/api/graph`, `/ui/api/node`, `/ui/api/relation`, `/ui/api/mutations`, `/ui/api/attachments*`.
@@ -970,8 +971,9 @@ Commit the four files with the reason, tests, token count, and approximate cost.
   - `lib/api.ts`: `apiFetch<T>(path, init)` adding the `Authorization: Bearer` header and mapping `{code,message}` errors to typed exceptions.
   - `lib/auth.ts`: PKCE flow (graph client `mcpmem-graph-ui`, redirect `/ui`), static-token hash capture with `history.replaceState`, sessionStorage keys, `requestConsent(scopes)`.
   - `lib/workspaces.ts`: cached workspace list per session, explicit selection state, `currentWorkspace()`.
-  - `lib/urls.ts`: one `PUBLIC_BASE` derived from the current script path; every API, asset, page, and OAuth URL built from it (path-prefix safe).
+  - `lib/urls.ts`: derive one `PUBLIC_BASE` from the loaded module URL. Build API, page, and OAuth URLs from it.
   - `app.tsx`: the shell with TopBar, nav, and a page router that pulls `features/*/page.tsx` from `import.meta.glob("./features/*/page.tsx", { eager: false })`.
+  - HTML bootstrap: use relative Vite asset URLs and set a document base before asset tags load. Derive it from the exact browser page suffix. The internal manifest keys stay `/ui/assets/*`.
 
 - [ ] **Step 1: Write a failing type contract**
 
@@ -984,21 +986,21 @@ Expected: FAIL on the missing API client or typed routes. No feature page exists
 
 - [ ] **Step 3: Write the auth and API layers**
 
-Implement `lib/auth.ts` by porting the PKCE logic from the old `src/ui/graph.js`. Port the verifier, the S256 challenge, the token exchange at `/oauth/token`, and the sessionStorage tokens `mcpmem_graph_access` plus the separate `mcpmem_admin_access`. Add hash-token capture and `requestConsent(scopes)` returning a boolean. Implement `lib/api.ts` with typed methods per contract table and a session call that returns the capability object from Task 4. Implement `lib/urls.ts` as described. Implement `lib/format.ts` with the repo's date and time rules, ISO dates and 24 h, and no locale-dependent strings.
+Implement `lib/auth.ts` by porting the PKCE logic from the old `src/ui/graph.js`. Port the verifier, the S256 challenge, the token exchange at `/oauth/token`, and the sessionStorage tokens `mcpmem_graph_access` plus the separate `mcpmem_admin_access`. Add hash-token capture and `requestConsent(scopes)` returning a boolean. Implement `lib/api.ts` with typed methods per contract table and a session call that returns the capability object from Task 10a. Implement `lib/urls.ts` as described. Implement `lib/format.ts` with the repo's date and time rules, ISO dates and 24 h, and no locale-dependent strings.
 
 - [ ] **Step 4: Write the shell and shared components**
 
 Implement the components from the handoff inventory with the tokens from `tokens.css`. Keep one primary button per screen, focus rings on every control, native elements with labels, and `aria-label` on icon buttons. Implement `app.tsx` with TopBar, workspace switcher, command palette (⌘K), and the `import.meta.glob` router. With no feature pages yet, the router renders an empty state.
 
-- [ ] **Step 5: Run the build and the checks**
+- [ ] **Step 5: Build and check the prefixed shell**
 
 Run: `cd ui && npm run build && npm run check`
-Expected: PASS; `ui/dist/ui-manifest.json` still matches the Task 1 check.
+Expected: PASS; `ui/dist/ui-manifest.json` still matches the Task 1 check. Check that the emitted HTML sets the base before any relative asset tag. Open `/ui/admin/callback` and `/mem/ui/admin/callback` through a prefix-stripping proxy. Confirm both load JS and CSS, and no prefixed page requests root `/ui/assets/*`. A relative Vite base without a document base is not enough on the nested callback.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add ui/src ui/scripts
+git add ui/src ui/vite.config.ts
 git commit -m "feat: add the React shell, auth, and API client"
 ```
 
@@ -1172,7 +1174,7 @@ Annotate the commit with tokens burned and approximate cost.
 **Depends on:** Task 12, Task 13, Task 14, Task 15
 
 **Files:**
-- Create: `ui/e2e/playwright.config.ts`, `ui/e2e/helpers.ts`, `ui/e2e/graph.spec.ts`, `ui/e2e/search.spec.ts`, `ui/e2e/admin.spec.ts`, `ui/e2e/files.spec.ts`, `ui/e2e/responsive.spec.ts`, `ui/e2e/regressions.spec.ts`
+- Create: `ui/e2e/playwright.config.ts`, `ui/e2e/helpers.ts`, `ui/e2e/graph.spec.ts`, `ui/e2e/search.spec.ts`, `ui/e2e/admin.spec.ts`, `ui/e2e/files.spec.ts`, `ui/e2e/responsive.spec.ts`, `ui/e2e/regressions.spec.ts`, `ui/e2e/prefix.spec.ts`
 - Modify: `ui/package.json` (add playwright), `ui/package-lock.json`
 
 **Interfaces:**
@@ -1184,6 +1186,7 @@ Annotate the commit with tokens burned and approximate cost.
 Port the four contracts from the deleted `tests/ui_graph_defects.test.mjs` into `ui/e2e/regressions.spec.ts` as real browser assertions: attachment next-page follows pageCount; the attachments list request sends limit >= 1000; the OAuth return restores a node by name even when it is off-page; upload confirmation names the selected file.
 
 Add specs for the graph round trip, search modes, relation hits, and admin owner-vs-admin gates. Add specs for files upload, poll, read, and download. Add responsive checks at 1440, 900, and 390 pixels. Add keyboard checks for ⌘K, Esc, F, and the zoom keys, plus the focus order.
+Add a browser spec through a prefix-stripping `/mem` proxy. Open Graph and the nested admin callback at both root and prefix paths. Check asset, session, and OAuth request paths. No prefixed page may request a root asset or OAuth URL.
 
 - [ ] **Step 2: Run the suite to verify it fails**
 
