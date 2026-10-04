@@ -19,13 +19,12 @@ use axum::body::{Body, Bytes};
 use axum::http::{Request, Response, StatusCode, header};
 use futures::stream;
 use http_body_util::BodyExt;
-use mcpmem::principals::PrincipalEntry;
-use mcpmem::tools::ToolCategory;
-use mcpmem_oauth::store::{Grant, Store, TokenKind};
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use serde_json::{Value, json};
 
 mod support;
+
+use support::{attachment_count, data, fixture, graph, send, upload_path};
 
 /// The measured fields of one attachment row. The plan names them: the
 /// `status` values, `errorStage`, and `pageCount`. A new field changes this
@@ -42,161 +41,7 @@ const ATTACHMENT_FIELDS: [&str; 9] = [
     "status",
 ];
 
-fn plant(store: &Store, principal: &str, scopes: &[&str]) -> String {
-    let token = mcpmem_oauth::new_token();
-    let now = mcpmem_core::events::now_us();
-    store
-        .put_token(
-            &token,
-            TokenKind::Access,
-            &Grant {
-                client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
-                principal: principal.to_owned(),
-                scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
-                resource: format!("{}/mcp", support::PUBLIC_URL),
-                family: mcpmem_oauth::new_token(),
-            },
-            now,
-            now + 3_600_000_000,
-        )
-        .unwrap();
-    token
-}
 
-struct Fixture {
-    server: support::Server,
-    owner: String,
-    reader: String,
-    writer_without_scope: String,
-    workspace: String,
-}
-
-async fn fixture() -> Fixture {
-    let mut oauth = support::oauth_config("https://idp.invalid");
-    for (name, sub) in [("reader", "sub-2"), ("unscoped", "sub-3")] {
-        oauth.principals.push(PrincipalEntry {
-            name: name.into(),
-            iss: "https://idp.invalid".into(),
-            sub: sub.into(),
-            label: None,
-            scopes: vec![
-                "graph-read".into(),
-                "graph-write".into(),
-                "attachments".into(),
-            ],
-        });
-    }
-    oauth.principals[0].scopes.push("attachments".into());
-    let server = support::server(
-        Some(oauth.clone()),
-        support::Scopes {
-            bearer: Vec::new(),
-            enabled: ToolCategory::ALL.to_vec(),
-        },
-        None,
-    )
-    .await;
-    let (owner, reader, writer_without_scope) = server.oauth().with_store(|store| {
-        let id = |index: usize| {
-            mcpmem::principals::human_id(&oauth.principals[index].iss, &oauth.principals[index].sub)
-        };
-        (
-            plant(store, &id(0), &["graph-read", "graph-write", "attachments"]),
-            plant(store, &id(1), &["graph-read", "attachments"]),
-            plant(store, &id(2), &["graph-write"]),
-        )
-    });
-    let created = mcp(
-        &server,
-        &owner,
-        "create_workspace",
-        json!({"name": "private", "visibility": "private"}),
-    )
-    .await;
-    let workspace = created["result"]["workspace"]["workspaceId"]
-        .as_str()
-        .expect("a workspace id")
-        .to_owned();
-    let seeded = mcp(
-        &server,
-        &owner,
-        "create_entities",
-        json!({
-            "workspaceId": workspace,
-            "entities": [
-                { "name": "Alice", "entityType": "person", "observations": [] },
-            ],
-        }),
-    )
-    .await;
-    assert!(
-        seeded.get("error").is_none() && seeded["result"]["isError"].as_bool() != Some(true),
-        "seeding failed: {seeded}"
-    );
-    let reader_id =
-        mcpmem::principals::human_id(&oauth.principals[1].iss, &oauth.principals[1].sub);
-    let grant = mcp(
-        &server,
-        &owner,
-        "grant_workspace_access",
-        json!({"workspaceId":workspace,"principalId":reader_id,"role":"reader"}),
-    )
-    .await;
-    assert_eq!(grant["result"]["grant"]["role"], "reader", "{grant}");
-    Fixture {
-        server,
-        owner,
-        reader,
-        writer_without_scope,
-        workspace,
-    }
-}
-
-async fn mcp(server: &support::Server, token: &str, tool: &str, arguments: Value) -> Value {
-    let response = server
-        .request(
-            Request::post("/mcp")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    json!({
-                        "jsonrpc":"2.0","id":1,"method":"tools/call",
-                        "params":{"name":tool,"arguments":arguments}
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK, "{tool}");
-    support::json(response).await
-}
-
-fn upload_path(ws: &str, entity: &str, filename: &str) -> String {
-    format!("/ui/api/attachments?workspaceId={ws}&entityName={entity}&filename={filename}")
-}
-
-async fn send(
-    server: &support::Server,
-    token: &str,
-    method: &str,
-    path: &str,
-    body: Body,
-    mime: Option<&str>,
-) -> Response<Body> {
-    let mut builder = Request::builder().method(method).uri(path);
-    if !token.is_empty() {
-        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
-    }
-    if let Some(mime) = mime {
-        builder = builder.header(header::CONTENT_TYPE, mime);
-    }
-    server.request(builder.body(body).unwrap()).await
-}
-
-async fn data(response: Response<Body>) -> Value {
-    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
-}
 
 /// The status and the body text of one response. The gate tests print the
 /// body in the assertion message, so a wrong status names its reason.
@@ -207,28 +52,6 @@ async fn status_and_text(response: Response<Body>) -> (StatusCode, String) {
         parts.status,
         String::from_utf8_lossy(&bytes).into_owned(),
     )
-}
-
-fn graph(fixture: &Fixture) -> Connection {
-    let registry_path = format!(
-        "{}.workspaces.sqlite",
-        fixture.server.memory_db_path().display()
-    );
-    let registry = Connection::open(registry_path).unwrap();
-    let path: String = registry
-        .query_row(
-            "SELECT graph_path FROM workspace WHERE workspace_id=?1",
-            [&fixture.workspace],
-            |row| row.get(0),
-        )
-        .unwrap();
-    Connection::open(path).unwrap()
-}
-
-fn attachment_count(fixture: &Fixture) -> i64 {
-    graph(fixture)
-        .query_row("SELECT count(*) FROM attachment", [], |row| row.get(0))
-        .unwrap()
 }
 
 /// A body whose first poll records itself. The gates must reject the request
@@ -260,7 +83,7 @@ fn field_set(object: &Value) -> Vec<&str> {
 /// the row. The metadata and the download return the stored facts.
 #[tokio::test]
 async fn upload_list_metadata_and_download_at_the_api_base() {
-    let fx = fixture().await;
+    let fx = fixture(true).await;
     let post = send(
         &fx.server,
         &fx.owner,
@@ -362,7 +185,7 @@ async fn upload_list_metadata_and_download_at_the_api_base() {
 /// media type; the plan text in task-10-brief.md that says 400 is stale.
 #[tokio::test]
 async fn a_mime_outside_the_allowlist_rejects_and_names_the_rule() {
-    let fx = fixture().await;
+    let fx = fixture(true).await;
     let response = send(
         &fx.server,
         &fx.owner,
@@ -387,7 +210,7 @@ async fn a_mime_outside_the_allowlist_rejects_and_names_the_rule() {
 /// 52,428,800 bytes.
 #[tokio::test]
 async fn one_byte_above_the_cap_rejects_with_413_and_reads_no_body() {
-    let fx = fixture().await;
+    let fx = fixture(true).await;
     let count = Arc::new(AtomicUsize::new(0));
     let request = Request::post(upload_path(&fx.workspace, "Alice", "too-large.txt"))
         .header(header::AUTHORIZATION, format!("Bearer {}", fx.owner))
@@ -418,7 +241,7 @@ async fn one_byte_above_the_cap_rejects_with_413_and_reads_no_body() {
 /// the adapter groups `Size` and `WorkspaceBudget` under 413.
 #[tokio::test]
 async fn workspace_budget_exhaustion_rejects_the_upload() {
-    let fx = fixture().await;
+    let fx = fixture(true).await;
     let conn = graph(&fx);
     let entity_id: i64 = conn
         .query_row("SELECT id FROM entity WHERE name='Alice'", [], |row| {
@@ -428,11 +251,12 @@ async fn workspace_budget_exhaustion_rejects_the_upload() {
     let mut seed = conn
         .prepare(
             "INSERT INTO attachment(entity_id,filename,mime,size_bytes,sha256,content,status,revision,last_error,error_stage,created_us)
-             VALUES(?1,?2,'text/plain',?3,zeroblob(32),zeroblob(?3),'uploaded',1,NULL,NULL,1)",
+             VALUES(?1,?2,'text/plain',?3,zeroblob(32),zeroblob(1),'uploaded',1,NULL,NULL,1)",
         )
         .unwrap();
     // Five near-cap rows (5 x 53,687,080 = 268,435,400) leave 56 bytes of
-    // the default 268,435,456-byte budget.
+    // the default 268,435,456-byte budget. The budget query reads
+    // `size_bytes` only, so the content blob is a one-byte stub.
     for index in 0..5 {
         seed.execute(params![entity_id, format!("seed-{index}.txt"), 53_687_080_i64])
             .unwrap();
@@ -475,7 +299,7 @@ async fn workspace_budget_exhaustion_rejects_the_upload() {
 /// denied-workspace rule answers 404, and the green suite pins it.
 #[tokio::test]
 async fn a_reader_cannot_upload_and_a_token_without_scope_is_denied() {
-    let fx = fixture().await;
+    let fx = fixture(true).await;
     let count = Arc::new(AtomicUsize::new(0));
     let denied = send(
         &fx.server,
@@ -544,7 +368,7 @@ async fn a_reader_cannot_upload_and_a_token_without_scope_is_denied() {
 /// The delete with the wrong workspace leaves the row untouched.
 #[tokio::test]
 async fn an_unknown_workspace_returns_the_same_404_and_hides_existence() {
-    let fx = fixture().await;
+    let fx = fixture(true).await;
     let unknown = "00000000-0000-0000-0000-000000000000";
     let count = Arc::new(AtomicUsize::new(0));
     let upload = send(
@@ -614,6 +438,32 @@ async fn an_unknown_workspace_returns_the_same_404_and_hides_existence() {
     assert_eq!(attachment_count(&fx), 0);
 }
 
+/// A non-UUID `workspaceId` is invalid input, not an unknown workspace. The
+/// registry answers 400 and names the UUID rule. The upload gate rejects
+/// before the body reads, so a malformed id cannot probe the stored rows.
+#[tokio::test]
+async fn a_malformed_workspace_id_rejects_with_400_and_reads_no_body() {
+    let fx = fixture(true).await;
+    let count = Arc::new(AtomicUsize::new(0));
+    let upload = send(
+        &fx.server,
+        &fx.owner,
+        "POST",
+        &upload_path("no-such-workspace", "Alice", "ghost.txt"),
+        never_read_body(Arc::clone(&count)),
+        Some("text/plain"),
+    )
+    .await;
+    let (status, body) = status_and_text(upload).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "malformed id: {body}");
+    assert!(
+        body.contains("workspaceId") && body.contains("UUID"),
+        "the rejection names the UUID rule: {body}"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 0, "the gate rejects first");
+    assert_eq!(attachment_count(&fx), 0);
+}
+
 /// The metadata passes the stored status domain through untouched. The
 /// extractor writes `extracting`, `ready`, and `error` with an `errorStage`;
 /// this test moves one row through all four values and reads each back. The
@@ -621,7 +471,7 @@ async fn an_unknown_workspace_returns_the_same_404_and_hides_existence() {
 /// index state or a chunk count.
 #[tokio::test]
 async fn metadata_passes_the_status_domain_and_page_count_through() {
-    let fx = fixture().await;
+    let fx = fixture(true).await;
     let uploaded = send(
         &fx.server,
         &fx.owner,
@@ -703,7 +553,7 @@ async fn metadata_passes_the_status_domain_and_page_count_through() {
 /// freed name is the proof that the row and its blob are gone.
 #[tokio::test]
 async fn delete_removes_the_row_job_and_bytes() {
-    let fx = fixture().await;
+    let fx = fixture(true).await;
     let uploaded = send(
         &fx.server,
         &fx.owner,
@@ -752,7 +602,7 @@ async fn delete_removes_the_row_job_and_bytes() {
 /// `Content-Type` header. A missing input answers 400 and names the input.
 #[tokio::test]
 async fn uploads_require_filename_entity_and_content_type() {
-    let fx = fixture().await;
+    let fx = fixture(true).await;
     let cases = [
         (
             format!(
