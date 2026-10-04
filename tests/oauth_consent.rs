@@ -554,6 +554,45 @@ fn a_hostile_destination_is_escaped() {
     assert!(html.contains("&lt;script&gt;"), "{html}");
 }
 
+/// The page carries the handoff surface: the mcpmem wordmark, the scope rows
+/// as cards, and the inlined dark-theme tokens.
+///
+/// The look is a contract, not a taste. The OAuth crate serves this page
+/// without the UI feature, so the tokens are inlined here and the markers
+/// below are what a restyle must keep: a wordmark that names the server (not
+/// the client asking), one card per offered scope with a `scope` checkbox,
+/// and the dimension and surface tokens the handoff layout is built from.
+#[test]
+fn the_page_carries_the_handoff_surface() {
+    let html = page(
+        "Test client",
+        "adam@example.com",
+        "https://claude.ai/api/mcp/auth_callback",
+        &["graph-read".to_string(), "graph-write".to_string()],
+        "csrf-value",
+        "state-value",
+    );
+    // The wordmark names the server that serves this page, never who is
+    // asking for consent.
+    assert!(html.contains(r#"class="wordmark""#), "{html}");
+    assert!(
+        html.contains(">mcpmem<"),
+        "the wordmark must name the server: {html}"
+    );
+    // Scope rows render as cards, one checkbox per offered scope.
+    assert!(
+        html.contains(r#"class="scope-card""#),
+        "an offered scope must render in a scope card: {html}"
+    );
+    assert!(html.contains(r#"value="graph-read""#), "{html}");
+    assert!(html.contains(r#"value="graph-write""#), "{html}");
+    // The tokens are inlined because the crate cannot depend on the UI
+    // feature. The dimension token shapes the card; the surface token is the
+    // app ground the whole page sits on.
+    assert!(html.contains("--radius-lg: 10px"), "{html}");
+    assert!(html.contains("--surface-0: #141310"), "{html}");
+}
+
 /// Every value the page draws as text sits inside a `<bdi>`.
 ///
 /// A strongly right-to-left name reorders the neutral characters around it, so
