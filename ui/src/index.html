@@ -1,8 +1,25 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <script>
+      // Run before Vite's relative script, stylesheet, and preload tags.
+      // The server serves only these exact page suffixes under /ui.
+      (() => {
+        const path = location.pathname;
+        const suffix = ["/ui/admin/callback", "/ui/search", "/ui/admin", "/ui"]
+          .find((page) => path.endsWith(page));
+        if (!suffix) return;
+        const base = document.createElement("base");
+        base.href = location.origin + path.slice(0, -suffix.length) + "/ui/";
+        document.head.append(base);
+      })();
+    </script>
+
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet" />
     <title>mcpmem</title>
   </head>
   <body>
