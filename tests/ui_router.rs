@@ -346,9 +346,14 @@ fn manifest() -> serde_json::Value {
     serde_json::from_str(&text).expect("the manifest is JSON")
 }
 
-/// Every path the tests probe either as assets or as `/ui/api/*` routes.
+/// Every path the off-state tests probe: the four page routes, the manifest
+/// assets, and the `/ui/api/*` routes.
 fn api_probes() -> Vec<String> {
     let mut probes: Vec<String> = vec![
+        "/ui".into(),
+        "/ui/search".into(),
+        "/ui/admin".into(),
+        "/ui/admin/callback".into(),
         "/ui/api/graph".into(),
         "/ui/api/search".into(),
         "/ui/api/node".into(),
@@ -496,6 +501,53 @@ fn data_moves_under_api() {
             .any(|e| e["name"] == "Alice"),
         "search finds the seeded node: {body}"
     );
+
+    // The relation adapter answers one exact triple: seed Acme and the
+    // works_at edge, then read the triple back with its detail shape.
+    let acme = format!(
+        r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_entities","arguments":{{"workspaceId":"{ws}","entities":[{{"name":"Acme","entityType":"company","observations":[]}}]}}}},"id":3}}"#
+    );
+    let (status, _, body) = request(srv.port, "POST", "/mcp", Some(&acme), Some(TEST_BEARER));
+    assert_eq!(status, 200, "seed Acme should succeed: {body}");
+    let works_at = format!(
+        r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"create_relations","arguments":{{"workspaceId":"{ws}","relations":[{{"from":"Alice","to":"Acme","relationType":"works_at"}}]}}}},"id":4}}"#
+    );
+    let (status, _, body) = request(srv.port, "POST", "/mcp", Some(&works_at), Some(TEST_BEARER));
+    assert_eq!(status, 200, "seed create_relations should succeed: {body}");
+
+    let (status, _headers, body) = get(
+        srv.port,
+        &format!("/ui/api/relation?workspaceId={ws}&from=Alice&to=Acme&relationType=works_at"),
+        Some(TEST_BEARER),
+    );
+    assert_eq!(
+        status, 200,
+        "GET /ui/api/relation should succeed: {body:.120}"
+    );
+    let relation: serde_json::Value =
+        serde_json::from_str(&body).expect("relation payload is JSON");
+    assert_eq!(relation["from"], "Alice", "the triple keeps its from");
+    assert_eq!(relation["to"], "Acme", "the triple keeps its to");
+    assert_eq!(
+        relation["relationType"], "works_at",
+        "the triple keeps its relationType"
+    );
+    assert!(
+        relation["observations"].is_array(),
+        "the triple carries its observations"
+    );
+    assert!(
+        relation["attributes"].is_object(),
+        "the triple carries its attributes"
+    );
+
+    // An absent triple is a 404, the same answer an unknown workspace gives.
+    let (status, _headers, _body) = get(
+        srv.port,
+        &format!("/ui/api/relation?workspaceId={ws}&from=Alice&to=Zed&relationType=works_at"),
+        Some(TEST_BEARER),
+    );
+    assert_eq!(status, 404, "an unknown relation triple must be a 404");
 }
 
 /// The parsed JSON of one JSON-RPC tool result. `create_workspace` returns
