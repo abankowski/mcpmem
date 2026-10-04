@@ -280,6 +280,7 @@ pub struct ServerSection {
     pub log_file: Option<String>,
     pub roles: Option<Vec<String>>,
     pub legacy_observations: Option<bool>,
+    pub ui: Option<bool>,
     pub stdio_concurrency: Option<usize>,
     pub read_pool_size: Option<usize>,
 }
@@ -448,6 +449,11 @@ impl FileConfig {
             &mut args.legacy_observations,
             server.legacy_observations,
             cli.absent("legacy_observations"),
+        );
+        assign(
+            &mut args.ui,
+            server.ui,
+            cli.absent("ui"),
         );
         assign(
             &mut args.stdio_concurrency,

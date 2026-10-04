@@ -100,6 +100,15 @@ pub struct Args {
     #[arg(long)]
     pub legacy_observations: bool,
 
+    /// Embed and serve the optional browser UI under /ui.
+    #[arg(
+        long,
+        action = clap::ArgAction::Set,
+        value_parser = clap::value_parser!(bool),
+        default_value_t = true
+    )]
+    pub ui: bool,
+
     /// Bearer token required on the `http` (`Authorization` header) transport.
     /// Overrides `--auth-token-file` and the `MCP_MEMORY_AUTH_TOKEN` env var.
     /// stdio is never authenticated.

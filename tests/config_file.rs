@@ -261,6 +261,18 @@ fn the_log_file_comes_from_the_file_and_a_flag_beats_it() {
 }
 
 #[test]
+fn ui_comes_from_the_file_and_a_flag_beats_it() {
+    let from_file = merge(&[], "[server]\nui = false\n");
+    assert!(
+        !from_file.ui,
+        "the file must fill ui when the CLI leaves it alone"
+    );
+
+    let from_cli = merge(&["--ui", "true"], "[server]\nui = false\n");
+    assert!(from_cli.ui, "a command-line flag beats the file");
+}
+
+#[test]
 fn an_unknown_role_in_the_file_fails_with_the_same_error_as_the_flag() {
     let args = merge(&[], "[server]\nroles = [\"indexerr\"]\n");
     let error = Config::from_args(&args).expect_err("an unknown role must be rejected");
