@@ -871,10 +871,13 @@ Create `tests/ui_attachment_http.rs`:
 ```rust
 // upload raw body with filename and entityName at the new base returns
 // status "uploaded"; list returns the row; download returns the bytes.
-// MIME outside the allowlist -> 400 naming the rule.
-// byte 52,428,801 -> 413.
-// workspace budget exhaustion -> 409.
-// reader token -> 403 on upload; missing attachments scope -> 403.
+// MIME outside the allowlist -> 415 naming the rule (adapter semantics,
+// corrected 2026-10-04: the moved handler answers UNSUPPORTED_MEDIA_TYPE).
+// byte 52,428,801 -> 413 with zero body reads.
+// workspace budget exhaustion -> 413 (attachment_failure groups Size and
+// WorkspaceBudget together; corrected 2026-10-04).
+// reader-with-scope upload -> 404 like any denied workspace (denied maps to
+// not_found); missing attachments scope -> 403 before any lookup.
 // wrong workspace returns 404 and hides existence.
 // delete removes the row and frees the bytes.
 ```
