@@ -321,11 +321,12 @@ impl Config {
             ));
         }
 
-        // A build without the `ui` feature has no `/ui` route. Refuse the UI
-        // at startup so an operator sees a named error instead of a blank
-        // page.
+        // A build without the `ui` feature has no `/ui` route. Refuse only
+        // an explicit enable at startup so an operator sees a named error
+        // instead of a blank page. The absent flag stays off and never
+        // refuses.
         #[cfg(not(feature = "ui"))]
-        if args.ui {
+        if args.ui == Some(true) {
             return Err(MCSError::InvalidParams(
                 "the ui build feature is not compiled into this binary".into(),
             ));
@@ -447,7 +448,7 @@ impl Config {
             enabled_categories,
             roles,
             legacy_observations: args.legacy_observations,
-            ui_enabled: args.ui,
+            ui_enabled: args.ui.unwrap_or(cfg!(feature = "ui")),
             oauth,
             bearer_scopes,
             attachments: args.attachments.clone(),
