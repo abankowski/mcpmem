@@ -5,62 +5,239 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Authorize {{client_name}}</title>
 <style>
-:root { color-scheme: light dark; }
-body {
-  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  margin: 0; display: flex; justify-content: center; padding: 3rem 1rem;
+:root {
+  /* The mcpmem dark theme, inlined from designs/mcpmem-ui-handoff/tokens.css.
+     The OAuth crate serves this page to external clients and must not depend
+     on the UI feature, so the tokens live here. Keep the values in step with
+     tokens.css. */
+  color-scheme: dark;
+  --surface-0: #141310;
+  --surface-1: #1e1c18;
+  --surface-2: #2a2722;
+  --line: #332f29;
+  --line-strong: #7a7367;
+  --ink: #ece8df;
+  --ink-muted: #b1aa9d;
+  --ink-faint: #8f887b;
+  --on-orange: #1c1b18;
+  --orange: #f26b1d;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --shadow-float: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --font-ui: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-display: "Fraunces", "Iowan Old Style", Georgia, serif;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
 }
-main { max-width: 32rem; width: 100%; }
-h1 { font-size: 1.5rem; margin: 0 0 1rem; }
-.who { opacity: 0.75; font-size: 0.9rem; }
-fieldset { border: 1px solid currentColor; border-radius: 6px; margin: 1.5rem 0; padding: 1rem; }
-legend { padding: 0 0.4rem; font-weight: 600; }
-.scope { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.25rem 0; }
-.scope code { font-size: 0.95rem; }
-.buttons { display: flex; gap: 0.75rem; }
-button { font: inherit; padding: 0.5rem 1.25rem; border-radius: 6px; cursor: pointer; }
-button[name="approve"] { font-weight: 600; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--ink);
+  background: var(--surface-0);
+}
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 40px 16px;
+}
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.wordmark .name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 22px;
+}
+.card {
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  box-shadow: var(--shadow-float);
+}
+.heading {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.heading h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 26px;
+  line-height: 32px;
+}
+.heading .sub {
+  margin: 0;
+  color: var(--ink-muted);
+}
+.kv {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.kv .cap { align-self: center; }
+.kv .mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.cap {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 16px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  font-weight: 500;
+}
+.intake {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+legend { padding: 0; }
+.scope-card {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-0);
+  cursor: pointer;
+}
+.scope-card:hover { border-color: var(--line-strong); }
+.scope-card:has(input:checked) { border-color: var(--line-strong); }
+.scope-card input[type="checkbox"] {
+  accent-color: var(--orange);
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+}
+.scope-card code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.identity {
+  font-size: 13px;
+  color: var(--ink-muted);
+}
+.buttons {
+  display: flex;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.btn:hover { background: var(--surface-2); }
+.btn.primary {
+  background: var(--orange);
+  border-color: var(--orange);
+  color: var(--on-orange);
+}
+.revoke {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
 </style>
 </head>
 <body>
-<main>
-<!--
-  Each substituted value sits in a `<bdi>`. A strongly right-to-left name
-  reorders the neutral characters around it, so a bare name in
-  `Authorize <name>` can rearrange the sentence that tells the human what they
-  are about to grant. `<bdi>` isolates the value's direction from the sentence.
-  It does not make the value itself safe: `consent.rs` still drops the twelve
-  bidirectional controls, because an override inside an isolate still reverses
-  the run it opens, and `<title>` below takes text with no element to wrap it.
--->
-<h1>Authorize <bdi>{{client_name}}</bdi></h1>
-<p><strong><bdi>{{client_name}}</bdi></strong> asks to use your memory graph on your behalf.</p>
-<!--
-  The destination, not only the name. Registration is open and unauthenticated,
-  so the name above is whatever the registrant chose; the authority below is
-  the one the authorization code is actually delivered to, taken from the
-  login row and matched byte for byte against the registered set.
--->
-<p>Approving sends your authorization to <strong><bdi>{{destination}}</bdi></strong>.</p>
-<p class="who">You are signed in as <bdi>{{principal_label}}</bdi>.</p>
-<!--
-  The action is relative on purpose. This page is served from
-  `GET /oauth/callback`, so `consent` resolves to `/oauth/consent` at the same
-  prefix — which is what a server published under a path prefix needs, and
-  what an absolute `/oauth/consent` would get wrong behind a stripping proxy.
--->
-<form method="post" action="consent">
-<input type="hidden" name="csrf" value="{{csrf}}">
-<input type="hidden" name="state" value="{{state}}">
-<fieldset>
-<legend>Grant only what it needs</legend>
-{{scopes}}
-</fieldset>
-<div class="buttons">
-<button type="submit" name="approve" value="1">Approve</button>
-<button type="submit" name="deny" value="1">Deny</button>
+<div class="app">
+  <!--
+    Each substituted value sits in a `<bdi>`. A strongly right-to-left name
+    reorders the neutral characters around it, so a bare name in
+    `Authorize <name>` can rearrange the sentence that tells the human what they
+    are about to grant. `<bdi>` isolates the value's direction from the
+    sentence. It does not make the value itself safe: `consent.rs` still drops
+    the twelve bidirectional controls, because an override inside an isolate
+    still reverses the run it opens, and `<title>` below takes text with no
+    element to wrap it.
+  -->
+  <div class="wordmark"><span class="name">mcpmem</span></div>
+
+  <div class="card">
+    <div class="heading">
+      <h1>Authorize <bdi>{{client_name}}</bdi></h1>
+      <p class="sub"><strong><bdi>{{client_name}}</bdi></strong> asks to use your memory graph on your behalf.</p>
+    </div>
+
+    <!--
+      The destination, not only the name. Registration is open and
+      unauthenticated, so the name above is whatever the registrant chose; the
+      authority below is the one the authorization code is actually delivered
+      to, taken from the login row and matched byte for byte against the
+      registered set.
+    -->
+    <div class="kv"><span class="cap">Returns to</span><span class="mono"><bdi>{{destination}}</bdi></span></div>
+
+    <!--
+      The action is relative on purpose. This page is served from
+      `GET /oauth/callback`, so `consent` resolves to `/oauth/consent` at the
+      same prefix — which is what a server published under a path prefix needs,
+      and what an absolute `/oauth/consent` would get wrong behind a stripping
+      proxy.
+    -->
+    <form class="intake" method="post" action="consent">
+      <input type="hidden" name="csrf" value="{{csrf}}">
+      <input type="hidden" name="state" value="{{state}}">
+      <fieldset>
+        <legend class="cap">Grant only what it needs</legend>
+        {{scopes}}
+      </fieldset>
+      <div class="identity">You are signed in as <bdi>{{principal_label}}</bdi>.</div>
+      <div class="buttons">
+        <button type="submit" class="btn" name="deny" value="1">Deny</button>
+        <button type="submit" class="btn primary" name="approve" value="1">Approve</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="revoke">You can revoke this grant any time in Admin · Principals.</div>
 </div>
-</form>
-</main>
 </body>
 </html>
