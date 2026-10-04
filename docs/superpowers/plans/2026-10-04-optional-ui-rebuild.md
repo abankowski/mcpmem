@@ -953,6 +953,81 @@ Commit the four files with the reason, tests, token count, and approximate cost.
 
 ---
 
+### Task 10b: Complete the graph detail and page routes
+
+**Depends on:** Task 4
+
+**Files:**
+- Modify: `src/ui/api/graph.rs`, `src/ui/pages.rs`, `tests/ui_router.rs`
+- Create: `tests/ui_graph_detail.rs`
+
+**Interfaces:**
+- Add `GET /ui/api/types?workspaceId` with entity and relation type catalogues.
+- Return `{entities:[{type,count,desc?}],relations:[{type,count,desc?}]}` from the selected workspace.
+- Include registered types with zero members when a description exists.
+- Make `GET /ui/api/node` return the approved entity detail with incident triples and degree.
+- Use the existing `describe_entity` snapshot instead of inferring adjacency from the graph page.
+- Serve the same shell for direct visits to `/ui/admin/*`. Keep the exact OAuth callback route.
+
+**Correction, 2026-10-04:** Task 4 moved only the old graph handlers. It omitted the type catalogue. Its node handler returns `Entity`, which has no incident relations or degree. The graph page cannot construct either fact from one page of nodes. Admin subpaths also return 404 on a direct visit.
+
+- [ ] **Step 1: Write failing HTTP tests**
+
+Cover both type catalogues, descriptions, zero-member types, and selected workspace access. Cover node degree, relation triples, observation IDs, and an absent node. Cover direct Admin subpath reload and the callback.
+
+- [ ] **Step 2: See the tests fail on the partial routes**
+
+Run: `cargo test --test ui_graph_detail --test ui_router -- --test-threads=1`
+Expected: FAIL on missing type and Admin subpath routes and incomplete node detail.
+
+- [ ] **Step 3: Implement the graph detail and page routes**
+
+Reuse the viewer scope gate, workspace registry, and core graph snapshot methods. Keep the UI build and runtime gates in `src/ui/mod.rs`.
+
+- [ ] **Step 4: Verify and commit**
+
+Run the two suites above and adjacent graph HTTP tests. Commit the changed files with test results, token count, and approximate cost.
+
+---
+
+### Task 10c: Make browser API errors match the approved envelope
+
+**Depends on:** Tasks 10a and 10b
+
+**Files:**
+- Modify: `src/http.rs`, `src/ui/api/graph.rs`, `src/ui/api/admin.rs`, `src/ui/api/attachments.rs`, `src/ui/api/session.rs`
+- Modify as needed: `src/ui/api/search.rs`, `src/ui/api/mutations.rs`, `src/ui/api/mod.rs`, `src/ui/mod.rs`
+- Test: `tests/ui_error_contract.rs` (new); update existing UI HTTP assertions that read `error`.
+
+**Interfaces:**
+- Known `/ui/api/*` routes return every non-success body as `{code,message}`.
+- Preserve HTTP status values and the exact `WWW-Authenticate` challenge on 401 and scope 403.
+- Use stable snake-case codes for each status. Preserve existing `forbidden` and `permission_denied` codes where the UI already emits them. Use `unauthorized`, `insufficient_scope`, `bad_request`, `not_found`, `conflict`, `request_timeout`, `payload_too_large`, `unsupported_media_type`, `unavailable`, or `internal_error` elsewhere.
+- Keep unknown and denied workspace errors identical. Do not include internal storage details in a 5xx message.
+- Do not change MCP or OAuth transport response bodies. Do not remove the static query-token fallback used by scripts.
+
+**Correction, 2026-10-04:** The old shared HTTP helper emits `{error}`. Several moved UI handlers also return plain text. A browser fallback would hide the mismatch and break one error contract across screens. Correct the UI responses at their server boundary.
+
+- [ ] **Step 1: Write failing error-contract tests**
+
+Probe authentication, scope, input, hidden workspace, conflict, MIME, byte cap, and unavailable service responses. Assert the status, code, message, and challenge header where one applies. Keep a positive request beside a hidden-workspace test.
+
+- [ ] **Step 2: See the tests fail**
+
+Run: `cargo test --test ui_error_contract -- --test-threads=1`
+Expected: FAIL on `{error}` and plain-text UI bodies.
+
+- [ ] **Step 3: Normalize UI errors**
+
+Use one UI error helper for the shared shape. Migrate browser adapter call sites and old UI error assertions. Leave the MCP and OAuth challenge bodies unchanged.
+
+- [ ] **Step 4: Verify and commit**
+
+Run the new suite and affected UI HTTP suites. Commit the changed files with test results, token count, and approximate cost.
+
+---
+
+
 
 ### Task 11: React foundation and shell
 
@@ -1011,7 +1086,7 @@ Annotate the commit with tokens burned and approximate cost.
 
 ### Task 12: Graph screen
 
-**Depends on:** Task 7, Task 11, Task 15
+**Depends on:** Tasks 7, 10b, 10c, 11, and 15
 
 **Files:**
 - Create: `ui/src/features/graph/page.tsx`, `ui/src/features/graph/canvas.ts`, `ui/src/features/graph/rail.tsx`, `ui/src/features/graph/toolbar.tsx`, `ui/src/features/graph/legend.tsx`, `ui/src/features/graph/new-menu.tsx`, `ui/src/features/graph/inspector/`, `ui/src/features/graph/session-state.ts`
@@ -1059,7 +1134,7 @@ Annotate the commit with tokens burned and approximate cost.
 
 ### Task 13: Search screen
 
-**Depends on:** Task 8, Task 11, Task 12
+**Depends on:** Tasks 8, 10b, 10c, 11, and 12
 
 **Files:**
 - Create: `ui/src/features/search/page.tsx`, `ui/src/features/search/controls.tsx`, `ui/src/features/search/results.tsx`, `ui/src/features/search/state.ts`
@@ -1098,7 +1173,7 @@ Annotate the commit with tokens burned and approximate cost.
 
 ### Task 14: Admin screens
 
-**Depends on:** Task 9, Task 11
+**Depends on:** Tasks 9, 10b, 10c, and 11
 
 **Files:**
 - Create: `ui/src/features/admin/page.tsx`, `ui/src/features/admin/subnav.tsx`, `ui/src/features/admin/workspaces.tsx`, `ui/src/features/admin/members.tsx`, `ui/src/features/admin/principals.tsx`, `ui/src/features/admin/approvals.tsx`, `ui/src/features/admin/webhooks.tsx`, `ui/src/features/admin/repos.tsx`, `ui/src/features/admin/vectors.tsx`
