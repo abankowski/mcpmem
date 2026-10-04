@@ -463,8 +463,10 @@ fn pages_and_assets_serve_with_runtime_ui_on() {
 
 #[test]
 fn legacy_json_urls_are_gone() {
-    // GET /ui/graph, /ui/node, /ui/workspaces, /ui/attachments, /ui/search?q=..
-    // with a valid graph-read token -> 404, not JSON.
+    // GET /ui/graph, /ui/node, /ui/workspaces, /ui/attachments with a valid
+    // graph-read token -> 404, not JSON. /ui/search is a page now: it returns
+    // 200 text/html with no JSON envelope (corrected per the design; the
+    // first brief text wrongly listed it among the legacy JSON URLs).
 }
 
 #[test]
