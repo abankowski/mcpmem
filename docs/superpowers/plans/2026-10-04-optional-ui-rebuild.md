@@ -964,11 +964,12 @@ Commit the four files with the reason, tests, token count, and approximate cost.
 - Modify: `ui/src/app.tsx`; add `ui/src/features/*/page.tsx` in later screen tasks.
 - Check: `ui/package.json` already runs the manifest check and `tsc --noEmit` through `npm run check`.
 - Modify: `ui/src/index.html`, `ui/vite.config.ts` for the path-prefix-safe asset bootstrap.
+- Modify: `ui/package.json`, `ui/package-lock.json` to add Zod for browser response validation.
 
 **Interfaces:**
 - Consumes: `ui/dist/ui-manifest.json` for final paths; the spec contract tables for `/ui/api/session`, `/ui/api/workspaces`, `/ui/api/search`, `/ui/api/graph`, `/ui/api/node`, `/ui/api/relation`, `/ui/api/mutations`, `/ui/api/attachments*`.
 - Produces:
-  - `lib/api.ts`: `apiFetch<T>(path, init)` adding the `Authorization: Bearer` header and mapping `{code,message}` errors to typed exceptions.
+  - `lib/api.ts`: `apiFetch` adds the `Authorization: Bearer` header. Parse external JSON with Zod schemas. Map `{code,message}` errors to typed exceptions.
   - `lib/auth.ts`: PKCE flow (graph client `mcpmem-graph-ui`, redirect `/ui`), static-token hash capture with `history.replaceState`, sessionStorage keys, `requestConsent(scopes)`.
   - `lib/workspaces.ts`: cached workspace list per session, explicit selection state, `currentWorkspace()`.
   - `lib/urls.ts`: derive one `PUBLIC_BASE` from the loaded module URL. Build API, page, and OAuth URLs from it.
@@ -1000,7 +1001,7 @@ Expected: PASS; `ui/dist/ui-manifest.json` still matches the Task 1 check. Check
 - [ ] **Step 6: Commit**
 
 ```bash
-git add ui/src ui/vite.config.ts
+git add ui/src ui/vite.config.ts ui/package.json ui/package-lock.json
 git commit -m "feat: add the React shell, auth, and API client"
 ```
 
