@@ -662,7 +662,7 @@ Annotate the commit with tokens burned and approximate cost.
 
 **Files:**
 - Create: `src/ui/api/mutations.rs`, `tests/ui_mutations.rs` (new)
-- Create: `crates/mcpmem-core/src/mutation.rs` additions (see Controller ruling), `crates/mcpmem-core/src/types.rs` additions
+- Create: `crates/mcpmem-core/src/mutation.rs` additions (see Controller ruling)
 - Modify: `src/ui/mod.rs` (register the mutations routes)
 
 **Controller ruling (2026-10-04, ledger):** Task 2 implemented `editObservation` and the ID-keyed deletes only. `reverseRelation` and `changeRelationType` do not exist in core. The gateway cannot dispatch to them. Task 7 therefore ALSO implements the two atomic triple mutations in `mcpmem-core`:
@@ -672,6 +672,7 @@ Annotate the commit with tokens burned and approximate cost.
 - A self-loop reverse is a no-op with a named error.
 - `ChangeRelationType` to the identical triple is a no-op.
 - Tests cover: swap with observations and attributes preserved; the old triple gone; a failed create rolls back and never deletes the old triple; self-loop no-op; duplicate-target conflict returns 409-equivalent.
+- Controller ruling 2 (2026-10-04, post-review): reverse and retype MUST be invertible. When the target triple exists only as a tombstoned mirror row (deleted=1), delete that tombstone first, then apply the fresh UNIQUE insert. This is not an upsert and does not resurrect the old id; it lets a UI undo-reverse or re-change-type back to the original triple. Add round-trip tests for both operations.
 
 **Interfaces:**
 - Consumes: `MutationService` request variants from Task 2; the auth helpers and `workspace_failure` mapping from `http.rs`.
@@ -712,7 +713,7 @@ In `mutations.rs`, parse `operation` as a tagged enum. Validate the payload per 
 
 - [ ] **Step 4: Register the route**
 
-In `src/ui/mod.rs`, add `router = crate::ui::api::mutations::attach(router, state);` inside the `ui_enabled` branch.
+In `src/ui/mod.rs`, add `router = crate::ui::api::mutations::attach(router);` inside the `ui_enabled` branch. The adapter's attach takes the router only, matching every sibling adapter; it reads capability state from `HttpState` where it needs a gate.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
