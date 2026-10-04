@@ -104,10 +104,9 @@ pub struct Args {
     #[arg(
         long,
         action = clap::ArgAction::Set,
-        value_parser = clap::value_parser!(bool),
-        default_value_t = true
+        value_parser = clap::value_parser!(bool)
     )]
-    pub ui: bool,
+    pub ui: Option<bool>,
 
     /// Bearer token required on the `http` (`Authorization` header) transport.
     /// Overrides `--auth-token-file` and the `MCP_MEMORY_AUTH_TOKEN` env var.

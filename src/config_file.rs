@@ -452,7 +452,7 @@ impl FileConfig {
         );
         assign(
             &mut args.ui,
-            server.ui,
+            server.ui.map(Some),
             cli.absent("ui"),
         );
         assign(
