@@ -41,17 +41,12 @@ const ATTACHMENT_FIELDS: [&str; 9] = [
     "status",
 ];
 
-
-
 /// The status and the body text of one response. The gate tests print the
 /// body in the assertion message, so a wrong status names its reason.
 async fn status_and_text(response: Response<Body>) -> (StatusCode, String) {
     let (parts, body) = response.into_parts();
     let bytes = body.collect().await.unwrap().to_bytes();
-    (
-        parts.status,
-        String::from_utf8_lossy(&bytes).into_owned(),
-    )
+    (parts.status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// A body whose first poll records itself. The gates must reject the request
@@ -176,7 +171,11 @@ async fn upload_list_metadata_and_download_at_the_api_base() {
         "attachment; filename=\"hello.txt\""
     );
     let bytes = download.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&bytes[..], b"hello", "the download returns the stored bytes");
+    assert_eq!(
+        &bytes[..],
+        b"hello",
+        "the download returns the stored bytes"
+    );
 }
 
 /// The MIME type outside the allowlist rejects the upload. The rejection
@@ -258,8 +257,12 @@ async fn workspace_budget_exhaustion_rejects_the_upload() {
     // the default 268,435,456-byte budget. The budget query reads
     // `size_bytes` only, so the content blob is a one-byte stub.
     for index in 0..5 {
-        seed.execute(params![entity_id, format!("seed-{index}.txt"), 53_687_080_i64])
-            .unwrap();
+        seed.execute(params![
+            entity_id,
+            format!("seed-{index}.txt"),
+            53_687_080_i64
+        ])
+        .unwrap();
     }
     drop(seed);
     drop(conn);
@@ -359,7 +362,11 @@ async fn a_reader_cannot_upload_and_a_token_without_scope_is_denied() {
         None,
     )
     .await;
-    assert_eq!(list.status(), StatusCode::OK, "the read grant serves the list");
+    assert_eq!(
+        list.status(),
+        StatusCode::OK,
+        "the read grant serves the list"
+    );
 }
 
 /// An unknown workspace answers 404 on every route and hides the stored
@@ -389,9 +396,7 @@ async fn an_unknown_workspace_returns_the_same_404_and_hides_existence() {
         &fx.server,
         &fx.owner,
         "GET",
-        &format!(
-            "/ui/api/attachments?workspaceId={unknown}&entityName=Alice"
-        ),
+        &format!("/ui/api/attachments?workspaceId={unknown}&entityName=Alice"),
         Body::empty(),
         None,
     )
@@ -500,8 +505,11 @@ async fn metadata_passes_the_status_domain_and_page_count_through() {
         }
     };
 
-    conn.execute("UPDATE attachment SET status='extracting' WHERE id=?1", [id])
-        .unwrap();
+    conn.execute(
+        "UPDATE attachment SET status='extracting' WHERE id=?1",
+        [id],
+    )
+    .unwrap();
     let extracting = meta(id).await;
     assert_eq!(extracting["status"], "extracting");
     assert_eq!(extracting["errorStage"], Value::Null);
