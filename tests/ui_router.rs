@@ -420,6 +420,14 @@ fn pages_and_assets_serve_with_runtime_ui_on() {
 #[test]
 fn admin_subpaths_reload_with_the_shell() {
     let srv = spawn("true", Some(TEST_BEARER));
+    // The served shell is the built artifact: it must carry the admin-subpath
+    // base rule, or a reload on an admin subpage 404s its assets. The raw
+    // HTML cannot run the script, so pin its source marker in the response.
+    let (_, _, shell) = get(srv.port, "/ui/admin", None);
+    assert!(
+        shell.contains("lastIndexOf(\"/ui/admin/\")"),
+        "the served shell carries the admin-subpath base rule"
+    );
     for path in [
         "/ui/admin/workspaces",
         "/ui/admin/repos",
