@@ -5,4 +5,5 @@
 pub mod admin;
 pub mod attachments;
 pub mod graph;
+pub mod mutations;
 pub mod search;

@@ -122,6 +122,23 @@ pub enum MutationRequest {
         relation_type: String,
         observation_id: i64,
     },
+    /// Swap the direction of one relation triple in one transaction. The
+    /// observation and attribute children follow the triple; the old mirror
+    /// is tombstoned and the new one gets a fresh row.
+    ReverseRelation {
+        from: String,
+        to: String,
+        relation_type: String,
+    },
+    /// Change the type of one relation triple in one transaction. The
+    /// observation and attribute children follow the triple; the old mirror
+    /// is tombstoned and the new one gets a fresh row.
+    ChangeRelationType {
+        from: String,
+        to: String,
+        relation_type: String,
+        new_relation_type: String,
+    },
     MergeEntities {
         source: String,
         target: String,
@@ -552,9 +569,12 @@ fn affected_names(conn: &Connection, request: &MutationRequest) -> Result<BTreeS
             .iter()
             .map(|update| update.relation.from.clone())
             .collect(),
-        MutationRequest::DeleteRelationObservationById { from, .. } => {
-            [from.clone()].into()
-        }
+        MutationRequest::DeleteRelationObservationById { from, .. } => [from.clone()].into(),
+        // Both endpoints are event anchors: the swap or re-type changes the
+        // relation between the same two entities, so their snapshots and
+        // relation deltas must be captured on both sides of the mutation.
+        MutationRequest::ReverseRelation { from, to, .. }
+        | MutationRequest::ChangeRelationType { from, to, .. } => [from.clone(), to.clone()].into(),
         MutationRequest::SetAttributes { targets } => targets
             .iter()
             .filter_map(|target| match target.owner_kind.as_str() {
@@ -960,6 +980,63 @@ fn resolve_relation_mirror(conn: &Connection, relation: &Relation) -> Result<i64
         )),
         _ => sql_error(error),
     })
+}
+
+/// One live relation triple and the ids of its physical rows. The mirror id
+/// names the row the chunk worker owns; the entity and type ids name the
+/// physical relation table row that connects the two endpoints.
+fn resolve_live_relation(conn: &Connection, relation: &Relation) -> Result<(i64, i64, i64, i64)> {
+    conn.query_row(
+        "SELECT m.id, m.from_id, m.to_id, m.type_id
+         FROM taxonomy_relation m
+         JOIN entity f ON f.id = m.from_id AND f.name = ?1 AND f.flags = 0
+         JOIN entity t ON t.id = m.to_id AND t.name = ?2 AND t.flags = 0
+         JOIN type_dict d ON d.id = m.type_id AND d.kind = 1 AND d.name = ?3
+         WHERE m.deleted = 0",
+        params![relation.from, relation.to, relation.relation_type],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => MCSError::InvalidParams(format!(
+            "{} -> {} -> {} not found",
+            relation.from, relation.relation_type, relation.to
+        )),
+        _ => sql_error(error),
+    })
+}
+
+/// A UNIQUE refusal on the target triple is a conflict the caller could have
+/// avoided, not a store fault. The transaction rolls back, so the old triple
+/// stays live and this error never deletes it.
+fn relation_target_conflict(error: rusqlite::Error, relation: &Relation) -> MCSError {
+    match error {
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            MCSError::ConstraintViolation(format!(
+                "{} -> {} -> {} already exists",
+                relation.from, relation.relation_type, relation.to
+            ))
+        }
+        other => sql_error(other),
+    }
+}
+
+/// Move the observation and attribute children of one mirror to another.
+/// The children keep their ids and their order; only the parent pointer
+/// changes, so the FTS projections stay valid.
+fn rehome_relation_children(conn: &Connection, old_mirror: i64, new_mirror: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE relation_observation SET relation_id=?1 WHERE relation_id=?2",
+        params![new_mirror, old_mirror],
+    )
+    .map_err(sql_error)?;
+    conn.execute(
+        "UPDATE attribute SET owner_id=?1 WHERE owner_kind='relation' AND owner_id=?2",
+        params![new_mirror, old_mirror],
+    )
+    .map_err(sql_error)?;
+    Ok(())
 }
 
 /// Insert relation observation rows, keyed on the mirror id, id from the
@@ -1478,9 +1555,7 @@ fn execute(
                 .optional()
                 .map_err(sql_error)?;
             let Some(old_body) = old_body else {
-                return Err(MCSError::InvalidParams(
-                    "observation not found".into(),
-                ));
+                return Err(MCSError::InvalidParams("observation not found".into()));
             };
             conn.execute(
                 "UPDATE observation SET body=?1, occurred_us=?2 WHERE id=?3 AND entity_id=?4",
@@ -1543,6 +1618,124 @@ fn execute(
                 .map_err(sql_error)?;
                 bump_relation_revision_enqueue(conn, mirror_id)?;
             }
+            Ok(MutationResult::Unit)
+        }
+        MutationRequest::ReverseRelation {
+            from,
+            to,
+            relation_type,
+        } => {
+            // A self-loop has one direction, so the swap cannot change it.
+            // The refusal is named so the caller does not mistake the
+            // unchanged graph for a success.
+            if from == to {
+                return Err(MCSError::InvalidParams(
+                    "self-loop reverse is a no-op".into(),
+                ));
+            }
+            let old = Relation {
+                from: from.clone(),
+                to: to.clone(),
+                relation_type: relation_type.clone(),
+            };
+            let target = Relation {
+                from: to.clone(),
+                to: from.clone(),
+                relation_type: relation_type.clone(),
+            };
+            let (old_mirror, from_id, to_id, type_id) = resolve_live_relation(conn, &old)?;
+            let changed = conn
+                .execute(
+                    "UPDATE relation SET from_id=?1, to_id=?2
+                     WHERE from_id=?3 AND to_id=?4 AND type_id=?5",
+                    params![to_id, from_id, from_id, to_id, type_id],
+                )
+                .map_err(|error| relation_target_conflict(error, &target))?;
+            if changed == 0 {
+                return Err(MCSError::InvalidParams(format!(
+                    "{} -> {} -> {} not found",
+                    from, relation_type, to
+                )));
+            }
+            // A fresh mirror for the swapped triple. The plain insert is the
+            // point of the ruling: the upsert would resurrect a tombstoned
+            // target with its old id, and the worker would then overwrite
+            // that row with the swapped content. A target that exists in any
+            // form refuses here and the whole transaction rolls back.
+            let new_mirror: i64 = conn
+                .query_row(
+                    "INSERT INTO taxonomy_relation(from_id,to_id,type_id,revision,deleted)
+                     VALUES(?1,?2,?3,1,0) RETURNING id",
+                    params![to_id, from_id, type_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| relation_target_conflict(error, &target))?;
+            rehome_relation_children(conn, old_mirror, new_mirror)?;
+            // The old mirror is tombstoned after its children moved. The
+            // children deletes inside the tombstone then match nothing.
+            tombstone_relation_mirror(conn, from_id, to_id, type_id)?;
+            crate::jobs::enqueue_chunk_change(
+                conn,
+                crate::jobs::OwnerKind::Relation,
+                new_mirror,
+                1,
+                false,
+            )?;
+            Ok(MutationResult::Unit)
+        }
+        MutationRequest::ChangeRelationType {
+            from,
+            to,
+            relation_type,
+            new_relation_type,
+        } => {
+            // Re-typing to the identical triple changes nothing. The request
+            // completes as a no-op, like an empty write.
+            if relation_type == new_relation_type {
+                return Ok(MutationResult::Unit);
+            }
+            let old = Relation {
+                from: from.clone(),
+                to: to.clone(),
+                relation_type: relation_type.clone(),
+            };
+            let target = Relation {
+                from: from.clone(),
+                to: to.clone(),
+                relation_type: new_relation_type.clone(),
+            };
+            let (old_mirror, from_id, to_id, old_type_id) = resolve_live_relation(conn, &old)?;
+            let new_type_id = type_id(conn, &new_relation_type, 1)?;
+            let changed = conn
+                .execute(
+                    "UPDATE relation SET type_id=?1
+                     WHERE from_id=?2 AND to_id=?3 AND type_id=?4",
+                    params![new_type_id, from_id, to_id, old_type_id],
+                )
+                .map_err(|error| relation_target_conflict(error, &target))?;
+            if changed == 0 {
+                return Err(MCSError::InvalidParams(format!(
+                    "{} -> {} -> {} not found",
+                    from, relation_type, to
+                )));
+            }
+            let new_mirror: i64 = conn
+                .query_row(
+                    "INSERT INTO taxonomy_relation(from_id,to_id,type_id,revision,deleted)
+                     VALUES(?1,?2,?3,1,0) RETURNING id",
+                    params![from_id, to_id, new_type_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| relation_target_conflict(error, &target))?;
+            rehome_relation_children(conn, old_mirror, new_mirror)?;
+            tombstone_relation_mirror(conn, from_id, to_id, old_type_id)?;
+            crate::jobs::enqueue_chunk_change(
+                conn,
+                crate::jobs::OwnerKind::Relation,
+                new_mirror,
+                1,
+                false,
+            )?;
             Ok(MutationResult::Unit)
         }
         MutationRequest::MergeEntities { source, target } => {
@@ -2119,5 +2312,348 @@ mod tests {
         // relation delta makes an entity change for each endpoint), once at
         // the delete. Count drops to the one survivor.
         assert_eq!((count, revision), (1, 3), "survivor count and bumps");
+    }
+
+    /// (id, body) rows of the relation observations under one triple, in
+    /// stored order.
+    fn relation_obs(
+        kg: &GraphHandle,
+        from: &str,
+        to: &str,
+        relation_type: &str,
+    ) -> Vec<(i64, String)> {
+        let conn = kg.writer.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT ro.id, ro.body FROM relation_observation ro
+                 JOIN taxonomy_relation m ON m.id = ro.relation_id
+                 JOIN entity f ON f.id = m.from_id
+                 JOIN entity t ON t.id = m.to_id
+                 JOIN type_dict d ON d.id = m.type_id
+                 WHERE f.name=?1 AND t.name=?2 AND d.name=?3 AND d.kind=1
+                 ORDER BY ro.idx, ro.id",
+            )
+            .unwrap();
+        stmt.query_map(params![from, to, relation_type], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    }
+
+    /// The k:v attributes of one relation triple, keyed on the triple's own
+    /// mirror row.
+    fn relation_attrs(
+        kg: &GraphHandle,
+        from: &str,
+        to: &str,
+        relation_type: &str,
+    ) -> BTreeMap<String, String> {
+        let conn = kg.writer.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.key, a.value FROM attribute a
+                 JOIN taxonomy_relation m ON m.id = a.owner_id
+                 JOIN entity f ON f.id = m.from_id
+                 JOIN entity t ON t.id = m.to_id
+                 JOIN type_dict d ON d.id = m.type_id
+                 WHERE a.owner_kind='relation' AND f.name=?1 AND t.name=?2
+                   AND d.name=?3 AND d.kind=1
+                 ORDER BY a.key",
+            )
+            .unwrap();
+        stmt.query_map(params![from, to, relation_type], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    }
+
+    /// Seed one relation with one observation and one attribute.
+    fn seed_relation_with_children(kg: &GraphHandle, from: &str, to: &str, relation_type: &str) {
+        kg.create_relations(&[RelationInput {
+            from: from.into(),
+            to: to.into(),
+            relation_type: relation_type.into(),
+            observations: vec!["shared fact".into()],
+            attributes: Some(BTreeMap::from([("weight".into(), "7".into())])),
+        }])
+        .unwrap();
+    }
+
+    fn reverse(
+        kg: &GraphHandle,
+        from: &str,
+        to: &str,
+        relation_type: &str,
+    ) -> crate::errors::Result<()> {
+        MutationService::new(kg)
+            .apply(
+                MutationRequest::ReverseRelation {
+                    from: from.into(),
+                    to: to.into(),
+                    relation_type: relation_type.into(),
+                },
+                MutationContext::local(),
+            )
+            .map(|_| ())
+    }
+
+    fn change_type(
+        kg: &GraphHandle,
+        from: &str,
+        to: &str,
+        relation_type: &str,
+        new_relation_type: &str,
+    ) -> crate::errors::Result<()> {
+        MutationService::new(kg)
+            .apply(
+                MutationRequest::ChangeRelationType {
+                    from: from.into(),
+                    to: to.into(),
+                    relation_type: relation_type.into(),
+                    new_relation_type: new_relation_type.into(),
+                },
+                MutationContext::local(),
+            )
+            .map(|_| ())
+    }
+
+    #[test]
+    fn reverse_relation_swaps_triple_and_preserves_children() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
+            .unwrap();
+        seed_relation_with_children(&kg, "ada", "bob", "knows");
+        let (old_mirror, old_revision, old_deleted) = mirror_row(&kg, "ada", "bob", "knows");
+        assert_eq!((old_revision, old_deleted), (1, 0), "live mirror expected");
+        let obs_before = relation_obs(&kg, "ada", "bob", "knows");
+
+        reverse(&kg, "ada", "bob", "knows").expect("reverse succeeds");
+
+        // The swapped triple is live on a fresh mirror row with revision one.
+        let (new_mirror, new_revision, new_deleted) = mirror_row(&kg, "bob", "ada", "knows");
+        assert_ne!(new_mirror, old_mirror, "a fresh mirror row is required");
+        assert_eq!((new_revision, new_deleted), (1, 0));
+        // The old triple is tombstoned in place, revision bumped once.
+        let (same_id, revision, deleted) = mirror_row(&kg, "ada", "bob", "knows");
+        assert_eq!(
+            (same_id, revision, deleted),
+            (old_mirror, old_revision + 1, 1),
+            "old mirror tombstoned"
+        );
+        assert!(
+            mirror_detail(&kg.writer.lock(), &relation("ada", "bob", "knows"))
+                .unwrap()
+                .is_none(),
+            "the old triple no longer exists"
+        );
+        // The observation and attribute children moved with the triple and
+        // kept their ids.
+        assert_eq!(
+            relation_obs(&kg, "bob", "ada", "knows"),
+            obs_before,
+            "observations follow the swap"
+        );
+        assert_eq!(
+            relation_attrs(&kg, "bob", "ada", "knows"),
+            BTreeMap::from([("weight".into(), "7".into())])
+        );
+        assert!(relation_obs(&kg, "ada", "bob", "knows").is_empty());
+        assert!(relation_attrs(&kg, "ada", "bob", "knows").is_empty());
+        // The physical row now points the other way.
+        let conn = kg.writer.lock();
+        let direction: (String, String) = conn
+            .query_row(
+                "SELECT f.name, t.name FROM relation r
+                 JOIN entity f ON f.id = r.from_id
+                 JOIN entity t ON t.id = r.to_id
+                 JOIN type_dict d ON d.id = r.type_id
+                 WHERE d.kind=1 AND d.name='knows'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(direction, ("bob".into(), "ada".into()));
+        // Both chunk jobs were enqueued: the delete for the old mirror, the
+        // upsert for the fresh one.
+        let jobs = relation_chunk_jobs(&kg);
+        assert_eq!(jobs.len(), 2, "both chunk jobs expected");
+        let delete = jobs
+            .iter()
+            .find(|job| job.0 == old_mirror)
+            .expect("the old mirror gets a delete job");
+        assert_eq!((delete.1, delete.2.as_str()), (old_revision + 1, "delete"));
+        let upsert = jobs
+            .iter()
+            .find(|job| job.0 == new_mirror)
+            .expect("the new mirror gets an upsert job");
+        assert_eq!((upsert.1, upsert.2.as_str()), (1, "upsert"));
+    }
+
+    #[test]
+    fn reverse_relation_self_loop_is_a_named_noop() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person")]).unwrap();
+        kg.create_relations(&[relation_input("ada", "ada", "self")])
+            .unwrap();
+        let before = mirror_row(&kg, "ada", "ada", "self");
+
+        let error = reverse(&kg, "ada", "ada", "self").expect_err("self-loop must refuse");
+        assert!(
+            error.to_string().contains("self-loop"),
+            "the refusal names the no-op: {error}"
+        );
+        assert_eq!(
+            mirror_row(&kg, "ada", "ada", "self"),
+            before,
+            "the graph does not change"
+        );
+    }
+
+    #[test]
+    fn change_relation_type_retypes_in_one_transaction() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
+            .unwrap();
+        seed_relation_with_children(&kg, "ada", "bob", "knows");
+        let (old_mirror, old_revision, _) = mirror_row(&kg, "ada", "bob", "knows");
+        let obs_before = relation_obs(&kg, "ada", "bob", "knows");
+
+        change_type(&kg, "ada", "bob", "knows", "likes").expect("re-type succeeds");
+
+        let (new_mirror, new_revision, new_deleted) = mirror_row(&kg, "ada", "bob", "likes");
+        assert_ne!(new_mirror, old_mirror, "a fresh mirror row is required");
+        assert_eq!((new_revision, new_deleted), (1, 0));
+        let (_, revision, deleted) = mirror_row(&kg, "ada", "bob", "knows");
+        assert_eq!(
+            (revision, deleted),
+            (old_revision + 1, 1),
+            "old mirror tombstoned"
+        );
+        assert_eq!(
+            relation_obs(&kg, "ada", "bob", "likes"),
+            obs_before,
+            "observations follow the re-type"
+        );
+        assert_eq!(
+            relation_attrs(&kg, "ada", "bob", "likes"),
+            BTreeMap::from([("weight".into(), "7".into())])
+        );
+        // The relations counter moves between the two types.
+        let (count, _) = type_row(&kg, 1, "knows");
+        assert_eq!(count, 0);
+        let (count, _) = type_row(&kg, 1, "likes");
+        assert_eq!(count, 1);
+        // The physical row carries the new type.
+        let conn = kg.writer.lock();
+        let physical: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM relation r
+                 JOIN type_dict d ON d.id = r.type_id
+                 WHERE d.kind=1 AND d.name='likes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(physical, 1);
+        // One delete job for the old mirror, one upsert for the new one.
+        let jobs = relation_chunk_jobs(&kg);
+        assert_eq!(jobs.len(), 2);
+        let delete = jobs
+            .iter()
+            .find(|job| job.0 == old_mirror)
+            .expect("the old mirror gets a delete job");
+        assert_eq!((delete.1, delete.2.as_str()), (old_revision + 1, "delete"));
+        let upsert = jobs
+            .iter()
+            .find(|job| job.0 == new_mirror)
+            .expect("the new mirror gets an upsert job");
+        assert_eq!((upsert.1, upsert.2.as_str()), (1, "upsert"));
+    }
+
+    #[test]
+    fn change_relation_type_to_identical_triple_is_a_noop() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
+            .unwrap();
+        kg.create_relations(&[relation_input("ada", "bob", "knows")])
+            .unwrap();
+        let before = mirror_row(&kg, "ada", "bob", "knows");
+
+        change_type(&kg, "ada", "bob", "knows", "knows").expect("identical re-type succeeds");
+
+        assert_eq!(
+            mirror_row(&kg, "ada", "bob", "knows"),
+            before,
+            "the triple does not change"
+        );
+        let jobs = relation_chunk_jobs(&kg);
+        assert_eq!(jobs.len(), 1, "no new job for a no-op");
+    }
+
+    #[test]
+    fn failed_reverse_rolls_back_and_keeps_the_old_triple() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
+            .unwrap();
+        // Both directions exist: the swap target is already a live triple.
+        seed_relation_with_children(&kg, "ada", "bob", "knows");
+        kg.create_relations(&[relation_input("bob", "ada", "knows")])
+            .unwrap();
+        let old_before = mirror_row(&kg, "ada", "bob", "knows");
+        let target_before = mirror_row(&kg, "bob", "ada", "knows");
+        let obs_before = relation_obs(&kg, "ada", "bob", "knows");
+        let jobs_before = relation_chunk_jobs(&kg);
+
+        let error = reverse(&kg, "ada", "bob", "knows").expect_err("target conflict must refuse");
+        assert!(
+            matches!(error, MCSError::ConstraintViolation(_)),
+            "an avoidable conflict is named, not a store fault: {error}"
+        );
+
+        // The whole transaction rolled back: both triples are live, the
+        // children stayed with the old mirror, and no job was added.
+        assert_eq!(mirror_row(&kg, "ada", "bob", "knows"), old_before);
+        assert_eq!(mirror_row(&kg, "bob", "ada", "knows"), target_before);
+        assert_eq!(relation_obs(&kg, "ada", "bob", "knows"), obs_before);
+        assert_eq!(relation_chunk_jobs(&kg), jobs_before);
+    }
+
+    #[test]
+    fn failed_retype_rolls_back_and_keeps_the_old_triple() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
+            .unwrap();
+        seed_relation_with_children(&kg, "ada", "bob", "knows");
+        // The target type already has a live triple between the same pair.
+        kg.create_relations(&[relation_input("ada", "bob", "likes")])
+            .unwrap();
+        let old_before = mirror_row(&kg, "ada", "bob", "knows");
+        let obs_before = relation_obs(&kg, "ada", "bob", "knows");
+        let jobs_before = relation_chunk_jobs(&kg);
+
+        let error =
+            change_type(&kg, "ada", "bob", "knows", "likes").expect_err("conflict must refuse");
+        assert!(
+            matches!(error, MCSError::ConstraintViolation(_)),
+            "an avoidable conflict is named, not a store fault: {error}"
+        );
+
+        assert_eq!(mirror_row(&kg, "ada", "bob", "knows"), old_before);
+        assert_eq!(relation_obs(&kg, "ada", "bob", "knows"), obs_before);
+        assert_eq!(relation_chunk_jobs(&kg), jobs_before);
+        let (count, _) = type_row(&kg, 1, "knows");
+        assert_eq!(count, 1, "the old relation stays counted");
     }
 }
