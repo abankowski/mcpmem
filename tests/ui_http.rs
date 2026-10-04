@@ -856,9 +856,10 @@ fn test_ui_search_paginated_nodes_only() {
     let ws = register_workspace(srv.port, Some(TEST_BEARER));
     seed_many(srv.port, 25, &ws);
 
+    // The page size k caps the response: 10 of the 25 FTS matches.
     let (status, headers, body) = get(
         srv.port,
-        &format!("/ui/api/search?workspaceId={ws}&q=person&limit=10&offset=0"),
+        &format!("/ui/api/search?workspaceId={ws}&q=person&mode=direct&scope=nodes&k=10"),
         Some(TEST_BEARER),
     );
     assert_eq!(status, 200, "search should succeed: {body}");
@@ -869,24 +870,47 @@ fn test_ui_search_paginated_nodes_only() {
         "search data must be JSON, headers: {headers}"
     );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results.len(), 10, "the page holds k rows: {body}");
     assert_eq!(
-        v["entities"].as_array().unwrap().len(),
+        v["count"].as_u64().unwrap(),
         10,
-        "first search page"
+        "count matches the returned rows"
     );
-    assert_eq!(v["page"]["hasMore"], true, "25 matches → more pages");
     // Search returns matched nodes only; the user expands for relationships.
-    assert_eq!(v["relations"].as_array().unwrap().len(), 0);
+    for row in results {
+        assert_eq!(
+            row["kind"].as_str(),
+            Some("entity"),
+            "every row is a node SearchHit: {row:?}"
+        );
+        assert!(
+            row["name"].as_str().is_some(),
+            "a node hit names the entity: {row:?}"
+        );
+        assert!(
+            row["entityType"].as_str().is_some(),
+            "a node hit carries its type: {row:?}"
+        );
+    }
+    assert!(
+        v.get("entities").is_none(),
+        "the envelope has no graph members: {body}"
+    );
+    assert!(
+        v.get("relations").is_none(),
+        "the envelope has no graph members: {body}"
+    );
 
-    // Second page paginates the same query.
+    // A larger legal k returns every match; there is no offset cursor.
     let (_, _, body) = get(
         srv.port,
-        &format!("/ui/api/search?workspaceId={ws}&q=person&limit=10&offset=20"),
+        &format!("/ui/api/search?workspaceId={ws}&q=person&mode=direct&scope=nodes&k=50"),
         Some(TEST_BEARER),
     );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["entities"].as_array().unwrap().len(), 5);
-    assert_eq!(v["page"]["hasMore"], false);
+    assert_eq!(v["results"].as_array().unwrap().len(), 25);
+    assert_eq!(v["count"].as_u64().unwrap(), 25);
 }
 
 #[test]
@@ -902,15 +926,24 @@ fn test_ui_search_prefix_and_permission() {
     );
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let names: Vec<&str> = v["entities"]
-        .as_array()
-        .unwrap()
+    let results = v["results"].as_array().unwrap();
+    let names: Vec<&str> = results
         .iter()
-        .map(|e| e["name"].as_str().unwrap())
+        .filter_map(|row| row.get("name").and_then(serde_json::Value::as_str))
         .collect();
     assert!(
         names.contains(&"Acme"),
         "prefix search should find Acme, got {names:?}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|row| row["kind"].as_str() == Some("entity")),
+        "every hit is a node SearchHit"
+    );
+    assert!(
+        v["count"].as_u64().unwrap() >= 1,
+        "count reflects the matches: {v}"
     );
     drop(srv);
 
