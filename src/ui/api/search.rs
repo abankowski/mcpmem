@@ -12,7 +12,6 @@
 //! The adapter never calls its own `/mcp` endpoint; it drives the graph
 //! handle and the shared vector path directly, exactly as MCP dispatch does.
 
-use axum::Json;
 use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -20,12 +19,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracing::error;
 
 use crate::authz::Principal;
 use crate::errors::{MCSError, Result};
-use crate::http::{HttpState, workspace_failure};
+use crate::http::{HttpState, ui_error, ui_insufficient_scope, workspace_failure};
 use crate::kg::GraphHandle;
 use crate::ui::api::graph::{UiSelection, ui_data_gate, ui_json};
 use crate::vector_store::VectorStore;
@@ -124,7 +123,7 @@ async fn ui_search_handler(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     else {
-        return search_error(
+        return ui_error(
             StatusCode::BAD_REQUEST,
             "bad_request",
             "missing 'q' parameter",
@@ -137,7 +136,7 @@ async fn ui_search_handler(
     {
         s if s == "nodes" || s == "relations" => s,
         other => {
-            return search_error(
+            return ui_error(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
                 format!("'scope' must be nodes or relations, not {other:?}"),
@@ -151,7 +150,7 @@ async fn ui_search_handler(
     {
         s if s == "direct" || s == "semantic" || s == "hybrid" => s,
         other => {
-            return search_error(
+            return ui_error(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
                 format!("'mode' must be direct, semantic or hybrid, not {other:?}"),
@@ -163,7 +162,7 @@ async fn ui_search_handler(
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(10);
     if !matches!(k, 10 | 20 | 50) {
-        return search_error(
+        return ui_error(
             StatusCode::BAD_REQUEST,
             "bad_request",
             "'k' must be 10, 20 or 50",
@@ -206,7 +205,7 @@ async fn ui_search_handler(
             // store or profile check, so the challenge names the scope and
             // never the server's configuration.
             if let Some(missing) = crate::authz::missing_scope(&principal, "semantic_search") {
-                return insufficient_scope_response(missing);
+                return ui_insufficient_scope(&state, &[missing]);
             }
             let allow_attachments =
                 crate::server::attachments_enabled() && principal.scopes.contains("attachments");
@@ -230,31 +229,6 @@ async fn ui_search_handler(
             .await
         }
     }
-}
-
-/// One error body in the `{code,message}` contract the design doc pins.
-fn search_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> Response {
-    (
-        status,
-        Json(json!({ "code": code, "message": message.into() })),
-    )
-        .into_response()
-}
-
-/// The 403 for a missing scope, with the UI's `{code,message}` body. The
-/// challenge names the scope the caller must ask for, mirroring the mutation
-/// adapter's response.
-fn insufficient_scope_response(scope: &'static str) -> Response {
-    let challenge = format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\"");
-    (
-        StatusCode::FORBIDDEN,
-        [(header::WWW_AUTHENTICATE, challenge)],
-        Json(json!({
-            "code": "insufficient_scope",
-            "message": "insufficient scope",
-        })),
-    )
-        .into_response()
 }
 
 /// Turn a free-text search box query into a safe FTS5 MATCH expression: keep
@@ -482,15 +456,15 @@ async fn ui_vector_response(
         Ok(Ok(json)) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
         Ok(Err(UiSearchError::Workspace(error))) => workspace_failure(&error),
         Ok(Err(UiSearchError::Unavailable(message))) => {
-            search_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
+            ui_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
         }
         #[cfg(feature = "indexer")]
         Ok(Err(UiSearchError::BadRequest(message))) => {
-            search_error(StatusCode::BAD_REQUEST, "bad_request", message)
+            ui_error(StatusCode::BAD_REQUEST, "bad_request", message)
         }
         Ok(Err(UiSearchError::Malformed(message))) => {
             error!("/ui/api/search vector payload: {message}");
-            search_error(
+            ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "internal error",
@@ -498,7 +472,7 @@ async fn ui_vector_response(
         }
         Err(join_err) => {
             error!("/ui/api/search task panicked: {join_err}");
-            search_error(
+            ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "internal error",

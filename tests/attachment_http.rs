@@ -324,7 +324,7 @@ async fn byte_after_limit_is_rejected_even_with_a_false_short_length() {
     let response = fx.server.request(request).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert!(
-        data(response).await["error"]
+        data(response).await["message"]
             .as_str()
             .unwrap()
             .contains("per-file")
@@ -406,7 +406,7 @@ async fn mime_duplicate_and_entity_rules_leave_the_original_intact() {
     .await;
     assert_eq!(invalid.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     assert!(
-        data(invalid).await["error"]
+        data(invalid).await["message"]
             .as_str()
             .unwrap()
             .contains("MIME")
@@ -433,7 +433,7 @@ async fn mime_duplicate_and_entity_rules_leave_the_original_intact() {
     .await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     assert!(
-        data(duplicate).await["error"]
+        data(duplicate).await["message"]
             .as_str()
             .unwrap()
             .contains("duplicate")
@@ -830,7 +830,7 @@ async fn concurrent_upload_spools_hit_a_process_wide_bound_and_release() {
     let rejected = rejected.expect("the process-wide spool bound never filled");
     let rejected: Value = serde_json::from_slice(&rejected).expect("a json rejection body");
     assert!(
-        rejected["error"]
+        rejected["message"]
             .as_str()
             .unwrap()
             .contains("spool capacity"),

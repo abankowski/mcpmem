@@ -598,7 +598,10 @@ async fn test_delivery_refuses_a_host_outside_the_allowlist() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = support::json(res).await;
     assert!(
-        body["error"].as_str().unwrap().contains("not allowlisted"),
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("not allowlisted"),
         "{body}"
     );
     assert_eq!(
@@ -650,7 +653,7 @@ async fn test_delivery_refuses_an_unknown_secret_ref() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = support::json(res).await;
     assert!(
-        body["error"].as_str().unwrap().contains("not configured"),
+        body["message"].as_str().unwrap().contains("not configured"),
         "{body}"
     );
 }

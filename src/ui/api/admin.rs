@@ -25,8 +25,8 @@ use serde_json::json;
 
 use crate::authz::Principal;
 use crate::http::{
-    HttpState, admin_gate, bad_request, conflict, insufficient_scope, json_error, not_found,
-    oauth_store_failure, principal_of_ui, store_failure, unauthorized, workspace_failure,
+    HttpState, admin_gate, bad_request, conflict, not_found, oauth_store_failure, principal_of_ui,
+    store_failure, ui_error, ui_insufficient_scope, ui_unauthorized, workspace_failure,
 };
 use crate::workspace::{Visibility, WorkspaceError};
 use tracing::error;
@@ -167,7 +167,7 @@ async fn admin_list_principals(State(state): State<HttpState>, headers: HeaderMa
         return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found();
     };
     let mut out: Vec<PrincipalView> = oauth
         .config
@@ -224,7 +224,7 @@ async fn admin_create_principal(
         return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found();
     };
     let input: PrincipalInput = match serde_json::from_str(&body) {
         Ok(v) => v,
@@ -292,7 +292,7 @@ async fn admin_update_principal(
         return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found();
     };
     let Some((iss, sub)) = key_of_id(&id) else {
         return not_found();
@@ -365,7 +365,7 @@ async fn admin_delete_principal(
         return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found();
     };
     let Some((iss, sub)) = key_of_id(&id) else {
         return not_found();
@@ -400,9 +400,11 @@ async fn admin_delete_principal(
             return conflict("a workspace owner cannot be deleted");
         }
         Err(error) => {
-            return json_error(
+            error!("workspace registry: {error}");
+            return ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("workspace registry: {error}"),
+                "internal_error",
+                "internal error",
             );
         }
     };
@@ -421,7 +423,7 @@ async fn admin_list_waitlist(State(state): State<HttpState>, headers: HeaderMap)
         return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found();
     };
     let entries = match oauth.with_principals(|s| s.waitlist()) {
         Ok(rows) => rows,
@@ -456,7 +458,7 @@ async fn admin_approve_waitlist(
         return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found();
     };
     let Some((iss, sub)) = key_of_id(&id) else {
         return not_found();
@@ -501,7 +503,7 @@ async fn admin_dismiss_waitlist(
         return *response;
     }
     let Some(oauth) = state.oauth.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return not_found();
     };
     let Some((iss, sub)) = key_of_id(&id) else {
         return not_found();
@@ -538,23 +540,21 @@ fn ws_write_gate(
     tool: &str,
 ) -> std::result::Result<Principal, Box<Response>> {
     let Some(principal) = principal_of_ui(state, headers, None) else {
-        return Err(Box::new(unauthorized(state)));
+        return Err(Box::new(ui_unauthorized(state)));
     };
     if !state
         .enabled_categories
         .contains(&crate::tools::ToolCategory::GraphWrite)
     {
-        return Err(Box::new(
-            (
-                StatusCode::FORBIDDEN,
-                "graph-write tools are disabled; start the server with --enable-graph-write \
+        return Err(Box::new(ui_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "graph-write tools are disabled; start the server with --enable-graph-write \
              (or --enable-all)",
-            )
-                .into_response(),
-        ));
+        )));
     }
     if let Some(scope) = crate::authz::missing_scope(&principal, tool) {
-        return Err(Box::new(insufficient_scope(state, &[scope])));
+        return Err(Box::new(ui_insufficient_scope(state, &[scope])));
     }
     Ok(principal)
 }
@@ -569,20 +569,18 @@ fn ws_read_gate(
     tool: &str,
 ) -> std::result::Result<Principal, Box<Response>> {
     let Some(principal) = principal_of_ui(state, headers, None) else {
-        return Err(Box::new(unauthorized(state)));
+        return Err(Box::new(ui_unauthorized(state)));
     };
     if !crate::server::graph_read_enabled() {
-        return Err(Box::new(
-            (
-                StatusCode::FORBIDDEN,
-                "graph-read tools are disabled; start the server with --enable-graph-read \
+        return Err(Box::new(ui_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "graph-read tools are disabled; start the server with --enable-graph-read \
              (or --enable-all)",
-            )
-                .into_response(),
-        ));
+        )));
     }
     if let Some(scope) = crate::authz::missing_scope(&principal, tool) {
-        return Err(Box::new(insufficient_scope(state, &[scope])));
+        return Err(Box::new(ui_insufficient_scope(state, &[scope])));
     }
     Ok(principal)
 }
@@ -597,10 +595,10 @@ fn vector_stats_gate(
 ) -> std::result::Result<Principal, Box<Response>> {
     let Some(principal) = principal_of_ui(state, headers, params.get("token").map(String::as_str))
     else {
-        return Err(Box::new(unauthorized(state)));
+        return Err(Box::new(ui_unauthorized(state)));
     };
     if let Some(scope) = crate::authz::missing_scope(&principal, "vector_store_stats") {
-        return Err(Box::new(insufficient_scope(state, &[scope])));
+        return Err(Box::new(ui_insufficient_scope(state, &[scope])));
     }
     Ok(principal)
 }
@@ -683,7 +681,11 @@ async fn admin_create_workspace(
         Ok(Err(error)) => workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/workspaces create task panicked: {error}");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -710,7 +712,11 @@ async fn admin_get_workspace(
         Ok(Err(error)) => workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/workspaces view task panicked: {error}");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -751,7 +757,11 @@ async fn admin_update_workspace(
         Ok(Err(error)) => workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/workspaces update task panicked: {error}");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -778,7 +788,11 @@ async fn admin_list_grants(
         Ok(Err(error)) => workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/workspaces grants task panicked: {error}");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -819,7 +833,11 @@ async fn admin_create_grant(
         Ok(Err(error)) => workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/workspaces grant task panicked: {error}");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -848,7 +866,11 @@ async fn admin_revoke_grant(
         Ok(Err(error)) => workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/workspaces revoke task panicked: {error}");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -907,9 +929,10 @@ async fn admin_vector_stats(
                 ));
             }
             Err(error) => {
-                return Err(VectorStatsError::Unavailable(format!(
-                    "the store profile is unavailable: {error}"
-                )));
+                error!("vector profile lookup failed: {error}");
+                return Err(VectorStatsError::Unavailable(
+                    "the store profile is unavailable".to_string(),
+                ));
             }
         };
         Ok(serde_json::json!({
@@ -924,11 +947,15 @@ async fn admin_vector_stats(
         Ok(Ok(stats)) => (StatusCode::OK, Json(stats)).into_response(),
         Ok(Err(VectorStatsError::Workspace(error))) => workspace_failure(&error),
         Ok(Err(VectorStatsError::Unavailable(message))) => {
-            json_error(StatusCode::SERVICE_UNAVAILABLE, message)
+            ui_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
         }
         Err(error) => {
             error!("/ui/api/vectors/stats task panicked: {error}");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -997,13 +1024,16 @@ struct WebhookPatch {
     enabled: Option<bool>,
 }
 
-/// A 500 whose message names the webhook store, so an operator does not
-/// chase the principals store for a subscription failure.
+/// A 500 whose log line names the webhook store, so an operator does not
+/// chase the principals store for a subscription failure. The response body
+/// stays generic: the design pins no storage detail in a 5xx message.
 #[cfg(feature = "webhooks")]
 fn webhook_store_failure(e: impl std::fmt::Display) -> Response {
-    json_error(
+    error!("webhook store: {e}");
+    ui_error(
         StatusCode::INTERNAL_SERVER_ERROR,
-        format!("webhook store: {e}"),
+        "internal_error",
+        "internal error",
     )
 }
 
@@ -1116,10 +1146,10 @@ async fn admin_test_webhook(
         Err(WorkerError::Secret(message)) => {
             bad_request(format!("webhook test refused: {message}"))
         }
-        Err(WorkerError::Delivery(message)) => json_error(
-            StatusCode::BAD_GATEWAY,
-            format!("webhook test delivery failed: {message}"),
-        ),
+        Err(WorkerError::Delivery(message)) => {
+            error!("webhook test delivery failed: {message}");
+            ui_error(StatusCode::BAD_GATEWAY, "internal_error", "internal error")
+        }
         Err(WorkerError::Database(message)) => webhook_store_failure(message),
         Err(WorkerError::Core(message)) => webhook_store_failure(message),
     }
@@ -1344,6 +1374,18 @@ async fn admin_delete_webhook(
 // Managed repositories (`/ui/api/repos`), behind the `code` feature
 // ---------------------------------------------------------------------------
 
+/// A 500 whose log line names the repos store. The response body stays
+/// generic: the design pins no storage detail in a 5xx message.
+#[cfg(feature = "code")]
+fn repos_store_failure(e: impl std::fmt::Display) -> Response {
+    error!("repos store: {e}");
+    ui_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "internal error",
+    )
+}
+
 /// `GET /ui/api/repos` — every managed repository with its live state.
 /// Mutations answer 202 and run the job on a detached thread; the next poll
 /// of the list shows the transition.
@@ -1354,10 +1396,7 @@ async fn admin_list_repos(State(state): State<HttpState>, headers: HeaderMap) ->
     }
     match crate::repos::list() {
         Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "repos": rows }))).into_response(),
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("repos store: {e}"),
-        ),
+        Err(e) => repos_store_failure(e),
     }
 }
 
@@ -1386,18 +1425,12 @@ async fn admin_create_repo(
         return match e {
             crate::errors::MCSError::ConstraintViolation(message) => conflict(message),
             crate::errors::MCSError::InvalidParams(message) => bad_request(message),
-            other => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("repos store: {other}"),
-            ),
+            other => repos_store_failure(other),
         };
     }
     let key = input.key;
     if let Err(e) = crate::repos::add_job(&key) {
-        return json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("repos store: {e}"),
-        );
+        return repos_store_failure(e);
     }
     (
         StatusCode::ACCEPTED,
@@ -1421,12 +1454,7 @@ async fn admin_reindex_repo(
     match crate::repos::get_row(&key) {
         Ok(Some(_)) => {}
         Ok(None) => return not_found(),
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("repos store: {e}"),
-            );
-        }
+        Err(e) => return repos_store_failure(e),
     }
     match crate::repos::reindex_job(&key) {
         Ok(()) => (
@@ -1434,13 +1462,8 @@ async fn admin_reindex_repo(
             Json(serde_json::json!({ "status": "accepted", "key": key })),
         )
             .into_response(),
-        Err(crate::errors::MCSError::InvalidParams(message)) => {
-            json_error(StatusCode::CONFLICT, message)
-        }
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("repos store: {e}"),
-        ),
+        Err(crate::errors::MCSError::InvalidParams(message)) => conflict(message),
+        Err(e) => repos_store_failure(e),
     }
 }
 
@@ -1458,12 +1481,7 @@ async fn admin_remove_repo(
     match crate::repos::get_row(&key) {
         Ok(Some(_)) => {}
         Ok(None) => return not_found(),
-        Err(e) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("repos store: {e}"),
-            );
-        }
+        Err(e) => return repos_store_failure(e),
     }
     match crate::repos::remove_job(&key) {
         Ok(()) => (
@@ -1471,13 +1489,8 @@ async fn admin_remove_repo(
             Json(serde_json::json!({ "status": "accepted", "key": key })),
         )
             .into_response(),
-        Err(crate::errors::MCSError::InvalidParams(message)) => {
-            json_error(StatusCode::CONFLICT, message)
-        }
-        Err(e) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("repos store: {e}"),
-        ),
+        Err(crate::errors::MCSError::InvalidParams(message)) => conflict(message),
+        Err(e) => repos_store_failure(e),
     }
 }
 #[cfg(all(test, feature = "webhooks"))]
@@ -1663,9 +1676,13 @@ mod webhook_admin_tests {
         )
         .await;
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        let message = response.1["error"]
+        assert_eq!(
+            response.1["code"], "bad_request",
+            "the refusal carries the bad_request envelope code"
+        );
+        let message = response.1["message"]
             .as_str()
-            .expect("a refusal carries a JSON error body");
+            .expect("a refusal carries a JSON message");
         assert!(
             message.contains("secretRef 'stripe' is not configured"),
             "{message}"

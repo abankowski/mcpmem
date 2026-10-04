@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -34,7 +34,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::errors::MCSError;
-use crate::http::{HttpState, principal_of_ui};
+use crate::http::{HttpState, principal_of_ui, ui_error, ui_insufficient_scope, ui_unauthorized};
 use crate::kg::GraphHandle;
 use crate::workspace::{WorkspaceAccess, WorkspaceError};
 
@@ -458,7 +458,7 @@ async fn ui_mutations_handler(
         Ok(outcome) => respond(&state, outcome),
         Err(join_err) => {
             error!("mutation task join failed: {join_err}");
-            mutation_error(
+            ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "internal error",
@@ -471,30 +471,28 @@ fn respond(state: &HttpState, outcome: MutateOutcome) -> Response {
     match outcome {
         MutateOutcome::Applied => Json(serde_json::json!({ "ok": true })).into_response(),
         MutateOutcome::BadPayload(message) => {
-            mutation_error(StatusCode::BAD_REQUEST, "bad_request", message)
+            ui_error(StatusCode::BAD_REQUEST, "bad_request", message)
         }
-        MutateOutcome::Unauthorized => unauthorized_response(state),
-        MutateOutcome::CategoryDisabled => mutation_error(
+        MutateOutcome::Unauthorized => ui_unauthorized(state),
+        MutateOutcome::CategoryDisabled => ui_error(
             StatusCode::FORBIDDEN,
             "forbidden",
             "graph-write tools are disabled; start the server with \
              --enable-graph-write (or --enable-all) to edit the graph",
         ),
-        MutateOutcome::MissingScope(scope) => insufficient_scope_response(state, scope),
+        MutateOutcome::MissingScope(scope) => ui_insufficient_scope(state, &[scope]),
         MutateOutcome::WorkspaceInput(error) => {
-            mutation_error(StatusCode::BAD_REQUEST, "bad_request", error.to_string())
+            ui_error(StatusCode::BAD_REQUEST, "bad_request", error.to_string())
         }
-        MutateOutcome::NotFound => {
-            mutation_error(StatusCode::NOT_FOUND, "not_found", "no such row")
-        }
-        MutateOutcome::WriteDenied => mutation_error(
+        MutateOutcome::NotFound => ui_error(StatusCode::NOT_FOUND, "not_found", "no such row"),
+        MutateOutcome::WriteDenied => ui_error(
             StatusCode::FORBIDDEN,
             "permission_denied",
             "write access to this workspace is required",
         ),
         MutateOutcome::WorkspaceFault(error) => {
             error!("workspace lookup failed: {error}");
-            mutation_error(
+            ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "workspace registry error",
@@ -576,84 +574,24 @@ fn conflict_message(
     }
 }
 
-/// One error body in the `{code,message}` contract the design doc pins.
-fn mutation_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> Response {
-    (
-        status,
-        Json(serde_json::json!({ "code": code, "message": message.into() })),
-    )
-        .into_response()
-}
-
 /// Map the shared service error onto the HTTP contract. An invalid request
 /// is 400; an avoidable conflict is 409; anything else is logged and hidden
 /// behind a safe message.
 fn mutation_failure(error: MCSError) -> Response {
     match error {
         MCSError::InvalidParams(message) => {
-            mutation_error(StatusCode::BAD_REQUEST, "bad_request", message)
+            ui_error(StatusCode::BAD_REQUEST, "bad_request", message)
         }
         MCSError::ConstraintViolation(message) => {
-            mutation_error(StatusCode::CONFLICT, "conflict", message)
+            ui_error(StatusCode::CONFLICT, "conflict", message)
         }
         _ => {
             error!("mutation failed: {error}");
-            mutation_error(
+            ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
                 "internal error",
             )
         }
     }
-}
-
-/// The 401 of the MCP endpoint, with the UI's `{code,message}` body in
-/// place of the text body. The challenge header is the contract: it names
-/// the resource metadata a client needs to discover the authorization
-/// server. The header shape here mirrors [`crate::http::unauthorized`].
-fn unauthorized_response(state: &HttpState) -> Response {
-    let mut value = String::from("Bearer");
-    if let Some(oauth) = state.oauth.as_ref() {
-        value.push_str(&format!(
-            " resource_metadata=\"{}\"",
-            oauth.resource_metadata()
-        ));
-        let scope = state
-            .enabled_categories
-            .iter()
-            .map(|c| c.slug())
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !scope.is_empty() {
-            value.push_str(&format!(", scope=\"{scope}\""));
-        }
-    }
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, value)],
-        Json(serde_json::json!({ "code": "unauthorized", "message": "authentication required" })),
-    )
-        .into_response()
-}
-
-/// The 403 of the MCP endpoint, with the UI's `{code,message}` body. The
-/// challenge names the scope the caller must ask for, mirroring
-/// [`crate::http::insufficient_scope`].
-fn insufficient_scope_response(state: &HttpState, scope: &'static str) -> Response {
-    let mut value = format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\"");
-    if let Some(oauth) = state.oauth.as_ref() {
-        value.push_str(&format!(
-            ", resource_metadata=\"{}\"",
-            oauth.resource_metadata()
-        ));
-    }
-    (
-        StatusCode::FORBIDDEN,
-        [(header::WWW_AUTHENTICATE, value)],
-        Json(serde_json::json!({
-            "code": "insufficient_scope",
-            "message": "insufficient scope"
-        })),
-    )
-        .into_response()
 }
