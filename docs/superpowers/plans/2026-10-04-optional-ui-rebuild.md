@@ -662,7 +662,16 @@ Annotate the commit with tokens burned and approximate cost.
 
 **Files:**
 - Create: `src/ui/api/mutations.rs`, `tests/ui_mutations.rs` (new)
+- Create: `crates/mcpmem-core/src/mutation.rs` additions (see Controller ruling), `crates/mcpmem-core/src/types.rs` additions
 - Modify: `src/ui/mod.rs` (register the mutations routes)
+
+**Controller ruling (2026-10-04, ledger):** Task 2 implemented `editObservation` and the ID-keyed deletes only. `reverseRelation` and `changeRelationType` do not exist in core. The gateway cannot dispatch to them. Task 7 therefore ALSO implements the two atomic triple mutations in `mcpmem-core`:
+
+- `MutationRequest::ReverseRelation` / `ChangeRelationType`, payloads `{from,to,relationType}` and `{from,to,relationType,newRelationType}` (snake_case variants in the real enum).
+- Both run inside one `TxGuard` transaction. Insert a fresh UNIQUE mirror row. Never use the `ON CONFLICT DO UPDATE` upsert, which would resurrect a tombstoned triple with the old id. Update the physical relation row, re-home `relation_observation.relation_id` and `attribute.owner_id` children, tombstone the old mirror, and re-enqueue both chunk jobs.
+- A self-loop reverse is a no-op with a named error.
+- `ChangeRelationType` to the identical triple is a no-op.
+- Tests cover: swap with observations and attributes preserved; the old triple gone; a failed create rolls back and never deletes the old triple; self-loop no-op; duplicate-target conflict returns 409-equivalent.
 
 **Interfaces:**
 - Consumes: `MutationService` request variants from Task 2; the auth helpers and `workspace_failure` mapping from `http.rs`.
