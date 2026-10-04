@@ -23,13 +23,17 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, Response};
+use axum::http::{Request, Response, StatusCode, header};
 use http_body_util::BodyExt;
 use mcpmem::config::OAuthConfig;
 use mcpmem::http::{HttpState, TestSetup};
 use mcpmem::oauth_routes::OauthState;
 use mcpmem::principals::PrincipalEntry;
 use mcpmem::tools::ToolCategory;
+use mcpmem_oauth::store::{Grant, Store, TokenKind};
+use rusqlite::Connection;
+use serde_json::Value;
+use serde_json::json;
 use tempfile::TempDir;
 
 pub const PUBLIC_URL: &str = "https://mem.example.com";
@@ -380,16 +384,219 @@ pub async fn static_server() -> Server {
     server_with_static_token(None, STATIC_BEARER, Scopes::all(), None).await
 }
 
-pub async fn json(res: Response<axum::body::Body>) -> serde_json::Value {
+pub async fn json(res: Response<Body>) -> Value {
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
 }
 
-pub fn header(res: &Response<axum::body::Body>, name: &str) -> String {
+pub fn header(res: &Response<Body>, name: &str) -> String {
     res.headers()
         .get(name)
         .unwrap_or_else(|| panic!("missing header {name}"))
         .to_str()
         .unwrap()
         .to_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Shared attachment HTTP fixtures.
+// ---------------------------------------------------------------------------
+//
+// The green attachment suite (`tests/attachment_http.rs`) and the contract
+// suite at the `/ui/api/attachments` base (`tests/ui_attachment_http.rs`)
+// drive the same fixture: an OAuth server with the attachments category
+// enabled, an owner token, a reader token, and a writer token without the
+// scope. Both binaries import these helpers instead of copying them.
+
+/// A stored access token for one principal, with the named scopes.
+pub fn plant(store: &Store, principal: &str, scopes: &[&str]) -> String {
+    let token = mcpmem_oauth::new_token();
+    let now = mcpmem_core::events::now_us();
+    store
+        .put_token(
+            &token,
+            TokenKind::Access,
+            &Grant {
+                client_id: mcpmem_oauth::ADMIN_CLIENT_ID.to_owned(),
+                principal: principal.to_owned(),
+                scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+                resource: format!("{PUBLIC_URL}/mcp"),
+                family: mcpmem_oauth::new_token(),
+            },
+            now,
+            now + 3_600_000_000,
+        )
+        .unwrap();
+    token
+}
+
+/// The principals and tokens one attachment test needs.
+pub struct Fixture {
+    pub server: Server,
+    pub owner: String,
+    pub reader: String,
+    pub writer_without_scope: String,
+    pub workspace: String,
+}
+
+/// Build the attachment fixture. `enabled_attachments` false removes the
+/// attachments category, for the tests of the disabled-category gate.
+pub async fn fixture(enabled_attachments: bool) -> Fixture {
+    let mut oauth = oauth_config("https://idp.invalid");
+    for (name, sub) in [("reader", "sub-2"), ("unscoped", "sub-3")] {
+        oauth.principals.push(PrincipalEntry {
+            name: name.into(),
+            iss: "https://idp.invalid".into(),
+            sub: sub.into(),
+            label: None,
+            scopes: vec![
+                "graph-read".into(),
+                "graph-write".into(),
+                "attachments".into(),
+            ],
+        });
+    }
+    oauth.principals[0].scopes.push("attachments".into());
+    let mut enabled = ToolCategory::ALL.to_vec();
+    if !enabled_attachments {
+        enabled.retain(|category| *category != ToolCategory::Attachments);
+    }
+    let server = server(
+        Some(oauth.clone()),
+        Scopes {
+            bearer: Vec::new(),
+            enabled,
+        },
+        None,
+    )
+    .await;
+    let (owner, reader, writer_without_scope) = server.oauth().with_store(|store| {
+        let id = |index: usize| {
+            mcpmem::principals::human_id(&oauth.principals[index].iss, &oauth.principals[index].sub)
+        };
+        (
+            plant(store, &id(0), &["graph-read", "graph-write", "attachments"]),
+            plant(store, &id(1), &["graph-read", "attachments"]),
+            plant(store, &id(2), &["graph-write"]),
+        )
+    });
+    let created = mcp(
+        &server,
+        &owner,
+        "create_workspace",
+        json!({"name": "private", "visibility": "private"}),
+    )
+    .await;
+    let workspace = created["result"]["workspace"]["workspaceId"]
+        .as_str()
+        .expect("a workspace id")
+        .to_owned();
+    let seeded = mcp(
+        &server,
+        &owner,
+        "create_entities",
+        json!({
+            "workspaceId": workspace,
+            "entities": [
+                { "name": "Alice", "entityType": "person", "observations": [] },
+                { "name": "Bob", "entityType": "person", "observations": [] },
+            ],
+        }),
+    )
+    .await;
+    assert!(
+        seeded.get("error").is_none() && seeded["result"]["isError"].as_bool() != Some(true),
+        "seeding failed: {seeded}"
+    );
+    let reader_id =
+        mcpmem::principals::human_id(&oauth.principals[1].iss, &oauth.principals[1].sub);
+    let grant = mcp(
+        &server,
+        &owner,
+        "grant_workspace_access",
+        json!({"workspaceId":workspace,"principalId":reader_id,"role":"reader"}),
+    )
+    .await;
+    assert_eq!(grant["result"]["grant"]["role"], "reader", "{grant}");
+    Fixture {
+        server,
+        owner,
+        reader,
+        writer_without_scope,
+        workspace,
+    }
+}
+
+/// One JSON-RPC `tools/call` against the fixture server.
+pub async fn mcp(server: &Server, token: &str, tool: &str, arguments: Value) -> Value {
+    let response = server
+        .request(
+            Request::post("/mcp")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "jsonrpc":"2.0","id":1,"method":"tools/call",
+                        "params":{"name":tool,"arguments":arguments}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK, "{tool}");
+    json(response).await
+}
+
+/// The `/ui/api/attachments` upload URL with the three query parameters.
+pub fn upload_path(ws: &str, entity: &str, filename: &str) -> String {
+    format!("/ui/api/attachments?workspaceId={ws}&entityName={entity}&filename={filename}")
+}
+
+/// One raw HTTP request through the fixture router.
+pub async fn send(
+    server: &Server,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Body,
+    mime: Option<&str>,
+) -> Response<Body> {
+    let mut builder = Request::builder().method(method).uri(path);
+    if !token.is_empty() {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    if let Some(mime) = mime {
+        builder = builder.header(header::CONTENT_TYPE, mime);
+    }
+    server.request(builder.body(body).unwrap()).await
+}
+
+/// The JSON body of one response.
+pub async fn data(response: Response<Body>) -> Value {
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+/// A read/write connection to the fixture workspace's graph file.
+pub fn graph(fixture: &Fixture) -> Connection {
+    let registry_path = format!(
+        "{}.workspaces.sqlite",
+        fixture.server.memory_db_path().display()
+    );
+    let registry = Connection::open(registry_path).unwrap();
+    let path: String = registry
+        .query_row(
+            "SELECT graph_path FROM workspace WHERE workspace_id=?1",
+            [&fixture.workspace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    Connection::open(path).unwrap()
+}
+
+/// The number of stored attachment rows in the fixture workspace.
+pub fn attachment_count(fixture: &Fixture) -> i64 {
+    graph(fixture)
+        .query_row("SELECT count(*) FROM attachment", [], |row| row.get(0))
+        .unwrap()
 }
