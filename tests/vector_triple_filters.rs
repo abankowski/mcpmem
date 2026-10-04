@@ -13,9 +13,7 @@
 use mcpmem::config::Config;
 use mcpmem::server::{HttpOutcome, MCPServer, dispatch_http_body};
 use mcpmem::tools::ToolCategory;
-use mcpmem::vector_actions::{
-    handle_vector_mmr_search, handle_vector_search_entities,
-};
+use mcpmem::vector_actions::{handle_vector_mmr_search, handle_vector_search_entities};
 use mcpmem::vector_store::{VectorConfig, VectorStore};
 use mcpmem::workspace::{WorkspaceAccess, WorkspaceHandles, WorkspaceRegistry};
 use serde_json::Value;
@@ -78,14 +76,6 @@ fn call_tool(s: &TestServer, name: &str, arguments: &Value) -> Value {
     )
 }
 
-/// The `content[0].text` of a tool result.
-fn result_text(value: &Value) -> String {
-    value["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("expected tool text content, got {value}"))
-        .to_owned()
-}
-
 /// Push one search through `vector_search_entities` and return the rows.
 fn searched_rows(s: &TestServer, arguments: &Value) -> Vec<Value> {
     let text = searched_text(s, arguments);
@@ -98,8 +88,7 @@ fn searched_text(s: &TestServer, arguments: &Value) -> String {
         .resolve("machine:local", None, WorkspaceAccess::Read)
         .unwrap();
     let kg = s.handles.get(&record).unwrap().kg;
-    handle_vector_search_entities(&s.vs, &kg, Some(arguments), true)
-        .expect("the search succeeds")
+    handle_vector_search_entities(&s.vs, &kg, Some(arguments), true).expect("the search succeeds")
 }
 
 fn rows_of(text: &str) -> Vec<Value> {
@@ -167,8 +156,11 @@ fn activate_test_profile(conn: &rusqlite::Connection) {
         [PROFILE],
     )
     .unwrap();
-    conn.execute("INSERT INTO ann_generation(profile_id) VALUES(?1)", [PROFILE])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO ann_generation(profile_id) VALUES(?1)",
+        [PROFILE],
+    )
+    .unwrap();
 }
 
 /// The 8-float blob with the given leading values, L2 distances against the
@@ -286,7 +278,11 @@ fn relation_rows_carry_structured_triples() {
             "topK": 10,
         }),
     );
-    assert_eq!(rows.len(), 2, "relation and entity rows both rank: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        2,
+        "relation and entity rows both rank: {rows:?}"
+    );
     let entity = rows
         .iter()
         .find(|r| r["kind"] == "entity")
@@ -456,8 +452,7 @@ fn triple_filter_members_must_be_strings() {
             })),
             true,
         )
-        .err()
-        .expect("a non-string triple member must be refused");
+        .expect_err("a non-string triple member must be refused");
         assert!(
             err.to_string().contains(&format!("'filter.{key}'")),
             "{key}: {err}"

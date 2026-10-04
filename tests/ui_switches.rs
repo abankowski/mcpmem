@@ -72,7 +72,10 @@ fn the_file_turns_the_ui_off_and_the_cli_turns_it_back_on() {
 #[test]
 fn an_explicit_ui_true_is_refused_by_a_build_without_the_feature() {
     let no_flag = Config::from_args(&args(&[])).expect("no enable must start");
-    assert!(!no_flag.ui_enabled, "the default is off without the feature");
+    assert!(
+        !no_flag.ui_enabled,
+        "the default is off without the feature"
+    );
 
     let error = Config::from_args(&args(&["--ui", "true"]))
         .expect_err("an explicit flag enable must be refused")

@@ -316,7 +316,7 @@ impl FakeEmbeddings {
 
     /// How many embeddings requests every spawned server made.
     fn recorded(&self) -> usize {
-        self.state.lock().clone()
+        *self.state.lock()
     }
 }
 
@@ -1014,7 +1014,7 @@ fn hybrid_fusion_returns_text_and_vector_scores() {
         "the text half contributed: {body}"
     );
     let acme = results
-        .into_iter()
+        .iter()
         .find(|row| row["name"].as_str() == Some("acme"))
         .expect("acme ranks with a vector-only score");
     assert_eq!(acme["textScore"].as_f64(), Some(0.0), "{body}");

@@ -52,8 +52,8 @@ async fn status_and_text(response: Response<Body>) -> (StatusCode, String) {
 /// A body whose first poll records itself. The gates must reject the request
 /// before the spool reads the body, so a rejected upload leaves this count
 /// at zero.
-fn never_read_body(count: Arc<AtomicUsize>) -> Body {
-    let polled = Arc::clone(&count);
+fn never_read_body(count: &Arc<AtomicUsize>) -> Body {
+    let polled = Arc::clone(count);
     Body::from_stream(stream::once(async move {
         polled.fetch_add(1, Ordering::SeqCst);
         Ok::<Bytes, std::io::Error>(Bytes::from_static(b"never read"))
@@ -197,7 +197,7 @@ async fn a_mime_outside_the_allowlist_rejects_and_names_the_rule() {
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     let body = data(response).await;
     assert!(
-        body["error"].as_str().unwrap().contains("MIME"),
+        body["message"].as_str().unwrap().contains("MIME"),
         "the rejection names the MIME rule: {body}"
     );
     assert_eq!(attachment_count(&fx), 0, "no row survives the rejection");
@@ -215,13 +215,13 @@ async fn one_byte_above_the_cap_rejects_with_413_and_reads_no_body() {
         .header(header::AUTHORIZATION, format!("Bearer {}", fx.owner))
         .header(header::CONTENT_TYPE, "text/plain")
         .header(header::CONTENT_LENGTH, "52428801")
-        .body(never_read_body(Arc::clone(&count)))
+        .body(never_read_body(&count))
         .unwrap();
     let response = fx.server.request(request).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let body = data(response).await;
     assert!(
-        body["error"].as_str().unwrap().contains("per-file"),
+        body["message"].as_str().unwrap().contains("per-file"),
         "the rejection names the per-file limit: {body}"
     );
     assert_eq!(
@@ -283,7 +283,7 @@ async fn workspace_budget_exhaustion_rejects_the_upload() {
     );
     let body = data(response).await;
     assert!(
-        body["error"].as_str().unwrap().contains("budget"),
+        body["message"].as_str().unwrap().contains("budget"),
         "the rejection names the budget rule: {body}"
     );
     assert_eq!(
@@ -309,7 +309,7 @@ async fn a_reader_cannot_upload_and_a_token_without_scope_is_denied() {
         &fx.reader,
         "POST",
         &upload_path(&fx.workspace, "Alice", "denied.txt"),
-        never_read_body(Arc::clone(&count)),
+        never_read_body(&count),
         Some("text/plain"),
     )
     .await;
@@ -331,7 +331,7 @@ async fn a_reader_cannot_upload_and_a_token_without_scope_is_denied() {
         &fx.writer_without_scope,
         "POST",
         &upload_path(&fx.workspace, "Alice", "denied.txt"),
-        never_read_body(Arc::clone(&count)),
+        never_read_body(&count),
         Some("text/plain"),
     )
     .await;
@@ -383,7 +383,7 @@ async fn an_unknown_workspace_returns_the_same_404_and_hides_existence() {
         &fx.owner,
         "POST",
         &upload_path(unknown, "Alice", "ghost.txt"),
-        never_read_body(Arc::clone(&count)),
+        never_read_body(&count),
         Some("text/plain"),
     )
     .await;
@@ -455,7 +455,7 @@ async fn a_malformed_workspace_id_rejects_with_400_and_reads_no_body() {
         &fx.owner,
         "POST",
         &upload_path("no-such-workspace", "Alice", "ghost.txt"),
-        never_read_body(Arc::clone(&count)),
+        never_read_body(&count),
         Some("text/plain"),
     )
     .await;
@@ -639,7 +639,7 @@ async fn uploads_require_filename_entity_and_content_type() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
         let body = data(response).await;
         assert!(
-            body["error"].as_str().unwrap().contains(expected),
+            body["message"].as_str().unwrap().contains(expected),
             "{path}: {body}"
         );
     }

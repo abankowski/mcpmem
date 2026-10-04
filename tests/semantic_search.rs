@@ -754,7 +754,11 @@ fn filter_selects_relation_triple_before_ranking() {
         .as_array()
         .expect("results array")
         .clone();
-    assert_eq!(rows.len(), 1, "only the carol->dan relation matches: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the carol->dan relation matches: {rows:?}"
+    );
     assert_eq!(rows[0]["kind"].as_str(), Some("relation"), "{rows:?}");
     assert_eq!(rows[0]["from"].as_str(), Some("carol"), "{rows:?}");
     assert_eq!(rows[0]["to"].as_str(), Some("dan"), "{rows:?}");
@@ -1077,11 +1081,7 @@ fn relation_observation_chain_serves_include_chunks() {
     );
     assert_eq!(rows[0]["from"].as_str(), Some("ada"), "{text}");
     assert_eq!(rows[0]["to"].as_str(), Some("bob"), "{text}");
-    assert_eq!(
-        rows[0]["relationType"].as_str(),
-        Some("knows"),
-        "{text}"
-    );
+    assert_eq!(rows[0]["relationType"].as_str(), Some("knows"), "{text}");
     assert!(
         rows[0].get("name").is_none(),
         "a relation row carries the triple, not a formatted name: {text}"
