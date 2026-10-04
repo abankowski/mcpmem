@@ -195,6 +195,22 @@ async fn get(srv: &support::Server, token: &str, path: &str) -> (StatusCode, Str
     (status, String::from_utf8_lossy(&bytes).to_string())
 }
 
+/// One JSON PATCH as `token`; return (status, raw body).
+async fn patch(srv: &support::Server, token: &str, path: &str, body: &str) -> (StatusCode, String) {
+    let res = srv
+        .request(
+            Request::patch(path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await;
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
 /// The `workspaceId`s on one `/ui/api/workspaces` JSON body.
 fn listed_ids(body: &str) -> Vec<String> {
     let v: Value = serde_json::from_str(body).expect("workspace list payload is JSON");
@@ -561,5 +577,118 @@ async fn explicit_workspace_id_drives_graph_search_node_and_expand() {
         status,
         StatusCode::NOT_FOUND,
         "the neighbourhood of Alice is private"
+    );
+}
+
+/// The visibility toggle: only the owner can flip it, the flip moves the
+/// workspace in and out of an unrelated caller's list and single-workspace
+/// read in one step, and an unknown id is the same 404.
+#[tokio::test]
+async fn visibility_toggle_moves_the_workspace_in_and_out_of_an_unrelated_list() {
+    let fx = viewer().await;
+
+    // Before the toggle the reader can neither read nor list the private
+    // workspace.
+    let (status, _) = get(
+        &fx.srv,
+        &fx.reader,
+        &format!("/ui/api/workspaces/{}", fx.private_id),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a private workspace is not found before the toggle"
+    );
+
+    // The owner flips the private workspace public; the echo carries the
+    // new state.
+    let (status, body) = patch(
+        &fx.srv,
+        &fx.owner,
+        &format!("/ui/api/workspaces/{}", fx.private_id),
+        r#"{"visibility":"public"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the owner toggles: {body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["workspace"]["visibility"], "public", "{body}");
+
+    // The unrelated caller can now read the workspace and sees it listed
+    // with the public role.
+    let (status, body) = get(
+        &fx.srv,
+        &fx.reader,
+        &format!("/ui/api/workspaces/{}", fx.private_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the public read opens: {body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["workspace"]["workspaceId"], fx.private_id, "{body}");
+    assert_eq!(v["workspace"]["role"], "public", "{body}");
+
+    let (status, body) = get(&fx.srv, &fx.reader, "/ui/api/workspaces?limit=100").await;
+    assert_eq!(status, StatusCode::OK, "the list after the toggle: {body}");
+    assert!(
+        listed_ids(&body).contains(&fx.private_id),
+        "the now-public graph is listed for the reader: {body}"
+    );
+
+    // Flipping back private closes both again.
+    let (status, body) = patch(
+        &fx.srv,
+        &fx.owner,
+        &format!("/ui/api/workspaces/{}", fx.private_id),
+        r#"{"visibility":"private"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the toggle returns: {body}");
+    let (status, _) = get(
+        &fx.srv,
+        &fx.reader,
+        &format!("/ui/api/workspaces/{}", fx.private_id),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the private read closes again"
+    );
+    let (status, body) = get(&fx.srv, &fx.reader, "/ui/api/workspaces?limit=100").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the list after the toggle back: {body}"
+    );
+    assert!(
+        !listed_ids(&body).contains(&fx.private_id),
+        "the private graph leaves the reader's list: {body}"
+    );
+
+    // The reader cannot toggle: the missing graph-write scope is refused
+    // before any lookup, and an unknown id is the owner's 404.
+    let (status, _) = patch(
+        &fx.srv,
+        &fx.reader,
+        &format!("/ui/api/workspaces/{}", fx.private_id),
+        r#"{"visibility":"public"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the reader holds no graph-write scope"
+    );
+    let (status, body) = patch(
+        &fx.srv,
+        &fx.owner,
+        "/ui/api/workspaces/00000000-0000-0000-0000-000000000000",
+        r#"{"visibility":"public"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an unknown id is the same not-found: {body}"
     );
 }

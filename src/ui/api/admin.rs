@@ -1,18 +1,20 @@
 //! The admin adapters under `/ui/api/*`: principals, waitlist, webhook
-//! subscriptions, and managed repositories.
+//! subscriptions, managed repositories, and the workspace and vector-stats
+//! groups.
 //!
-//! Every route runs the [`crate::http::admin_gate`] first: a human resolved
-//! through an OAuth grant holding the `admin` scope. The static bearer token
-//! can never hold admin, so every admin is a human. The webhook and repo
-//! groups keep their feature gates too: their routes exist only when the
-//! `webhooks` and `code` features compiled them in.
+//! The principals, waitlist, webhook and repo routes run the
+//! [`crate::http::admin_gate`] first: a human resolved through an OAuth
+//! grant holding the `admin` scope. The static bearer token can never hold
+//! admin, so every admin is a human. The workspace and vector-stats groups
+//! deliberately use other gates: workspace ownership stays in the registry,
+//! and `admin` never substitutes for it. The webhook and repo groups keep
+//! their feature gates too: their routes exist only when the `webhooks` and
+//! `code` features compiled them in.
 
-#[cfg(feature = "webhooks")]
 use std::collections::HashMap;
+use std::sync::Arc;
 
-#[cfg(feature = "webhooks")]
-use axum::extract::Query;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
@@ -21,12 +23,13 @@ use serde::Deserialize;
 #[cfg(feature = "webhooks")]
 use serde_json::json;
 
-#[cfg(feature = "webhooks")]
-use crate::http::workspace_failure;
+use crate::authz::Principal;
 use crate::http::{
-    HttpState, admin_gate, bad_request, conflict, json_error, not_found, oauth_store_failure,
-    store_failure,
+    HttpState, admin_gate, bad_request, conflict, insufficient_scope, json_error, not_found,
+    oauth_store_failure, principal_of_ui, store_failure, unauthorized, workspace_failure,
 };
+use crate::workspace::{Visibility, WorkspaceError};
+use tracing::error;
 
 /// The subscription tools and the admin handlers below share the store's
 /// validation: both call [`webhooks_actions`]' checks, so the MCP surface
@@ -64,7 +67,27 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
             "/ui/api/waitlist/{id}/approve",
             post(admin_approve_waitlist),
         )
-        .route("/ui/api/waitlist/{id}", delete(admin_dismiss_waitlist));
+        .route("/ui/api/waitlist/{id}", delete(admin_dismiss_waitlist))
+        // The workspace adapters share `/ui/api/workspaces` with the viewer
+        // list in `graph.rs`; axum merges the non-overlapping methods, so
+        // the list GET stays the viewer's and the create POST is this
+        // group's. The workspace and vector-stats adapters are the only
+        // routes here that do not run the admin gate: ownership stays in
+        // the registry, and `admin` never substitutes for it.
+        .route("/ui/api/workspaces", post(admin_create_workspace))
+        .route(
+            "/ui/api/workspaces/{id}",
+            get(admin_get_workspace).patch(admin_update_workspace),
+        )
+        .route(
+            "/ui/api/workspaces/{id}/grants",
+            get(admin_list_grants).post(admin_create_grant),
+        )
+        .route(
+            "/ui/api/workspaces/{id}/grants/{principalId}",
+            delete(admin_revoke_grant),
+        )
+        .route("/ui/api/vectors/stats", get(admin_vector_stats));
     // The webhook-subscription admin API exists only in a build with the
     // `webhooks` feature. Elsewhere the routes are absent and the SPA
     // answers their 404 by hiding the section.
@@ -487,6 +510,426 @@ async fn admin_dismiss_waitlist(
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => not_found(),
         Err(e) => store_failure(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces (`/ui/api/workspaces`) and vector stats (`/ui/api/vectors/stats`)
+// ---------------------------------------------------------------------------
+//
+// These adapters wrap the registry and the vector store directly. They
+// never run the admin gate: grants and visibility need workspace
+// ownership, which only the registry's owner checks decide, and the viewer
+// side of the same stores already gates on the graph scopes.
+
+/// The gate every workspace write route runs first: an authenticated
+/// principal, the graph-write category enabled, and the graph-write scope.
+/// The scope decision is [`crate::authz::allows_tool`]'s, asked about the
+/// management tool the route stands for by name, exactly as `graph.rs`
+/// asks about `read_graph`: a tool moved to another scope moves its
+/// adapter with it.
+///
+/// The category read mirrors `src/ui/api/mutations.rs`: `src/server.rs`
+/// publishes the write-category flag from this same enabled-categories
+/// list, so reading the list keeps this gate in step with MCP dispatch.
+fn ws_write_gate(
+    state: &HttpState,
+    headers: &HeaderMap,
+    tool: &str,
+) -> std::result::Result<Principal, Box<Response>> {
+    let Some(principal) = principal_of_ui(state, headers, None) else {
+        return Err(Box::new(unauthorized(state)));
+    };
+    if !state
+        .enabled_categories
+        .contains(&crate::tools::ToolCategory::GraphWrite)
+    {
+        return Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                "graph-write tools are disabled; start the server with --enable-graph-write \
+             (or --enable-all)",
+            )
+                .into_response(),
+        ));
+    }
+    if let Some(scope) = crate::authz::missing_scope(&principal, tool) {
+        return Err(Box::new(insufficient_scope(state, &[scope])));
+    }
+    Ok(principal)
+}
+
+/// The gate every workspace read route runs first: an authenticated
+/// principal with the graph-read category enabled and the graph-read
+/// scope. Same shape as the write gate; the routes ask about the
+/// management read tool each stands for.
+fn ws_read_gate(
+    state: &HttpState,
+    headers: &HeaderMap,
+    tool: &str,
+) -> std::result::Result<Principal, Box<Response>> {
+    let Some(principal) = principal_of_ui(state, headers, None) else {
+        return Err(Box::new(unauthorized(state)));
+    };
+    if !crate::server::graph_read_enabled() {
+        return Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                "graph-read tools are disabled; start the server with --enable-graph-read \
+             (or --enable-all)",
+            )
+                .into_response(),
+        ));
+    }
+    if let Some(scope) = crate::authz::missing_scope(&principal, tool) {
+        return Err(Box::new(insufficient_scope(state, &[scope])));
+    }
+    Ok(principal)
+}
+
+/// The gate the vector-stats route runs first: an authenticated principal
+/// with the `vectors` scope. Profile availability is a separate 503 seam,
+/// decided per workspace after the workspace check.
+fn vector_stats_gate(
+    state: &HttpState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> std::result::Result<Principal, Box<Response>> {
+    let Some(principal) = principal_of_ui(state, headers, params.get("token").map(String::as_str))
+    else {
+        return Err(Box::new(unauthorized(state)));
+    };
+    if let Some(scope) = crate::authz::missing_scope(&principal, "vector_store_stats") {
+        return Err(Box::new(insufficient_scope(state, &[scope])));
+    }
+    Ok(principal)
+}
+
+/// The create body: the design contract names `name` only. The created
+/// workspace is private and owned by the caller.
+#[derive(Deserialize)]
+struct WorkspaceCreate {
+    name: String,
+}
+
+/// The visibility patch body: `{visibility}` with `private` or `public`.
+#[derive(Deserialize)]
+struct WorkspaceVisibilityPatch {
+    visibility: String,
+}
+
+/// The grant body: `{principalId, role}` with `reader` or `writer`. The
+/// registry validates the role and the target's registration.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceGrantInput {
+    principal_id: String,
+    role: String,
+}
+
+/// `POST /ui/api/workspaces` — create one private workspace the caller
+/// owns. Creation needs the graph-write scope; a name the caller already
+/// owns answers 409, the same status the mutations route gives a relation
+/// conflict.
+async fn admin_create_workspace(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let principal = match ws_write_gate(&state, &headers, "create_workspace") {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let input: WorkspaceCreate = match serde_json::from_str(&body) {
+        Ok(input) => input,
+        Err(_) => return bad_request("the body must be JSON with a name member"),
+    };
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return bad_request("a workspace name is needed");
+    }
+    let name_for_duplicate = name.clone();
+    let registry = Arc::clone(&state.registry);
+    let handles = Arc::clone(&state.handles);
+    let created = tokio::task::spawn_blocking(move || {
+        // The registry stores no name uniqueness; the adapter keeps the
+        // caller's own list free of two rows with one name, the confusion
+        // the SPA would otherwise show.
+        let page = registry.list(&principal.id, None, 100)?;
+        if page
+            .workspaces
+            .iter()
+            .any(|w| w.role == "owner" && w.name == name_for_duplicate)
+        {
+            return Ok(None);
+        }
+        registry
+            .create(
+                &principal.id,
+                &name_for_duplicate,
+                Visibility::Private,
+                |path| handles.initialize_graph(path),
+            )
+            .map(Some)
+    })
+    .await;
+    match created {
+        Ok(Ok(Some(view))) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "workspace": view })),
+        )
+            .into_response(),
+        Ok(Ok(None)) => conflict(format!("a workspace named '{name}' already exists")),
+        Ok(Err(error)) => workspace_failure(&error),
+        Err(error) => {
+            error!("/ui/api/workspaces create task panicked: {error}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// `GET /ui/api/workspaces/{id}` — the caller's view of one workspace it
+/// can access. Unknown and denied workspaces answer the same 404, through
+/// the shared [`crate::http::workspace_failure`] mapping.
+async fn admin_get_workspace(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let principal = match ws_read_gate(&state, &headers, "get_workspace") {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let registry = state.registry;
+    match tokio::task::spawn_blocking(move || registry.view(&principal.id, &id)).await {
+        Ok(Ok((_record, view))) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "workspace": view })),
+        )
+            .into_response(),
+        Ok(Err(error)) => workspace_failure(&error),
+        Err(error) => {
+            error!("/ui/api/workspaces view task panicked: {error}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// `PATCH /ui/api/workspaces/{id}` — flip one workspace's visibility.
+/// Needs the workspace owner and the graph-write scope; the echo is the
+/// updated view.
+async fn admin_update_workspace(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    let principal = match ws_write_gate(&state, &headers, "set_workspace_visibility") {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let patch: WorkspaceVisibilityPatch = match serde_json::from_str(&body) {
+        Ok(patch) => patch,
+        Err(_) => return bad_request("the body must be JSON with a visibility member"),
+    };
+    let visibility = match patch.visibility.as_str() {
+        "private" => Visibility::Private,
+        "public" => Visibility::Public,
+        _ => return bad_request("'visibility' must be 'private' or 'public'"),
+    };
+    let registry = state.registry;
+    match tokio::task::spawn_blocking(move || {
+        registry.set_visibility(&principal.id, &id, visibility)
+    })
+    .await
+    {
+        Ok(Ok(view)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "workspace": view })),
+        )
+            .into_response(),
+        Ok(Err(error)) => workspace_failure(&error),
+        Err(error) => {
+            error!("/ui/api/workspaces update task panicked: {error}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// `GET /ui/api/workspaces/{id}/grants` — the grants of one owned
+/// workspace, the same rows the `list_workspace_grants` tool returns. A
+/// non-owner gets the same 404 as an unknown workspace.
+async fn admin_list_grants(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let principal = match ws_read_gate(&state, &headers, "list_workspace_grants") {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let registry = state.registry;
+    match tokio::task::spawn_blocking(move || registry.grants(&principal.id, &id)).await {
+        Ok(Ok(grants)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "grants": grants })),
+        )
+            .into_response(),
+        Ok(Err(error)) => workspace_failure(&error),
+        Err(error) => {
+            error!("/ui/api/workspaces grants task panicked: {error}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// `POST /ui/api/workspaces/{id}/grants` — grant one registered identity
+/// `reader` or `writer` on an owned workspace. The registry validates the
+/// role and the target's registration; the echo matches the MCP grant
+/// tool.
+async fn admin_create_grant(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    let principal = match ws_write_gate(&state, &headers, "grant_workspace_access") {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let input: WorkspaceGrantInput = match serde_json::from_str(&body) {
+        Ok(input) => input,
+        Err(_) => return bad_request("the body must be JSON with principalId and role"),
+    };
+    let target = input.principal_id.clone();
+    let role = input.role.clone();
+    let registry = state.registry;
+    match tokio::task::spawn_blocking(move || {
+        registry.grant(&principal.id, &id, &input.principal_id, &input.role)
+    })
+    .await
+    {
+        Ok(Ok(())) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "grant": { "principalId": target, "role": role }
+            })),
+        )
+            .into_response(),
+        Ok(Err(error)) => workspace_failure(&error),
+        Err(error) => {
+            error!("/ui/api/workspaces grant task panicked: {error}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// `DELETE /ui/api/workspaces/{id}/grants/{principalId}` — revoke one
+/// grant of an owned workspace. The answer reports whether a row was
+/// revoked, exactly like the MCP tool.
+async fn admin_revoke_grant(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path((id, principal_id)): Path<(String, String)>,
+) -> Response {
+    let principal = match ws_write_gate(&state, &headers, "revoke_workspace_access") {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let registry = state.registry;
+    match tokio::task::spawn_blocking(move || registry.revoke(&principal.id, &id, &principal_id))
+        .await
+    {
+        Ok(Ok(revoked)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "revoked": revoked })),
+        )
+            .into_response(),
+        Ok(Err(error)) => workspace_failure(&error),
+        Err(error) => {
+            error!("/ui/api/workspaces revoke task panicked: {error}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// A vector-stats payload failure, kept distinct so the handler maps each
+/// kind to the status the design pins: a workspace error to the shared
+/// mapping (unknown and denied both 404) and an unusable store or profile
+/// to 503.
+enum VectorStatsError {
+    Workspace(WorkspaceError),
+    Unavailable(String),
+}
+
+impl From<WorkspaceError> for VectorStatsError {
+    fn from(error: WorkspaceError) -> Self {
+        VectorStatsError::Workspace(error)
+    }
+}
+
+/// `GET /ui/api/vectors/stats` — the measured state of one workspace's
+/// vector store: the chunk count, the serving profile's dimension, and the
+/// petgraph mirror counts, exactly the fields the `vector_store_stats` MCP
+/// tool reports. The route needs the `vectors` scope and a workspace the
+/// caller can read; a store without a serving profile answers 503. The
+/// payload never invents a model name, a status or a refresh clock.
+async fn admin_vector_stats(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let principal = match vector_stats_gate(&state, &headers, &params) {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let registry = state.registry;
+    let handles = state.handles;
+    let payload = tokio::task::spawn_blocking(move || {
+        let record = registry.resolve(
+            &principal.id,
+            params.get("workspaceId").map(String::as_str),
+            crate::workspace::WorkspaceAccess::Read,
+        )?;
+        let entry = handles.get(&record)?;
+        let Some(store) = entry.vs else {
+            return Err(VectorStatsError::Unavailable(
+                "vector stats are unavailable because the vector subsystem is off; \
+                 start the server with --enable-vectors"
+                    .to_string(),
+            ));
+        };
+        let dims = match store.serving_profile() {
+            Ok(Some(profile)) => profile.dimensions,
+            Ok(None) => {
+                return Err(VectorStatsError::Unavailable(
+                    "the store serves no index profile".to_string(),
+                ));
+            }
+            Err(error) => {
+                return Err(VectorStatsError::Unavailable(format!(
+                    "the store profile is unavailable: {error}"
+                )));
+            }
+        };
+        Ok(serde_json::json!({
+            "embeddingCount": store.count(),
+            "dims": dims,
+            "petgraphNodes": store.graph_node_count(),
+            "petgraphEdges": store.graph_edge_count(),
+        }))
+    })
+    .await;
+    match payload {
+        Ok(Ok(stats)) => (StatusCode::OK, Json(stats)).into_response(),
+        Ok(Err(VectorStatsError::Workspace(error))) => workspace_failure(&error),
+        Ok(Err(VectorStatsError::Unavailable(message))) => {
+            json_error(StatusCode::SERVICE_UNAVAILABLE, message)
+        }
+        Err(error) => {
+            error!("/ui/api/vectors/stats task panicked: {error}");
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
     }
 }
 
