@@ -270,7 +270,11 @@ fn ui_comes_from_the_file_and_a_flag_beats_it() {
     );
 
     let from_cli = merge(&["--ui", "true"], "[server]\nui = false\n");
-    assert_eq!(from_cli.ui, Some(true), "a command-line flag beats the file");
+    assert_eq!(
+        from_cli.ui,
+        Some(true),
+        "a command-line flag beats the file"
+    );
 }
 
 #[test]

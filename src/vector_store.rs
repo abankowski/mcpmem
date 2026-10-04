@@ -85,7 +85,7 @@ pub struct RelationFilter<'a> {
 }
 
 impl RelationFilter<'_> {
-    fn has_members(&self) -> bool {
+    const fn has_members(&self) -> bool {
         self.from.is_some() || self.to.is_some() || self.relation_type.is_some()
     }
 }
@@ -567,6 +567,12 @@ impl VectorStore {
         )
     }
 
+    // Clippy's seven-argument bound is a style limit. This single ranking
+    // entry point takes the pool knobs explicitly; a struct would split the
+    // filter options from the scalar knobs without a behavioral gain, and
+    // both consumers pass through the same set. All parameters are distinct
+    // primitives or filter options with one role each.
+    #[allow(clippy::too_many_arguments)]
     fn rank_chunks(
         &self,
         query: &[f32],

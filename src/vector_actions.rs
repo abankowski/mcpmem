@@ -259,8 +259,7 @@ fn search_owner_rows(
         if exclude == Some((hit.owner_kind, hit.owner_id)) {
             continue;
         }
-        let Some(resolved) = vs.resolve_owner(hit.owner_kind, hit.owner_id)?
-        else {
+        let Some(resolved) = vs.resolve_owner(hit.owner_kind, hit.owner_id)? else {
             continue;
         };
         if ftype.is_some_and(|want| resolved.entity_type != want) {
@@ -368,7 +367,9 @@ fn build_owner_results(rows: &[OwnerRow], include_chunks: bool) -> String {
         if let Some(detail) = &row.attachment {
             write_attachment_detail(
                 &mut out,
-                row.name.as_deref().expect("an attachment row has a filename"),
+                row.name
+                    .as_deref()
+                    .expect("an attachment row has a filename"),
                 detail,
             );
             if include_chunks {
@@ -507,7 +508,9 @@ fn build_fused_results(results: &[FusedRow], include_chunks: bool) -> String {
         if let Some(detail) = &row.attachment {
             write_attachment_detail(
                 &mut out,
-                row.name.as_deref().expect("an attachment row has a filename"),
+                row.name
+                    .as_deref()
+                    .expect("an attachment row has a filename"),
                 detail,
             );
             if include_chunks {
@@ -1239,7 +1242,10 @@ mod tests {
             json.contains(r#""from":"a","to":"b","relationType":"t""#),
             "a relation row carries the triple, not a name: {json}"
         );
-        assert!(!json.contains("\"name\""), "no name member on a relation row: {json}");
+        assert!(
+            !json.contains("\"name\""),
+            "no name member on a relation row: {json}"
+        );
         let parsed: Value = serde_json::from_str(&json).expect("the row JSON parses");
         assert_eq!(
             parsed["results"][0]["chunk"]["text"].as_str(),

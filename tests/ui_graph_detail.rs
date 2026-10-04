@@ -435,7 +435,7 @@ fn row_of(catalogue: &serde_json::Value, type_name: &str) -> Option<serde_json::
         .expect("a catalogue is an array")
         .iter()
         .find(|item| item["type"].as_str() == Some(type_name))
-        .map(|found| found.clone())
+        .cloned()
 }
 
 // ── /ui/api/types ─────────────────────────────────────────────────────────
