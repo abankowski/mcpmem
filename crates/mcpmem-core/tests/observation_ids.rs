@@ -11,9 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mcpmem_core::graph::GraphHandle;
-use mcpmem_core::mutation::{
-    EntitySnapshot, MutationContext, MutationRequest, MutationService,
-};
+use mcpmem_core::mutation::{EntitySnapshot, MutationContext, MutationRequest, MutationService};
 use mcpmem_core::storage::{Durability, SqliteTuning};
 use mcpmem_core::types::{Entity, EntityInput, Observation, ObservationInput, RelationInput};
 
@@ -87,7 +85,10 @@ fn observation_id_round_trips_through_node_read() {
     let kg = new_kg();
     kg.create_entities(&[entity_with_bodies("a", &["same", "same"])])
         .expect("create succeeds");
-    let entity = kg.get_entity("a").expect("read succeeds").expect("entity exists");
+    let entity = kg
+        .get_entity("a")
+        .expect("read succeeds")
+        .expect("entity exists");
     assert_eq!(entity.observations.len(), 2, "both equal bodies persist");
     let ids: Vec<i64> = entity
         .observations
@@ -97,7 +98,10 @@ fn observation_id_round_trips_through_node_read() {
     assert_ne!(ids[0], ids[1], "equal bodies keep distinct ids");
     // The wire field is camelCase and absent-tolerant.
     let text = serde_json::to_string(&entity).expect("entity serializes");
-    assert!(text.contains(r#""observationId""#), "id appears on the wire");
+    assert!(
+        text.contains(r#""observationId""#),
+        "id appears on the wire"
+    );
     let decoded: Entity<Observation> = serde_json::from_str(&text).expect("wire value decodes");
     assert_eq!(decoded, entity, "id survives a serde round trip");
 }
@@ -128,7 +132,10 @@ fn delete_observation_by_id_removes_only_the_target_duplicate() {
             observation_id: ids[1],
         },
     );
-    let entity = kg.get_entity("a").expect("read succeeds").expect("entity exists");
+    let entity = kg
+        .get_entity("a")
+        .expect("read succeeds")
+        .expect("entity exists");
     assert_eq!(entity.observations.len(), 1, "exactly one row remains");
     assert_eq!(
         entity.observations[0].observation_id,
@@ -150,8 +157,13 @@ fn edit_observation_preserves_created_at_and_origin() {
         attributes: None,
     }])
     .expect("create succeeds");
-    let entity = kg.get_entity("a").expect("read succeeds").expect("entity exists");
-    let id = entity.observations[0].observation_id.expect("read model carries the id");
+    let entity = kg
+        .get_entity("a")
+        .expect("read succeeds")
+        .expect("entity exists");
+    let id = entity.observations[0]
+        .observation_id
+        .expect("read model carries the id");
     let created_at_us = entity.observations[0].created_at_us;
     apply(
         &kg,
@@ -162,7 +174,10 @@ fn edit_observation_preserves_created_at_and_origin() {
             occurred_at_us: Some(900),
         },
     );
-    let entity = kg.get_entity("a").expect("read succeeds").expect("entity exists");
+    let entity = kg
+        .get_entity("a")
+        .expect("read succeeds")
+        .expect("entity exists");
     assert_eq!(entity.observations.len(), 1);
     let obs = &entity.observations[0];
     assert_eq!(obs.body, "replacedbody", "body is replaced");
@@ -194,7 +209,10 @@ fn relation_observation_delete_by_id_targets_one_row() {
         from: "a".into(),
         to: "b".into(),
         relation_type: "knows".into(),
-        observations: vec![ObservationInput::from("same"), ObservationInput::from("same")],
+        observations: vec![
+            ObservationInput::from("same"),
+            ObservationInput::from("same"),
+        ],
         attributes: None,
     }])
     .expect("relation creates");

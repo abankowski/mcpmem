@@ -33,5 +33,6 @@ pub fn attach(router: Router<HttpState>, state: &HttpState) -> Router<HttpState>
     let router = api::graph::attach(router);
     let router = api::search::attach(router);
     let router = api::admin::attach(router);
-    api::attachments::attach(router)
+    let router = api::attachments::attach(router);
+    api::mutations::attach(router)
 }
