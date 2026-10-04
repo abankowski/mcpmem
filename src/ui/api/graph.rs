@@ -1,6 +1,6 @@
 //! The graph-viewer adapters under `/ui/api/*`: the workspace list, the
-//! graph page, one node, one exact relation triple, and the expand
-//! neighbourhood.
+//! graph page, the type catalogues, one node, one exact relation triple, and
+//! the expand neighbourhood.
 //!
 //! Every route shares one gate: the caller must hold the `graph-read` scope
 //! (the scope `read_graph` itself needs), and the workspace must be one the
@@ -44,6 +44,7 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
         .route("/ui/api/node", get(ui_node_handler))
         .route("/ui/api/expand", get(ui_expand_handler))
         .route("/ui/api/relation", get(ui_relation_handler))
+        .route("/ui/api/types", get(ui_types_handler))
 }
 
 /// Shared auth + scope gate for the viewer's workspace list and data routes.
@@ -215,13 +216,14 @@ async fn ui_graph_handler(
     .await
 }
 
-/// `GET /ui/api/node` — one entity with its observation bodies, for the
-/// inspector to lazy-load when a node is selected. The list endpoints
-/// (`/ui/api/graph`, `/ui/api/search`) deliberately omit observation bodies
-/// (they only carry `obsCount`) to keep those payloads small; this fetches
-/// the bodies for the single node the user is looking at. Same auth +
-/// `graph-read` gate. Query params: `name` (required), `workspaceId` and
-/// `token` (auth fallback).
+/// `GET /ui/api/node` — the `describe_entity` snapshot for one entity: name
+/// and type, observations with their stable `observationId`, attributes,
+/// degree in both directions, neighbours, and every incident relation
+/// triple. The inspector lazy-loads this when a node is selected; the list
+/// endpoints (`/ui/api/graph`, `/ui/api/search`) deliberately omit
+/// observation bodies to keep those payloads small. Same auth + `graph-read`
+/// gate. Query params: `name` (required), `workspaceId` and `token` (auth
+/// fallback).
 async fn ui_node_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -237,19 +239,22 @@ async fn ui_node_handler(
     let selection = UiSelection::new(state, principal, &params);
     match tokio::task::spawn_blocking(move || {
         let kg = selection.graph()?;
-        Ok::<_, WorkspaceError>(kg.get_entity(&name))
+        Ok::<_, WorkspaceError>(kg.describe_entity(&name))
     })
     .await
     {
         Ok(Err(error)) => workspace_failure(&error),
-        Ok(Ok(Ok(Some(entity)))) => match serde_json::to_string(&entity) {
+        // An unknown entity is a client error (bad `name`), not a server fault.
+        Ok(Ok(Ok(entity))) => match serde_json::to_string(&entity) {
             Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
             Err(e) => {
                 error!("/ui/api/node serialize error: {e}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
             }
         },
-        Ok(Ok(Ok(None))) => (StatusCode::NOT_FOUND, "entity not found").into_response(),
+        Ok(Ok(Err(MCSError::InvalidParams(_)))) => {
+            (StatusCode::NOT_FOUND, "entity not found").into_response()
+        }
         Ok(Ok(Err(e))) => {
             error!("/ui/api/node error: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
@@ -259,6 +264,60 @@ async fn ui_node_handler(
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
         }
     }
+}
+
+/// `GET /ui/api/types` — the entity and relation type catalogues of the
+/// selected workspace: `{entities:[{type,count,desc?}],
+/// relations:[{type,count,desc?}]}`. A registered type with no members stays
+/// listed when its stored description registered it; a type without a
+/// description omits the `desc` key. Same auth + `graph-read` gate as
+/// `/ui/api/graph`. Query params: `workspaceId` and `token` (auth fallback).
+async fn ui_types_handler(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let principal = match ui_data_gate(&state, &headers, &params) {
+        Ok(principal) => principal,
+        Err(response) => return *response,
+    };
+    let selection = UiSelection::new(state, principal, &params);
+    ui_json(selection, "/ui/api/types", build_types_payload).await
+}
+
+/// Assemble the `/ui/api/types` JSON from the two catalogue reads, one
+/// reader acquisition each. The `desc` key is emitted only for a stored
+/// description; the browser schema types it optional, never nullable.
+fn build_types_payload(kg: &GraphHandle) -> Result<String> {
+    let mut out = String::with_capacity(256);
+    out.push('{');
+    push_catalogue(&mut out, "entities", kg.entity_type_catalog());
+    out.push(',');
+    push_catalogue(&mut out, "relations", kg.relation_type_catalog());
+    out.push('}');
+    Ok(out)
+}
+
+/// Append `"<key>":[{type,count,desc?},…]` for one catalogue to `out`. The
+/// caller owns the surrounding object and the comma between properties.
+fn push_catalogue(out: &mut String, key: &str, catalogue: Vec<(String, usize, Option<String>)>) {
+    out.push('"');
+    out.push_str(key);
+    out.push_str("\":[");
+    for (i, (name, count, desc)) in catalogue.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"type\":");
+        crate::kg::push_json_str(out, name);
+        out.push_str(&format!(",\"count\":{count}"));
+        if let Some(d) = desc {
+            out.push_str(",\"desc\":");
+            crate::kg::push_json_str(out, d);
+        }
+        out.push('}');
+    }
+    out.push(']');
 }
 
 /// `GET /ui/api/relation` — one exact relation triple: from, to, and

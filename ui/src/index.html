@@ -3,9 +3,19 @@
   <head>
     <script>
       // Run before Vite's relative script, stylesheet, and preload tags.
-      // The server serves only these exact page suffixes under /ui.
+      // The server serves the exact page suffixes under /ui — the OAuth
+      // callback, /ui/search, /ui/admin, /ui — and every /ui/admin/* subpath:
+      // a reload on an admin subpage loads the page itself, so its base is
+      // the same one the /ui/admin page uses.
       (() => {
         const path = location.pathname;
+        const adminAt = path.lastIndexOf("/ui/admin/");
+        if (adminAt !== -1) {
+          const base = document.createElement("base");
+          base.href = location.origin + path.slice(0, adminAt) + "/ui/";
+          document.head.append(base);
+          return;
+        }
         const suffix = ["/ui/admin/callback", "/ui/search", "/ui/admin", "/ui"]
           .find((page) => path.endsWith(page));
         if (!suffix) return;

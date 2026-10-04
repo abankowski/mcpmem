@@ -354,11 +354,13 @@ fn api_probes() -> Vec<String> {
         "/ui/search".into(),
         "/ui/admin".into(),
         "/ui/admin/callback".into(),
+        "/ui/admin/workspaces".into(),
         "/ui/api/graph".into(),
         "/ui/api/search".into(),
         "/ui/api/node".into(),
         "/ui/api/expand".into(),
         "/ui/api/relation".into(),
+        "/ui/api/types".into(),
         "/ui/api/workspaces".into(),
         "/ui/api/attachments".into(),
         "/ui/api/principals".into(),
@@ -406,6 +408,35 @@ fn pages_and_assets_serve_with_runtime_ui_on() {
             body.len(),
             expected_bytes,
             "{path} must serve exactly the built bytes"
+        );
+    }
+}
+
+/// A direct visit to any `/ui/admin/*` subpath serves the same shell as
+/// `/ui/admin`, so a reload on an admin subpage loads its assets and the app
+/// can route the path client-side. The exact OAuth callback route keeps
+/// answering with the shell too.
+#[cfg(feature = "ui")]
+#[test]
+fn admin_subpaths_reload_with_the_shell() {
+    let srv = spawn("true", Some(TEST_BEARER));
+    for path in [
+        "/ui/admin/workspaces",
+        "/ui/admin/repos",
+        "/ui/admin/callback",
+    ] {
+        let (status, headers, body) = get(srv.port, path, None);
+        assert_eq!(
+            status, 200,
+            "GET {path} must serve the shell on a direct visit"
+        );
+        assert!(
+            headers.to_lowercase().contains("content-type: text/html"),
+            "{path} must be served as HTML: {headers}"
+        );
+        assert!(
+            body.contains("<div id=\"root\">"),
+            "{path} must answer with the shell: {body:.80}"
         );
     }
 }
