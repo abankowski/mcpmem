@@ -14,7 +14,7 @@ use tracing::error;
 
 use crate::authz::PrincipalKind;
 use crate::http::{
-    HttpState, json_error, principal_of, store_failure, unauthorized, workspace_failure,
+    HttpState, principal_of, store_failure, ui_error, ui_unauthorized, workspace_failure,
 };
 use crate::principals::{human_key, resolve_human};
 use crate::tools::ToolCategory;
@@ -55,15 +55,15 @@ async fn session_handler(
     Query(query): Query<SessionQuery>,
 ) -> Response {
     let Some(principal) = principal_of(&state, &headers) else {
-        return unauthorized(&state);
+        return ui_unauthorized(&state);
     };
 
     let principal_name = if principal.kind == PrincipalKind::Human {
         let Some((iss, sub)) = human_key(&principal.id) else {
-            return unauthorized(&state);
+            return ui_unauthorized(&state);
         };
         let Some(oauth) = state.oauth.as_ref() else {
-            return unauthorized(&state);
+            return ui_unauthorized(&state);
         };
         match resolve_human(
             &iss,
@@ -118,7 +118,11 @@ async fn session_handler(
         Ok(Err(error)) => return workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/session task panicked: {error}");
-            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+            return ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            );
         }
     };
 

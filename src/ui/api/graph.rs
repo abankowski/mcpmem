@@ -19,8 +19,8 @@ use tracing::error;
 use crate::authz::Principal;
 use crate::errors::{MCSError, Result};
 use crate::http::{
-    HttpState, bad_request, insufficient_scope, json_error, not_found, principal_of_ui,
-    unauthorized, workspace_failure,
+    HttpState, bad_request, not_found, principal_of_ui, ui_error, ui_insufficient_scope,
+    ui_unauthorized, workspace_failure,
 };
 use crate::kg::GraphHandle;
 use crate::server::graph_read_enabled;
@@ -57,9 +57,10 @@ pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
 /// is what keeps the two provably in step: a tool moved to another scope
 /// moves the viewer with it.
 ///
-/// The 401 is [`unauthorized`] and the scope refusal is
-/// [`insufficient_scope`], the same two challenges `/mcp` sends: one server
-/// answers with one shape, so a scripted viewer client can discover the
+/// The 401 is [`ui_unauthorized`] and the scope refusal is
+/// [`ui_insufficient_scope`], the same two challenges `/mcp` sends with the
+/// `{code,message}` body in place of the transport's plain text: one server
+/// answers with one challenge, so a browser client can discover the
 /// authorization server from the 401 and learn the scope to ask for from the
 /// 403.
 pub(crate) fn ui_data_gate(
@@ -69,23 +70,21 @@ pub(crate) fn ui_data_gate(
 ) -> std::result::Result<Principal, Box<Response>> {
     let Some(principal) = principal_of_ui(state, headers, params.get("token").map(String::as_str))
     else {
-        return Err(Box::new(unauthorized(state)));
+        return Err(Box::new(ui_unauthorized(state)));
     };
     if !graph_read_enabled() {
-        return Err(Box::new(
-            (
-                StatusCode::FORBIDDEN,
-                "graph-read tools are disabled; start the server with --enable-graph-read (or --enable-all) to view the graph",
-            )
-                .into_response(),
-        ));
+        return Err(Box::new(ui_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "graph-read tools are disabled; start the server with --enable-graph-read (or --enable-all) to view the graph",
+        )));
     }
     if !crate::authz::allows_tool(&principal, "read_graph") {
         // The scope the challenge names is the one `authz` reports missing, so
         // the header cannot drift from the decision that produced it.
         let missing = crate::authz::missing_scope(&principal, "read_graph")
             .unwrap_or(crate::tools::ToolCategory::GraphRead.slug());
-        return Err(Box::new(insufficient_scope(state, &[missing])));
+        return Err(Box::new(ui_insufficient_scope(state, &[missing])));
     }
     Ok(principal)
 }
@@ -149,11 +148,19 @@ where
         Ok(Err(error)) => workspace_failure(&error),
         Ok(Ok(Err(error))) => {
             error!("{what} error: {error}");
-            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
         Err(join_err) => {
             error!("{what} task panicked: {join_err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -186,7 +193,11 @@ async fn ui_workspaces_handler(
         Ok(Err(error)) => workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/workspaces task panicked: {error}");
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -234,7 +245,7 @@ async fn ui_node_handler(
         Err(response) => return *response,
     };
     let Some(name) = params.get("name").filter(|s| !s.is_empty()).cloned() else {
-        return (StatusCode::BAD_REQUEST, "missing 'name' parameter").into_response();
+        return bad_request("missing 'name' parameter");
     };
     let selection = UiSelection::new(state, principal, &params);
     match tokio::task::spawn_blocking(move || {
@@ -249,19 +260,31 @@ async fn ui_node_handler(
             Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
             Err(e) => {
                 error!("/ui/api/node serialize error: {e}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+                ui_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "internal error",
+                )
             }
         },
         Ok(Ok(Err(MCSError::InvalidParams(_)))) => {
-            (StatusCode::NOT_FOUND, "entity not found").into_response()
+            ui_error(StatusCode::NOT_FOUND, "not_found", "entity not found")
         }
         Ok(Ok(Err(e))) => {
             error!("/ui/api/node error: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
         Err(join_err) => {
             error!("/ui/api/node task panicked: {join_err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -291,16 +314,16 @@ async fn ui_types_handler(
 fn build_types_payload(kg: &GraphHandle) -> Result<String> {
     let mut out = String::with_capacity(256);
     out.push('{');
-    push_catalogue(&mut out, "entities", kg.entity_type_catalog());
+    push_catalogue(&mut out, "entities", &kg.entity_type_catalog());
     out.push(',');
-    push_catalogue(&mut out, "relations", kg.relation_type_catalog());
+    push_catalogue(&mut out, "relations", &kg.relation_type_catalog());
     out.push('}');
     Ok(out)
 }
 
 /// Append `"<key>":[{type,count,desc?},…]` for one catalogue to `out`. The
 /// caller owns the surrounding object and the comma between properties.
-fn push_catalogue(out: &mut String, key: &str, catalogue: Vec<(String, usize, Option<String>)>) {
+fn push_catalogue(out: &mut String, key: &str, catalogue: &[(String, usize, Option<String>)]) {
     out.push('"');
     out.push_str(key);
     out.push_str("\":[");
@@ -368,18 +391,30 @@ async fn ui_relation_handler(
                 Ok(json) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
                 Err(e) => {
                     error!("/ui/api/relation serialize error: {e}");
-                    (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+                    ui_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        "internal error",
+                    )
                 }
             },
             None => not_found(),
         },
         Ok(Ok(Err(e))) => {
             error!("/ui/api/relation error: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
         Err(join_err) => {
             error!("/ui/api/relation task panicked: {join_err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }
@@ -486,7 +521,7 @@ async fn ui_expand_handler(
         Err(response) => return *response,
     };
     let Some(name) = params.get("name").filter(|s| !s.is_empty()).cloned() else {
-        return (StatusCode::BAD_REQUEST, "missing 'name' parameter").into_response();
+        return bad_request("missing 'name' parameter");
     };
     let depth = params
         .get("depth")
@@ -508,14 +543,24 @@ async fn ui_expand_handler(
         Ok(Ok(Ok(json))) => ([(header::CONTENT_TYPE, "application/json")], json).into_response(),
         Ok(Err(error)) => workspace_failure(&error),
         // An unknown entity is a client error (bad `name`), not a server fault.
-        Ok(Ok(Err(MCSError::InvalidParams(msg)))) => (StatusCode::NOT_FOUND, msg).into_response(),
+        Ok(Ok(Err(MCSError::InvalidParams(msg)))) => {
+            ui_error(StatusCode::NOT_FOUND, "not_found", msg)
+        }
         Ok(Ok(Err(e))) => {
             error!("/ui/api/expand error: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
         Err(join_err) => {
             error!("/ui/api/expand task panicked: {join_err}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+            ui_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error",
+            )
         }
     }
 }

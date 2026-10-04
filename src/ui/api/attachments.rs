@@ -27,8 +27,8 @@ use sha2::{Digest, Sha256};
 use tracing::error;
 
 use crate::http::{
-    HttpState, bad_request, insufficient_scope, json_error, not_found, principal_of, unauthorized,
-    workspace_failure,
+    HttpState, bad_request, not_found, principal_of, ui_error, ui_insufficient_scope,
+    ui_unauthorized, workspace_failure,
 };
 use crate::server::attachments_enabled;
 use crate::workspace::{WorkspaceAccess, WorkspaceError};
@@ -221,8 +221,9 @@ async fn get_attachment_handler(
         let (view, entity_name) = attachment_row(conn, id, true)?;
         let mut payload = serde_json::to_value(view).map_err(|error| {
             error!("attachment metadata serialize error: {error}");
-            Box::new(json_error(
+            Box::new(ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
                 "internal error",
             ))
         })?;
@@ -293,7 +294,7 @@ async fn get_attachment_page_handler(
         let Some(text) = text else {
             return Ok((
                 StatusCode::NOT_FOUND,
-                Json(json!({ "error": "no such page" })),
+                Json(json!({ "code": "not_found", "message": "no such page" })),
             ));
         };
         let start: usize = text.chars().take(offset as usize).map(char::len_utf8).sum();
@@ -511,8 +512,9 @@ async fn spool_body(
         Ok(spool) => spool,
         Err(error) => {
             error!("attachment spool create error: {error}");
-            return Err(Box::new(json_error(
+            return Err(Box::new(ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
                 "internal error",
             )));
         }
@@ -525,8 +527,9 @@ async fn spool_body(
         Err(_) => {
             // An idle body must release its spool permit, or four slow
             // trickles would hold every slot forever and block all uploads.
-            return Err(Box::new(json_error(
+            return Err(Box::new(ui_error(
                 StatusCode::REQUEST_TIMEOUT,
+                "request_timeout",
                 "attachment upload idle timeout; retry later",
             )));
         }
@@ -535,8 +538,9 @@ async fn spool_body(
             Ok(bytes) => bytes,
             Err(error) => {
                 error!("attachment upload stream error: {error}");
-                return Err(Box::new(json_error(
+                return Err(Box::new(ui_error(
                     StatusCode::BAD_REQUEST,
+                    "bad_request",
                     "attachment upload stream failed",
                 )));
             }
@@ -544,15 +548,17 @@ async fn spool_body(
         count = match count.checked_add(bytes.len() as i64) {
             Some(count) => count,
             None => {
-                return Err(Box::new(json_error(
+                return Err(Box::new(ui_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
                     "attachment exceeds the per-file size limit",
                 )));
             }
         };
         if count > limits.max_bytes {
-            return Err(Box::new(json_error(
+            return Err(Box::new(ui_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
                 "attachment exceeds the per-file size limit",
             )));
         }
@@ -561,8 +567,9 @@ async fn spool_body(
             let amount = ATTACHMENT_STREAM_CHUNK.min(rest.len());
             if let Err(error) = spool.write_all(&rest[..amount]) {
                 error!("attachment spool write error: {error}");
-                return Err(Box::new(json_error(
+                return Err(Box::new(ui_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
                     "internal error",
                 )));
             }
@@ -572,8 +579,9 @@ async fn spool_body(
     }
     if let Err(error) = spool.seek(SeekFrom::Start(0)) {
         error!("attachment spool seek error: {error}");
-        return Err(Box::new(json_error(
+        return Err(Box::new(ui_error(
             StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
             "internal error",
         )));
     }
@@ -642,8 +650,9 @@ async fn post_attachment_handler(
         .and_then(|value| value.parse::<i64>().ok())
         && length > state.attachment_limits.max_bytes
     {
-        return json_error(
+        return ui_error(
             StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
             "attachment exceeds the per-file size limit",
         );
     }
@@ -653,8 +662,9 @@ async fn post_attachment_handler(
     let _spool = match state.attachment_spools.try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            return json_error(
+            return ui_error(
                 StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
                 "attachment spool capacity is full; retry later",
             );
         }
@@ -723,8 +733,9 @@ async fn attachment_path(
     access: WorkspaceAccess,
 ) -> std::result::Result<PathBuf, Box<Response>> {
     if !attachments_enabled() {
-        return Err(Box::new(json_error(
+        return Err(Box::new(ui_error(
             StatusCode::FORBIDDEN,
+            "forbidden",
             "attachments tools are disabled",
         )));
     }
@@ -747,15 +758,16 @@ async fn attachment_path(
     .await;
     match outcome {
         Ok(AttachmentPath::Path(path)) => Ok(path),
-        Ok(AttachmentPath::Unauthorized) => Err(Box::new(unauthorized(state))),
+        Ok(AttachmentPath::Unauthorized) => Err(Box::new(ui_unauthorized(state))),
         Ok(AttachmentPath::MissingScope(scope)) => {
-            Err(Box::new(insufficient_scope(state, &[scope])))
+            Err(Box::new(ui_insufficient_scope(state, &[scope])))
         }
         Ok(AttachmentPath::Workspace(error)) => Err(Box::new(workspace_failure(&error))),
         Err(error) => {
             error!("attachment access task panicked: {error}");
-            Err(Box::new(json_error(
+            Err(Box::new(ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
                 "internal error",
             )))
         }
@@ -764,36 +776,43 @@ async fn attachment_path(
 
 fn attachment_db_error(error: &rusqlite::Error) -> Box<Response> {
     error!("attachment graph error: {error}");
-    Box::new(json_error(
+    Box::new(ui_error(
         StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
         "attachment storage error",
     ))
 }
 
 fn attachment_bootstrap_error(error: &mcpmem_core::errors::MCSError) -> Box<Response> {
     error!("attachment graph bootstrap error: {error}");
-    Box::new(json_error(
+    Box::new(ui_error(
         StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
         "attachment storage error",
     ))
 }
 
 fn attachment_failure(error: AttachmentError) -> Box<Response> {
-    let status = match error {
-        AttachmentError::DuplicateFilename => StatusCode::CONFLICT,
-        AttachmentError::Mime => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        AttachmentError::Size | AttachmentError::WorkspaceBudget => StatusCode::PAYLOAD_TOO_LARGE,
-        AttachmentError::NotFound | AttachmentError::WrongPrincipal => StatusCode::NOT_FOUND,
+    let (status, code) = match error {
+        AttachmentError::DuplicateFilename => (StatusCode::CONFLICT, "conflict"),
+        AttachmentError::Mime => (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type"),
+        AttachmentError::Size | AttachmentError::WorkspaceBudget => {
+            (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large")
+        }
+        AttachmentError::NotFound | AttachmentError::WrongPrincipal => {
+            (StatusCode::NOT_FOUND, "not_found")
+        }
         AttachmentError::Storage(source) => {
             error!("attachment storage error: {source}");
-            return Box::new(json_error(
+            return Box::new(ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
                 "attachment storage error",
             ));
         }
-        _ => StatusCode::BAD_REQUEST,
+        _ => (StatusCode::BAD_REQUEST, "bad_request"),
     };
-    Box::new(json_error(status, error.to_string()))
+    Box::new(ui_error(status, code, error.to_string()))
 }
 
 fn attachment_id(raw: &str) -> std::result::Result<i64, Box<Response>> {
@@ -853,8 +872,9 @@ where
         Ok(result) => result,
         Err(error) => {
             error!("attachment graph task panicked: {error}");
-            Err(Box::new(json_error(
+            Err(Box::new(ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
                 "internal error",
             )))
         }

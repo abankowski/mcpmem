@@ -409,7 +409,11 @@ pub(crate) fn principal_of(state: &HttpState, headers: &HeaderMap) -> Option<Pri
 /// section 3.3, which RFC 6750 section 3 defers to, admits no empty scope
 /// list, and a parser that rejects the malformed parameter discards the whole
 /// header — including the only discovery pointer the client has.
-pub(crate) fn unauthorized(state: &HttpState) -> Response {
+///
+/// The string is built once here because the MCP transport and the `/ui/api/*`
+/// adapters must send byte-identical challenges: a connector and the browser
+/// resolve the same discovery pointers.
+fn unauthorized_challenge(state: &HttpState) -> String {
     let mut value = String::from("Bearer");
     if let Some(oauth) = state.oauth.as_ref() {
         value.push_str(&format!(
@@ -426,10 +430,31 @@ pub(crate) fn unauthorized(state: &HttpState) -> Response {
             value.push_str(&format!(", scope=\"{scope}\""));
         }
     }
+    value
+}
+
+/// The MCP transport's 401: the bare RFC 6750 challenge and the plain-text
+/// body. This body is part of the MCP and OAuth transport contract and stays
+/// byte-identical; the `/ui/api/*` adapters use [`ui_unauthorized`] instead.
+pub(crate) fn unauthorized(state: &HttpState) -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, value)],
+        [(header::WWW_AUTHENTICATE, unauthorized_challenge(state))],
         "Unauthorized",
+    )
+        .into_response()
+}
+
+/// The `/ui/api/*` 401: the same challenge as [`unauthorized`], with the
+/// `{code,message}` envelope in place of the transport's plain text.
+pub(crate) fn ui_unauthorized(state: &HttpState) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, unauthorized_challenge(state))],
+        Json(serde_json::json!({
+            "code": "unauthorized",
+            "message": "authentication required",
+        })),
     )
         .into_response()
 }
@@ -442,7 +467,10 @@ pub(crate) fn unauthorized(state: &HttpState) -> Response {
 /// — `resource_metadata`. The last one is what makes the 403 actionable: a
 /// client that has been refused for a scope it does not hold needs the
 /// document naming the authorization server to go and get one.
-pub(crate) fn insufficient_scope(state: &HttpState, scopes: &[&'static str]) -> Response {
+///
+/// The string is built once here because the MCP transport and the `/ui/api/*`
+/// adapters must send byte-identical challenges.
+fn insufficient_scope_challenge(state: &HttpState, scopes: &[&'static str]) -> String {
     let scope = scopes.join(" ");
     let mut value = format!("Bearer error=\"insufficient_scope\", scope=\"{scope}\"");
     if let Some(oauth) = state.oauth.as_ref() {
@@ -451,10 +479,38 @@ pub(crate) fn insufficient_scope(state: &HttpState, scopes: &[&'static str]) -> 
             oauth.resource_metadata()
         ));
     }
+    value
+}
+
+/// The MCP transport's 403: the `insufficient_scope` challenge and the
+/// plain-text body. This body is part of the MCP and OAuth transport contract
+/// and stays byte-identical; the `/ui/api/*` adapters use
+/// [`ui_insufficient_scope`] instead.
+pub(crate) fn insufficient_scope(state: &HttpState, scopes: &[&'static str]) -> Response {
     (
         StatusCode::FORBIDDEN,
-        [(header::WWW_AUTHENTICATE, value)],
+        [(
+            header::WWW_AUTHENTICATE,
+            insufficient_scope_challenge(state, scopes),
+        )],
         "insufficient scope",
+    )
+        .into_response()
+}
+
+/// The `/ui/api/*` 403: the same challenge as [`insufficient_scope`], with
+/// the `{code,message}` envelope in place of the transport's plain text.
+pub(crate) fn ui_insufficient_scope(state: &HttpState, scopes: &[&'static str]) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(
+            header::WWW_AUTHENTICATE,
+            insufficient_scope_challenge(state, scopes),
+        )],
+        Json(serde_json::json!({
+            "code": "insufficient_scope",
+            "message": "insufficient scope",
+        })),
     )
         .into_response()
 }
@@ -583,27 +639,39 @@ pub(crate) fn admin_gate(
         return Ok(principal);
     }
     let response = if principal_of_ui(state, headers, None).is_some() {
-        insufficient_scope(state, &[crate::principals::ADMIN_SCOPE])
+        ui_insufficient_scope(state, &[crate::principals::ADMIN_SCOPE])
     } else {
-        unauthorized(state)
+        ui_unauthorized(state)
     };
     Err(Box::new(response))
 }
 
-pub(crate) fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
-    (status, Json(serde_json::json!({ "error": message.into() }))).into_response()
+/// One `/ui/api/*` error body in the `{code,message}` envelope the design
+/// doc pins: exactly the two keys, a stable snake-case code, and the message
+/// text. The status carries the transport meaning; the code carries the
+/// stable programmatic name the viewer switches on.
+pub(crate) fn ui_error(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> Response {
+    (
+        status,
+        Json(serde_json::json!({ "code": code, "message": message.into() })),
+    )
+        .into_response()
 }
 
 pub(crate) fn bad_request(message: impl Into<String>) -> Response {
-    json_error(StatusCode::BAD_REQUEST, message)
+    ui_error(StatusCode::BAD_REQUEST, "bad_request", message)
 }
 
 pub(crate) fn conflict(message: impl Into<String>) -> Response {
-    json_error(StatusCode::CONFLICT, message)
+    ui_error(StatusCode::CONFLICT, "conflict", message)
 }
 
 pub(crate) fn not_found() -> Response {
-    json_error(StatusCode::NOT_FOUND, "no such row")
+    ui_error(StatusCode::NOT_FOUND, "not_found", "no such row")
 }
 
 /// Hide whether a denied workspace exists. Invalid selectors and absent
@@ -616,8 +684,9 @@ pub(crate) fn workspace_failure(error: &WorkspaceError) -> Response {
         }
         WorkspaceError::Storage(_) | WorkspaceError::Io(_) | WorkspaceError::Graph(_) => {
             error!("workspace lookup failed: {error}");
-            json_error(
+            ui_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
                 "workspace registry error",
             )
         }
@@ -625,19 +694,23 @@ pub(crate) fn workspace_failure(error: &WorkspaceError) -> Response {
 }
 
 pub(crate) fn store_failure(e: impl std::fmt::Display) -> Response {
-    json_error(
+    error!("principals store: {e}");
+    ui_error(
         StatusCode::INTERNAL_SERVER_ERROR,
-        format!("principals store: {e}"),
+        "internal_error",
+        "internal error",
     )
 }
 
-/// A 500 whose message names the OAuth store, not the principals store: the
-/// token-revocation path in the delete handler can fail in either, and a
-/// mislabeled body sends the operator to the wrong logs.
+/// A 500 whose store differs from the principals store: the token-revocation
+/// path in the delete handler can fail in either, and a mislabeled log line
+/// sends the operator to the wrong logs.
 pub(crate) fn oauth_store_failure(e: impl std::fmt::Display) -> Response {
-    json_error(
+    error!("oauth store: {e}");
+    ui_error(
         StatusCode::INTERNAL_SERVER_ERROR,
-        format!("oauth store: {e}"),
+        "internal_error",
+        "internal error",
     )
 }
 
