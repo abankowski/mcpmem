@@ -327,6 +327,12 @@ async fn admin_update_principal(
 ///
 /// The admin path keeps its bare ID segment. Convert it to the stable human
 /// ID before the owner check or token revocation.
+///
+/// One sidecar write lock covers the owner check, the OAuth revocation, the
+/// runtime row deletion, and the access cleanup, exactly as the inline
+/// comment below states. The OAuth and runtime store locks are taken only
+/// after the registry lock; neither store calls back into the registry, so
+/// the order cannot deadlock.
 async fn admin_delete_principal(
     State(state): State<HttpState>,
     headers: HeaderMap,

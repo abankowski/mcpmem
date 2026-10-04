@@ -41,13 +41,18 @@ struct AssetMeta {
 
 /// Register the asset route. Unknown names answer 404 — the manifest is the
 /// checked list, and a name outside it is a broken bundle.
+///
+/// The manifest is parsed here, at route build: a manifest that does not
+/// parse is a packaging defect — a binary cannot serve assets it claims to
+/// carry — so the failure must surface at startup, not on the first asset
+/// request.
 pub fn attach(router: Router<HttpState>) -> Router<HttpState> {
+    assets();
     router.route("/ui/assets/{*name}", get(asset_handler))
 }
 
-/// Parse the embedded manifest once, into name → metadata order the handler
-/// looks up. A manifest that does not parse is a packaging defect: the
-/// binary cannot serve assets it claims to carry, so startup fails loudly.
+/// The embedded manifest, parsed once into name → metadata order the handler
+/// looks up.
 fn assets() -> &'static Vec<(String, AssetMeta)> {
     static ASSETS: std::sync::LazyLock<Vec<(String, AssetMeta)>> = std::sync::LazyLock::new(|| {
         serde_json::from_str::<serde_json::Value>(MANIFEST)
