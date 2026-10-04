@@ -958,7 +958,7 @@ Commit the four files with the reason, tests, token count, and approximate cost.
 **Depends on:** Task 4
 
 **Files:**
-- Modify: `src/ui/api/graph.rs`, `src/ui/pages.rs`, `tests/ui_router.rs`
+- Modify: `src/ui/api/graph.rs`, `src/ui/pages.rs`, `tests/ui_router.rs`, `ui/src/index.html`
 - Create: `tests/ui_graph_detail.rs`
 
 **Interfaces:**
@@ -968,6 +968,7 @@ Commit the four files with the reason, tests, token count, and approximate cost.
 - Make `GET /ui/api/node` return the approved entity detail with incident triples and degree.
 - Use the existing `describe_entity` snapshot instead of inferring adjacency from the graph page.
 - Serve the same shell for direct visits to `/ui/admin/*`. Keep the exact OAuth callback route.
+- Set the document base for any `/ui/admin/*` subpath, not only the exact registered pages, so an admin subpage reload loads its assets.
 
 **Correction, 2026-10-04:** Task 4 moved only the old graph handlers. It omitted the type catalogue. Its node handler returns `Entity`, which has no incident relations or degree. The graph page cannot construct either fact from one page of nodes. Admin subpaths also return 404 on a direct visit.
 
