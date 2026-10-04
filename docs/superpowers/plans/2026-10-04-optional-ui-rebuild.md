@@ -334,7 +334,7 @@ Annotate the commit with tokens burned and approximate cost.
 - Consumes: existing `ExplicitArgs` precedence rules.
 - Produces:
   - Cargo feature `ui = []`; `default = ["code", "oauth", "ui"]`.
-  - CLI: `--ui true|false` (value enum, default true).
+  - CLI: `--ui true|false` (explicit value only; when absent, the compiled feature decides the default).
   - TOML: `[server] ui = true|false`.
   - `Config.ui_enabled: bool`.
   - A startup refusal for an explicit `--ui true` or a file true in a build without the `ui` feature. Mirror the OAuth refusal in `src/config.rs:301-320`.
@@ -383,9 +383,11 @@ In `src/lib.rs` `Args`, after `legacy_observations`:
 
 ```rust
 /// Embed and serve the optional browser UI under /ui.
-#[arg(long, value_enum, default_value_t = true)]
-pub ui: bool,
+#[arg(long, action = clap::ArgAction::Set, value_parser!(bool))]
+pub ui: Option<bool>,
 ```
+
+The field carries no default: `None` means the compiled feature decides. clap has no bool `ValueEnum`; `Set` plus a bool value parser gives the `--ui true|false` value flag. The prior plan text used `default_value_t = true`; that default is unconditional and made every `--no-default-features` startup refuse. Corrected in task 3, fix round 1.
 
 - [ ] **Step 4: Add the TOML key and merge**
 
@@ -397,14 +399,16 @@ assign(&mut args.ui, server.ui, cli.absent("ui"));
 
 - [ ] **Step 5: Add the runtime field and the refusal**
 
-In `config.rs`, add `pub ui_enabled: bool` to `Config`, derive it from `args.ui`, and add the refusal in `from_args`:
+In `config.rs`, add `pub ui_enabled: bool` to `Config`, resolve it as `args.ui.unwrap_or(cfg!(feature = "ui"))`, and add the refusal in `from_args`. The refusal fires only on an explicit enable:
 
 ```rust
 #[cfg(not(feature = "ui"))]
-if args.ui {
+if args.ui == Some(true) {
     return Err(... "the ui build feature is not compiled into this binary");
 }
 ```
+
+The `Config::default()` constructor arms `ui_enabled: true` under `cfg(feature = "ui")` and `false` under `cfg(not(feature = "ui"))`, so a no-feature default build starts with the UI off.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
