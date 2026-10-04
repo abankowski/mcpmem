@@ -909,9 +909,54 @@ Annotate the commit with tokens burned and approximate cost.
 
 ---
 
+### Task 10a: Add the approved session adapter
+
+**Depends on:** Tasks 4 and 9
+
+**Files:**
+- Create: `src/ui/api/session.rs`, `tests/ui_session.rs`
+- Modify: `src/ui/api/mod.rs`, `src/ui/mod.rs`
+
+**Interfaces:**
+- Produce `GET /ui/api/session?workspaceId?` with the exact response in the approved design.
+- Authenticate with the Authorization header; reject query-token credentials.
+- Return the principal's scopes, not the server's enabled categories.
+- Return the configured or registered human name for a human credential. Return null when no display name exists.
+- Return the resolved workspace role when a workspace is selected or saved. Return null if none is selected.
+- Map unknown and denied workspaces to the same 404. Do not infer a role from a paginated workspace list.
+- Report server feature availability apart from scopes. Use enabled categories for vectors and attachments.
+- Require both the compiled feature and the enabled category for code. Report whether webhook routes are compiled for webhooks.
+
+**Correction, 2026-10-04:** Task 4 moved old handlers, but the old UI had no session endpoint. The React shell cannot infer server availability from credential scopes. Add this adapter before Task 11. Keep the approved response shape unchanged.
+
+- [ ] **Step 1: Write failing HTTP tests**
+
+Cover absent credentials, a query token, human and static credentials, and exact JSON keys. Cover owner, writer, reader, public, and null workspace roles. Compare unknown and denied workspace responses. Verify that scopes and feature flags can differ.
+
+- [ ] **Step 2: Run the new tests to see the route fail**
+
+Run: `cargo test --test ui_session -- --test-threads=1`
+Expected: FAIL because `/ui/api/session` does not exist.
+
+- [ ] **Step 3: Add the adapter**
+
+Reuse the principal resolver, workspace registry, and error mapping. Keep the handler in the gated UI module. Do not add a graph-read gate to an admin-only session.
+
+- [ ] **Step 4: Verify the adapter**
+
+Run: `cargo test --test ui_session -- --test-threads=1`
+Expected: PASS. Also run the adjacent UI and workspace HTTP tests.
+
+- [ ] **Step 5: Commit**
+
+Commit the four files with the reason, tests, token count, and approximate cost.
+
+---
+
+
 ### Task 11: React foundation and shell
 
-**Depends on:** Task 1
+**Depends on:** Tasks 1 and 10a
 
 **Files:**
 - Create: `ui/src/lib/api.ts`, `ui/src/lib/auth.ts`, `ui/src/lib/workspaces.ts`, `ui/src/lib/format.ts`, `ui/src/lib/urls.ts`
