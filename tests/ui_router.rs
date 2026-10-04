@@ -492,14 +492,22 @@ fn data_moves_under_api() {
         "GET /ui/api/search should succeed: {body:.120}"
     );
     let search: serde_json::Value = serde_json::from_str(&body).expect("search payload is JSON");
-    assert!(search["entities"].is_array(), "search carries entities");
+    let results = search["results"]
+        .as_array()
+        .expect("search carries results: {body}");
     assert!(
-        search["entities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["name"] == "Alice"),
+        results.iter().any(|row| {
+            row["kind"].as_str() == Some("entity") && row["name"].as_str() == Some("Alice")
+        }),
         "search finds the seeded node: {body}"
+    );
+    assert!(
+        search["count"].as_u64().unwrap() >= 1,
+        "count reflects the matches: {body}"
+    );
+    assert!(
+        search["elapsedMs"].as_u64().is_some(),
+        "elapsedMs is a number: {body}"
     );
 
     // The relation adapter answers one exact triple: seed Acme and the
