@@ -395,8 +395,11 @@ async fn ui_mutations_handler(
 ) -> Response {
     let registry = Arc::clone(&state.registry);
     let handles = Arc::clone(&state.handles);
-    // The write category, read from the same enabled list the MCP dispatch
-    // path publishes its flags from.
+    // The write category. `src/server.rs` publishes `GRAPH_WRITE_ENABLED`
+    // from this same list; `server::graph_write_enabled()` there is the
+    // single definition of the write-category set, and the MCP dispatch
+    // path reads the published flag. Reading the list keeps this gate in
+    // step with both.
     let write_enabled = state
         .enabled_categories
         .contains(&crate::tools::ToolCategory::GraphWrite);
@@ -503,7 +506,10 @@ fn respond(state: &HttpState, outcome: MutateOutcome) -> Response {
 
 /// Name conflicts answer 409 before the mutation runs. The shared service
 /// silently skips a duplicate create, and the UI must see the conflict, so
-/// the gateway checks the exact targets first.
+/// the gateway checks the exact targets first. The check and the dispatch
+/// are two steps: a duplicate created by a concurrent writer in between
+/// falls through to the service's silent skip and answers 200, which is an
+/// accepted race — the conflict path exists for the single-writer UI.
 fn apply_with_conflict_check(
     kg: &GraphHandle,
     actor: &str,

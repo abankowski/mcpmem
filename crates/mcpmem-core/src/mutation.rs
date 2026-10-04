@@ -1657,11 +1657,18 @@ fn execute(
                     from, relation_type, to
                 )));
             }
-            // A fresh mirror for the swapped triple. The plain insert is the
-            // point of the ruling: the upsert would resurrect a tombstoned
-            // target with its old id, and the worker would then overwrite
-            // that row with the swapped content. A target that exists in any
-            // form refuses here and the whole transaction rolls back.
+            // A fresh mirror for the swapped triple. A target that exists
+            // only as a tombstone (deleted=1) must not refuse the swap:
+            // delete the tombstone row first so the fresh insert takes a new
+            // id. This is not an upsert and cannot resurrect the old id. A
+            // live target still refuses below and the whole transaction
+            // rolls back, keeping the old triple.
+            conn.execute(
+                "DELETE FROM taxonomy_relation
+                 WHERE from_id=?1 AND to_id=?2 AND type_id=?3 AND deleted=1",
+                params![to_id, from_id, type_id],
+            )
+            .map_err(sql_error)?;
             let new_mirror: i64 = conn
                 .query_row(
                     "INSERT INTO taxonomy_relation(from_id,to_id,type_id,revision,deleted)
@@ -1719,6 +1726,18 @@ fn execute(
                     from, relation_type, to
                 )));
             }
+            // A fresh mirror for the re-typed triple. A target that exists
+            // only as a tombstone (deleted=1) must not refuse the re-type:
+            // delete the tombstone row first so the fresh insert takes a new
+            // id. This is not an upsert and cannot resurrect the old id. A
+            // live target still refuses below and the whole transaction
+            // rolls back, keeping the old triple.
+            conn.execute(
+                "DELETE FROM taxonomy_relation
+                 WHERE from_id=?1 AND to_id=?2 AND type_id=?3 AND deleted=1",
+                params![from_id, to_id, new_type_id],
+            )
+            .map_err(sql_error)?;
             let new_mirror: i64 = conn
                 .query_row(
                     "INSERT INTO taxonomy_relation(from_id,to_id,type_id,revision,deleted)
@@ -2598,6 +2617,94 @@ mod tests {
         );
         let jobs = relation_chunk_jobs(&kg);
         assert_eq!(jobs.len(), 1, "no new job for a no-op");
+    }
+
+    #[test]
+    fn reverse_relation_round_trips_back_to_the_original_triple() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
+            .unwrap();
+        seed_relation_with_children(&kg, "ada", "bob", "knows");
+        let (first_id, _, _) = mirror_row(&kg, "ada", "bob", "knows");
+        let obs_before = relation_obs(&kg, "ada", "bob", "knows");
+        let attrs_before = relation_attrs(&kg, "ada", "bob", "knows");
+
+        reverse(&kg, "ada", "bob", "knows").expect("the first reverse succeeds");
+        let (second_id, _, _) = mirror_row(&kg, "bob", "ada", "knows");
+
+        // The second reverse targets the tombstoned (ada,bob,knows) row.
+        // It must invert cleanly: the tombstone gives way to a fresh mirror.
+        reverse(&kg, "bob", "ada", "knows").expect("the round trip succeeds");
+
+        let (final_id, final_revision, final_deleted) = mirror_row(&kg, "ada", "bob", "knows");
+        assert_ne!(final_id, first_id, "a fresh mirror, not the historical id");
+        assert_ne!(final_id, second_id, "a fresh mirror, not the swapped id");
+        assert_eq!((final_revision, final_deleted), (1, 0));
+        let (_, revision, deleted) = mirror_row(&kg, "bob", "ada", "knows");
+        assert_eq!((revision, deleted), (2, 1), "the swapped triple is gone");
+        assert_eq!(
+            relation_obs(&kg, "ada", "bob", "knows"),
+            obs_before,
+            "the observations return with the triple"
+        );
+        assert_eq!(
+            relation_attrs(&kg, "ada", "bob", "knows"),
+            attrs_before,
+            "the attributes return with the triple"
+        );
+        let conn = kg.writer.lock();
+        let (from_name, to_name): (String, String) = conn
+            .query_row(
+                "SELECT f.name, t.name FROM relation r
+                 JOIN entity f ON f.id = r.from_id
+                 JOIN entity t ON t.id = r.to_id
+                 JOIN type_dict d ON d.id = r.type_id
+                 WHERE d.kind=1 AND d.name='knows'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!((from_name.as_str(), to_name.as_str()), ("ada", "bob"));
+    }
+
+    #[test]
+    fn change_relation_type_round_trips_back_to_the_original_type() {
+        let kg = new_kg();
+        serving_profile(&kg);
+        kg.create_entities(&[entity("ada", "person"), entity("bob", "person")])
+            .unwrap();
+        seed_relation_with_children(&kg, "ada", "bob", "knows");
+        let (first_id, _, _) = mirror_row(&kg, "ada", "bob", "knows");
+        let obs_before = relation_obs(&kg, "ada", "bob", "knows");
+
+        change_type(&kg, "ada", "bob", "knows", "likes").expect("the first re-type succeeds");
+        let (second_id, _, _) = mirror_row(&kg, "ada", "bob", "likes");
+
+        // The second re-type targets the tombstoned (ada,bob,knows) row.
+        // It must invert cleanly: the tombstone gives way to a fresh mirror.
+        change_type(&kg, "ada", "bob", "likes", "knows").expect("the round trip succeeds");
+
+        let (final_id, final_revision, final_deleted) = mirror_row(&kg, "ada", "bob", "knows");
+        assert_ne!(final_id, first_id, "a fresh mirror, not the historical id");
+        assert_ne!(final_id, second_id, "a fresh mirror, not the swapped id");
+        assert_eq!((final_revision, final_deleted), (1, 0));
+        let (_, revision, deleted) = mirror_row(&kg, "ada", "bob", "likes");
+        assert_eq!((revision, deleted), (2, 1), "the re-typed triple is gone");
+        assert_eq!(
+            relation_obs(&kg, "ada", "bob", "knows"),
+            obs_before,
+            "the observations return with the type"
+        );
+        assert_eq!(
+            relation_attrs(&kg, "ada", "bob", "knows"),
+            BTreeMap::from([("weight".into(), "7".into())])
+        );
+        let (count, _) = type_row(&kg, 1, "knows");
+        assert_eq!(count, 1);
+        let (count, _) = type_row(&kg, 1, "likes");
+        assert_eq!(count, 0);
     }
 
     #[test]
