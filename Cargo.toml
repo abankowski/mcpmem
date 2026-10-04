@@ -92,7 +92,7 @@ blake3 = { version = "1", optional = true }
 notify = { version = "8", optional = true }
 
 [features]
-default = ["code", "oauth"]
+default = ["code", "oauth", "ui"]
 indexer = ["mcpmem-runtime/indexer", "dep:mcpmem-indexer"]
 webhooks = ["mcpmem-runtime/webhooks", "dep:mcpmem-webhook"]
 # The attachment extraction role: the extractor crate, the runtime arm, and
@@ -106,6 +106,10 @@ bedrock = ["indexer", "mcpmem-indexer/bedrock"]
 # HTTP client goes with it. A graph-only build serves no OAuth login, which is
 # the intended meaning.
 oauth = ["mcpmem-oauth/upstream", "dep:url"]
+# The optional browser UI at /ui. Empty: the feature adds no dependency, so
+# the graph-only build stays free of HTTP clients. A build without this
+# feature refuses an explicit enable at startup.
+ui = []
 # Tree-sitter code-symbol indexing: the `code_*` MCP tools + indexer.
 code = [
     "dep:tree-sitter",

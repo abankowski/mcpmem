@@ -59,6 +59,9 @@ pub struct Config {
     pub roles: RoleSet,
     /// MCP-only string observation adapter; deprecated and removed in 2.0.0.
     pub legacy_observations: bool,
+    /// Enable the optional browser UI at `/ui`. A build without the `ui`
+    /// feature refuses an explicit enable at startup.
+    pub ui_enabled: bool,
     /// OAuth authorization server settings. `None` keeps OAuth off.
     pub oauth: Option<OAuthConfig>,
     /// Scopes granted to the static bearer principal.
@@ -318,6 +321,16 @@ impl Config {
             ));
         }
 
+        // A build without the `ui` feature has no `/ui` route. Refuse the UI
+        // at startup so an operator sees a named error instead of a blank
+        // page.
+        #[cfg(not(feature = "ui"))]
+        if args.ui {
+            return Err(MCSError::InvalidParams(
+                "the ui build feature is not compiled into this binary".into(),
+            ));
+        }
+
         let oauth = if let Some(issuer) = args.oidc_issuer.clone() {
             if !roles.roles().contains(&crate::runtime::RuntimeRole::Mcp) {
                 return Err(MCSError::InvalidParams(
@@ -434,6 +447,7 @@ impl Config {
             enabled_categories,
             roles,
             legacy_observations: args.legacy_observations,
+            ui_enabled: args.ui,
             oauth,
             bearer_scopes,
             attachments: args.attachments.clone(),
@@ -476,6 +490,10 @@ impl Default for Config {
             enabled_categories: Vec::new(),
             roles: RoleSet::mcp_only(),
             legacy_observations: false,
+            #[cfg(feature = "ui")]
+            ui_enabled: true,
+            #[cfg(not(feature = "ui"))]
+            ui_enabled: false,
             oauth: None,
             bearer_scopes: ToolCategory::ALL.to_vec(),
             attachments: crate::config_file::AttachmentsSection::default(),
