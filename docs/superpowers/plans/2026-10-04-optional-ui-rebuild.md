@@ -916,8 +916,8 @@ Annotate the commit with tokens burned and approximate cost.
 **Files:**
 - Create: `ui/src/lib/api.ts`, `ui/src/lib/auth.ts`, `ui/src/lib/workspaces.ts`, `ui/src/lib/format.ts`, `ui/src/lib/urls.ts`
 - Create: `ui/src/components/*.tsx` for Button, Tag, Count, TopBar, WorkspaceSwitcher, CommandPalette, Sheet, ConfirmDialog, Toast, SegmentedControl
-- Create: `ui/src/app.tsx` (replace placeholder), `ui/src/pages` (routing via `import.meta.glob`)
-- Test: `ui/scripts/check-ts.mjs` runs `tsc --noEmit` through the build script; the manifest check from Task 1 stays green
+- Modify: `ui/src/app.tsx`; add `ui/src/features/*/page.tsx` in later screen tasks.
+- Check: `ui/package.json` already runs the manifest check and `tsc --noEmit` through `npm run check`.
 
 **Interfaces:**
 - Consumes: `ui/dist/ui-manifest.json` for final paths; the spec contract tables for `/ui/api/session`, `/ui/api/workspaces`, `/ui/api/search`, `/ui/api/graph`, `/ui/api/node`, `/ui/api/relation`, `/ui/api/mutations`, `/ui/api/attachments*`.
@@ -928,21 +928,14 @@ Annotate the commit with tokens burned and approximate cost.
   - `lib/urls.ts`: one `PUBLIC_BASE` derived from the current script path; every API, asset, page, and OAuth URL built from it (path-prefix safe).
   - `app.tsx`: the shell with TopBar, nav, and a page router that pulls `features/*/page.tsx` from `import.meta.glob("./features/*/page.tsx", { eager: false })`.
 
-- [ ] **Step 1: Write the failing TS contract script**
+- [ ] **Step 1: Write a failing type contract**
 
-Extend `ui/scripts/check-ts.mjs` so it fails in two cases. First, a page file that lacks the exported `Page` component. Second, `api.ts` that omits any route from a shipped list:
+Add a typed consumer for the API client. Reference the required routes through its exported type, not source-text matches. Include session, workspaces, graph, node, relation, expand, search, mutations, and attachments. Run the type check before the API client exists. Check that it fails for the missing module or methods. Corrected 2026-10-04: the earlier script proposal tested source text and tried to import TypeScript files with Node. Neither test proved the browser behavior.
 
-```js
-const pages = globSync("ui/src/features/*/page.tsx");
-for (const p of pages) assert(import(p).Page);
-const required = ["session", "workspaces", "graph", "node", "relation", "expand", "search", "mutations", "attachments"];
-// static grep the api.ts route map for each required noun
-```
-
-- [ ] **Step 2: Run the check to verify it fails**
+- [ ] **Step 2: Check the failure**
 
 Run: `cd ui && npm run check`
-Expected: FAIL (no features yet, api.ts missing).
+Expected: FAIL on the missing API client or typed routes. No feature page exists yet; absence of pages is not an error.
 
 - [ ] **Step 3: Write the auth and API layers**
 
