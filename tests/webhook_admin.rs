@@ -137,6 +137,7 @@ static FIXTURE: LazyLock<Fixture> = LazyLock::new(|| {
         bearer_scopes: ToolCategory::ALL.to_vec(),
         enabled_categories: ToolCategory::ALL.to_vec(),
         now_us: None,
+        ui_enabled: true,
     });
     let (admin, plain) = state
         .oauth()

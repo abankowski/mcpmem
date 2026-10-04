@@ -29,6 +29,8 @@ pub mod taxonomy;
 pub mod tls;
 pub mod tools;
 pub use mcpmem_core::types;
+#[cfg(feature = "ui")]
+pub mod ui;
 pub mod vector_actions;
 pub mod vector_store;
 pub mod watcher;

@@ -158,7 +158,7 @@ async fn mcp(server: &support::Server, token: &str, tool: &str, arguments: Value
 }
 
 fn upload_path(ws: &str, entity: &str, filename: &str) -> String {
-    format!("/ui/attachments?workspaceId={ws}&entityName={entity}&filename={filename}")
+    format!("/ui/api/attachments?workspaceId={ws}&entityName={entity}&filename={filename}")
 }
 
 async fn send(
@@ -402,7 +402,7 @@ fn real_server_streams_a_fifty_mib_upload_and_download() {
         .map(|frame| vec![(frame / 16) as u8; 64 * 1024])
         .collect();
     let upload_path =
-        format!("/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=real.bin");
+        format!("/ui/api/attachments?workspaceId={workspace}&entityName=Alice&filename=real.bin");
     let (status, _, body) =
         raw_chunked_upload(server.port, &upload_path, "application/pdf", &frames);
     assert_eq!(
@@ -418,7 +418,7 @@ fn real_server_streams_a_fifty_mib_upload_and_download() {
     let (status, headers, bytes) = raw_request(
         server.port,
         "GET",
-        &format!("/ui/attachments/{id}/download?workspaceId={workspace}"),
+        &format!("/ui/api/attachments/{id}/download?workspaceId={workspace}"),
         None,
         None,
     );
@@ -467,7 +467,10 @@ async fn fifty_mib_upload_and_download_have_identical_bytes_without_a_full_buffe
         &fx.server,
         &fx.owner,
         "GET",
-        &format!("/ui/attachments/{id}/download?workspaceId={}", fx.workspace),
+        &format!(
+            "/ui/api/attachments/{id}/download?workspaceId={}",
+            fx.workspace
+        ),
         Body::empty(),
         None,
     )
@@ -661,7 +664,7 @@ async fn every_route_refuses_a_disabled_category_before_it_reads_a_body() {
         (
             "GET",
             format!(
-                "/ui/attachments?workspaceId={}&entityName=Alice",
+                "/ui/api/attachments?workspaceId={}&entityName=Alice",
                 fx.workspace
             ),
             Body::empty(),
@@ -669,14 +672,14 @@ async fn every_route_refuses_a_disabled_category_before_it_reads_a_body() {
         ),
         (
             "GET",
-            format!("/ui/attachments/1?workspaceId={}", fx.workspace),
+            format!("/ui/api/attachments/1?workspaceId={}", fx.workspace),
             Body::empty(),
             None,
         ),
         (
             "GET",
             format!(
-                "/ui/attachments/1/pages?workspaceId={}&page=1",
+                "/ui/api/attachments/1/pages?workspaceId={}&page=1",
                 fx.workspace
             ),
             Body::empty(),
@@ -684,13 +687,16 @@ async fn every_route_refuses_a_disabled_category_before_it_reads_a_body() {
         ),
         (
             "GET",
-            format!("/ui/attachments/1/download?workspaceId={}", fx.workspace),
+            format!(
+                "/ui/api/attachments/1/download?workspaceId={}",
+                fx.workspace
+            ),
             Body::empty(),
             None,
         ),
         (
             "DELETE",
-            format!("/ui/attachments/1?workspaceId={}", fx.workspace),
+            format!("/ui/api/attachments/1?workspaceId={}", fx.workspace),
             Body::empty(),
             None,
         ),
@@ -764,7 +770,7 @@ async fn a_scoped_reader_reads_metadata_and_page_but_cannot_delete() {
         &fx.reader,
         "GET",
         &format!(
-            "/ui/attachments?workspaceId={}&entityName=Alice",
+            "/ui/api/attachments?workspaceId={}&entityName=Alice",
             fx.workspace
         ),
         Body::empty(),
@@ -777,7 +783,7 @@ async fn a_scoped_reader_reads_metadata_and_page_but_cannot_delete() {
         &fx.server,
         &fx.reader,
         "GET",
-        &format!("/ui/attachments/{id}?workspaceId={}", fx.workspace),
+        &format!("/ui/api/attachments/{id}?workspaceId={}", fx.workspace),
         Body::empty(),
         None,
     )
@@ -792,7 +798,7 @@ async fn a_scoped_reader_reads_metadata_and_page_but_cannot_delete() {
         &fx.reader,
         "GET",
         &format!(
-            "/ui/attachments/{id}/pages?workspaceId={}&page=1&offset=1&maxChars=2",
+            "/ui/api/attachments/{id}/pages?workspaceId={}&page=1&offset=1&maxChars=2",
             fx.workspace
         ),
         Body::empty(),
@@ -812,7 +818,7 @@ async fn a_scoped_reader_reads_metadata_and_page_but_cannot_delete() {
         &fx.server,
         &fx.reader,
         "DELETE",
-        &format!("/ui/attachments/{id}?workspaceId={}", fx.workspace),
+        &format!("/ui/api/attachments/{id}?workspaceId={}", fx.workspace),
         Body::empty(),
         None,
     )
@@ -822,7 +828,7 @@ async fn a_scoped_reader_reads_metadata_and_page_but_cannot_delete() {
         &fx.server,
         &fx.owner,
         "DELETE",
-        &format!("/ui/attachments/{id}?workspaceId={}", fx.workspace),
+        &format!("/ui/api/attachments/{id}?workspaceId={}", fx.workspace),
         Body::empty(),
         None,
     )
@@ -874,7 +880,7 @@ async fn attachment_routes_upgrade_a_pre_attachment_workspace() {
         &fx.owner,
         "GET",
         &format!(
-            "/ui/attachments?workspaceId={}&entityName=Alice",
+            "/ui/api/attachments?workspaceId={}&entityName=Alice",
             fx.workspace
         ),
         Body::empty(),
@@ -921,7 +927,10 @@ async fn attachment_routes_upgrade_a_pre_attachment_workspace() {
         &fx.server,
         &fx.owner,
         "GET",
-        &format!("/ui/attachments/1/download?workspaceId={}", fx.workspace),
+        &format!(
+            "/ui/api/attachments/1/download?workspaceId={}",
+            fx.workspace
+        ),
         Body::empty(),
         None,
     )
@@ -972,7 +981,7 @@ async fn concurrent_upload_spools_hit_a_process_wide_bound_and_release() {
             open_stalled_upload(
                 server.port,
                 &format!(
-                    "/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=stalled-{index}.txt"
+                    "/ui/api/attachments?workspaceId={workspace}&entityName=Alice&filename=stalled-{index}.txt"
                 ),
                 "text/plain",
             )
@@ -986,7 +995,7 @@ async fn concurrent_upload_spools_hit_a_process_wide_bound_and_release() {
         let (status, _, body) = raw_chunked_upload(
             server.port,
             &format!(
-                "/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=probe-{attempt}.txt"
+                "/ui/api/attachments?workspaceId={workspace}&entityName=Alice&filename=probe-{attempt}.txt"
             ),
             "text/plain",
             &[b"abc".to_vec()],
@@ -1019,7 +1028,7 @@ async fn concurrent_upload_spools_hit_a_process_wide_bound_and_release() {
     let (status, _, body) = raw_chunked_upload(
         server.port,
         &format!(
-            "/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=after-disconnect.txt"
+            "/ui/api/attachments?workspaceId={workspace}&entityName=Alice&filename=after-disconnect.txt"
         ),
         "text/plain",
         &[b"abc".to_vec()],
@@ -1061,7 +1070,7 @@ async fn idle_upload_times_out_and_releases_its_spool_permit() {
     // next frame does not arrive inside SPOOL_IDLE_TIMEOUT.
     let mut stall = open_stalled_upload(
         server.port,
-        &format!("/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=idle.txt"),
+        &format!("/ui/api/attachments?workspaceId={workspace}&entityName=Alice&filename=idle.txt"),
         "text/plain",
     );
     let mut reply = Vec::new();
@@ -1091,7 +1100,7 @@ async fn idle_upload_times_out_and_releases_its_spool_permit() {
     let (status, _, body) = raw_chunked_upload(
         server.port,
         &format!(
-            "/ui/attachments?workspaceId={workspace}&entityName=Alice&filename=after-idle.txt"
+            "/ui/api/attachments?workspaceId={workspace}&entityName=Alice&filename=after-idle.txt"
         ),
         "text/plain",
         &[b"abc".to_vec()],

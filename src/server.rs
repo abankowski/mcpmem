@@ -613,12 +613,19 @@ impl MCPServer {
         )?;
         // The legacy graph handle migrated the schema during server setup.
         // Open the OAuth store before the maintenance task starts to sweep it.
+        // The reserved browser clients are seeded only when the resolved
+        // runtime switch says the UI is on; stored rows are never removed
+        // when it is off.
         let oauth = match self.config.oauth.clone() {
-            Some(cfg) => Some(Arc::new(crate::oauth_routes::OauthState::open(
-                cfg,
-                Path::new(&self.config.memory_file_path),
-                self.config.busy_timeout_ms,
-            )?)),
+            Some(cfg) => {
+                let state = crate::oauth_routes::OauthState::open(
+                    cfg,
+                    Path::new(&self.config.memory_file_path),
+                    self.config.busy_timeout_ms,
+                )?;
+                state.seed_browser_clients(self.config.ui_enabled)?;
+                Some(Arc::new(state))
+            }
             None => None,
         };
         spawn_maintenance(self.kg.clone(), oauth.clone());
@@ -635,6 +642,7 @@ impl MCPServer {
             enabled_categories: Arc::from(self.config.enabled_categories.clone()),
             attachments: self.config.attachments.clone(),
             oauth,
+            ui_enabled: self.config.ui_enabled,
             tls_cert: self.config.tls_cert.clone(),
             tls_key: self.config.tls_key.clone(),
         })

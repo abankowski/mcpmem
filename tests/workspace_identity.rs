@@ -312,6 +312,7 @@ async fn a_revoked_machine_bearer_fails_on_the_next_http_request() {
         bearer_scopes: ToolCategory::ALL.to_vec(),
         enabled_categories: ToolCategory::ALL.to_vec(),
         now_us: None,
+        ui_enabled: true,
     });
     let registry = WorkspaceRegistry::open(&path, None).unwrap();
     let (id, credential) = registry
@@ -545,6 +546,7 @@ mod migration {
             bearer_scopes: scopes.bearer,
             enabled_categories: scopes.enabled,
             now_us: Some(Arc::new(|| NOW_US)),
+            ui_enabled: true,
         });
         let response = mcpmem::http::router(state)
             .oneshot(

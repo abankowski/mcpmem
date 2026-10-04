@@ -61,7 +61,7 @@ async fn the_challenge_omits_the_scope_parameter_when_no_category_is_enabled() {
 async fn the_ui_gate_sends_the_same_challenge_as_the_mcp_endpoint() {
     let server = support::oauth_server().await;
     let mcp = server.request(tools_list()).await;
-    let ui = server.request(get("/ui/graph")).await;
+    let ui = server.request(get("/ui/api/graph")).await;
     assert_eq!(ui.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         support::header(&ui, "www-authenticate"),
@@ -352,14 +352,20 @@ async fn reopening_the_store_upserts_the_reserved_client() {
         mcpmem_core::schema::initialize_database(&conn).unwrap();
     }
     let clock: std::sync::Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(move || FIXED);
+    // Startup seeds the reserved clients only through the explicit call; the
+    // open itself keeps the store untouched (see `OauthState::open`).
     let open = || {
-        mcpmem::oauth_routes::OauthState::open_with_clock(
+        let state = mcpmem::oauth_routes::OauthState::open_with_clock(
             support::oauth_config("https://idp.invalid"),
             &path,
             5000,
             Arc::clone(&clock),
         )
-        .expect("the store opens on the migrated schema")
+        .expect("the store opens on the migrated schema");
+        state
+            .seed_browser_clients(true)
+            .expect("the UI is on, so startup seeds the browser clients");
+        state
     };
     let created_us = open().with_store(|store| {
         store
