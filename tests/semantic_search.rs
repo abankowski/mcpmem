@@ -669,6 +669,119 @@ fn filter_selects_kind_and_type_before_ranking() {
     );
 }
 
+/// `filter.from`, `filter.to` and `filter.relationType` narrow relation
+/// rows before ranking. A relation row carries the structured triple
+/// instead of the old formatted `from -> TYPE -> to` name string.
+#[test]
+fn filter_selects_relation_triple_before_ranking() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = vector_server(&dir);
+    let created = call_tool(
+        &s,
+        "create_entities",
+        &serde_json::json!({"entities": [
+            {"name": "ada", "entityType": "Person", "observations": []},
+            {"name": "bob", "entityType": "Person", "observations": []},
+            {"name": "carol", "entityType": "Person", "observations": []},
+            {"name": "dan", "entityType": "Person", "observations": []}
+        ]}),
+    );
+    assert!(created["error"].is_null(), "{created}");
+    let linked = call_tool(
+        &s,
+        "create_relations",
+        &serde_json::json!({"relations": [
+            {"from": "ada", "to": "bob", "relationType": "knows"},
+            {"from": "carol", "to": "dan", "relationType": "knows"}
+        ]}),
+    );
+    assert!(linked["error"].is_null(), "{linked}");
+
+    let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+    let profile = "11111111-2222-3333-4444-555555555555";
+    activate_test_profile(&conn, profile, DIMS);
+    let seed = |conn: &rusqlite::Connection, from: &str, to: &str, value: f64| {
+        let relation_id: i64 = conn
+            .query_row(
+                "SELECT m.id FROM taxonomy_relation m
+                 JOIN entity f ON f.id=m.from_id AND f.name=?1
+                 JOIN entity t ON t.id=m.to_id AND t.name=?2
+                 WHERE m.deleted=0",
+                rusqlite::params![from, to],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let type_id: i64 = conn
+            .query_row(
+                "SELECT id FROM type_dict WHERE kind=1 AND name='knows'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let v: f32 = value as f32;
+        let blob: Vec<u8> = (0..DIMS as usize)
+            .flat_map(|d| {
+                if d == 0 {
+                    v.to_le_bytes().to_vec()
+                } else {
+                    0.0f32.to_le_bytes().to_vec()
+                }
+            })
+            .collect();
+        conn.execute(
+            "INSERT INTO chunk_vector(profile_id,kind,owner_kind,owner_id,chunk_index,type_id,owner_revision,blob,created_at_us,source)
+             VALUES(?1,'relation','relation',?2,0,?3,1,?4,1,'test')",
+            rusqlite::params![profile, relation_id, type_id, blob],
+        )
+        .unwrap();
+    };
+    seed(&conn, "ada", "bob", 1.0);
+    seed(&conn, "carol", "dan", 0.5);
+    drop(conn);
+    s.vs.reconcile_managed_snapshot().unwrap();
+
+    // A from filter excludes the nearer relation before ranking.
+    let text = result_text(&call_tool(
+        &s,
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": vec![1.0f64; DIMS as usize],
+            "topK": 10,
+            "filter": { "kind": "relation", "from": "carol" },
+        }),
+    ));
+    let rows = serde_json::from_str::<Value>(&text).expect("rows JSON")["results"]
+        .as_array()
+        .expect("results array")
+        .clone();
+    assert_eq!(rows.len(), 1, "only the carol->dan relation matches: {rows:?}");
+    assert_eq!(rows[0]["kind"].as_str(), Some("relation"), "{rows:?}");
+    assert_eq!(rows[0]["from"].as_str(), Some("carol"), "{rows:?}");
+    assert_eq!(rows[0]["to"].as_str(), Some("dan"), "{rows:?}");
+    assert_eq!(rows[0]["relationType"].as_str(), Some("knows"), "{rows:?}");
+    assert!(
+        rows[0].get("name").is_none(),
+        "a relation row carries the triple, not a name: {rows:?}"
+    );
+
+    // An absent member is no constraint: only `from` still matches.
+    let text = result_text(&call_tool(
+        &s,
+        "vector_search_entities",
+        &serde_json::json!({
+            "embedding": vec![1.0f64; DIMS as usize],
+            "topK": 10,
+            "filter": { "kind": "relation", "from": "ada" },
+        }),
+    ));
+    let rows = serde_json::from_str::<Value>(&text).expect("rows JSON")["results"]
+        .as_array()
+        .expect("results array")
+        .clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["to"].as_str(), Some("bob"), "{rows:?}");
+}
+
 #[test]
 fn filter_rejects_unknown_kind() {
     let dir = tempfile::tempdir().unwrap();
@@ -962,10 +1075,16 @@ fn relation_observation_chain_serves_include_chunks() {
         Some("relation"),
         "the observation chunk must rank the relation first: {text}"
     );
+    assert_eq!(rows[0]["from"].as_str(), Some("ada"), "{text}");
+    assert_eq!(rows[0]["to"].as_str(), Some("bob"), "{text}");
     assert_eq!(
-        rows[0]["name"].as_str(),
-        Some("ada -> knows -> bob"),
+        rows[0]["relationType"].as_str(),
+        Some("knows"),
         "{text}"
+    );
+    assert!(
+        rows[0].get("name").is_none(),
+        "a relation row carries the triple, not a formatted name: {text}"
     );
     assert_eq!(
         rows[0]["chunk"]["kind"].as_str(),
@@ -1444,7 +1563,13 @@ fn mmr_kind_relation_returns_relations() {
     );
     assert_eq!(rows.len(), 1, "the relation must not vanish: {rows:?}");
     assert_eq!(rows[0]["kind"], "relation", "{rows:?}");
-    assert_eq!(rows[0]["name"], "ada -> knows -> bob", "{rows:?}");
+    assert_eq!(rows[0]["from"], "ada", "{rows:?}");
+    assert_eq!(rows[0]["to"], "bob", "{rows:?}");
+    assert_eq!(rows[0]["relationType"], "knows", "{rows:?}");
+    assert!(
+        rows[0].get("name").is_none(),
+        "a relation row carries the triple, not a formatted name: {rows:?}"
+    );
 }
 
 /// Attachment hits must carry the attachment id and the parent entity name:

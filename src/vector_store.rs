@@ -53,6 +53,43 @@ pub enum AdoptOutcome {
 }
 pub type EntityId = i64;
 
+/// The live triple of one relation owner, resolved by id from the KG tables.
+/// Search rows carry these three fields; no formatted name string is built
+/// anywhere on this path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelationOwner {
+    pub from: String,
+    pub to: String,
+    pub relation_type: String,
+}
+
+/// One owner resolved to its live display row. `name` is `None` for a
+/// relation row, which carries the triple in `relation` instead. An entity
+/// row keeps its current name; an attachment row keeps its filename.
+#[derive(Clone, Debug)]
+pub struct ResolvedOwner {
+    pub name: Option<String>,
+    pub entity_type: String,
+    pub kind: String,
+    pub relation: Option<RelationOwner>,
+}
+
+/// Structural filters for relation rows, applied in `rank_chunks` before the
+/// candidate pool is truncated. Every member is `None` when the caller gave
+/// no value. Entity and attachment rows ignore these members.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RelationFilter<'a> {
+    pub from: Option<&'a str>,
+    pub to: Option<&'a str>,
+    pub relation_type: Option<&'a str>,
+}
+
+impl RelationFilter<'_> {
+    fn has_members(&self) -> bool {
+        self.from.is_some() || self.to.is_some() || self.relation_type.is_some()
+    }
+}
+
 /// The dimension the store validates chunk blobs against. The profile owns
 /// the real contract; this is the legacy CLI surface left for test servers.
 #[derive(Clone, Copy, Debug)]
@@ -502,6 +539,7 @@ impl VectorStore {
             fetch_k,
             filter_kind,
             filter_type,
+            None,
             allow_attachments,
             false,
         )
@@ -515,6 +553,7 @@ impl VectorStore {
         fetch_k: usize,
         filter_kind: Option<&str>,
         filter_type: Option<&str>,
+        relation_filter: Option<&RelationFilter<'_>>,
         allow_attachments: bool,
     ) -> Result<Vec<ChunkHit>> {
         self.rank_chunks(
@@ -522,6 +561,7 @@ impl VectorStore {
             fetch_k,
             filter_kind,
             filter_type,
+            relation_filter,
             allow_attachments,
             true,
         )
@@ -533,6 +573,7 @@ impl VectorStore {
         fetch_k: usize,
         filter_kind: Option<&str>,
         filter_type: Option<&str>,
+        relation_filter: Option<&RelationFilter<'_>>,
         allow_attachments: bool,
         best_only: bool,
     ) -> Result<Vec<ChunkHit>> {
@@ -565,6 +606,34 @@ impl VectorStore {
                 && !self.chunk_type_matches(sv.type_id, ftype)?
             {
                 continue;
+            }
+            if sv.owner_kind == OwnerKind::Relation
+                && relation_filter.is_some_and(|rel| rel.has_members())
+            {
+                // A triple filter excludes the relation before the pool is
+                // truncated. The owner id resolves to the live triple; no
+                // formatted name string is ever parsed here. A relation that
+                // vanished from the live graph cannot match the filter, so it
+                // must not occupy a pool slot ahead of rows that can.
+                let rel = relation_filter.expect("checked above");
+                let Some(owner) = self.resolve_relation_owner(sv.owner_id)? else {
+                    continue;
+                };
+                if let Some(want) = rel.from
+                    && owner.from != want
+                {
+                    continue;
+                }
+                if let Some(want) = rel.to
+                    && owner.to != want
+                {
+                    continue;
+                }
+                if let Some(want) = rel.relation_type
+                    && owner.relation_type != want
+                {
+                    continue;
+                }
             }
             let hit = ChunkHit {
                 owner_kind: sv.owner_kind,
@@ -1255,41 +1324,63 @@ impl VectorStore {
             .unwrap_or_default()
     }
 
-    /// Resolve one owner to its display row: `(name, entityType, kind)`.
-    ///
-    /// An entity row shows its current name and type, marked `"entity"`. A
-    /// relation row shows the live triple `from -> TYPE -> to` and the relation
-    /// type, marked `"relation"`. A row whose subject is gone (deleted entity,
-    /// deleted or endpoint-less relation) is `None`, not a placeholder: the
-    /// caller drops it instead of serving a name that no longer exists.
+    /// Resolve one relation owner id to its live triple. `None` when the
+    /// relation is deleted or an endpoint is gone: the caller drops the row
+    /// instead of serving a triple that no longer exists.
+    pub fn resolve_relation_owner(&self, owner_id: i64) -> Result<Option<RelationOwner>> {
+        let conn = self.db.lock();
+        let row: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT f.name, d.name, t.name FROM taxonomy_relation m
+                 JOIN entity f ON f.id=m.from_id JOIN entity t ON t.id=m.to_id
+                 JOIN type_dict d ON d.id=m.type_id
+                 WHERE m.id=?1 AND m.deleted=0 AND f.flags=0 AND t.flags=0",
+                [owner_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(sqlite_err)?;
+        Ok(row.map(|(from, relation_type, to)| RelationOwner {
+            from,
+            to,
+            relation_type,
+        }))
+    }
+
+    /// Resolve one owner to its display row. An entity row shows its current
+    /// name and type, marked `"entity"`. A relation row shows the live
+    /// triple and the relation type, marked `"relation"`. A row whose
+    /// subject is gone (deleted entity, deleted or endpoint-less relation)
+    /// is `None`, not a placeholder: the caller drops it instead of serving
+    /// a name or triple that no longer exists.
     pub fn resolve_owner(
         &self,
         owner_kind: OwnerKind,
         owner_id: i64,
-    ) -> Result<Option<(String, String, String)>> {
+    ) -> Result<Option<ResolvedOwner>> {
         match owner_kind {
             OwnerKind::Entity => {
                 let conn = self.db.lock();
                 let Some((name, etype)) = self.get_entity_name_type(&conn, owner_id)? else {
                     return Ok(None);
                 };
-                Ok(Some((name, etype, "entity".to_string())))
+                Ok(Some(ResolvedOwner {
+                    name: Some(name),
+                    entity_type: etype,
+                    kind: "entity".to_string(),
+                    relation: None,
+                }))
             }
             OwnerKind::Relation => {
-                let conn = self.db.lock();
-                let row: Option<(String, String, String)> = conn
-                    .query_row(
-                        "SELECT f.name, d.name, t.name FROM taxonomy_relation m
-                         JOIN entity f ON f.id=m.from_id JOIN entity t ON t.id=m.to_id
-                         JOIN type_dict d ON d.id=m.type_id
-                         WHERE m.id=?1 AND m.deleted=0 AND f.flags=0 AND t.flags=0",
-                        [owner_id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )
-                    .optional()
-                    .map_err(sqlite_err)?;
-                Ok(row
-                    .map(|(f, ty, t)| (format!("{f} -> {ty} -> {t}"), ty, "relation".to_string())))
+                let Some(owner) = self.resolve_relation_owner(owner_id)? else {
+                    return Ok(None);
+                };
+                Ok(Some(ResolvedOwner {
+                    name: None,
+                    entity_type: owner.relation_type.clone(),
+                    kind: "relation".to_string(),
+                    relation: Some(owner),
+                }))
             }
             OwnerKind::Attachment => {
                 let Some(fence) = self.attachment_incarnation(owner_id) else {
@@ -1307,7 +1398,12 @@ impl VectorStore {
                     )
                     .optional()
                     .map_err(sqlite_err)?;
-                Ok(row.map(|(filename, ty)| (filename, ty, "attachment".to_string())))
+                Ok(row.map(|(filename, entity_type)| ResolvedOwner {
+                    name: Some(filename),
+                    entity_type,
+                    kind: "attachment".to_string(),
+                    relation: None,
+                }))
             }
         }
     }
@@ -2289,14 +2385,19 @@ mod tests {
         let ada = entity_id_of(&env, "ada");
         let acme = entity_id_of(&env, "acme");
 
-        let (name, etype, kind) = env
+        let resolved = env
             .vs
             .resolve_owner(OwnerKind::Entity, ada)
             .unwrap()
             .expect("ada is a live entity");
         assert_eq!(
-            (name.as_str(), etype.as_str(), kind.as_str()),
-            ("ada", "Person", "entity")
+            (
+                resolved.name.as_deref(),
+                resolved.entity_type.as_str(),
+                resolved.kind.as_str(),
+                resolved.relation.is_none()
+            ),
+            (Some("ada"), "Person", "entity", true)
         );
 
         // Unknown entity: None, not a placeholder.
@@ -2333,14 +2434,24 @@ mod tests {
             .unwrap();
         }
 
-        let (name, etype, kind) = env
+        let resolved = env
             .vs
             .resolve_owner(OwnerKind::Relation, 42)
             .unwrap()
             .expect("the live relation row resolves");
+        let triple = resolved
+            .relation
+            .expect("a relation row carries the resolved triple");
         assert_eq!(
-            (name.as_str(), etype.as_str(), kind.as_str()),
-            ("ada -> works_at -> acme", "works_at", "relation")
+            (
+                resolved.name.as_deref(),
+                triple.from.as_str(),
+                triple.to.as_str(),
+                triple.relation_type.as_str(),
+                resolved.entity_type.as_str(),
+                resolved.kind.as_str()
+            ),
+            (None, "ada", "acme", "works_at", "works_at", "relation")
         );
 
         let (from_id, to_id, _) = relation_row(&env, 42);
