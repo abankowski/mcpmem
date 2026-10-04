@@ -19,7 +19,7 @@ use crate::types::{
 };
 
 /// Single SQL projection for every full graph JSON read. Alias `o` is an observation row.
-const OBSERVATION_JSON: &str = "json_object('body',o.body,'createdAtUs',o.created_us,'occurredAtUs',o.occurred_us,'originEntityName',o.origin_entity_name)";
+const OBSERVATION_JSON: &str = "json_object('body',o.body,'createdAtUs',o.created_us,'occurredAtUs',o.occurred_us,'originEntityName',o.origin_entity_name,'observationId',o.id)";
 
 /// Cap on entities/relations collected in a single traversal (DoS guard).
 /// Prevents a dense graph at high depth from allocating unbounded memory.
@@ -125,7 +125,7 @@ fn relation_details(
         let observations: Vec<Observation> = {
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT body, created_us, occurred_us
+                    "SELECT body, created_us, occurred_us, id
                      FROM relation_observation WHERE relation_id = ?1
                      ORDER BY idx, id",
                 )
@@ -136,6 +136,7 @@ fn relation_details(
                     created_at_us: Some(row.get(1)?),
                     occurred_at_us: row.get(2)?,
                     origin_entity_name: None,
+                    observation_id: Some(row.get(3)?),
                 })
             })
             .map_err(sqlite_err)?
@@ -2105,7 +2106,8 @@ impl GraphHandle {
                                 'body', ro.body,
                                 'createdAtUs', ro.created_us,
                                 'occurredAtUs', ro.occurred_us,
-                                'originEntityName', NULL))
+                                'originEntityName', NULL,
+                                'observationId', ro.id))
                             FROM relation_observation ro
                             JOIN taxonomy_relation m ON m.id = ro.relation_id AND m.deleted = 0
                             WHERE m.from_id = r.from_id AND m.to_id = r.to_id AND m.type_id = r.type_id

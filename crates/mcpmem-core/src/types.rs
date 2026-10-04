@@ -163,6 +163,10 @@ pub struct Observation {
     pub created_at_us: Option<i64>,
     pub occurred_at_us: Option<i64>,
     pub origin_entity_name: Option<String>,
+    /// Stable row id from the sequence cells. Optional on the wire: old
+    /// stored payloads predate the field and deserialize to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<i64>,
 }
 
 impl<'de> Deserialize<'de> for Observation {
@@ -174,6 +178,8 @@ impl<'de> Deserialize<'de> for Observation {
             created_at_us: Option<i64>,
             occurred_at_us: Option<i64>,
             origin_entity_name: Option<String>,
+            #[serde(default)]
+            observation_id: Option<i64>,
         }
         #[derive(Deserialize)]
         #[serde(untagged)]
@@ -187,12 +193,14 @@ impl<'de> Deserialize<'de> for Observation {
                 created_at_us: value.created_at_us,
                 occurred_at_us: value.occurred_at_us,
                 origin_entity_name: value.origin_entity_name,
+                observation_id: value.observation_id,
             },
             Durable::Historical(body) => Self {
                 body,
                 created_at_us: None,
                 occurred_at_us: None,
                 origin_entity_name: None,
+                observation_id: None,
             },
         })
     }
