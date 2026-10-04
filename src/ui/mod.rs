@@ -30,6 +30,7 @@ pub fn attach(router: Router<HttpState>, state: &HttpState) -> Router<HttpState>
     }
     let router = pages::attach(router);
     let router = assets::attach(router);
+    let router = api::session::attach(router);
     let router = api::graph::attach(router);
     let router = api::search::attach(router);
     let router = api::admin::attach(router);
