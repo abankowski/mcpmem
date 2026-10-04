@@ -1329,6 +1329,8 @@ Expected: FAIL (the package excludes `ui/` or the assets are absent).
 
 In `.github/workflows/ci.yml` add: a frontend job (setup-node, pnpm/package manager from Task 1's lockfile, `npm ci && npm run build && npm run check`); a packaging job that runs `cargo package -p mcpmem --locked` plus the UI package check; a feature matrix job that runs the route-matrix and OAuth tests under `--features ui`, `--no-default-features`, `--no-default-features --features ui`, and `--no-default-features --features oauth`; a browser job running `npm run e2e` on the release target with Poppler installed for the PDF legs. Keep the no-default HTTP/AWS tree guard.
 
+Add a generated asset table update after the frontend job. The embedded bytes in `src/ui/assets.rs` are a checked-in include table that must match the fresh manifest. Write one generator script and run it where the frontend job rebuilds. Until it exists, every frontend rebuild needs a hand edit and a revert risk; the controller regenerated the table by hand on 2026-10-04 after Task 11 changed the hashed names.
+
 - [ ] **Step 4: Update the release flow**
 
 In `.github/workflows/release.yml`, build the UI assets before the Cargo build. Add a smoke step that runs the release binary and serves `/ui` with the bundled app. Update `scripts/publish-crates.sh` only if publish ordering changes.
