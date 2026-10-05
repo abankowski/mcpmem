@@ -451,20 +451,65 @@ fn test_ui_shell_served_as_html() {
         "viewer must be served as HTML, headers: {headers}"
     );
     // The React shell mounts its app and loads exactly the bundled assets the
-    // manifest lists; the legacy hand-written assets are gone.
+    // manifest lists; the legacy hand-written assets are gone. Only the entry
+    // chunk and its static dependencies are named in the HTML: the shell
+    // routes its screens through import.meta.glob, so the page and sheet
+    // chunks are dynamic imports resolved at runtime and never appear in the
+    // document. Their bytes and hashes are pinned by the ui-package check and
+    // their ability to load by the browser suite.
     let manifest = ui_manifest();
     assert!(
         body.contains("<div id=\"root\">"),
         "expected the React shell: {body:.120}"
     );
+    // Every asset name the document references must be carried by the
+    // manifest: a shell that names an asset the package does not ship would
+    // 404 in a browser. The reverse (every manifest asset named in the HTML)
+    // is false by design: the dynamic page and sheet chunks are runtime
+    // imports, so only the entry is named in the document.
+    let mut referenced = 0;
+    let mut entry_js = 0;
+    let mut entry_css = 0;
     for (path, _meta) in manifest["files"].as_object().unwrap() {
         let name = path
             .strip_prefix("/ui/assets/")
             .expect("a manifest asset path keeps its prefix");
-        assert!(
-            body.contains(name),
-            "the shell should load the bundled asset {name}: {body:.120}"
-        );
+        if body.contains(name) {
+            referenced += 1;
+            if name.starts_with("index-") {
+                if name.ends_with(".js") {
+                    entry_js += 1;
+                } else if name.ends_with(".css") {
+                    entry_css += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        entry_js == 1 && entry_css == 1,
+        "the shell must name the entry script and stylesheet, got js={entry_js} css={entry_css}"
+    );
+    assert!(
+        referenced >= 2,
+        "no named asset beyond the entry was expected, got {referenced} named assets"
+    );
+    // No asset outside the manifest: every quoted reference of the form
+    // "./assets/<name>" must name a manifest file. The HTML quotes the
+    // script and stylesheet src/href, so the quote split yields the clean
+    // leaf.
+    for piece in body.split('"') {
+        if piece.starts_with("./assets/") {
+            let leaf = piece
+                .strip_prefix("./assets/")
+                .expect("piece starts with ./assets/");
+            assert!(
+                manifest["files"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key(&format!("/ui/assets/{leaf}")),
+                "the shell references {leaf}, which the manifest does not carry"
+            );
+        }
     }
     for legacy in [
         "/ui/graph.css",
