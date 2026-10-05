@@ -134,7 +134,7 @@ export function NodeTab({
     });
   }
 
-  const headerActions = canWrite && (onTogglePin != null || onExpand != null || onIsolate != null);
+  const headerActions = onTogglePin != null || onExpand != null || onIsolate != null;
   const shown = showAll ? observations : observations.slice(0, 3);
 
   return (

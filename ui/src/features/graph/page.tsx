@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { Link2, ScanText, X } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
-import { currentWorkspace } from "../../lib/workspaces";
 import { pageUrl } from "../../lib/urls";
 import { useShell } from "../../lib/app-context";
 import type { TypeList } from "../../lib/schemas";
@@ -834,7 +833,7 @@ export function Page() {
       <Sheet
         open={connectTypeOpen}
         title={connect ? `Connect ${connect.source} → ${connect.target ?? ""}` : "Connect"}
-        onClose={() => setConnectTypeOpen(false)}
+        onClose={() => cancelConnect()}
       >
         <div className="g-field">
           <label htmlFor="g-connect-type">Relation type</label>
@@ -854,7 +853,7 @@ export function Page() {
           <Button disabled={!connectType.trim() || busy} onClick={() => void createRelation()}>
             Create relation
           </Button>
-          <Button variant="ghost" onClick={() => setConnectTypeOpen(false)}>Cancel</Button>
+          <Button variant="ghost" onClick={() => cancelConnect()}>Cancel</Button>
         </div>
       </Sheet>
     </div>
@@ -877,9 +876,9 @@ interface Callbacks {
  * the current workspace binds the set.
  */
 export function selectInGraph(names: readonly string[], depth = 1): void {
+  // The current workspace binds the set via sessionStorage; a workspaceId
+  // query string would lie on a new-tab deep link and break the selection.
   const url = pageUrl("graph");
-  const workspace = currentWorkspace();
-  if (workspace) url.searchParams.set("workspaceId", workspace.workspaceId);
   if (names.length === 1) {
     url.searchParams.set("node", names[0]);
   } else {
