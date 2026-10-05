@@ -12,6 +12,21 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Breaking changes
 
+- **The web UI is now a built React app, and its data routes moved under
+  `/ui/api/*`.** The hand-written viewer shell is gone: `GET /ui` serves the
+  built bundle, the pages are `/ui`, `/ui/search`, `/ui/admin` and
+  `/ui/admin/callback`, the assets live at `/ui/assets/*`, and every data
+  endpoint moved from `/ui/graph`, `/ui/search`, `/ui/node`, `/ui/expand` and
+  `/ui/workspaces` to `/ui/api/*` (`/ui/api/graph`, `/ui/api/search`,
+  `/ui/api/node`, `/ui/api/expand`, `/ui/api/relation`, `/ui/api/types`,
+  `/ui/api/workspaces`, `/ui/api/session`, `/ui/api/mutations` and the
+  admin and attachment adapters). The old JSON routes answer 404; the old
+  asset names (`graph.css`, `graph.js`, `nav.css`, `admin.js`, `admin.css`)
+  are gone.
+- **The two reserved browser OAuth clients are seeded only when the UI is
+  enabled.** A build without the `ui` feature, or a server started with
+  `[server] ui = false`, registers neither `mcpmem-graph-ui` nor
+  `mcpmem-admin-ui` and answers 404 on every `/ui*` path.
 - **Open HTTP can no longer serve graph data.** An `http` transport with the
   `mcp` role refuses to start unless OAuth (`--oidc-issuer`) or a bearer
   credential (`--auth-token`, `--auth-token-file`, `MCP_MEMORY_AUTH_TOKEN`)
@@ -25,6 +40,26 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Added
 
+- **The `ui` Cargo feature and the `[server] ui` switch.** The browser UI is
+  compiled by default; `--no-default-features` drops it, and a build without
+  the feature refuses an explicit `--ui true` at startup. `[server] ui =
+  false` turns the compiled module off at runtime (every `/ui*` path answers
+  404). `--ui` takes a value, so the command line beats the file.
+- **The bundle ships inside the crate and the binary.** `cargo package -p
+  mcpmem` includes `ui/dist`, so a `cargo install` binary serves the UI from
+  its own embedded bytes with **no Node runtime** on the host. The release
+  workflow builds the frontend first and smoke-tests the UI from the release
+  binary; CI regenerates the embedded asset table after every frontend build
+  and refuses a drift.
+- **The UI serves under a path prefix.** A prefix-stripping proxy can serve
+  the app under any path (for example `/mem`): the built pages load assets
+  and API calls relative to the page, request no origin-level asset or OAuth
+  URL, and never bypass the proxy.
+- **The OAuth consent page wears the mcpmem design.** The restyled page
+  keeps its one-pass render contract — the client name at the same three
+  sites, the signed-in identity, the destination host, one checkbox per
+  offered scope, the Deny/Approve pair and the revocation note — in the dark
+  card layout of the mcpmem design tokens, with no external fonts or assets.
 - **`--version` on the shipped binaries.** `mcpmem --version` and
   `mcpmem-maintenance --version` print the build version and exit, so an
   operator can identify a running build before connecting to it.
@@ -99,7 +134,7 @@ This entry lists every change since that snapshot. The version line restarts at
   and `revoke_machine_account` manage separate `machine:<uuid>` credentials
   with tool-category scopes and one-time tokens. Only an `admin` human or
   trusted local stdio may manage them.
-- **The `/ui` viewer has a workspace dropdown** fed by `GET /ui/workspaces`.
+- **The `/ui` viewer has a workspace dropdown** fed by `GET /ui/api/workspaces`.
   A switch is session-only — it never changes the stored default — and the
   data routes resolve the selected `workspaceId`. The admin webhook page
   gained an owner workspace ID field for the same purpose.

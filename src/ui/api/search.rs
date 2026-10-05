@@ -244,7 +244,13 @@ async fn ui_search_handler(
 fn fts_query(raw: &str) -> String {
     let tokens: Vec<String> = raw
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .map(str::to_owned)

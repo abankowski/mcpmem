@@ -13,7 +13,29 @@ repository = "https://github.com/abankowski/mcpmem"
 readme = "README.md"
 keywords = ["mcp", "knowledge-graph", "memory", "llm", "agent"]
 categories = ["command-line-utilities"]
-exclude = ["/target", "*.mcpmem"]
+# The built UI bundle lives in `ui/dist`, which the gitignore rules keep out
+# of the commit history: the bundle is a build artifact, and only the
+# regenerated `src/ui/assets.rs` include table is checked in. Without an
+# `include` list, `cargo package` takes its file list from git and skips
+# ignored files, so the packaged crate would carry no `ui/dist` and the
+# embedded `include_str!` / `include_bytes!` could not compile. This list
+# makes the packaging walk the tree instead: the gitignore rules no longer
+# apply, so everything not negated here ships — including `ui/dist` and the
+# checked-in sources it embeds.
+include = [
+    "**",
+    "!**/.git/**",
+    "!**/.DS_Store",
+    "!**/*.swp",
+    "!**/*.swo",
+    "!**/*~",
+    "!**/*.bin",
+    "!**/node_modules/**",
+    "!ui/test-results/**",
+    "!.superpowers/**",
+    "!.worktrees/**",
+    "!*.mcpmem*",
+]
 
 [dependencies]
 tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "io-std", "io-util", "sync", "net"] }

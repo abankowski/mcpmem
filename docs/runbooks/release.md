@@ -79,12 +79,23 @@ which keeps a re-run and a manual bump from fighting each other.
 
    Do not edit the manifests by hand. `v1.0.0-rc.2` failed its release gate
    because the tag moved and the workspace did not.
-2. Run the tests and the packaging check locally:
+2. Build the frontend bundle, then run the tests and the packaging checks
+   locally. The root crate embeds `ui/dist` at compile time and the packaged
+   crate carries it, so a fresh bundle must exist before any cargo build:
 
    ```sh
+   cd ui && npm ci && npm run build && npm run check && cd ..
    cargo test --workspace --all-targets --locked -- --test-threads=1
    cargo package -p mcpmem-core --locked
+   node scripts/check-ui-package.mjs
    ```
+
+   `scripts/check-ui-package.mjs` runs the Cargo package dry-run and asserts
+   the packaged crate ships `ui/dist/ui-manifest.json` and every manifest
+   asset with matching bytes — the crate must compile its embedded asset
+   table. CI runs the same check on every PR. A `cargo install mcpmem`
+   therefore needs **no Node runtime** to serve the UI: the bundle is inside
+   the binary.
 
 3. Merge to `main` through a pull request.
 
@@ -105,7 +116,12 @@ gh release create v1.1.0-rc.1 --title v1.1.0-rc.1 --notes 'release candidate' --
 
 The `release: published` event starts the workflow. It re-runs the version
 gate, checks the prerelease flag, checks the ancestry of the commit, runs the
-whole test suite, and then publishes.
+whole test suite, and then publishes. Before the cargo build, the workflow's
+frontend job rebuilds the UI bundle from the tagged `ui/src` and uploads it;
+the publish and binaries jobs restore it into `ui/dist`. The publish job then
+builds the release binary and smoke-tests it serving `/ui` and a real asset —
+from the binary's own embedded bytes, with no Node on the host — before
+crates.io is touched.
 
 ## Publish order
 
@@ -117,6 +133,10 @@ whole test suite, and then publishes.
 
 `cargo publish` waits for each crate to appear in the index before it returns,
 so the next crate resolves it.
+
+The root `mcpmem` package changes shape here, not order: it carries `ui/dist`
+(the embedded bundle), which is why the workflow builds the frontend first and
+CI gates the packaged bytes with `scripts/check-ui-package.mjs`.
 
 The script skips a crate that crates.io already holds at this version. A
 re-run after a partial failure therefore completes the release instead of
