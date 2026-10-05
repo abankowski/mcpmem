@@ -28,8 +28,16 @@ const UI_ASSET_BYTES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/dist/assets/index-CGyvWhOu.css"),
     ),
     (
-        "index-Cl45FBJz.js",
-        include_bytes!("../../ui/dist/assets/index-Cl45FBJz.js"),
+        "index-DPiJ_KbD.js",
+        include_bytes!("../../ui/dist/assets/index-DPiJ_KbD.js"),
+    ),
+    (
+        "page-2e8MqwCo.js",
+        include_bytes!("../../ui/dist/assets/page-2e8MqwCo.js"),
+    ),
+    (
+        "page-C3KEu0l_.css",
+        include_bytes!("../../ui/dist/assets/page-C3KEu0l_.css"),
     ),
 ];
 
