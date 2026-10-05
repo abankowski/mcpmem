@@ -8,6 +8,18 @@ version 5.2.1, commit `d6fe34b`. The license stays Apache-2.0, and
 This entry lists every change since that snapshot. The version line restarts at
 1.0.0, because the upstream crate name belongs to another author.
 
+## 3.0.1 (unreleased)
+
+### Fixed
+
+- **The release pipeline publishes the root crate again.** The v3.0.0 release
+  on 2026-10-05 published the six library crates and then failed on the
+  `mcpmem` binary crate: its package walks the tree, so the freshly built
+  `ui/dist` bundle landed in the package as uncommitted files and `cargo
+  publish` refused them. `scripts/publish-crates.sh` now publishes the root
+  crate with `--allow-dirty`; the library crates keep the strict check. The
+  `v3.0.0` tag stays as it is, and all seven crates ship as `3.0.1` instead.
+
 ## 3.0.0 (unreleased)
 
 ### Breaking changes
