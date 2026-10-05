@@ -1,0 +1,314 @@
+/* Search screen. Cards, controls, and the named states follow the handoff
+   layout with the token palette; only measured values render. */
+
+.s-page {
+  max-width: 960px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 40px 24px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.s-heading {
+  margin: 0;
+  font: 600 26px/32px var(--font-display);
+  color: var(--ink);
+}
+
+/* --- controls ----------------------------------------------------------- */
+
+.s-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.s-query {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.s-query svg {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  color: var(--ink-faint);
+  pointer-events: none;
+}
+
+.s-query__input {
+  width: 100%;
+  height: 44px;
+  padding: 0 12px 0 40px;
+  box-sizing: border-box;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--ink);
+  font: inherit;
+  font-size: 16px;
+}
+
+.s-query__input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.s-control-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+
+.s-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.s-control--end {
+  margin-left: auto;
+}
+
+.s-cap {
+  color: var(--ink-faint);
+  font: 500 11px/16px var(--font-mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.s-select {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.s-endpoint {
+  width: 120px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.s-endpoint:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.s-feature-note {
+  margin: 0;
+  color: var(--ink-faint);
+  font: 11px/16px var(--font-mono);
+}
+
+/* --- results -------------------------------------------------------------- */
+
+.s-results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.s-results__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.s-results__meta {
+  color: var(--ink-faint);
+  font: 12px/18px var(--font-mono);
+}
+
+.s-results__bulk {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.s-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.s-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.s-result:hover {
+  border-color: var(--line-strong);
+}
+
+.s-result__checkbox {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 4px 0 0;
+  accent-color: var(--orange);
+}
+
+.s-result__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.s-result__title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.s-result__title {
+  padding: 0;
+  border: none;
+  background: none;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+  color: var(--ink);
+  font: 500 15px/22px var(--font-ui);
+  cursor: pointer;
+}
+
+.s-result__title:hover {
+  color: var(--orange-deep);
+  text-decoration: underline;
+}
+
+.s-result__arrow {
+  margin: 0 2px;
+  color: var(--ink-faint);
+  font: 11px/16px var(--font-mono);
+  white-space: nowrap;
+}
+
+.s-result__tag {
+  color: var(--ink-muted);
+}
+
+.s-result__snippet {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.s-result__snippet mark {
+  background: var(--orange-tint);
+  color: var(--orange-deep);
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+.s-result__meta {
+  color: var(--ink-faint);
+  font: 11px/16px var(--font-mono);
+}
+
+.s-result__side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.s-score {
+  color: var(--orange-deep);
+  font: 12px/18px var(--font-mono);
+}
+
+.s-result__actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* --- named states --------------------------------------------------------- */
+
+.s-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  text-align: center;
+}
+
+.s-panel h2 {
+  margin: 0;
+  font: 600 18px/24px var(--font-display);
+  color: var(--ink);
+}
+
+.s-panel p {
+  margin: 0;
+  color: var(--ink-muted);
+}
+
+.s-panel--unavailable h2 {
+  color: var(--orange-deep);
+}
+
+.s-panel--error {
+  border-color: var(--red-tint);
+}
+
+.s-panel--error h2 {
+  color: var(--red-deep);
+}
+
+.s-panel__code {
+  font: 12px/18px var(--font-mono);
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.s-panel__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* --- right-sheet host -------------------------------------------------------
+   The graph inspector is a 360px rail by default; inside the search sheet it
+   fills the sheet body instead. */
+
+.s-panel-host .g-inspector {
+  width: 100%;
+  border-left: none;
+}
