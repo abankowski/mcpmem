@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H4 Admin</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+a{color:#ff9152;text-decoration:none}a:hover{color:#ffb380;text-decoration:underline}
+.app{font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:20px;color:#ece8df;background:#141310}
+.m{font-family:'JetBrains Mono',monospace}
+.cap{font-family:'JetBrains Mono',monospace;font-size:11px;line-height:16px;letter-spacing:.06em;text-transform:uppercase;color:#8f887b;font-weight:500}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border:1px solid #332f29;border-radius:6px;background:#1e1c18;color:#ece8df;font:inherit;font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap}
+.btn:hover{background:#2a2722}
+.btn.ghost{background:transparent;border-color:transparent}
+.btn.ghost:hover{background:#2a2722}
+.btn.primary{background:#f26b1d;border-color:#f26b1d;color:#1c1b18}
+.btn.icon{width:32px;padding:0;justify-content:center}
+.btn.sm{height:26px;padding:0 8px;font-size:12px}
+.tag{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:999px;border:1px solid #332f29;background:#2a2722;font-family:'JetBrains Mono',monospace;font-size:11px;color:#ece8df}
+.tag.ok{color:#7fd49a;background:#15291c;border-color:#15291c}
+.tag.warn{color:#ffb380;background:#3a2114;border-color:#3a2114}
+.row{display:flex;align-items:center;gap:8px}
+.col{display:flex;flex-direction:column;gap:8px}
+.ico{width:16px;height:16px;flex:none}
+.nav a{display:flex;align-items:center;justify-content:space-between;height:32px;padding:0 10px;border-radius:6px;color:#b1aa9d;font-size:13px;font-weight:500}
+.nav a:hover{background:#2a2722;text-decoration:none}
+.nav a.on{background:#2a2722;color:#ece8df;box-shadow:inset 2px 0 0 #f26b1d}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{text-align:left;padding:10px 12px;border-bottom:1px solid #332f29;background:#2a2722;font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8f887b;font-weight:500}
+td{padding:12px;border-bottom:1px solid #332f29;vertical-align:middle}
+tr:hover td{background:#1e1c18}
+input[type=text]{font:inherit;font-size:13px;color:#ece8df;background:#141310;border:1px solid #7a7367;border-radius:6px;padding:0 10px;height:32px;width:100%;box-sizing:border-box}
+input[type=checkbox]{accent-color:#f26b1d;width:14px;height:14px;margin:0}
+.fld{display:flex;flex-direction:column;gap:6px}
+.sc{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border:1px solid #332f29;border-radius:6px;cursor:pointer}
+.sc:hover{border-color:#7a7367}
+</style>
+</head>
+<body>
+<div class="app" style="display:flex;flex-direction:column;min-height:900px;position:relative">
+
+  <header style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:0 16px;height:48px;border-bottom:1px solid #332f29;background:#1e1c18">
+    <a href="01-graph-explorer.html" style="font-family:'Fraunces',serif;font-weight:700;font-size:20px;color:#ece8df;margin-right:4px">mcpmem</a>
+    <button class="btn ghost" aria-label="Switch workspace"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/></svg><span class="m" style="font-size:12px">second-brain</span><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px;color:#8f887b"><path d="m6 9 6 6 6-6"/></svg></button>
+    <nav class="row" style="gap:2px;margin-left:12px">
+      <a href="01-graph-explorer.html" class="btn ghost" style="color:#b1aa9d">Graph</a>
+      <a href="03-search.html" class="btn ghost" style="color:#b1aa9d">Search</a>
+      <a href="04-admin.html" class="btn ghost" style="color:#ff9152">Admin</a>
+    </nav>
+    <div style="flex:1"></div>
+    <button class="btn" style="width:280px;justify-content:flex-start;color:#8f887b;font-weight:400"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Jump to node<span class="m" style="margin-left:auto;font-size:11px;border:1px solid #332f29;border-radius:4px;padding:1px 5px">⌘K</span></button>
+    <button class="btn ghost" aria-label="Account menu"><span style="width:24px;height:24px;border-radius:50%;background:#2a2722;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:600">AB</span></button>
+  </header>
+
+  <div style="display:flex;flex-wrap:wrap;flex:1">
+    <aside class="nav" style="width:240px;border-right:1px solid #332f29;background:#1e1c18;padding:16px 8px;display:flex;flex-direction:column;gap:20px">
+      <div class="col" style="gap:2px">
+        <span class="cap" style="padding:0 10px 6px">Workspace · second-brain</span>
+        <a href="#o">Overview</a>
+        <a href="#m">Members and grants<span class="m" style="font-size:11px;color:#8f887b">3</span></a>
+        <a href="#w">Webhooks<span class="m" style="font-size:11px;color:#8f887b">1</span></a>
+        <a href="#v">Vector index</a>
+      </div>
+      <div class="col" style="gap:2px">
+        <span class="cap" style="padding:0 10px 6px">Server</span>
+        <a href="#p" class="on">Principals<span class="m" style="font-size:11px;color:#8f887b">2</span></a>
+        <a href="#a">Pending approvals<span class="tag warn" style="height:18px;font-size:10px">1</span></a>
+        <a href="#r">Code repositories<span class="m" style="font-size:11px;color:#8f887b">1</span></a>
+        <a href="#s">Workspaces<span class="m" style="font-size:11px;color:#8f887b">2</span></a>
+      </div>
+    </aside>
+
+    <main style="flex:999 1 560px;min-width:0;padding:32px;display:flex;flex-direction:column;gap:20px">
+      <div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:12px">
+        <div class="col" style="gap:4px">
+          <div style="font-family:'Fraunces',serif;font-weight:600;font-size:26px;line-height:32px">Principals</div>
+          <div style="color:#b1aa9d">Identities that may authorize against this server, and the scopes they can be granted.</div>
+        </div>
+        <button class="btn primary"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Add principal</button>
+      </div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <div style="width:280px"><label for="f" style="position:absolute;left:-9999px">Filter principals</label><input id="f" type="text" value="" placeholder="Filter by name, issuer, subject"></div>
+        <button class="btn">Scope: any<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px;color:#8f887b"><path d="m6 9 6 6 6-6"/></svg></button>
+      </div>
+      <div style="overflow-x:auto;border:1px solid #332f29;border-radius:10px">
+        <table>
+          <thead><tr><th>Name</th><th>Issuer</th><th>Subject</th><th>Scopes</th><th>Last seen</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td><div class="row"><span style="font-weight:500">abankowski</span><span class="tag" style="height:18px;font-size:10px">built-in</span></div></td>
+              <td class="m" style="font-size:12px;color:#b1aa9d">accounts.google.com</td>
+              <td class="m" style="font-size:12px;color:#b1aa9d">1051805…4437</td>
+              <td><div class="row" style="gap:4px;flex-wrap:wrap"><span class="tag">admin</span><span class="tag">code</span><span class="tag">graph-read</span><span class="tag">graph-write</span><span class="tag">vectors</span></div></td>
+              <td class="m" style="font-size:12px;color:#b1aa9d">2026-10-02 23:58</td>
+              <td><button class="btn ghost icon sm" aria-label="Row actions"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button></td>
+            </tr>
+            <tr>
+              <td><span style="font-weight:500">n8n-worker</span></td>
+              <td class="m" style="font-size:12px;color:#b1aa9d">brain-1.tandk.pl</td>
+              <td class="m" style="font-size:12px;color:#b1aa9d">svc:n8n</td>
+              <td><div class="row" style="gap:4px;flex-wrap:wrap"><span class="tag">graph-read</span><span class="tag">graph-write</span></div></td>
+              <td class="m" style="font-size:12px;color:#b1aa9d">2026-10-02 21:10</td>
+              <td><button class="btn ghost icon sm" aria-label="Row actions"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="m" style="font-size:11px;color:#8f887b">2 principals · scopes change takes effect on next token</div>
+    </main>
+  </div>
+
+  <div style="position:absolute;inset:0;background:rgba(20,19,16,.55)"></div>
+  <aside style="position:absolute;top:0;right:0;bottom:0;width:440px;background:#1e1c18;border-left:1px solid #332f29;padding:24px;display:flex;flex-direction:column;gap:20px;box-shadow:0 4px 16px rgba(0,0,0,.4)">
+    <div class="row" style="justify-content:space-between">
+      <div style="font-family:'Fraunces',serif;font-weight:600;font-size:20px;line-height:26px">Add principal</div>
+      <button class="btn ghost icon" aria-label="Close"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="fld"><label for="pn" class="cap">Name</label><input id="pn" type="text" value="" placeholder="e.g. claude-desktop"></div>
+    <div class="fld"><label for="pi" class="cap">Issuer (iss)</label><input id="pi" type="text" value="https://accounts.google.com"></div>
+    <div class="fld"><label for="ps" class="cap">Subject (sub)</label><input id="ps" type="text" value="" placeholder="identity id from the token"></div>
+    <div class="fld"><label for="pl" class="cap">Label</label><input id="pl" type="text" value="" placeholder="optional, shown in audit"></div>
+    <div class="fld">
+      <span class="cap">Scopes</span>
+      <label class="sc"><input type="checkbox" checked style="margin-top:3px"><span><span class="m" style="font-size:12px">graph-read</span><br><span style="color:#8f887b;font-size:12px">read entities, relations, search</span></span></label>
+      <label class="sc"><input type="checkbox" style="margin-top:3px"><span><span class="m" style="font-size:12px">graph-write</span><br><span style="color:#8f887b;font-size:12px">create, edit, merge, delete</span></span></label>
+      <label class="sc"><input type="checkbox" style="margin-top:3px"><span><span class="m" style="font-size:12px">vectors</span><br><span style="color:#8f887b;font-size:12px">semantic and hybrid search</span></span></label>
+      <label class="sc"><input type="checkbox" style="margin-top:3px"><span><span class="m" style="font-size:12px">code</span><br><span style="color:#8f887b;font-size:12px">code index tools</span></span></label>
+      <label class="sc"><input type="checkbox" style="margin-top:3px"><span><span class="m" style="font-size:12px">admin</span><br><span style="color:#8f887b;font-size:12px">this panel and server settings</span></span></label>
+    </div>
+    <div class="row" style="margin-top:auto;justify-content:flex-end"><button class="btn">Cancel</button><button class="btn primary">Save principal</button></div>
+  </aside>
+</div>
+</body>
+</html>

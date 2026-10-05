@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T1 Dark theme tokens</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+a{color:#ff9152}a:hover{color:#ffb380}
+.t{font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:20px;color:#ece8df;background:#141310}
+.m{font-family:'JetBrains Mono',monospace}
+.cap{font-family:'JetBrains Mono',monospace;font-size:12px;line-height:18px;letter-spacing:.06em;text-transform:uppercase;color:#8f887b;font-weight:500}
+.sw{display:flex;flex-direction:column;gap:6px;width:150px}
+.chip{height:56px;border-radius:6px;border:1px solid #332f29;box-sizing:border-box;display:flex;align-items:flex-end;padding:6px 8px;font-family:'JetBrains Mono',monospace;font-size:11px}
+.grid{display:flex;flex-wrap:wrap;gap:16px}
+.sec{display:flex;flex-direction:column;gap:12px}
+h2{font-family:'Fraunces',serif;font-weight:600;font-size:20px;line-height:26px;margin:0;color:#ece8df}
+.dot{width:14px;height:14px;border-radius:50%;display:inline-block;border:1px solid rgba(0,0,0,.4)}
+</style>
+</head>
+<body>
+<div class="t" style="width:1440px;padding:48px;box-sizing:border-box;display:flex;flex-direction:column;gap:40px">
+
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:16px">
+    <div>
+      <div class="cap">Design system extension · theme "dark"</div>
+      <div style="font-family:'Fraunces',serif;font-weight:700;font-size:34px;line-height:40px;margin-top:8px">mcpmem dark tokens</div>
+      <div style="color:#b1aa9d;margin-top:6px;max-width:720px">Same token names as the light theme, dark values. Warm near-black ground so the orange reads as the same accent. Roles are unchanged: neutral carries, orange points, blue is information, green success, red danger.</div>
+    </div>
+    <div class="cap">contrast: ink 15:1 · ink-muted 8:1 · ink-faint 5:1 on surface-0</div>
+  </div>
+
+  <div class="sec">
+    <h2>Surfaces and lines</h2>
+    <div class="grid">
+      <div class="sw"><div class="chip" style="background:#141310">#141310</div><span class="m" style="font-size:12px">surface-0</span><span style="color:#8f887b;font-size:12px">app ground, canvas</span></div>
+      <div class="sw"><div class="chip" style="background:#1e1c18">#1e1c18</div><span class="m" style="font-size:12px">surface-1</span><span style="color:#8f887b;font-size:12px">rails, inspector, cards</span></div>
+      <div class="sw"><div class="chip" style="background:#2a2722">#2a2722</div><span class="m" style="font-size:12px">surface-2</span><span style="color:#8f887b;font-size:12px">hover, table head, inline code</span></div>
+      <div class="sw"><div class="chip" style="background:#332f29">#332f29</div><span class="m" style="font-size:12px">line</span><span style="color:#8f887b;font-size:12px">hairlines</span></div>
+      <div class="sw"><div class="chip" style="background:#7a7367">#7a7367</div><span class="m" style="font-size:12px">line-strong</span><span style="color:#8f887b;font-size:12px">inputs, axes</span></div>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>Ink</h2>
+    <div class="grid">
+      <div class="sw"><div class="chip" style="background:#ece8df;color:#141310">#ece8df</div><span class="m" style="font-size:12px">ink</span><span style="color:#8f887b;font-size:12px">text, primary button fill</span></div>
+      <div class="sw"><div class="chip" style="background:#b1aa9d;color:#141310">#b1aa9d</div><span class="m" style="font-size:12px">ink-muted</span><span style="color:#8f887b;font-size:12px">secondary text</span></div>
+      <div class="sw"><div class="chip" style="background:#8f887b;color:#141310">#8f887b</div><span class="m" style="font-size:12px">ink-faint</span><span style="color:#8f887b;font-size:12px">captions, timestamps</span></div>
+      <div class="sw"><div class="chip" style="background:#141310">#141310</div><span class="m" style="font-size:12px">on-ink</span><span style="color:#8f887b;font-size:12px">text on ink fill</span></div>
+      <div class="sw"><div class="chip" style="background:#5f5b53;color:#ece8df">#5f5b53</div><span class="m" style="font-size:12px">on-ink-muted</span><span style="color:#8f887b;font-size:12px">secondary on ink fill</span></div>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>Accent and status</h2>
+    <div class="grid">
+      <div class="sw"><div class="chip" style="background:#f26b1d;color:#1c1b18">#f26b1d</div><span class="m" style="font-size:12px">orange</span><span style="color:#8f887b;font-size:12px">fill: CTA, selected node ring</span></div>
+      <div class="sw"><div class="chip" style="background:#ff9152;color:#1c1b18">#ff9152</div><span class="m" style="font-size:12px">orange-deep</span><span style="color:#8f887b;font-size:12px">text: links, active nav, key numbers</span></div>
+      <div class="sw"><div class="chip" style="background:#3a2114">#3a2114</div><span class="m" style="font-size:12px">orange-tint</span><span style="color:#8f887b;font-size:12px">selected row, marked text</span></div>
+      <div class="sw"><div class="chip" style="background:#5b8ff0;color:#141310">#5b8ff0</div><span class="m" style="font-size:12px">blue</span><span style="color:#8f887b;font-size:12px">info mark</span></div>
+      <div class="sw"><div class="chip" style="background:#8fb3f7;color:#141310">#8fb3f7</div><span class="m" style="font-size:12px">blue-deep · focus</span><span style="color:#8f887b;font-size:12px">info text, focus ring</span></div>
+      <div class="sw"><div class="chip" style="background:#16233a">#16233a</div><span class="m" style="font-size:12px">blue-tint</span><span style="color:#8f887b;font-size:12px">info ground</span></div>
+      <div class="sw"><div class="chip" style="background:#4fb36f;color:#141310">#4fb36f</div><span class="m" style="font-size:12px">green</span><span style="color:#8f887b;font-size:12px">success mark, "enabled"</span></div>
+      <div class="sw"><div class="chip" style="background:#7fd49a;color:#141310">#7fd49a</div><span class="m" style="font-size:12px">green-deep</span><span style="color:#8f887b;font-size:12px">success text</span></div>
+      <div class="sw"><div class="chip" style="background:#15291c">#15291c</div><span class="m" style="font-size:12px">green-tint</span><span style="color:#8f887b;font-size:12px">success ground</span></div>
+      <div class="sw"><div class="chip" style="background:#f27d74;color:#141310">#f27d74</div><span class="m" style="font-size:12px">red-deep</span><span style="color:#8f887b;font-size:12px">danger text, destructive</span></div>
+      <div class="sw"><div class="chip" style="background:#3a1c1a">#3a1c1a</div><span class="m" style="font-size:12px">red-tint</span><span style="color:#8f887b;font-size:12px">danger ground</span></div>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>Entity type palette (new, graph only)</h2>
+    <div style="color:#b1aa9d;max-width:760px">Eight categorical hues at matched lightness, assigned to entity types in order of count. Types 9+ reuse the hue with a hollow ring. The selected node gets an orange ring regardless of type; the hovered edge goes orange-deep. Relations are always line-strong.</div>
+    <div class="grid">
+      <div class="sw"><div class="chip" style="background:#f28c4a;color:#141310">#f28c4a</div><span class="m" style="font-size:12px">node-1 · Osoba</span></div>
+      <div class="sw"><div class="chip" style="background:#6b9cf5;color:#141310">#6b9cf5</div><span class="m" style="font-size:12px">node-2 · Technologia</span></div>
+      <div class="sw"><div class="chip" style="background:#5fc385;color:#141310">#5fc385</div><span class="m" style="font-size:12px">node-3 · Organizacja</span></div>
+      <div class="sw"><div class="chip" style="background:#b08cf0;color:#141310">#b08cf0</div><span class="m" style="font-size:12px">node-4 · Decyzja</span></div>
+      <div class="sw"><div class="chip" style="background:#4fc4c4;color:#141310">#4fc4c4</div><span class="m" style="font-size:12px">node-5 · Zasada</span></div>
+      <div class="sw"><div class="chip" style="background:#ee82b0;color:#141310">#ee82b0</div><span class="m" style="font-size:12px">node-6 · System</span></div>
+      <div class="sw"><div class="chip" style="background:#d9b84a;color:#141310">#d9b84a</div><span class="m" style="font-size:12px">node-7 · Projekt</span></div>
+      <div class="sw"><div class="chip" style="background:#a39d91;color:#141310">#a39d91</div><span class="m" style="font-size:12px">node-8 · Zobowiązanie</span></div>
+    </div>
+    <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap">
+      <span class="cap">on canvas</span>
+      <span style="display:inline-flex;align-items:center;gap:8px"><span class="dot" style="background:#f28c4a"></span>filled = types 1-8</span>
+      <span style="display:inline-flex;align-items:center;gap:8px"><span class="dot" style="background:transparent;border:2px solid #f28c4a"></span>hollow = types 9-16</span>
+      <span style="display:inline-flex;align-items:center;gap:8px"><span class="dot" style="background:#6b9cf5;box-shadow:0 0 0 3px #f26b1d"></span>orange ring = selected</span>
+      <span style="display:inline-flex;align-items:center;gap:8px"><span class="dot" style="background:#6b9cf5;opacity:.3"></span>30% = filtered out / not in path</span>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>Type for the app</h2>
+    <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px">
+      <div style="background:#1e1c18;border:1px solid #332f29;border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:8px">
+        <span class="cap">ui · IBM Plex Sans</span>
+        <div style="font-size:20px;line-height:26px;font-weight:600">John Doe</div>
+        <div style="font-size:14px;line-height:20px">Body 14/20 for inspector, tables, forms. Buttons at 500.</div>
+        <div style="font-size:13px;line-height:18px;color:#b1aa9d">Small 13/18 for meta and secondary rows.</div>
+        <div style="font-size:12px;color:#8f887b">New family: the DS has no sans and serif body is wrong for a dense tool. Plex pairs with JetBrains Mono.</div>
+      </div>
+      <div style="background:#1e1c18;border:1px solid #332f29;border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:8px">
+        <span class="cap">identity · JetBrains Mono</span>
+        <div class="m" style="font-size:13px;line-height:20px">pracuje_w · dotyczy</div>
+        <div class="m" style="font-size:13px;line-height:20px">fte = 0.75 · degree 4</div>
+        <div class="m" style="font-size:13px;line-height:20px">2026-09-04 17:27:29</div>
+        <div style="font-size:12px;color:#8f887b">Relation types, attribute keys and values, counts, timestamps, IDs, scopes. Caption labels uppercase 12px.</div>
+      </div>
+      <div style="background:#1e1c18;border:1px solid #332f29;border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:8px">
+        <span class="cap">brand touch · Fraunces</span>
+        <div style="font-family:'Fraunces',serif;font-weight:700;font-size:26px;line-height:32px">mcpmem</div>
+        <div style="font-family:'Fraunces',serif;font-weight:600;font-size:20px;line-height:26px">Principals</div>
+        <div style="font-size:12px;color:#8f887b">Only the wordmark, page titles and the consent card heading. Nothing inside panels.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec">
+    <h2>Shape, spacing, motion</h2>
+    <div style="display:flex;gap:40px;flex-wrap:wrap;color:#b1aa9d">
+      <div><span class="cap">radius</span><br>4 tags, chips · 6 buttons, inputs · 10 cards, sheets</div>
+      <div><span class="cap">spacing</span><br>8px grid; 12 cell padding · 16 panel padding · 24 between groups</div>
+      <div><span class="cap">borders</span><br>1px line everywhere; line-strong on inputs; no shadows except popovers</div>
+      <div><span class="cap">focus</span><br>2px blue-deep ring, 2px offset</div>
+      <div><span class="cap">motion</span><br>≤150ms; sheet slide 150ms; canvas physics exempt</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
