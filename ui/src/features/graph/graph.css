@@ -365,6 +365,14 @@
   font: 12px/18px var(--font-ui);
   z-index: 3;
   white-space: nowrap;
+  /* The chip floats over the canvas: it is a status readout, not an
+     interaction surface, and a node under it must stay clickable. Only
+     the Cancel control takes pointer events. */
+  pointer-events: none;
+}
+
+.g-connect-hint button {
+  pointer-events: auto;
 }
 
 .g-isolate-banner {

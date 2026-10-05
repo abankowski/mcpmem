@@ -1981,6 +1981,7 @@ dependencies = [
  "blake3",
  "clap",
  "dashmap",
+ "flate2",
  "futures",
  "hmac 0.12.1",
  "http-body-util",

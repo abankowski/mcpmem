@@ -178,6 +178,76 @@ async fn upload_list_metadata_and_download_at_the_api_base() {
     );
 }
 
+/// A download the client negotiates with `Accept-Encoding` must still
+/// round-trip the exact stored bytes. The response-compression layer polls a
+/// streamed body once more after it ends, and the download stream used to
+/// panic on that poll, which closed the connection with no response
+/// (`ERR_EMPTY_RESPONSE` in the browser, nothing in the server log). On the
+/// pre-fix code this request panics the router task; the decoded body must
+/// equal the uploaded bytes.
+#[tokio::test]
+async fn a_negotiated_download_round_trips_the_exact_bytes() {
+    let fx = fixture(true).await;
+    let payload: &[u8] = b"E2E files text line one.\nE2E files text line two.\n";
+    let post = send(
+        &fx.server,
+        &fx.owner,
+        "POST",
+        &upload_path(&fx.workspace, "Alice", "e2e-notes.txt"),
+        Body::from(payload.to_vec()),
+        Some("text/plain"),
+    )
+    .await;
+    assert_eq!(post.status(), StatusCode::CREATED);
+    let id = data(post).await["attachmentId"]
+        .as_i64()
+        .expect("an attachment id");
+
+    let negotiated = fx
+        .server
+        .request(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/api/attachments/{id}/download?workspaceId={}",
+                    fx.workspace
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {}", fx.owner))
+                .header(header::ACCEPT_ENCODING, "gzip")
+                .body(Body::empty())
+                .expect("a valid request"),
+        )
+        .await;
+    assert_eq!(negotiated.status(), StatusCode::OK);
+    let (parts, body) = negotiated.into_parts();
+    let encoded = body
+        .collect()
+        .await
+        .expect("the download completes")
+        .to_bytes();
+    let decoded = match parts.headers.get(header::CONTENT_ENCODING) {
+        Some(encoding) if encoding == "gzip" => gunzip(&encoded),
+        _ => encoded.to_vec(),
+    };
+    assert_eq!(
+        decoded, payload,
+        "the negotiated download returns the stored bytes byte for byte"
+    );
+}
+
+/// Inflate one gzip body. The compression layer encodes the stream when the
+/// client advertises support, so the round-trip comparison reads through
+/// `Content-Encoding`.
+fn gunzip(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .expect("a valid gzip body");
+    decoded
+}
+
 /// The MIME type outside the allowlist rejects the upload. The rejection
 /// names the MIME rule and stores no row. The HTTP code is 415
 /// (`UNSUPPORTED_MEDIA_TYPE`), the semantically correct code for a refused

@@ -546,11 +546,37 @@ export function Page() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (connectMode) cancelConnect();
-      if (connectTypeOpen) setConnectTypeOpen(false);
-      if (createNodeOpen) setCreateNodeOpen(false);
-      if (observeOpen) setObserveOpen(false);
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      const typing = target != null && (
+        target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" ||
+        target.isContentEditable
+      );
+      if (event.key === "Escape") {
+        // A modal dialog owns its Escape (cancel closes it). The window
+        // handler must not also clear the selection behind it.
+        if (document.querySelector("dialog[open]") != null) return;
+        const anyOpen = connectMode || connectTypeOpen || createNodeOpen || observeOpen;
+        if (connectMode) cancelConnect();
+        if (connectTypeOpen) setConnectTypeOpen(false);
+        if (createNodeOpen) setCreateNodeOpen(false);
+        if (observeOpen) setObserveOpen(false);
+        if (!anyOpen && !typing) clearSelection();
+        return;
+      }
+      // The handoff canvas shortcuts; never fire while the user types.
+      if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      if (event.key === "f" || event.key === "F") {
+        event.preventDefault();
+        canvas.fit();
+      } else if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        canvas.zoomIn();
+      } else if (event.key === "-" || event.key === "_") {
+        event.preventDefault();
+        canvas.zoomOut();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
