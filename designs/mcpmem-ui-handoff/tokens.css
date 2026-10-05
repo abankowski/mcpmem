@@ -1,0 +1,99 @@
+/* mcpmem web UI - dark theme tokens (extension of the "Artur Bankowski" design system)
+   Same token names as the light theme of the DS, dark values. */
+
+:root {
+  /* surfaces and lines */
+  --surface-0: #141310;   /* app ground, graph canvas */
+  --surface-1: #1e1c18;   /* rails, inspector, cards, sheets, top bar */
+  --surface-2: #2a2722;   /* hover, table head, inline code, pressed */
+  --line: #332f29;        /* hairline dividers, card borders */
+  --line-strong: #7a7367; /* inputs, secondary buttons, axes, edges on canvas */
+
+  /* ink */
+  --ink: #ece8df;         /* text; also the fill of the "ink" button */
+  --ink-muted: #b1aa9d;   /* secondary text, inactive nav */
+  --ink-faint: #8f887b;   /* captions, timestamps, placeholders, counts */
+  --on-ink: #141310;      /* text on an ink fill */
+  --on-ink-muted: #5f5b53;
+
+  /* accent */
+  --orange: #f26b1d;      /* FILL only: primary button, selected-node ring, active tab underline */
+  --orange-deep: #ff9152; /* TEXT: links, active nav, scores, highlighted edge, "Add" actions */
+  --orange-tint: #3a2114; /* selected row, <mark> background, pending badge */
+  --on-orange: #1c1b18;   /* text on orange fill, never white */
+
+  /* status (always paired with a word or icon) */
+  --blue: #5b8ff0;
+  --blue-deep: #8fb3f7;   /* info text and the focus ring */
+  --blue-tint: #16233a;
+  --green: #4fb36f;
+  --green-deep: #7fd49a;  /* "indexed", "live", "enabled" */
+  --green-tint: #15291c;
+  --red-deep: #f27d74;    /* destructive text, errors */
+  --red-tint: #3a1c1a;
+  --focus: var(--blue-deep);
+
+  /* entity type palette (graph only; assigned by type count rank, 1..8; 9+ reuse hue with hollow ring) */
+  --node-1: #f28c4a;
+  --node-2: #6b9cf5;
+  --node-3: #5fc385;
+  --node-4: #b08cf0;
+  --node-5: #4fc4c4;
+  --node-6: #ee82b0;
+  --node-7: #d9b84a;
+  --node-8: #a39d91;
+  --edge: #3d3831;        /* unselected edges on canvas */
+  --edge-active: var(--line-strong);
+  --edge-hot: var(--orange-deep);
+
+  /* type */
+  --font-ui: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-display: "Fraunces", "Iowan Old Style", Georgia, serif;
+
+  /* shape */
+  --radius-sm: 4px;   /* tags, chips, counts */
+  --radius-md: 6px;   /* buttons, inputs, cards inside panels, code */
+  --radius-lg: 10px;  /* cards, sheets, tables, consent card */
+  --border-hair: 1px;
+  --border-focus: 2px;
+  --shadow-float: 0 4px 16px rgba(0,0,0,.4); /* popovers, sheets, lightbox only */
+
+  /* spacing: 8px grid, half step 4 */
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 64px;
+}
+
+/* shadcn/ui mapping (globals.css, .dark scope). Values are the same hexes as above
+   expressed for Tailwind v4 / shadcn "new-york" variables. */
+.dark {
+  --background: #141310;
+  --foreground: #ece8df;
+  --card: #1e1c18;
+  --card-foreground: #ece8df;
+  --popover: #1e1c18;
+  --popover-foreground: #ece8df;
+  --primary: #f26b1d;
+  --primary-foreground: #1c1b18;
+  --secondary: #2a2722;
+  --secondary-foreground: #ece8df;
+  --muted: #2a2722;
+  --muted-foreground: #8f887b;
+  --accent: #2a2722;
+  --accent-foreground: #ece8df;
+  --destructive: #f27d74;
+  --destructive-foreground: #141310;
+  --border: #332f29;
+  --input: #7a7367;
+  --ring: #8fb3f7;
+  --radius: 0.375rem; /* 6px */
+  --sidebar: #1e1c18;
+  --sidebar-foreground: #ece8df;
+  --sidebar-primary: #f26b1d;
+  --sidebar-primary-foreground: #1c1b18;
+  --sidebar-accent: #2a2722;
+  --sidebar-accent-foreground: #ece8df;
+  --sidebar-border: #332f29;
+  --sidebar-ring: #8fb3f7;
+  --chart-1: #f28c4a; --chart-2: #6b9cf5; --chart-3: #5fc385; --chart-4: #b08cf0; --chart-5: #4fc4c4;
+}
