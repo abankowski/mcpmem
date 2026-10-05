@@ -25,6 +25,7 @@ The HTML in `screens/` is reference markup, not the implementation. Build with R
 - Type scale: UI body 14/20; small 13/18 (meta, secondary rows); page title 26/32 Fraunces 600; node name 20/26 Plex 600; caption 11/16 mono uppercase tracking .06em in `--ink-faint`.
 - What is set in mono: relation types, attribute keys and values, counts, timestamps, IDs, scopes, workspace id, scores, file meta. Everything users read as prose is Plex.
 - Sentence case everywhere. No emoji. Plain hyphen, never em dash. Dates `2026-09-04`, times 24h.
+- **English only.** All UI copy, entity and relation types, observations, and example data are English. The screens in this folder predate the rule and still carry Polish example taxonomy (`Osoba`, `Zasada`, `FTE`); treat them as stale and write new content in English. The landing page (`site/src/template.html`) already follows it.
 - Borders, not shadows. `--shadow-float` only on sheets, popovers, command palette, lightbox.
 - Motion at most 150 ms (sheet slide, tab underline, hover). Canvas physics is exempt.
 - Focus: 2px `--focus` ring, 2px offset, on every interactive element. Icon-only buttons get `aria-label`. Real `<button>`, `<a href>`, `<input>` + `<label>`.
