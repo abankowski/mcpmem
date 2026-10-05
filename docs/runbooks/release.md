@@ -142,6 +142,13 @@ The script skips a crate that crates.io already holds at this version. A
 re-run after a partial failure therefore completes the release instead of
 aborting on the crates that already went out.
 
+One failure mode needed a flag. On 2026-10-05 the v3.0.0 release published
+the six library crates and failed on the root crate: the package include
+list pulls in the freshly built, git-ignored `ui/dist`, and cargo's dirty
+check refuses uncommitted files. The root crate now publishes with
+`--allow-dirty`; the library crates stay strict. A release that stops
+mid-way needs a new version for the re-run.
+
 ## Dry run
 
 `workflow_dispatch` accepts a tag and a `dry_run` flag, which defaults to true.
