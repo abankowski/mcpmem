@@ -46,6 +46,24 @@ jobs:
         run: command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
       - name: Workspace versions agree and are valid semver
         run: scripts/check-release-version.sh
+      # The version in the code must not already carry a release tag: a tag
+      # means that version was released, and work merged on top of it would
+      # silently extend a shipped version. The release workflow bumps the
+      # version on a dedicated PR right after publishing, so any other PR
+      # against main is expected to sit on a version with no tag yet. The
+      # name is read from the root manifest so this stays in sync with the
+      # rest of the version tooling.
+      - name: The version in the code has no release tag yet
+        if: github.event_name == 'pull_request'
+        run: |
+          version="$(awk '/^\[package\]/ {inpkg = 1; next}
+                     /^\[/ {inpkg = 0}
+                     inpkg && /^version = / {gsub(/[",]/, "", \$3); print \$3; exit}' Cargo.toml)"
+          if git ls-remote --tags origin "refs/tags/v${version}" | grep -q "refs/tags/v${version}"; then
+            echo "::error::version ${version} already has a release tag v${version}; this version was shipped. Advance the version before merging work onto it (see scripts/next-version.sh)"
+            exit 1
+          fi
+          echo "version ${version} has no release tag yet"
       # The v1.0.0-rc.1 release failed while verifying the packaged crate,
       # because an include_str! read a file outside the crate root. CI now
       # answers that question before a release does.
