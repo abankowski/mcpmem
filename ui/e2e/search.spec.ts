@@ -8,9 +8,14 @@ import { ensureServer, openWorkspace, seedWorkspace, type WorkspaceShape } from 
 test.describe.configure({ mode: "serial" });
 
 let ws: WorkspaceShape;
+let teardownServer: (() => void) | undefined;
+
+test.afterAll(async () => {
+  teardownServer?.();
+});
 
 test.beforeAll(async () => {
-  await ensureServer();
+  teardownServer = await ensureServer();
   ws = await seedWorkspace(`e2e-search-${Date.now()}`, {
     entities: [
       { name: "Alpha", entityType: "note", observations: ["zirconium alpha flavour"] },

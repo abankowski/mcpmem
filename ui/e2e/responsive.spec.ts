@@ -16,9 +16,14 @@ import {
 test.describe.configure({ mode: "serial" });
 
 let ws: WorkspaceShape;
+let teardownServer: (() => void) | undefined;
+
+test.afterAll(async () => {
+  teardownServer?.();
+});
 
 test.beforeAll(async () => {
-  await ensureServer();
+  teardownServer = await ensureServer();
   ws = await seedWorkspace(`e2e-responsive-${Date.now()}`, {
     entities: [
       { name: "R-A", entityType: "note" },

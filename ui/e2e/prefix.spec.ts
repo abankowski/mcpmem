@@ -15,9 +15,14 @@ test.describe.configure({ mode: "serial" });
 
 let ws: WorkspaceShape;
 let proxy: ChildProcess | null = null;
+let teardownServer: (() => void) | undefined;
+
+test.afterAll(async () => {
+  teardownServer?.();
+});
 
 test.beforeAll(async () => {
-  await ensureServer();
+  teardownServer = await ensureServer();
   ws = await seedWorkspace(`e2e-prefix-${Date.now()}`, {
     entities: [{ name: "prefixed-node", entityType: "note" }],
   });

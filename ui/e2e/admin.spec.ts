@@ -8,12 +8,17 @@ import { ensureServer, openWorkspace, seedWorkspace, TEST_BEARER, type Workspace
 test.describe.configure({ mode: "serial" });
 
 let ws: WorkspaceShape;
+let teardownServer: (() => void) | undefined;
 
 test.beforeAll(async () => {
-  await ensureServer();
+  teardownServer = await ensureServer();
   ws = await seedWorkspace(`e2e-admin-${Date.now()}`, {
     entities: [{ name: "AdminTarget", entityType: "note" }],
   });
+});
+
+test.afterAll(async () => {
+  teardownServer?.();
 });
 
 function nav(page: Page) {

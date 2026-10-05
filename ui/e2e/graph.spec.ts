@@ -18,9 +18,14 @@ test.describe.configure({ mode: "serial" });
 
 let graphWs: WorkspaceShape;
 let connectWs: WorkspaceShape;
+let teardownServer: (() => void) | undefined;
+
+test.afterAll(async () => {
+  teardownServer?.();
+});
 
 test.beforeAll(async () => {
-  await ensureServer();
+  teardownServer = await ensureServer();
   graphWs = await seedWorkspace(`e2e-graph-${Date.now()}`, {
     entities: [
       { name: "Alpha", entityType: "note", observations: ["Alpha knows the graph protocol."] },

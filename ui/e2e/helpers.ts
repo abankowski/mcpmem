@@ -24,17 +24,27 @@ export const CONFIG_FILE = path.join(repoRoot, "ui", "e2e", "server.toml");
 /** The server flags shared by the webServer command and the standalone spawn. */
 export function serverArgs(): string[] {
   return [
-    `--config ${CONFIG_FILE}`,
-    `--memory-file ${TEMP_DIR}/graph.mem`,
-    "--transport http",
-    "--bind 127.0.0.1:8080",
+    "--config",
+    CONFIG_FILE,
+    "--memory-file",
+    `${TEMP_DIR}/graph.mem`,
+    "--transport",
+    "http",
+    "--bind",
+    "127.0.0.1:8080",
     "--enable-all",
-    "--ui true",
-    `--auth-token ${TEST_BEARER}`,
-    "--legacy-owner-id machine:local",
-    "--role mcp,extractor",
-    "--log-level info",
-    `--log-file ${TEMP_DIR}/server.log`,
+    "--ui",
+    "true",
+    "--auth-token",
+    TEST_BEARER,
+    "--legacy-owner-id",
+    "machine:local",
+    "--role",
+    "mcp,extractor",
+    "--log-level",
+    "info",
+    "--log-file",
+    `${TEMP_DIR}/server.log`,
   ];
 }
 

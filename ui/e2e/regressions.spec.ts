@@ -19,11 +19,16 @@ test.describe.configure({ mode: "serial" });
 
 let ws: WorkspaceShape;
 let bulkWs: WorkspaceShape;
+let teardownServer: (() => void) | undefined;
 
 const OFFPAGE_NODE = "e2e-offpage-target";
 
+test.afterAll(async () => {
+  teardownServer?.();
+});
+
 test.beforeAll(async () => {
-  await ensureServer();
+  teardownServer = await ensureServer();
   ws = await seedWorkspace(`e2e-regressions-${Date.now()}`, {
     entities: [{ name: "regression-node", entityType: "note" }],
   });
