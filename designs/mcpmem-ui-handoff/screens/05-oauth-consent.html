@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H5 OAuth consent</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+a{color:#ff9152;text-decoration:none}a:hover{color:#ffb380;text-decoration:underline}
+.app{font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:20px;color:#ece8df;background:#141310}
+.m{font-family:'JetBrains Mono',monospace}
+.cap{font-family:'JetBrains Mono',monospace;font-size:11px;line-height:16px;letter-spacing:.06em;text-transform:uppercase;color:#8f887b;font-weight:500}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:40px;padding:0 16px;border:1px solid #7a7367;border-radius:6px;background:#1e1c18;color:#ece8df;font:inherit;font-size:14px;font-weight:500;cursor:pointer}
+.btn:hover{background:#2a2722}
+.btn.primary{background:#f26b1d;border-color:#f26b1d;color:#1c1b18}
+.row{display:flex;align-items:center;gap:8px}
+.col{display:flex;flex-direction:column;gap:8px}
+.sc{display:flex;gap:12px;align-items:flex-start;padding:12px;border:1px solid #332f29;border-radius:6px;cursor:pointer;background:#141310}
+.sc:hover{border-color:#7a7367}
+.sc.on{border-color:#7a7367}
+input[type=checkbox]{accent-color:#f26b1d;width:16px;height:16px;margin:2px 0 0}
+.kv{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #332f29;font-size:13px}
+</style>
+</head>
+<body>
+<div class="app" style="min-height:900px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 16px;box-sizing:border-box;gap:20px;position:relative;overflow:hidden">
+  <img src="brain.svg" alt="" aria-hidden="true" style="position:absolute;left:50%;top:50%;width:1100px;max-width:none;transform:translate(-50%,-52%);opacity:.14;pointer-events:none">
+  <div class="row" style="gap:10px;position:relative"><span style="font-family:'Fraunces',serif;font-weight:700;font-size:22px">mcpmem</span><span class="m" style="font-size:12px;color:#8f887b">brain-1.tandk.pl</span></div>
+
+  <div style="position:relative;width:100%;max-width:480px;background:#1e1c18;border:1px solid #332f29;border-radius:10px;padding:32px;box-sizing:border-box;display:flex;flex-direction:column;gap:24px;box-shadow:0 4px 16px rgba(0,0,0,.4)">
+    <div class="col" style="gap:6px">
+      <div style="font-family:'Fraunces',serif;font-weight:600;font-size:26px;line-height:32px">Authorize mcpmem admin UI</div>
+      <div style="color:#b1aa9d">This client wants to use your memory graph on your behalf.</div>
+    </div>
+
+    <div class="col" style="gap:0">
+      <div class="kv"><span class="cap" style="align-self:center">Client</span><span style="font-weight:500">mcpmem admin UI</span></div>
+      <div class="kv"><span class="cap" style="align-self:center">Returns to</span><span class="m" style="font-size:12px">brain-1.tandk.pl</span></div>
+      <div class="kv" style="border-bottom:0"><span class="cap" style="align-self:center">Workspace</span><button class="row" style="background:none;border:0;color:#ece8df;font:inherit;font-size:13px;cursor:pointer;padding:0"><span class="m" style="font-size:12px">second-brain</span><svg viewBox="0 0 24 24" fill="none" stroke="#8f887b" stroke-width="1.5" style="width:14px;height:14px"><path d="m6 9 6 6 6-6"/></svg></button></div>
+    </div>
+
+    <div class="col" style="gap:8px">
+      <span class="cap">Grant only what it needs</span>
+      <label class="sc on"><input type="checkbox" checked><span><span class="m" style="font-size:13px">admin</span><br><span style="color:#b1aa9d;font-size:13px">Manage principals, webhooks and repositories</span></span></label>
+      <label class="sc on"><input type="checkbox" checked><span><span class="m" style="font-size:13px">graph-read</span><br><span style="color:#b1aa9d;font-size:13px">Read entities, relations and run searches</span></span></label>
+      <label class="sc"><input type="checkbox"><span><span class="m" style="font-size:13px">graph-write</span><br><span style="color:#b1aa9d;font-size:13px">Create, edit, merge and delete graph data</span></span></label>
+    </div>
+
+    <div class="col" style="gap:12px">
+      <div style="font-size:13px;color:#b1aa9d">Signed in as <span style="color:#ece8df;font-weight:500">Artur Bankowski</span> · <a href="#switch">Not you?</a></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn">Deny</button>
+        <button class="btn primary">Approve</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="m" style="font-size:11px;color:#8f887b;position:relative">You can revoke this grant any time in Admin · Principals.</div>
+</div>
+</body>
+</html>

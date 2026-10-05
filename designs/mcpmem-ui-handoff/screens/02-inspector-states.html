@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H2 Inspector states</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+body{margin:0}
+a{color:#ff9152;text-decoration:none}a:hover{color:#ffb380;text-decoration:underline}
+.app{font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:20px;color:#ece8df;background:#141310}
+.m{font-family:'JetBrains Mono',monospace}
+.cap{font-family:'JetBrains Mono',monospace;font-size:11px;line-height:16px;letter-spacing:.06em;text-transform:uppercase;color:#8f887b;font-weight:500}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border:1px solid #332f29;border-radius:6px;background:#1e1c18;color:#ece8df;font:inherit;font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap}
+.btn:hover{background:#2a2722}
+.btn.ghost{background:transparent;border-color:transparent}
+.btn.ghost:hover{background:#2a2722}
+.btn.primary{background:#f26b1d;border-color:#f26b1d;color:#1c1b18}
+.btn.icon{width:32px;padding:0;justify-content:center}
+.btn.sm{height:26px;padding:0 8px;font-size:12px}
+.btn.on{background:#2a2722;border-color:#7a7367}
+.tab{height:40px;padding:0 4px;margin-right:16px;display:inline-flex;align-items:center;gap:6px;border-bottom:2px solid transparent;color:#b1aa9d;font-weight:500;cursor:pointer;background:none;border-top:0;border-left:0;border-right:0;font:inherit;font-size:13px}
+.tab.on{color:#ece8df;border-bottom-color:#f26b1d}
+.tag{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:999px;border:1px solid #332f29;background:#2a2722;font-family:'JetBrains Mono',monospace;font-size:11px;color:#ece8df}
+.cnt{font-family:'JetBrains Mono',monospace;font-size:11px;color:#8f887b;background:#2a2722;border-radius:4px;padding:1px 5px}
+.row{display:flex;align-items:center;gap:8px}
+.col{display:flex;flex-direction:column;gap:8px}
+.obs{padding:10px 12px;border:1px solid #332f29;border-radius:6px;background:#141310;display:flex;flex-direction:column;gap:6px}
+.kv{display:grid;grid-template-columns:120px minmax(0,1fr);gap:0 12px;padding:6px 0;border-bottom:1px solid #332f29;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:18px}
+.ico{width:16px;height:16px;flex:none}
+.panel{width:380px;background:#1e1c18;border:1px solid #332f29;border-radius:10px;display:flex;flex-direction:column;overflow:hidden}
+.head{padding:16px 16px 0;display:flex;flex-direction:column;gap:10px}
+.body{padding:16px;display:flex;flex-direction:column;gap:24px}
+.rel{padding:10px 12px;border:1px solid #332f29;border-radius:6px;background:#141310;display:flex;flex-direction:column;gap:6px;cursor:pointer}
+.rel:hover{border-color:#7a7367}
+.file{padding:10px;border:1px solid #332f29;border-radius:6px;background:#141310;display:flex;gap:12px}
+.thumb{width:64px;height:64px;border-radius:4px;background:#2a2722;flex:none;display:flex;align-items:center;justify-content:center;color:#8f887b}
+input[type=text],textarea{font:inherit;font-size:13px;color:#ece8df;background:#141310;border:1px solid #7a7367;border-radius:6px;padding:8px 10px;width:100%;box-sizing:border-box}
+</style>
+</head>
+<body>
+<div class="app" style="width:1240px;height:900px;padding:32px;box-sizing:border-box;display:flex;gap:40px;align-items:flex-start">
+
+  <section class="panel">
+    <div class="head">
+      <div class="row" style="justify-content:space-between">
+        <span class="tag"><span style="width:8px;height:8px;border-radius:50%;background:#f28c4a"></span>Osoba</span>
+        <div class="row" style="gap:2px"><button class="btn ghost sm">Expand</button><button class="btn ghost sm">Isolate</button><button class="btn ghost icon sm" aria-label="More actions"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button></div>
+      </div>
+      <div style="font-size:20px;line-height:26px;font-weight:600">Krystian Pudlik</div>
+      <div class="m" style="font-size:12px;color:#8f887b">degree 4 · 7 observations · 2 files</div>
+    </div>
+    <div style="padding:6px 16px 0;border-bottom:1px solid #332f29">
+      <button class="tab">Node</button><button class="tab on">Relations<span class="cnt">4</span></button><button class="tab">Files<span class="cnt">2</span></button>
+    </div>
+    <div class="body">
+      <div class="row" style="justify-content:space-between">
+        <div class="row" style="gap:0;border:1px solid #332f29;border-radius:6px;overflow:hidden"><button class="btn ghost sm on" style="border-radius:0">All</button><button class="btn ghost sm" style="border-radius:0">Out</button><button class="btn ghost sm" style="border-radius:0">In</button></div>
+        <button class="btn ghost sm" style="color:#ff9152"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M12 5v14M5 12h14"/></svg>Relation</button>
+      </div>
+      <div class="col">
+        <div class="rel" style="border-color:#ff9152">
+          <div class="row" style="justify-content:space-between"><span class="m" style="font-size:12px;color:#ff9152">pracuje_w</span><span class="m" style="font-size:11px;color:#8f887b">→ out</span></div>
+          <div class="row"><span style="font-weight:500">Parloa</span><span class="tag" style="height:18px;font-size:10px"><span style="width:6px;height:6px;border-radius:50%;background:#5fc385"></span>Organizacja</span></div>
+          <div class="m" style="font-size:11px;color:#8f887b">2 attributes · 1 observation</div>
+        </div>
+        <div class="rel">
+          <div class="row" style="justify-content:space-between"><span class="m" style="font-size:12px;color:#b1aa9d">dotyczy</span><span class="m" style="font-size:11px;color:#8f887b">← in</span></div>
+          <div class="row"><span style="font-weight:500">Ryzyko: Krystian jako jedyny FE</span></div>
+          <div class="row"><span class="tag" style="height:18px;font-size:10px"><span style="width:6px;height:6px;border-radius:50%;background:#a39d91"></span>Ryzyko</span><span class="m" style="font-size:11px;color:#8f887b">no attributes</span></div>
+        </div>
+        <div class="rel">
+          <div class="row" style="justify-content:space-between"><span class="m" style="font-size:12px;color:#b1aa9d">pracuje_w</span><span class="m" style="font-size:11px;color:#8f887b">→ out</span></div>
+          <div class="row"><span style="font-weight:500">Evojam</span><span class="tag" style="height:18px;font-size:10px"><span style="width:6px;height:6px;border-radius:50%;background:#5fc385"></span>Organizacja</span></div>
+          <div class="m" style="font-size:11px;color:#8f887b">1 attribute</div>
+        </div>
+        <div class="rel">
+          <div class="row" style="justify-content:space-between"><span class="m" style="font-size:12px;color:#b1aa9d">dotyczy</span><span class="m" style="font-size:11px;color:#8f887b">→ out</span></div>
+          <div class="row"><span style="font-weight:500">Open Mercato</span><span class="tag" style="height:18px;font-size:10px"><span style="width:6px;height:6px;border-radius:50%;background:#d9b84a"></span>Projekt</span></div>
+          <div class="m" style="font-size:11px;color:#8f887b">no attributes</div>
+        </div>
+      </div>
+      <div class="m" style="font-size:11px;color:#8f887b">hover a row = edge lights up on canvas · click = edge inspector</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="head">
+      <div class="row" style="justify-content:space-between">
+        <a href="#back" class="btn ghost sm" style="color:#b1aa9d;padding-left:4px"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M15 6l-6 6 6 6"/></svg>Krystian Pudlik</a>
+        <button class="btn ghost icon sm" aria-label="More actions"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button>
+      </div>
+      <div class="row"><span class="tag" style="color:#ff9152;border-color:#3a2114;background:#3a2114">pracuje_w</span><span class="cap">relation</span></div>
+      <div style="font-size:16px;line-height:24px;font-weight:500;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <a href="#a" style="color:#ece8df">Krystian Pudlik</a>
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#7a7367" stroke-width="1.5"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        <a href="#b" style="color:#ece8df">Parloa</a>
+      </div>
+      <div class="m" style="font-size:12px;color:#8f887b">created 2026-09-04 · 1 observation · 2 attributes</div>
+    </div>
+    <div style="height:10px;border-bottom:1px solid #332f29"></div>
+    <div class="body">
+      <div class="col">
+        <div class="row" style="justify-content:space-between"><span class="cap">Observations · 1</span><button class="btn ghost sm" style="color:#ff9152"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M12 5v14M5 12h14"/></svg>Add</button></div>
+        <div class="obs">
+          <div style="font-size:13px;line-height:19px">Rozliczany po stawce architekta, oczekiwane kompetencje Frontend Engineera - dogadane z klientem</div>
+          <div class="m" style="font-size:11px;color:#8f887b">2026-09-04</div>
+        </div>
+        <div class="col" style="gap:6px">
+          <textarea rows="2" aria-label="New observation">Nowa obserwacja…</textarea>
+          <div class="row" style="justify-content:space-between"><span class="m" style="font-size:11px;color:#8f887b">occurred at: today ▾</span><div class="row" style="gap:4px"><button class="btn ghost sm">Cancel</button><button class="btn primary sm">Save</button></div></div>
+        </div>
+      </div>
+      <div class="col" style="gap:4px">
+        <div class="row" style="justify-content:space-between;margin-bottom:4px"><span class="cap">Attributes · 2</span><button class="btn ghost sm" style="color:#ff9152"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M12 5v14M5 12h14"/></svg>Add</button></div>
+        <div class="kv"><span style="color:#8f887b">since</span><span>2026-09</span></div>
+        <div class="kv"><span style="color:#8f887b">fte</span><span>0.75</span></div>
+      </div>
+      <div class="col" style="gap:4px">
+        <span class="cap" style="margin-bottom:4px">Actions</span>
+        <div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn sm">Change type</button><button class="btn sm">Reverse direction</button><button class="btn sm" style="color:#f27d74">Delete relation</button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="head">
+      <div class="row" style="justify-content:space-between">
+        <span class="tag"><span style="width:8px;height:8px;border-radius:50%;background:#f28c4a"></span>Osoba</span>
+        <div class="row" style="gap:2px"><button class="btn ghost sm">Expand</button><button class="btn ghost sm">Isolate</button><button class="btn ghost icon sm" aria-label="More actions"><svg class="ico" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg></button></div>
+      </div>
+      <div style="font-size:20px;line-height:26px;font-weight:600">Krystian Pudlik</div>
+      <div class="m" style="font-size:12px;color:#8f887b">degree 4 · 7 observations · 2 files</div>
+    </div>
+    <div style="padding:6px 16px 0;border-bottom:1px solid #332f29">
+      <button class="tab">Node</button><button class="tab">Relations<span class="cnt">4</span></button><button class="tab on">Files<span class="cnt">2</span></button>
+    </div>
+    <div class="body">
+      <div style="border:1px dashed #7a7367;border-radius:6px;padding:20px;text-align:center;display:flex;flex-direction:column;gap:4px;align-items:center">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#8f887b" stroke-width="1.5" style="width:20px;height:20px"><path d="M12 16V4M6 10l6-6 6 6M4 20h16"/></svg>
+        <div style="font-size:13px">Drop files here or <a href="#pick">browse</a></div>
+        <div class="m" style="font-size:11px;color:#8f887b">up to [LIMIT] MB per file</div>
+      </div>
+      <div class="col">
+        <div class="file">
+          <div class="thumb" style="background:#2a2722;background-image:linear-gradient(135deg,#3a3630 25%,transparent 25%,transparent 50%,#3a3630 50%,#3a3630 75%,transparent 75%);background-size:12px 12px"></div>
+          <div class="col" style="gap:4px;flex:1;min-width:0">
+            <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">whiteboard-2026-09-04.jpg</div>
+            <div class="m" style="font-size:11px;color:#8f887b">JPEG · 1.1 MB · 2026-09-04 · <span style="color:#7fd49a">indexed</span> · 3 chunks (OCR)</div>
+            <div class="row" style="gap:2px"><button class="btn ghost sm" style="color:#ff9152">Preview</button><button class="btn ghost sm">Download</button><button class="btn ghost icon sm" aria-label="Delete file"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button></div>
+          </div>
+        </div>
+        <div class="file">
+          <div class="thumb"><span class="m" style="font-size:11px">PDF</span></div>
+          <div class="col" style="gap:4px;flex:1;min-width:0">
+            <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">cv-krystian.pdf</div>
+            <div class="m" style="font-size:11px;color:#8f887b">PDF · 240 KB · 2026-09-04 · <span style="color:#7fd49a">indexed</span> · 12 chunks</div>
+            <div class="row" style="gap:2px"><button class="btn ghost sm" style="color:#ff9152">Preview</button><button class="btn ghost sm">Download</button><button class="btn ghost icon sm" aria-label="Delete file"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button></div>
+          </div>
+        </div>
+        <div class="file" style="border-color:#7a7367">
+          <div class="thumb"><span class="m" style="font-size:11px">ZIP</span></div>
+          <div class="col" style="gap:4px;flex:1;min-width:0">
+            <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">parloa-contract.zip</div>
+            <div style="height:4px;border-radius:2px;background:#2a2722;overflow:hidden"><div style="width:62%;height:100%;background:#f26b1d"></div></div>
+            <div class="m" style="font-size:11px;color:#8f887b">uploading · 62% · 3.4 MB · <span style="color:#ffb380">then indexing</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="m" style="font-size:11px;color:#8f887b">preview = lightbox for image, PDF, text and markdown; other types download only · contents of PDF, text, markdown and images (OCR) are chunked and embedded, so search hits file text</div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>
