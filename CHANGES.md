@@ -8,7 +8,7 @@ version 5.2.1, commit `d6fe34b`. The license stays Apache-2.0, and
 This entry lists every change since that snapshot. The version line restarts at
 1.0.0, because the upstream crate name belongs to another author.
 
-## 2.1.0 (unreleased)
+## 3.0.0 (unreleased)
 
 ### Breaking changes
 
@@ -60,58 +60,6 @@ This entry lists every change since that snapshot. The version line restarts at
   sites, the signed-in identity, the destination host, one checkbox per
   offered scope, the Deny/Approve pair and the revocation note — in the dark
   card layout of the mcpmem design tokens, with no external fonts or assets.
-- **`--version` on the shipped binaries.** `mcpmem --version` and
-  `mcpmem-maintenance --version` print the build version and exit, so an
-  operator can identify a running build before connecting to it.
-- **`Server` header on the HTTP transport.** Every response carries
-  `Server: mcpmem <version>`; `curl -i http://host:port/` answers the version
-  without an MCP handshake.
-- **Relations carry observations.** `add_relation_observations` and
-  `delete_relation_observations` manage them, and `create_relations` accepts
-  an optional `observations` list. Relation observations are embedded as
-  chunks and full-text searchable through `search_relations(query=...)`.
-- **k:v string attributes on entities and relations.** `set_attributes` and
-  `delete_attributes` manage them, and the create/upsert tools accept an
-  optional `attributes` map; get, describe, search and export return them.
-  Attributes are not indexed and not searchable.
-- **`search_relations` exposes the new fields.** Rows include
-  observations and attributes, and `export_graph` includes relation
-  observations and attributes.
-- **Registration rejects an unknown webhook `secretRef`.** When the server
-  loaded signing keys, `webhook_add_subscription`, `POST /ui/api/webhooks`
-  and `PATCH /ui/api/webhooks/{id}` return a 400 for a name that
-  `[webhooks.secrets]` does not define; a server without keys still accepts
-  any name (store-now shape).
-- **Webhook delivery logs the full failure cause.** A transport error used
-  to log only the reqwest headline `error sending request for url (...)`.
-  The log line now carries the whole cause chain — TCP, TLS, timeout — and
-  every attempt has a 10-second deadline, so a dead or stalled endpoint no
-  longer stalls the poller while the TCP stack gives up on its own.
-- **The admin UI flags webhook subscriptions that cannot be signed.** The
-  list marks a row whose `secretRef` has no signing key ("not configured"),
-  and the subscription form lists the configured names and explains the
-  contract.
-- **Webhook deliveries carry the full object (envelope v3).** Every event
-  now includes the `before` and `after` snapshots — entity name, type,
-  observations and kv attributes — plus full relation objects in the
-  relation delta. A delete event carries the complete last-known object in
-  `before`, so a consumer learns exactly what disappeared; a create event
-  carries it in `after`; any other event can be diffed for the exact
-  observations and attributes added, changed or removed. Relation
-  observation and attribute writes now emit their own `relation`-kind events
-  with the mirror's revision and an exact before/after pair. This replaces
-  the version-2 envelope that named only the entity identity.
-- **kv and relation-observation writes reach the outbox without churn.**
-  Attribute and relation-observation writes emit change events (and match
-  subscriptions) while leaving `entity_revision` and the index queues
-  untouched — the REQ-ATTR-OFFLINE economics hold. Migration `0013` drops
-  the `UNIQUE(entity_id, entity_revision)` constraint on `change_event`,
-  because consecutive quiet events on one entity share a structural
-  revision.
-- **Webhook body cap is configurable.** `max-body-bytes` in the
-  `[webhooks]` section raises or lowers the envelope cap (1 MiB default). An
-  event whose full snapshot exceeds the cap dead-letters with the policy
-  reason instead of failing delivery with a truncated body.
 - **Isolated knowledge workspaces.** Each workspace owns one knowledge graph
   in its own SQLite file, with an owner, a visibility, per-identity grants
   and defaults. The file named by `--memory-file` becomes the legacy
@@ -134,6 +82,18 @@ This entry lists every change since that snapshot. The version line restarts at
   and `revoke_machine_account` manage separate `machine:<uuid>` credentials
   with tool-category scopes and one-time tokens. Only an `admin` human or
   trusted local stdio may manage them.
+- **Observations carry a stable id and can be edited or deleted by it.**
+  Every observation returned by an entity read carries its `observationId`,
+  a delete by id removes only the targeted row (the old `delete_observations`
+  removed every copy of a body), and an edit replaces the body while
+  preserving `createdAtUs` and origin. The relation-observation delete takes
+  the same id. Snapshots stored before the field deserialize unchanged.
+- **Relation results carry a structured triple and filter before rank.**
+  `vector_search_entities` and `vector_mmr_search` return a relation hit as
+  `{from, to, relationType}` instead of the old `from -> TYPE -> to` name
+  string, and `filter.from`, `filter.to` and `filter.relationType` exclude a
+  relation before ranking and before the candidate pool is truncated.
+
 - **The `/ui` viewer has a workspace dropdown** fed by `GET /ui/api/workspaces`.
   A switch is session-only — it never changes the stored default — and the
   data routes resolve the selected `workspaceId`. The admin webhook page
@@ -190,6 +150,89 @@ This entry lists every change since that snapshot. The version line restarts at
   an explicit non-OpenAI vision URL. An explicit OpenAI OCR provider needs
   a readable, non-empty `api-key-file`. Invalid OCR settings fail PDFs at
   `config` without a provider request; text extraction does not need OCR.
+
+### Fixed
+
+- **The release PDF targets restore the embedded UI bundle.** A release on a
+  tag failed because `pdf-targets` compiled the crate with the default `ui`
+  feature while the gitignored `ui/dist` was never restored; each target now
+  downloads `ui-dist` from the frontend job, so a tagged release builds.
+- **The release gates the version before building.** A new `version` job runs
+  `check-release-version.sh --registry` and every build job depends on it; a
+  wrong tag fails in about ten seconds instead of after minutes of builds.
+
+### Documentation
+
+- **A public landing page is built from markdown and published to GitHub
+  Pages.** `site/` holds a zero-dependency `build.mjs` that renders
+  `content/index.md` (60 slots, each checked as filled and used) into the
+  design handoff template, and Pages publishes it on every push to main at
+  https://mcpmem.abankowski.pl. The page carries the automation section and
+  the model/scale facts.
+
+### Migration note
+
+- Migrations `0014` (workspace schema marker) and `0015` (attachment tables)
+  apply automatically at the first start after the upgrade. `0014` revokes
+  every OAuth session once and requires `--legacy-owner-id` to bind an
+  existing memory file.
+
+## 2.1.0 through 2.1.5
+
+### Added
+
+- **`--version` on the shipped binaries.** `mcpmem --version` and
+  `mcpmem-maintenance --version` print the build version and exit, so an
+  operator can identify a running build before connecting to it.
+- **`Server` header on the HTTP transport.** Every response carries
+  `Server: mcpmem <version>`; `curl -i http://host:port/` answers the version
+  without an MCP handshake.
+- **Relations carry observations.** `add_relation_observations` and
+  `delete_relation_observations` manage them, and `create_relations` accepts
+  an optional `observations` list. Relation observations are embedded as
+  chunks and full-text searchable through `search_relations(query=...)`.
+- **k:v string attributes on entities and relations.** `set_attributes` and
+  `delete_attributes` manage them, and the create/upsert tools accept an
+  optional `attributes` map; get, describe, search and export return them.
+  Attributes are not indexed and not searchable.
+- **`search_relations` exposes the new fields.** Rows include
+  observations and attributes, and `export_graph` includes relation
+  observations and attributes.
+- **Registration rejects an unknown webhook `secretRef`.** When the server
+  loaded signing keys, `webhook_add_subscription`, `POST /ui/api/webhooks`
+  and `PATCH /ui/api/webhooks/{id}` return a 400 for a name that
+  `[webhooks.secrets]` does not define; a server without keys still accepts
+  any name (store-now shape).
+- **Webhook delivery logs the full failure cause.** A transport error used
+  to log only the reqwest headline `error sending request for url (...)`.
+  The log line now carries the whole cause chain — TCP, TLS, timeout — and
+  every attempt has a 10-second deadline, so a dead or stalled endpoint no
+  longer stalls the poller while the TCP stack gives up on its own.
+- **The admin UI flags webhook subscriptions that cannot be signed.** The
+  list marks a row whose `secretRef` has no signing key ("not configured"),
+  and the subscription form lists the configured names and explains the
+  contract.
+- **Webhook deliveries carry the full object (envelope v3).** Every event
+  now includes the `before` and `after` snapshots — entity name, type,
+  observations and kv attributes — plus full relation objects in the
+  relation delta. A delete event carries the complete last-known object in
+  `before`, so a consumer learns exactly what disappeared; a create event
+  carries it in `after`; any other event can be diffed for the exact
+  observations and attributes added, changed or removed. Relation
+  observation and attribute writes now emit their own `relation`-kind events
+  with the mirror's revision and an exact before/after pair. This replaces
+  the version-2 envelope that named only the entity identity.
+- **kv and relation-observation writes reach the outbox without churn.**
+  Attribute and relation-observation writes emit change events (and match
+  subscriptions) while leaving `entity_revision` and the index queues
+  untouched — the REQ-ATTR-OFFLINE economics hold. Migration `0013` drops
+  the `UNIQUE(entity_id, entity_revision)` constraint on `change_event`,
+  because consecutive quiet events on one entity share a structural
+  revision.
+- **Webhook body cap is configurable.** `max-body-bytes` in the
+  `[webhooks]` section raises or lowers the envelope cap (1 MiB default). An
+  event whose full snapshot exceeds the cap dead-letters with the policy
+  reason instead of failing delivery with a truncated body.
 
 ## 2.0.0
 
