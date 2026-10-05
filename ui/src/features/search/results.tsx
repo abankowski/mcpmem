@@ -260,7 +260,14 @@ export function ResultList({
           </Button>
         </div>
       </div>
-      {results.length === 0 ? (
+      {state.data === null ? (
+        <div className="s-panel" role="status">
+          <p>Searching…</p>
+        </div>
+      ) : results.length === 0 ? (
+        // A data-less state is only "loading" (cold mount or retry); the
+        // verdict is unknown until the request settles, so the definitive
+        // empty panel must not render while it is in flight.
         <div className="s-panel" role="status">
           <h2>No results for “{params.q}”</h2>
           <p>Try a different query, scope, or type filter.</p>
