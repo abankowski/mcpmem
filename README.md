@@ -14,6 +14,9 @@ deploy, and no telemetry.
 
 Drop it into Claude Desktop, Claude Code, or any MCP client and your agent stops forgetting.
 
+The public landing page lives in `site/` and publishes to GitHub Pages on every push to
+`main` that touches it (see [site/README.md](site/README.md)).
+
 ---
 
 ## Why mcpmem

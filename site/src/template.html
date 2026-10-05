@@ -1,0 +1,682 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="{{slot:meta.description}}">
+<meta property="og:title" content="{{slot:og.title}}">
+<meta property="og:description" content="{{slot:og.description}}">
+<meta property="og:type" content="website">
+<meta property="og:image" content="{{slot:og.image}}">
+<link rel="icon" type="image/svg+xml" href="brain.svg">
+<title>{{slot:title}}</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#ff9152;text-decoration:none}a:hover{color:#ffb380;text-decoration:underline}
+.lp{font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:16px;line-height:24px;color:#ece8df;background:#141310}
+.m{font-family:'JetBrains Mono',monospace}
+.d{font-family:'Fraunces',serif;font-weight:700;letter-spacing:-.015em}
+.cap{font-family:'JetBrains Mono',monospace;font-size:12px;line-height:18px;letter-spacing:.06em;text-transform:uppercase;color:#8f887b;font-weight:500}
+.wrap{max-width:1120px;margin:0 auto;padding:0 32px;box-sizing:border-box}
+.btn{display:inline-flex;align-items:center;gap:8px;height:44px;padding:0 18px;border:1px solid #7a7367;border-radius:6px;background:#1e1c18;color:#ece8df;font:inherit;font-size:15px;font-weight:500;cursor:pointer;white-space:nowrap}
+.btn:hover{background:#2a2722;text-decoration:none;color:#ece8df}
+.btn.primary{background:#f26b1d;border-color:#f26b1d;color:#1c1b18}
+.btn.primary:hover{background:#ff7f36;color:#1c1b18}
+.card{background:#1e1c18;border:1px solid #332f29;border-radius:10px;padding:24px;display:flex;flex-direction:column;gap:12px}
+.code{background:#1e1c18;border:1px solid #332f29;border-radius:6px;padding:16px 20px;font-family:'JetBrains Mono',monospace;font-size:14px;line-height:22px;color:#ece8df;overflow-x:auto;white-space:pre}
+.k{color:#8fb3f7}.s{color:#7fd49a}.n{color:#ff9152}.c{color:#8f887b;font-style:italic}
+.tag{display:inline-flex;align-items:center;height:24px;padding:0 10px;border-radius:999px;border:1px solid #332f29;background:#2a2722;font-family:'JetBrains Mono',monospace;font-size:12px;color:#ece8df}
+.ico{width:20px;height:20px;flex:none}
+.g3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px}
+.g2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}
+.sec{padding:96px 0;border-top:1px solid #332f29}
+.nav{display:flex;align-items:center;gap:24px;height:64px}
+.nav a.l{color:#b1aa9d;font-size:14px;font-weight:500}
+.nav a.l:hover{color:#ece8df;text-decoration:none}
+.kv{display:grid;grid-template-columns:160px minmax(0,1fr);gap:0 16px;padding:10px 0;border-bottom:1px solid #332f29;font-size:14px}
+.logo{display:flex;align-items:center;gap:10px;height:56px;padding:0 16px;border:1px solid #332f29;border-radius:6px;background:#1e1c18;font-weight:500;font-size:14px;color:#b1aa9d}
+@media (max-width:900px){.g3,.g2{grid-template-columns:minmax(0,1fr)}.sec{padding:64px 0}.kv{grid-template-columns:minmax(0,1fr)}}
+</style>
+</head>
+<body>
+<div class="lp">
+
+  <header class="wrap nav">
+    <a href="#top" class="d" style="font-size:22px;color:#ece8df">mcpmem</a>
+    <nav style="display:flex;gap:20px;flex-wrap:wrap;margin-left:16px">
+      <a href="#what" class="l">What it does</a><a href="#how" class="l">How it works</a><a href="#ui" class="l">The UI</a><a href="#security" class="l">Security</a>
+    </nav>
+    <div style="flex:1"></div>
+    <a href="https://github.com/abankowski/mcpmem" class="btn" style="height:36px;font-size:14px"><svg class="ico" viewBox="0 0 24 24" fill="currentColor" style="width:18px;height:18px"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.2-3.4-1.2-.4-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.6-1.4-2.2-.3-4.6-1.1-4.6-5a3.9 3.9 0 0 1 1-2.7c-.1-.3-.4-1.3.1-2.7 0 0 .8-.3 2.8 1a9.5 9.5 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .5 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1 2.7c0 3.9-2.4 4.7-4.6 5 .4.3.7.9.7 1.9v2.8c0 .3.2.6.7.5A10 10 0 0 0 12 2z"></path></svg>GitHub</a>
+  </header>
+
+  <section id="top" class="wrap" style="display:flex;flex-wrap:wrap;align-items:center;gap:48px;padding-top:64px;padding-bottom:96px">
+    <div style="flex:1 1 440px;min-width:0;display:flex;flex-direction:column;gap:28px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><span class="tag">{{slot:hero.tags.1}}</span><span class="tag">{{slot:hero.tags.2}}</span><span class="tag">{{slot:hero.tags.3}}</span><span class="tag">{{slot:hero.tags.4}}</span></div>
+      <h1 class="d" style="margin:0;font-size:60px;line-height:62px">{{slot:hero.h1}}</h1>
+      <p style="margin:0;font-size:19px;line-height:30px;color:#b1aa9d;max-width:540px">{{slot:hero.sub}}</p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <a href="{{slot:hero.cta.primary.href}}" class="btn primary"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3 2.7 5.6 6.3.9-4.5 4.4 1 6.1-5.5-2.9L6.5 20l1-6.1L3 9.5l6.3-.9z"></path></svg>{{slot:hero.cta.primary}}</a>
+        <a href="#how" class="btn"><span class="m" style="font-size:14px">{{slot:hero.cta.secondary}}</span></a>
+      </div>
+      <div class="m" style="font-size:12px;color:#8f887b">{{slot:hero.meta}}</div>
+    </div>
+    <div style="flex:1 1 440px;min-width:0;display:flex;justify-content:center">
+      <svg viewBox="90 30 540 500" style="width:100%;max-width:560px;height:auto" role="img" aria-label="A knowledge graph of coloured nodes arranged in the shape of a brain">
+<g stroke="#4a443b" stroke-width="1" fill="none">
+<path d="M120 250L126 225"></path>
+<path d="M120 250L122 258"></path>
+<path d="M126 225L133 200"></path>
+<path d="M126 225L163 238"></path>
+<path d="M133 200L139 174"></path>
+<path d="M139 174L154 153"></path>
+<path d="M139 174L163 183"></path>
+<path d="M154 153L170 133"></path>
+<path d="M154 153L163 183"></path>
+<path d="M170 133L187 114"></path>
+<path d="M170 133L205 149"></path>
+<path d="M187 114L209 99"></path>
+<path d="M209 99L231 86"></path>
+<path d="M209 99L231 115"></path>
+<path d="M231 86L254 74"></path>
+<path d="M231 86L231 115"></path>
+<path d="M254 74L278 65"></path>
+<path d="M254 74L269 92"></path>
+<path d="M278 65L303 59"></path>
+<path d="M303 59L329 53"></path>
+<path d="M303 59L328 78"></path>
+<path d="M329 53L354 51"></path>
+<path d="M329 53L328 78"></path>
+<path d="M354 51L380 53"></path>
+<path d="M380 53L406 54"></path>
+<path d="M380 53L368 84"></path>
+<path d="M406 54L431 59"></path>
+<path d="M431 59L456 68"></path>
+<path d="M431 59L414 90"></path>
+<path d="M456 68L480 77"></path>
+<path d="M456 68L447 91"></path>
+<path d="M480 77L502 90"></path>
+<path d="M480 77L471 102"></path>
+<path d="M502 90L522 107"></path>
+<path d="M502 90L502 123"></path>
+<path d="M522 107L543 123"></path>
+<path d="M522 107L502 123"></path>
+<path d="M543 123L556 145"></path>
+<path d="M556 145L570 167"></path>
+<path d="M570 167L581 190"></path>
+<path d="M581 190L585 216"></path>
+<path d="M581 190L558 204"></path>
+<path d="M585 216L589 242"></path>
+<path d="M585 216L558 204"></path>
+<path d="M589 242L586 267"></path>
+<path d="M586 267L579 292"></path>
+<path d="M579 292L570 316"></path>
+<path d="M570 316L553 335"></path>
+<path d="M553 335L534 353"></path>
+<path d="M553 335L533 315"></path>
+<path d="M534 353L511 365"></path>
+<path d="M534 353L510 330"></path>
+<path d="M511 365L486 371"></path>
+<path d="M511 365L518 387"></path>
+<path d="M486 371L460 372"></path>
+<path d="M486 371L474 384"></path>
+<path d="M486 371L496 385"></path>
+<path d="M460 372L435 378"></path>
+<path d="M460 372L450 386"></path>
+<path d="M460 372L452 382"></path>
+<path d="M435 378L450 386"></path>
+<path d="M435 378L430 380"></path>
+<path d="M450 386L475 392"></path>
+<path d="M450 386L430 380"></path>
+<path d="M450 386L452 382"></path>
+<path d="M475 392L501 392"></path>
+<path d="M475 392L474 384"></path>
+<path d="M475 392L496 385"></path>
+<path d="M475 392L473 429"></path>
+<path d="M501 392L525 400"></path>
+<path d="M501 392L496 385"></path>
+<path d="M501 392L518 387"></path>
+<path d="M501 392L507 420"></path>
+<path d="M525 400L544 413"></path>
+<path d="M525 400L518 387"></path>
+<path d="M525 400L538 396"></path>
+<path d="M525 400L507 420"></path>
+<path d="M544 413L540 439"></path>
+<path d="M544 413L538 396"></path>
+<path d="M540 439L519 453"></path>
+<path d="M519 453L495 463"></path>
+<path d="M495 463L470 467"></path>
+<path d="M470 467L444 468"></path>
+<path d="M444 468L419 462"></path>
+<path d="M419 462L394 454"></path>
+<path d="M419 462L420 436"></path>
+<path d="M394 454L372 441"></path>
+<path d="M394 454L378 463"></path>
+<path d="M372 441L378 463"></path>
+<path d="M372 441L382 418"></path>
+<path d="M378 463L376 488"></path>
+<path d="M376 488L364 507"></path>
+<path d="M364 507L342 504"></path>
+<path d="M342 504L330 481"></path>
+<path d="M330 481L334 455"></path>
+<path d="M334 455L319 436"></path>
+<path d="M319 436L299 420"></path>
+<path d="M319 436L342 422"></path>
+<path d="M299 420L274 411"></path>
+<path d="M299 420L303 396"></path>
+<path d="M274 411L250 403"></path>
+<path d="M250 403L226 393"></path>
+<path d="M226 393L203 381"></path>
+<path d="M203 381L180 370"></path>
+<path d="M180 370L162 350"></path>
+<path d="M162 350L145 331"></path>
+<path d="M145 331L133 309"></path>
+<path d="M133 309L127 284"></path>
+<path d="M133 309L160 300"></path>
+<path d="M127 284L122 258"></path>
+<path d="M122 258L120 250"></path>
+<path d="M430 380L452 382"></path>
+<path d="M452 382L474 384"></path>
+<path d="M474 384L496 385"></path>
+<path d="M496 385L518 387"></path>
+<path d="M518 387L538 396"></path>
+<path d="M518 387L507 420"></path>
+<path d="M349 367L364 402"></path>
+<path d="M349 367L329 342"></path>
+<path d="M349 367L357 331"></path>
+<path d="M349 367L332 395"></path>
+<path d="M329 132L308 158"></path>
+<path d="M329 132L372 145"></path>
+<path d="M329 132L316 110"></path>
+<path d="M315 224L331 199"></path>
+<path d="M315 224L300 256"></path>
+<path d="M315 224L287 215"></path>
+<path d="M504 186L511 160"></path>
+<path d="M504 186L468 198"></path>
+<path d="M504 186L487 166"></path>
+<path d="M504 186L537 189"></path>
+<path d="M213 229L242 254"></path>
+<path d="M213 229L210 200"></path>
+<path d="M213 229L237 205"></path>
+<path d="M212 346L188 342"></path>
+<path d="M212 346L233 360"></path>
+<path d="M405 218L396 192"></path>
+<path d="M405 218L374 218"></path>
+<path d="M405 218L402 246"></path>
+<path d="M405 218L423 187"></path>
+<path d="M172 322L188 342"></path>
+<path d="M172 322L160 300"></path>
+<path d="M511 160L502 123"></path>
+<path d="M511 160L487 166"></path>
+<path d="M447 226L433 252"></path>
+<path d="M447 226L485 235"></path>
+<path d="M447 226L468 198"></path>
+<path d="M455 163L468 198"></path>
+<path d="M455 163L473 141"></path>
+<path d="M455 163L445 142"></path>
+<path d="M254 124L290 109"></path>
+<path d="M254 124L236 146"></path>
+<path d="M254 124L231 115"></path>
+<path d="M254 124L269 92"></path>
+<path d="M254 124L281 151"></path>
+<path d="M172 270L208 268"></path>
+<path d="M172 270L191 287"></path>
+<path d="M172 270L160 300"></path>
+<path d="M172 270L163 238"></path>
+<path d="M242 254L208 268"></path>
+<path d="M242 254L261 284"></path>
+<path d="M331 199L331 172"></path>
+<path d="M471 102L447 91"></path>
+<path d="M282 369L307 369"></path>
+<path d="M282 369L274 340"></path>
+<path d="M537 240L517 224"></path>
+<path d="M537 240L549 264"></path>
+<path d="M533 315L510 330"></path>
+<path d="M334 262L364 287"></path>
+<path d="M334 262L300 256"></path>
+<path d="M334 262L367 247"></path>
+<path d="M364 287L389 296"></path>
+<path d="M405 271L389 296"></path>
+<path d="M405 271L402 246"></path>
+<path d="M405 271L424 291"></path>
+<path d="M290 109L316 110"></path>
+<path d="M290 109L269 92"></path>
+<path d="M364 402L386 387"></path>
+<path d="M364 402L382 418"></path>
+<path d="M433 252L402 246"></path>
+<path d="M433 252L459 275"></path>
+<path d="M396 192L377 171"></path>
+<path d="M396 192L423 187"></path>
+<path d="M176 208L210 200"></path>
+<path d="M176 208L163 238"></path>
+<path d="M176 208L163 183"></path>
+<path d="M331 172L308 158"></path>
+<path d="M331 172L361 190"></path>
+<path d="M517 224L485 235"></path>
+<path d="M246 332L228 315"></path>
+<path d="M246 332L233 360"></path>
+<path d="M246 332L274 340"></path>
+<path d="M329 342L326 304"></path>
+<path d="M329 342L357 331"></path>
+<path d="M329 342L307 369"></path>
+<path d="M208 268L218 293"></path>
+<path d="M208 268L191 287"></path>
+<path d="M300 256L279 245"></path>
+<path d="M295 313L326 304"></path>
+<path d="M295 313L261 284"></path>
+<path d="M295 313L274 340"></path>
+<path d="M326 304L357 331"></path>
+<path d="M551 289L526 286"></path>
+<path d="M551 289L549 264"></path>
+<path d="M218 293L228 315"></path>
+<path d="M263 223L265 191"></path>
+<path d="M263 223L287 215"></path>
+<path d="M263 223L237 205"></path>
+<path d="M263 223L279 245"></path>
+<path d="M377 171L372 145"></path>
+<path d="M377 171L361 190"></path>
+<path d="M308 158L293 188"></path>
+<path d="M308 158L281 151"></path>
+<path d="M205 149L203 174"></path>
+<path d="M205 149L236 146"></path>
+<path d="M414 90L390 126"></path>
+<path d="M414 90L447 91"></path>
+<path d="M414 90L437 115"></path>
+<path d="M420 436L428 412"></path>
+<path d="M372 145L390 126"></path>
+<path d="M473 429L507 420"></path>
+<path d="M473 429L451 417"></path>
+<path d="M265 191L293 188"></path>
+<path d="M265 191L237 205"></path>
+<path d="M307 369L303 396"></path>
+<path d="M503 271L485 235"></path>
+<path d="M503 271L480 307"></path>
+<path d="M503 271L526 286"></path>
+<path d="M332 395L303 396"></path>
+<path d="M332 395L342 422"></path>
+<path d="M374 218L367 247"></path>
+<path d="M374 218L361 190"></path>
+<path d="M485 235L468 198"></path>
+<path d="M416 151L390 126"></path>
+<path d="M416 151L445 142"></path>
+<path d="M416 151L423 187"></path>
+<path d="M389 296L424 291"></path>
+<path d="M389 296L398 328"></path>
+<path d="M237 172L236 146"></path>
+<path d="M237 172L237 205"></path>
+<path d="M403 404L428 412"></path>
+<path d="M403 404L386 387"></path>
+<path d="M403 404L382 418"></path>
+<path d="M510 330L480 307"></path>
+<path d="M261 284L279 245"></path>
+<path d="M203 174L210 200"></path>
+<path d="M352 104L328 78"></path>
+<path d="M352 104L368 84"></path>
+<path d="M430 319L424 291"></path>
+<path d="M430 319L398 328"></path>
+<path d="M430 319L460 331"></path>
+<path d="M430 319L427 344"></path>
+<path d="M287 215L293 188"></path>
+<path d="M287 215L279 245"></path>
+<path d="M459 275L424 291"></path>
+<path d="M459 275L480 307"></path>
+<path d="M316 110L328 78"></path>
+<path d="M428 412L451 417"></path>
+<path d="M398 328L392 364"></path>
+<path d="M398 328L427 344"></path>
+<path d="M558 204L537 189"></path>
+<path d="M460 331L480 307"></path>
+<path d="M460 331L427 344"></path>
+<path d="M447 91L437 115"></path>
+<path d="M386 387L392 364"></path>
+<path d="M210 200L237 205"></path>
+<path d="M526 286L549 264"></path>
+<path d="M293 188L281 151"></path>
+<path d="M473 141L445 142"></path>
+<path d="M473 141L487 166"></path>
+<path d="M437 115L445 142"></path>
+</g><g stroke="#ff9152" stroke-width="1.5" fill="none">
+<path d="M334 262L343 240"></path>
+<path d="M367 247L343 240"></path>
+</g><g>
+<circle cx="120" cy="250" r="4.8" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="126" cy="225" r="4.8" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="133" cy="200" r="4.2" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="139" cy="174" r="4.8" fill="#b08cf0" opacity="0.95"></circle>
+<circle cx="154" cy="153" r="4.8" fill="#5fc385" opacity="0.95"></circle>
+<circle cx="170" cy="133" r="4.8" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="187" cy="114" r="4.2" fill="#5fc385" opacity="0.95"></circle>
+<circle cx="209" cy="99" r="4.8" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="231" cy="86" r="4.8" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="254" cy="74" r="4.8" fill="#4fc4c4" opacity="0.95"></circle>
+<circle cx="278" cy="65" r="4.2" fill="#5fc385" opacity="0.95"></circle>
+<circle cx="303" cy="59" r="4.8" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="329" cy="53" r="4.8" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="354" cy="51" r="4.2" fill="#d9b84a" opacity="0.95"></circle>
+<circle cx="380" cy="53" r="4.8" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="406" cy="54" r="4.2" fill="#5fc385" opacity="0.95"></circle>
+<circle cx="431" cy="59" r="4.8" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="456" cy="68" r="4.8" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="480" cy="77" r="4.8" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="502" cy="90" r="4.8" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="522" cy="107" r="4.8" fill="#b08cf0" opacity="0.95"></circle>
+<circle cx="543" cy="123" r="4.2" fill="#b08cf0" opacity="0.95"></circle>
+<circle cx="556" cy="145" r="4.2" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="570" cy="167" r="4.2" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="581" cy="190" r="4.8" fill="#ee82b0" opacity="0.95"></circle>
+<circle cx="585" cy="216" r="4.8" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="589" cy="242" r="4.2" fill="#b08cf0" opacity="0.95"></circle>
+<circle cx="586" cy="267" r="4.2" fill="#b08cf0" opacity="0.95"></circle>
+<circle cx="579" cy="292" r="4.2" fill="#4fc4c4" opacity="0.95"></circle>
+<circle cx="570" cy="316" r="4.2" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="553" cy="335" r="4.8" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="534" cy="353" r="4.8" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="511" cy="365" r="4.8" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="486" cy="371" r="5.4" fill="#4fc4c4" opacity="0.95"></circle>
+<circle cx="460" cy="372" r="5.4" fill="#d9b84a" opacity="0.95"></circle>
+<circle cx="435" cy="378" r="4.8" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="450" cy="386" r="6.0" fill="#4fc4c4" opacity="0.95"></circle>
+<circle cx="475" cy="392" r="6.0" fill="#ee82b0" opacity="0.95"></circle>
+<circle cx="501" cy="392" r="6.0" fill="#b08cf0" opacity="0.95"></circle>
+<circle cx="525" cy="400" r="6.0" fill="#4fc4c4" opacity="0.95"></circle>
+<circle cx="544" cy="413" r="4.8" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="540" cy="439" r="4.2" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="519" cy="453" r="4.2" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="495" cy="463" r="4.2" fill="#d9b84a" opacity="0.95"></circle>
+<circle cx="470" cy="467" r="4.2" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="444" cy="468" r="4.2" fill="#4fc4c4" opacity="0.95"></circle>
+<circle cx="419" cy="462" r="4.8" fill="#d9b84a" opacity="0.95"></circle>
+<circle cx="394" cy="454" r="4.8" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="372" cy="441" r="4.8" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="378" cy="463" r="4.8" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="376" cy="488" r="4.2" fill="#b08cf0" opacity="0.95"></circle>
+<circle cx="364" cy="507" r="4.2" fill="#b08cf0" opacity="0.95"></circle>
+<circle cx="342" cy="504" r="4.2" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="330" cy="481" r="4.2" fill="#a39d91" opacity="0.95"></circle>
+<circle cx="334" cy="455" r="4.2" fill="#d9b84a" opacity="0.95"></circle>
+<circle cx="319" cy="436" r="4.8" fill="#d9b84a" opacity="0.95"></circle>
+<circle cx="299" cy="420" r="4.8" fill="#d9b84a" opacity="0.95"></circle>
+<circle cx="274" cy="411" r="4.2" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="250" cy="403" r="4.2" fill="#b08cf0" opacity="0.95"></circle>
+<circle cx="226" cy="393" r="4.2" fill="#4fc4c4" opacity="0.95"></circle>
+<circle cx="203" cy="381" r="4.2" fill="#ee82b0" opacity="0.95"></circle>
+<circle cx="180" cy="370" r="4.2" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="162" cy="350" r="4.2" fill="#4fc4c4" opacity="0.95"></circle>
+<circle cx="145" cy="331" r="4.2" fill="#ee82b0" opacity="0.95"></circle>
+<circle cx="133" cy="309" r="4.8" fill="#f28c4a" opacity="0.95"></circle>
+<circle cx="127" cy="284" r="4.2" fill="#d9b84a" opacity="0.95"></circle>
+<circle cx="122" cy="258" r="4.8" fill="#6b9cf5" opacity="0.95"></circle>
+<circle cx="430" cy="380" r="4.8" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="452" cy="382" r="5.4" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="474" cy="384" r="5.4" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="496" cy="385" r="6.0" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="518" cy="387" r="6.6" fill="#a39d91" opacity="0.55"></circle>
+<circle cx="538" cy="396" r="4.8" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="349" cy="367" r="5.4" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="329" cy="132" r="4.8" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="315" cy="224" r="4.8" fill="#d9b84a" opacity="0.9"></circle>
+<circle cx="504" cy="186" r="5.4" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="213" cy="229" r="4.8" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="212" cy="346" r="4.2" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="405" cy="218" r="5.4" fill="#a39d91" opacity="0.55"></circle>
+<circle cx="172" cy="322" r="4.2" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="511" cy="160" r="4.8" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="188" cy="342" r="4.2" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="447" cy="226" r="4.8" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="455" cy="163" r="4.8" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="254" cy="124" r="6.0" fill="#6b9cf5" opacity="0.55"></circle>
+<circle cx="172" cy="270" r="5.4" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="242" cy="254" r="4.8" fill="#f28c4a" opacity="0.55"></circle>
+<circle cx="331" cy="199" r="4.2" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="471" cy="102" r="4.2" fill="#ee82b0" opacity="0.9"></circle>
+<circle cx="282" cy="369" r="4.2" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="537" cy="240" r="4.2" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="533" cy="315" r="4.2" fill="#d9b84a" opacity="0.9"></circle>
+<circle cx="334" cy="262" r="5.4" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="364" cy="287" r="4.2" fill="#4fc4c4" opacity="0.55"></circle>
+<circle cx="405" cy="271" r="4.8" fill="#b08cf0" opacity="0.55"></circle>
+<circle cx="290" cy="109" r="4.8" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="364" cy="402" r="4.8" fill="#ee82b0" opacity="0.9"></circle>
+<circle cx="433" cy="252" r="4.8" fill="#b08cf0" opacity="0.55"></circle>
+<circle cx="396" cy="192" r="4.8" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="176" cy="208" r="4.8" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="331" cy="172" r="4.8" fill="#b08cf0" opacity="0.55"></circle>
+<circle cx="517" cy="224" r="4.2" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="246" cy="332" r="4.8" fill="#4fc4c4" opacity="0.9"></circle>
+<circle cx="329" cy="342" r="5.4" fill="#ee82b0" opacity="0.55"></circle>
+<circle cx="208" cy="268" r="5.4" fill="#5fc385" opacity="0.55"></circle>
+<circle cx="300" cy="256" r="4.8" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="295" cy="313" r="4.8" fill="#ee82b0" opacity="0.9"></circle>
+<circle cx="326" cy="304" r="4.8" fill="#4fc4c4" opacity="0.55"></circle>
+<circle cx="502" cy="123" r="4.8" fill="#ee82b0" opacity="0.9"></circle>
+<circle cx="551" cy="289" r="4.2" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="218" cy="293" r="4.2" fill="#4fc4c4" opacity="0.9"></circle>
+<circle cx="191" cy="287" r="4.2" fill="#4fc4c4" opacity="0.9"></circle>
+<circle cx="263" cy="223" r="5.4" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="377" cy="171" r="4.8" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="357" cy="331" r="4.8" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="308" cy="158" r="5.4" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="205" cy="149" r="4.8" fill="#4fc4c4" opacity="0.9"></circle>
+<circle cx="414" cy="90" r="5.4" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="420" cy="436" r="4.2" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="372" cy="145" r="4.8" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="473" cy="429" r="4.8" fill="#5fc385" opacity="0.55"></circle>
+<circle cx="265" cy="191" r="4.8" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="307" cy="369" r="4.8" fill="#f28c4a" opacity="0.55"></circle>
+<circle cx="503" cy="271" r="4.8" fill="#f28c4a" opacity="0.55"></circle>
+<circle cx="332" cy="395" r="4.8" fill="#d9b84a" opacity="0.55"></circle>
+<circle cx="374" cy="218" r="4.8" fill="#d9b84a" opacity="0.55"></circle>
+<circle cx="485" cy="235" r="5.4" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="416" cy="151" r="4.8" fill="#4fc4c4" opacity="0.9"></circle>
+<circle cx="389" cy="296" r="5.4" fill="#d9b84a" opacity="0.9"></circle>
+<circle cx="237" cy="172" r="4.2" fill="#ee82b0" opacity="0.9"></circle>
+<circle cx="403" cy="404" r="4.8" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="402" cy="246" r="4.8" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="510" cy="330" r="4.8" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="261" cy="284" r="4.8" fill="#ee82b0" opacity="0.9"></circle>
+<circle cx="203" cy="174" r="4.2" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="160" cy="300" r="4.8" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="352" cy="104" r="4.2" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="430" cy="319" r="5.4" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="287" cy="215" r="5.4" fill="#ee82b0" opacity="0.9"></circle>
+<circle cx="459" cy="275" r="4.8" fill="#ee82b0" opacity="0.55"></circle>
+<circle cx="424" cy="291" r="5.4" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="316" cy="110" r="4.8" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="428" cy="412" r="4.8" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="398" cy="328" r="5.4" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="558" cy="204" r="4.8" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="460" cy="331" r="4.8" fill="#5fc385" opacity="0.55"></circle>
+<circle cx="390" cy="126" r="4.8" fill="#b08cf0" opacity="0.55"></circle>
+<circle cx="447" cy="91" r="5.4" fill="#d9b84a" opacity="0.55"></circle>
+<circle cx="480" cy="307" r="5.4" fill="#6b9cf5" opacity="0.55"></circle>
+<circle cx="468" cy="198" r="5.4" fill="#4fc4c4" opacity="0.55"></circle>
+<circle cx="386" cy="387" r="4.8" fill="#ee82b0" opacity="0.9"></circle>
+<circle cx="210" cy="200" r="5.4" fill="#4fc4c4" opacity="0.9"></circle>
+<circle cx="228" cy="315" r="4.2" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="367" cy="247" r="4.8" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="328" cy="78" r="5.4" fill="#b08cf0" opacity="0.55"></circle>
+<circle cx="368" cy="84" r="4.2" fill="#4fc4c4" opacity="0.9"></circle>
+<circle cx="236" cy="146" r="4.8" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="526" cy="286" r="4.8" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="233" cy="360" r="4.2" fill="#d9b84a" opacity="0.9"></circle>
+<circle cx="293" cy="188" r="5.4" fill="#4fc4c4" opacity="0.9"></circle>
+<circle cx="392" cy="364" r="4.2" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="507" cy="420" r="5.4" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="473" cy="141" r="4.8" fill="#5fc385" opacity="0.55"></circle>
+<circle cx="382" cy="418" r="4.8" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="237" cy="205" r="6.0" fill="#ee82b0" opacity="0.55"></circle>
+<circle cx="437" cy="115" r="4.8" fill="#6b9cf5" opacity="0.55"></circle>
+<circle cx="303" cy="396" r="4.8" fill="#6b9cf5" opacity="0.55"></circle>
+<circle cx="451" cy="417" r="4.2" fill="#4fc4c4" opacity="0.9"></circle>
+<circle cx="163" cy="238" r="4.8" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="445" cy="142" r="5.4" fill="#f28c4a" opacity="0.55"></circle>
+<circle cx="274" cy="340" r="4.8" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="231" cy="115" r="4.8" fill="#b08cf0" opacity="0.9"></circle>
+<circle cx="269" cy="92" r="4.8" fill="#4fc4c4" opacity="0.55"></circle>
+<circle cx="423" cy="187" r="4.8" fill="#d9b84a" opacity="0.9"></circle>
+<circle cx="281" cy="151" r="4.8" fill="#6b9cf5" opacity="0.55"></circle>
+<circle cx="163" cy="183" r="4.8" fill="#4fc4c4" opacity="0.55"></circle>
+<circle cx="487" cy="166" r="4.8" fill="#ee82b0" opacity="0.9"></circle>
+<circle cx="537" cy="189" r="4.2" fill="#5fc385" opacity="0.9"></circle>
+<circle cx="343" cy="240" r="9" fill="#f28c4a" stroke="#141310" stroke-width="3"></circle><circle cx="343" cy="240" r="13" fill="none" stroke="#f26b1d" stroke-width="2"></circle>
+<circle cx="279" cy="245" r="5.4" fill="#6b9cf5" opacity="0.9"></circle>
+<circle cx="361" cy="190" r="4.8" fill="#a39d91" opacity="0.9"></circle>
+<circle cx="427" cy="344" r="4.8" fill="#f28c4a" opacity="0.9"></circle>
+<circle cx="549" cy="264" r="4.8" fill="#b08cf0" opacity="0.55"></circle>
+<circle cx="342" cy="422" r="4.2" fill="#5fc385" opacity="0.9"></circle>
+</g>
+      </svg>
+    </div>
+  </section>
+
+  <section id="what" class="sec">
+    <div class="wrap" style="display:flex;flex-direction:column;gap:40px">
+      <div style="display:flex;flex-direction:column;gap:12px;max-width:640px">
+        <span class="cap">{{slot:what.eyebrow}}</span>
+        <h2 class="d" style="margin:0;font-size:38px;line-height:44px">{{slot:what.title}}</h2>
+        <p style="margin:0;color:#b1aa9d">{{slot:what.intro}}</p>
+      </div>
+      <div class="g3">
+        <div class="card">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#f28c4a" stroke-width="1.5"><circle cx="6" cy="6" r="2.5"></circle><circle cx="18" cy="8" r="2.5"></circle><circle cx="12" cy="18" r="2.5"></circle><path d="M8.3 7l7.3 1M7.2 8l3.8 8M16.8 10.2l-3.6 5.8"></path></svg>
+          <h3 style="margin:0;font-size:20px;line-height:26px;font-weight:600">{{slot:pillars.1.title}}</h3>
+          <p style="margin:0;color:#b1aa9d;font-size:15px;line-height:23px">{{slot:pillars.1.body}}</p>
+          <div class="m" style="font-size:12px;color:#8f887b">{{slot:pillars.1.flag}}</div>
+        </div>
+        <div class="card">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#6b9cf5" stroke-width="1.5"><path d="m8 7-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"></path></svg>
+          <h3 style="margin:0;font-size:20px;line-height:26px;font-weight:600">{{slot:pillars.2.title}}</h3>
+          <p style="margin:0;color:#b1aa9d;font-size:15px;line-height:23px">{{slot:pillars.2.body}}</p>
+          <div class="m" style="font-size:12px;color:#8f887b">{{slot:pillars.2.flag}}</div>
+        </div>
+        <div class="card">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#5fc385" stroke-width="1.5"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5M8 11h6M11 8v6"></path></svg>
+          <h3 style="margin:0;font-size:20px;line-height:26px;font-weight:600">{{slot:pillars.3.title}}</h3>
+          <p style="margin:0;color:#b1aa9d;font-size:15px;line-height:23px">{{slot:pillars.3.body}}</p>
+          <div class="m" style="font-size:12px;color:#8f887b">{{slot:pillars.3.flag}}</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how" class="sec">
+    <div class="wrap g2" style="align-items:start">
+      <div style="display:flex;flex-direction:column;gap:20px">
+        <span class="cap">{{slot:how.eyebrow}}</span>
+        <h2 class="d" style="margin:0;font-size:38px;line-height:44px">{{slot:how.title}}</h2>
+        <p style="margin:0;color:#b1aa9d">{{slot:how.intro}}</p>
+        <div style="display:flex;flex-direction:column">
+          <div class="kv"><span class="m" style="color:#8f887b;font-size:13px">transport</span><span>{{slot:facts.transport}}</span></div>
+          <div class="kv"><span class="m" style="color:#8f887b;font-size:13px">storage</span><span>{{slot:facts.storage}}</span></div>
+          <div class="kv"><span class="m" style="color:#8f887b;font-size:13px">embeddings</span><span>{{slot:facts.embeddings}}</span></div>
+          <div class="kv"><span class="m" style="color:#8f887b;font-size:13px">files</span><span>{{slot:facts.files}}</span></div>
+          <div class="kv"><span class="m" style="color:#8f887b;font-size:13px">code</span><span>{{slot:facts.code}}</span></div>
+          <div class="kv"><span class="m" style="color:#8f887b;font-size:13px">events</span><span>{{slot:facts.events}}</span></div>
+          <div class="kv" style="border-bottom:0"><span class="m" style="color:#8f887b;font-size:13px">telemetry</span><span>{{slot:facts.telemetry}}</span></div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div class="code"><span class="c"># install</span>
+cargo install mcpmem
+
+<span class="c"># everything on: memory + vectors + code</span>
+mcpmem --transport stdio --legacy-owner-id machine:local --enable-all</div>
+        <div class="code"><span class="c">// claude_desktop_config.json / .mcp.json</span>
+{
+  <span class="k">"mcpServers"</span>: {
+    <span class="k">"memory"</span>: {
+      <span class="k">"command"</span>: <span class="s">"mcpmem"</span>,
+      <span class="k">"args"</span>: [<span class="s">"--legacy-owner-id"</span>, <span class="s">"machine:local"</span>, <span class="s">"--enable-all"</span>]
+    }
+  }
+}</div>
+        <div class="m" style="font-size:12px;color:#8f887b">Trim --enable-all to the categories you want. Unknown types are never refused; the server suggests the closest existing ones instead.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" style="padding-top:64px;padding-bottom:64px">
+    <div class="wrap" style="display:flex;flex-direction:column;gap:20px">
+      <span class="cap">{{slot:works.eyebrow}}</span>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px">
+        <div class="logo">{{slot:works.1}}</div><div class="logo">{{slot:works.2}}</div><div class="logo">{{slot:works.3}}</div><div class="logo">{{slot:works.4}}</div><div class="logo">{{slot:works.5}}</div><div class="logo">{{slot:works.6}}</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="ui" class="sec">
+    <div class="wrap" style="display:flex;flex-direction:column;gap:40px">
+      <div style="display:flex;flex-direction:column;gap:12px;max-width:640px">
+        <span class="cap">{{slot:ui.eyebrow}}</span>
+        <h2 class="d" style="margin:0;font-size:38px;line-height:44px">{{slot:ui.title}}</h2>
+        <p style="margin:0;color:#b1aa9d">{{slot:ui.intro}}</p>
+      </div>
+      <div style="border:1px solid #332f29;border-radius:10px;overflow:hidden;background:#1e1c18">
+        <div style="display:flex;align-items:center;gap:12px;height:44px;padding:0 16px;border-bottom:1px solid #332f29">
+          <span class="d" style="font-size:16px">mcpmem</span><span class="m" style="font-size:12px;color:#8f887b">second-brain</span>
+          <span style="color:#ff9152;font-size:13px;font-weight:500;margin-left:12px">Graph</span><span style="color:#b1aa9d;font-size:13px;font-weight:500">Search</span><span style="color:#b1aa9d;font-size:13px;font-weight:500">Admin</span>
+        </div>
+        <div style="display:flex;min-height:420px">
+          <div style="width:220px;border-right:1px solid #332f29;padding:16px;display:flex;flex-direction:column;gap:10px;font-size:13px;color:#b1aa9d">
+            <span class="cap">Entity types</span>
+            <span style="display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:50%;background:#f28c4a"></span>Osoba<span class="m" style="margin-left:auto;font-size:11px;color:#8f887b">32</span></span>
+            <span style="display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:50%;background:#6b9cf5"></span>Technologia<span class="m" style="margin-left:auto;font-size:11px;color:#8f887b">28</span></span>
+            <span style="display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:50%;background:#5fc385"></span>Organizacja<span class="m" style="margin-left:auto;font-size:11px;color:#8f887b">28</span></span>
+            <span style="display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:50%;background:#b08cf0"></span>Decyzja<span class="m" style="margin-left:auto;font-size:11px;color:#8f887b">21</span></span>
+            <span style="display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:50%;background:#4fc4c4"></span>Zasada<span class="m" style="margin-left:auto;font-size:11px;color:#8f887b">21</span></span>
+          </div>
+          <div style="flex:1;background:#141310;position:relative;min-width:0">
+            <svg viewBox="0 0 600 420" preserveAspectRatio="xMidYMid slice" style="position:absolute;inset:0;width:100%;height:100%" aria-hidden="true">
+              <g stroke="#3d3831" stroke-width="1" fill="none"><path d="M120 120L220 180M220 180L330 110M330 110L450 170M450 170L520 280M220 180L190 300M190 300L300 360M300 360L420 320M420 320L520 280M300 360L300 250M300 250L450 170M120 120L80 240M80 240L190 300"></path></g>
+              <g stroke="#ff9152" stroke-width="1.5" fill="none"><path d="M300 250L220 180M300 250L420 320M300 250L190 300"></path></g>
+              <circle cx="120" cy="120" r="7" fill="#6b9cf5"></circle><circle cx="220" cy="180" r="9" fill="#5fc385"></circle><circle cx="330" cy="110" r="6" fill="#b08cf0"></circle><circle cx="450" cy="170" r="8" fill="#5fc385"></circle><circle cx="520" cy="280" r="7" fill="#d9b84a"></circle><circle cx="190" cy="300" r="8" fill="#a39d91"></circle><circle cx="300" cy="360" r="6" fill="#ee82b0"></circle><circle cx="420" cy="320" r="7" fill="#5fc385"></circle><circle cx="80" cy="240" r="5" fill="#4fc4c4" opacity=".6"></circle>
+              <circle cx="300" cy="250" r="14" fill="#f28c4a" stroke="#141310" stroke-width="3"></circle><circle cx="300" cy="250" r="19" fill="none" stroke="#f26b1d" stroke-width="2"></circle>
+              <text x="300" y="285" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="12" fill="#ece8df">Krystian Pudlik</text>
+              <text x="220" y="203" text-anchor="middle" font-family="IBM Plex Sans, sans-serif" font-size="11" fill="#b1aa9d">Parloa</text>
+            </svg>
+          </div>
+          <div style="width:300px;border-left:1px solid #332f29;padding:16px;display:flex;flex-direction:column;gap:12px;font-size:13px">
+            <span class="tag" style="align-self:flex-start"><span style="width:8px;height:8px;border-radius:50%;background:#f28c4a;margin-right:6px"></span>Osoba</span>
+            <span style="font-size:18px;font-weight:600;color:#ece8df">Krystian Pudlik</span>
+            <span class="m" style="font-size:11px;color:#8f887b">degree 4 · 7 observations · 2 files</span>
+            <span class="cap" style="margin-top:8px">Observations</span>
+            <span style="padding:10px;border:1px solid #332f29;border-radius:6px;background:#141310;color:#ece8df;font-size:13px;line-height:19px">Od września 2026 na 75% FTE w Parloa</span>
+            <span class="cap" style="margin-top:8px">Attributes</span>
+            <span class="m" style="font-size:12px;color:#b1aa9d">role · frontend engineer</span>
+            <span class="m" style="font-size:12px;color:#b1aa9d">fte · 0.75</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="security" class="sec">
+    <div class="wrap" style="display:flex;flex-direction:column;gap:40px">
+      <div style="display:flex;flex-direction:column;gap:12px;max-width:640px">
+        <span class="cap">{{slot:security.eyebrow}}</span>
+        <h2 class="d" style="margin:0;font-size:38px;line-height:44px">{{slot:security.title}}</h2>
+      </div>
+      <div class="g3">
+        <div class="card"><h3 style="margin:0;font-size:18px;line-height:24px;font-weight:600">{{slot:security.card.1.title}}</h3><p style="margin:0;color:#b1aa9d;font-size:15px;line-height:23px">{{slot:security.card.1.body}}</p></div>
+        <div class="card"><h3 style="margin:0;font-size:18px;line-height:24px;font-weight:600">{{slot:security.card.2.title}}</h3><p style="margin:0;color:#b1aa9d;font-size:15px;line-height:23px">{{slot:security.card.2.body}}</p></div>
+        <div class="card"><h3 style="margin:0;font-size:18px;line-height:24px;font-weight:600">{{slot:security.card.3.title}}</h3><p style="margin:0;color:#b1aa9d;font-size:15px;line-height:23px">{{slot:security.card.3.body}}</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" style="padding:80px 0">
+    <div class="wrap" style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:24px">
+      <h2 class="d" style="margin:0;font-size:32px;line-height:38px">{{slot:cta.title}}</h2>
+      <div style="display:flex;gap:12px;flex-wrap:wrap"><a href="{{slot:cta.primary.href}}" class="btn primary">{{slot:cta.primary}}</a><a href="https://crates.io/crates/mcpmem" class="btn">{{slot:cta.secondary}}</a></div>
+    </div>
+  </section>
+
+  <footer class="wrap" style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:16px;padding-top:24px;padding-bottom:40px;border-top:1px solid #332f29;color:#8f887b;font-size:13px">
+    <span><span class="d" style="color:#ece8df">mcpmem</span> · {{slot:footer.left}}</span>
+    <span style="display:flex;gap:16px"><a href="https://github.com/abankowski/mcpmem">GitHub</a><a href="https://crates.io/crates/mcpmem">crates.io</a><a href="https://modelcontextprotocol.io">MCP</a></span>
+  </footer>
+
+</div>
+</body>
+</html>
