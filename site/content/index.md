@@ -55,6 +55,14 @@ facts.files: attach PDF, markdown, text or images to a node; text is extracted, 
 facts.code: register a Git repo in the admin panel; reindex on demand or on a watch
 facts.events: signed webhooks on create, update, delete, rename
 facts.telemetry: none
+facts.models: cheap and open - Ollama, any OpenAI-compatible endpoint, or Amazon Bedrock. No cloud account required.
+facts.scale: from one laptop to a shared project or organization brain - many users, per-grant visibility.
+
+## Automation
+
+automation.eyebrow: Automation
+automation.title: Not just memory - a workflow engine
+automation.intro: mcpmem reacts to events and exposes its graph over MCP, so tools like Node-RED and n8n read, write and remember on your behalf. A set of decoupled workflows automates data processing and keeps the knowledge yours.
 
 ## Works with
 
