@@ -40,17 +40,28 @@ for crate in "${ORDER[@]}"; do
 		printf 'skip     %s %s is already published\n' "${crate}" "${version}"
 		continue
 	fi
+	publish_args=(--locked)
+	if [[ ${crate} == "mcpmem" ]]; then
+		# The root `mcpmem` package owns the built UI bundle: its `include` list walks
+		# the tree, so the git-ignored ui/dist restored from the frontend
+		# artifact lands in the package and cargo's dirty check refuses it.
+		# The release on 2026-10-05 (v3.0.0) published the six library
+		# crates and failed here; the uncommitted files are the bundle the
+		# crate must embed, not contamination. The library crates package no
+		# dist, so they stay strict.
+		publish_args+=(--allow-dirty)
+	fi
 	if [[ ${dry_run} -eq 1 ]]; then
 		printf 'dry-run  %s\n' "${crate}"
 		# A dependent cannot be verified before its dependency exists on
 		# crates.io, so the first release only dry-runs mcpmem-core.
-		cargo publish -p "${crate}" --locked --dry-run || {
+		cargo publish -p "${crate}" "${publish_args[@]}" --dry-run || {
 			printf 'dry-run  %s could not be verified yet\n' "${crate}"
 			continue
 		}
 	else
 		printf 'publish  %s\n' "${crate}"
-		cargo publish -p "${crate}" --locked
+		cargo publish -p "${crate}" "${publish_args[@]}"
 	fi
 done
 
