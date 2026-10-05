@@ -1225,7 +1225,7 @@ Annotate the commit with tokens burned and approximate cost.
 
 - [ ] **Step 1: Implement the dropzone and rows**
 
-FileDropzone with "Drop files here or browse" and the mono limit line; raw-body upload with filename and entityName, Content-Type from the file. FileRow shows the 64px thumbnail (image preview only for the allowed types; otherwise a mono type label), name, mono meta (`TYPE · size · date · status · pageCount`), Preview / Download / Delete, and a 4px progress while uploading. Status badges map the server values `uploaded`, `extracting`, `ready`, `error`; poll while not terminal and show the last error stage. Render "Other file types coming soon" as static text in the dropzone.
+FileDropzone with "Drop files here or browse" and the mono limit line; raw-body upload with filename and entityName, Content-Type from the file. FileRow shows the 64px thumbnail (image preview only for the allowed types; otherwise a mono type label), name, mono meta (`TYPE · size · status · pageCount`), Preview / Download / Delete, and a 4px progress while uploading. Status badges map the server values `uploaded`, `extracting`, `ready`, `error`; poll while not terminal and show the last error stage. A stored upload date is a measured-field-only deviation, corrected 2026-10-04: the attachment view carries no date; the mockup's `date` segment is omitted rather than invented. Render "Other file types coming soon" as static text in the dropzone.
 
 - [ ] **Step 2: Implement the lightbox**
 
