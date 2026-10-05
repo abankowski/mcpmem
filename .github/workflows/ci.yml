@@ -17,9 +17,18 @@ permissions:
 
 jobs:
   rust:
+    needs: frontend
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The root crate embeds the built bundle at compile time
+      # (include_str!/include_bytes! through src/ui/assets.rs), so every
+      # cargo leg needs the ui/dist the frontend job just built and checked.
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
       # An invalid workflow file otherwise fails as a run with no logs, which
       # names no cause. This step names it.
       - name: Lint workflows
@@ -103,3 +112,133 @@ jobs:
       - run: node build.mjs
         working-directory: site
         name: Build the landing page
+  # The UI is a checked-in source tree and a git-ignored build output. This
+  # job rebuilds the output from the source, checks the manifest contract,
+  # and uploads the bundle for every job whose cargo build embeds it.
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Node 22 is the floor: the build and check scripts use node:fs
+      # globSync, which exists from Node 22.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: ui
+      - name: Build the UI bundle and write the manifest
+        run: npm run build
+        working-directory: ui
+      - name: Check the manifest and the types
+        run: npm run check
+        working-directory: ui
+      # The embedded asset table is checked in; a fresh build must not
+      # change it. Regenerating and diffing proves the record is current —
+      # otherwise every frontend rebuild needs a hand edit and a revert
+      # risk, which is what happened before the generator existed.
+      - name: Regenerate the embedded asset table
+        run: node scripts/generate-assets-table.mjs
+      - name: The embedded asset table matches the fresh manifest
+        run: git diff --exit-code -- src/ui/assets.rs
+      - name: Upload the built bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+          if-no-files-found: error
+
+  # The packaged crate must ship the bundle: a crate without ui/dist cannot
+  # compile its embedded manifest, which is how the v1.0.0-rc.1 release
+  # failed (an include read a file outside the crate). The full package
+  # verification (`cargo package -p mcpmem --locked`) needs the workspace
+  # crates already published at this version, so the job runs the dry-run
+  # and the package check instead; the check packs the dry-run's own file
+  # list and verifies the manifest contract against those bytes.
+  ui-package:
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # After the toolchain: the cache key includes the rustc version.
+      - uses: Swatinem/rust-cache@v2
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+      - name: The packaged crate carries the manifest and every asset
+        run: node scripts/check-ui-package.mjs
+
+  # The route matrix from Task 4 under the feature sets the UI module can
+  # be compiled with, and the no-default OAuth flow beside it. Each leg
+  # names the tests that make sense for its feature set: the oauth legs run
+  # the full token flow, the ui legs run the router matrix.
+  feature-matrix:
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # After the toolchain: the cache key includes the rustc version.
+      - uses: Swatinem/rust-cache@v2
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+      - name: Route matrix and OAuth flow with default features
+        run: cargo test --test ui_router --test oauth_flow --features ui -- --test-threads=1
+      - name: Route matrix without default features
+        run: cargo test --test ui_router --no-default-features -- --test-threads=1
+      - name: Route matrix with the ui feature only
+        run: cargo test --test ui_router --no-default-features --features ui -- --test-threads=1
+      - name: OAuth flow with the oauth feature only
+        run: cargo test --test oauth_flow --no-default-features --features oauth -- --test-threads=1
+
+  # The browser behavior suite: real headless Chromium against a real
+  # server binary, with Poppler for the PDF legs and the fixture vision
+  # endpoint from ui/e2e. The suite spawns target/debug/mcpmem, so the job
+  # builds it with the features ui/e2e/server.toml requires.
+  browser:
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Node 22 is the floor: the suite and the fixture services use
+      # node:fs globSync and node:child_process spawnSync.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # After the toolchain: the cache key includes the rustc version.
+      - uses: Swatinem/rust-cache@v2
+      - name: Install external PDF renderer
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: ui
+      - name: Install the Playwright browser
+        run: npx playwright install --with-deps chromium
+        working-directory: ui
+      - name: Build the server binary the suite spawns
+        run: cargo build --features indexer,extractor,webhooks
+      - name: Run the browser behavior suite
+        run: npm run e2e
+        working-directory: ui

@@ -1831,9 +1831,8 @@ fn ocr_config_does_not_panic_a_spawned_binary_at_startup() {
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
-            let _ = stream.write_all(
-                b"GET /ui HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            );
+            let _ = stream
+                .write_all(b"GET /ui HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
             let mut head = [0u8; 64];
             if stream.read(&mut head).unwrap_or(0) > 0 {
                 let head = String::from_utf8_lossy(&head);

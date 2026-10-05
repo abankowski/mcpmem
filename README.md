@@ -98,6 +98,7 @@ the runtime role that needs it refuses to start.
 |---|---|---|---|
 | `code` | **on** | tree-sitter parsing for 11 languages and the `code_*` tools | 12 tree-sitter grammars, `ignore`, `blake3`, `notify` |
 | `oauth` | **on** | the OAuth 2.1 authorization server and the upstream OpenID Connect leg | `reqwest`, `url` |
+| `ui` | **on** | the browser UI at `/ui`: a built React bundle embedded into the binary, served by the `/ui/api/*` adapters | none — the feature adds no dependency, so a graph-only build stays free of HTTP clients |
 | `indexer` | off | the `indexer` role — a durable embedding worker with Ollama and OpenAI-compatible providers | `mcpmem-indexer`, `reqwest` |
 | `extractor` | off | the `extractor` role — durable text and PDF extraction. Implies `indexer`; PDF rendering also needs external Poppler commands at runtime | `mcpmem-extractor`, Poppler (`pdfinfo`, `pdftoppm`) on the extractor host |
 | `webhooks` | off | the `webhooks` role and the delivery outbox. Read the limitation below first | `mcpmem-webhook` |
@@ -105,7 +106,7 @@ the runtime role that needs it refuses to start.
 These commands are identical in Bash and fish:
 
 ```sh
-cargo install mcpmem                                      # default: code + oauth
+cargo install mcpmem                                      # default: code + oauth + ui
 cargo install mcpmem --features indexer                   # embedding worker
 cargo install mcpmem --features extractor                 # extraction + indexer
 cargo install mcpmem --features extractor,webhooks
@@ -113,22 +114,24 @@ cargo install mcpmem --features bedrock                   # implies indexer
 cargo install mcpmem --features extractor,webhooks,bedrock # all features
 cargo install mcpmem --no-default-features                # lean graph-only binary
 cargo install mcpmem --no-default-features --features oauth
+cargo install mcpmem --no-default-features --features ui
 ```
 
-A `--no-default-features` build carries no tree-sitter grammars and no HTTP client, and it
-**refuses `--oidc-issuer` at startup** rather than serve half an authorization server. Add
-`--features oauth` back when a lean build still needs the OAuth endpoints. CI asserts that the
+A `--no-default-features` build carries no tree-sitter grammars, no HTTP client and no browser
+UI, and it **refuses `--oidc-issuer` and `--ui true` at startup** rather than serve half an
+authorization server or a missing UI. Add `--features oauth` back when a lean build still needs
+the OAuth endpoints, or `--features ui` when it needs the web UI. CI asserts that the
 graph-only build links neither an HTTP client nor an AWS client.
 
-`--features extractor,webhooks,bedrock` is every feature this crate has: `code` and
-`oauth` are already on by default, and `extractor` pulls `indexer` with it. CI
+`--features extractor,webhooks,bedrock` is every feature this crate has: `code`, `oauth` and
+`ui` are already on by default, and `extractor` pulls `indexer` with it. CI
 compiles and lints the full set on every push.
 
 Prebuilt binaries are attached to every GitHub release, one per target:
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
 and `x86_64-apple-darwin`. The release workflow builds them with
 `--all-features`, so each binary already contains the whole feature matrix —
-`code`, `oauth`, `indexer`, `extractor`, `webhooks` and `bedrock`. Nothing more
+`code`, `oauth`, `ui`, `indexer`, `extractor`, `webhooks` and `bedrock`. Nothing more
 to select at install time: what runs is decided at runtime by `roles`, the
 `--enable-*` categories and the `[oauth]` / `[indexer]` / `[ocr]` /
 `[webhooks]` configuration, never by the binary. PDF extraction still needs
@@ -158,8 +161,8 @@ tar -xzf mcpmem.tar.gz && sudo mv mcpmem /usr/local/bin/
 
 `cargo install mcpmem` stays an option, with one difference that matters for
 `indexer`, `extractor` and `webhooks`: it recompiles from crates.io, which ships
-source only, with the **default** features (`code`, `oauth`) unless you name
-more. A default build has no indexer, extractor or webhook worker, and their
+source only, with the **default** features (`code`, `oauth`, `ui`) unless you
+name more. A default build has no indexer, extractor or webhook worker, and their
 roles refuse to start — pass `--features extractor,webhooks` explicitly when
 you install from source and need both workers.
 
@@ -626,7 +629,7 @@ delete those first.
 
 Allowed MIME types are `text/*`, `text/markdown`, and `application/pdf`; a
 different type is refused with a named rule. HTTP
-`POST /ui/attachments?workspaceId=<uuid>&entityName=<name>&filename=<name>`
+`POST /ui/api/attachments?workspaceId=<uuid>&entityName=<name>&filename=<name>`
 takes the **raw file body** with its MIME type in `Content-Type`. It streams
 up to **50 MiB (52,428,800 bytes)** and returns
 `{"attachmentId":123,"status":"uploaded"}`; byte 52,428,801 fails with HTTP
@@ -656,10 +659,10 @@ Use `list_attachments` for an entity and `get_attachment` for metadata.
 `read_attachment_chunk` returns up to 1 MiB of base64 content at a raw-byte
 `offset`. `get_attachment_page` returns text at a Unicode-character `offset`
 with `maxChars` up to 4,096. `delete_attachment` removes the attachment and
-its text and vectors. The inspector uses `GET /ui/attachments`,
-`GET /ui/attachments/{id}`, `GET /ui/attachments/{id}/pages`,
-`GET /ui/attachments/{id}/download`, and `DELETE /ui/attachments/{id}` with
-`workspaceId` on each request.
+its text and vectors. The inspector uses `GET /ui/api/attachments`,
+`GET /ui/api/attachments/{id}`, `GET /ui/api/attachments/{id}/pages`,
+`GET /ui/api/attachments/{id}/download`, and `DELETE /ui/api/attachments/{id}`
+with `workspaceId` on each request.
 
 ### Extraction, OCR, and search
 
@@ -843,8 +846,9 @@ By default the token grants every enabled tool category. Narrow it with
 `--static-bearer-scopes`, a comma-separated list of category slugs
 (`graph-read`, `graph-write`, `vectors`, `attachments`, `code`); a call to a tool outside the
 list is refused. The list also gates the built-in graph viewer, with or without
-a token: omit `graph-read` and `/ui/graph`, `/ui/search`, `/ui/node` and
-`/ui/expand` answer 403, so the viewer loads and stays empty.
+a token: omit `graph-read` and the data routes — `/ui/api/graph`,
+`/ui/api/search`, `/ui/api/node`, `/ui/api/expand`, `/ui/api/relation` and
+`/ui/api/workspaces` — answer 403, so the viewer loads and stays empty.
 
 ```sh
 mcpmem --enable-all --transport http --auth-token "s3cr3t" \
@@ -907,7 +911,10 @@ The graph viewer takes **either** credential in the `Authorization` header. On
 an OAuth server, opening `/ui` runs the same login as the admin UI: the viewer
 is a reserved PKCE client of this server's own AS, so the first 401 redirects
 it through the consent flow and it keeps the resulting access token in
-`sessionStorage` — no token to paste. On a no-OAuth server, the static token
+`sessionStorage` — no token to paste. The reserved browser clients are seeded
+only when the UI is compiled and enabled; a build without the `ui` feature or
+a server started with `[server] ui = false` answers 404 on every `/ui*` path,
+and there is no browser login to run. On a no-OAuth server, the static token
 routes below apply: open
 `https://mem.example.com/ui#token=<access token>`, and the viewer keeps the
 token client-side and sends it as a header. The fragment never reaches the
@@ -1122,60 +1129,57 @@ mcpmem --enable-all --transport http --bind 0.0.0.0:8080 --auth-token "s3cr3t" \
   --tls-cert ./cert.pem --tls-key ./key.pem
 ```
 
-### Web UI (graph viewer)
+### Web UI
 
-The `http` transport serves a **Neo4j-Browser-style knowledge-graph viewer** — open
+The `http` transport serves a **React knowledge-graph UI** — open
 [`http://<bind>/ui`](http://127.0.0.1:8080/ui) in any browser to explore the graph interactively:
 
-- A **force-directed** layout with pan / zoom (scroll or the on-canvas ＋ / − / ⤢ controls) and
-  drag-to-pin nodes.
-- **Captioned circular nodes** coloured by entity type (the Neo4j categorical palette), a live
-  **legend**, and curved multi-edges with **relationship-type labels + arrowheads**.
-- **Double-click a node to expand its relationships** — incremental graph traversal that pulls the
-  node's neighbourhood from the server and merges it into the view (start small, expand outward).
-- **Paginated browse + full-text search.** Page through the graph with Prev / Next, or search all
-  entities (FTS5, prefix / search-as-you-type) — both paginated, so large graphs stay responsive.
-- A **node inspector** (type, observations, relationships — click a relationship to jump), plus
-  **Isolate** / **Dismiss** actions, a label filter, and Esc-to-deselect.
-- A **workspace dropdown** in the toolbar: it lists every
-  [workspace](#workspaces-isolated-knowledge-graphs) the signed-in identity can access
-  (one or many), starts on the saved default, and switches the view between graphs without
-  ever touching the stored default.
+- The **graph page** at `/ui`: a force-directed `<canvas>` layout with pan / zoom, coloured rings,
+  drag-pin and connect mode, a live legend, double-click neighbourhood expansion, a node
+  inspector (type, observations, relationships, entity attachments), and a workspace dropdown
+  that lists every [workspace](#workspaces-isolated-knowledge-graphs) the signed-in identity
+  can access and starts on the saved default.
+- The **search page** at `/ui/search`: full-text (FTS5, prefix / search-as-you-type) and
+  vector-mode search with entity-type and relation-scope filters.
+- The **administration page** at `/ui/admin`: principals, the approval waitlist, workspaces and
+  grants, webhook subscriptions, managed repositories and vector-store stats. It is its own
+  OAuth client (the reserved `mcpmem-admin-ui`, asking for the `admin` scope). The nested
+  `/ui/admin/callback` path serves the same shell, so an OAuth return on an admin subpage
+  reloads the page itself.
 
-It is served as static assets — `index.html`, `graph.css`, `graph.js` and the
-shared `nav.css` topbar stylesheet (the administration SPA shares the bar) —
-with **no external dependencies** (no CDNs, no telemetry; everything renders
-locally on a `<canvas>`). The viewer is a distinct browser front-end: it talks
-only to the `/ui/*` HTTP routes below and adds **no MCP tools** and no stdio
-behaviour.
+The UI is a **built React bundle** (Vite), embedded into the binary at compile time from
+`ui/dist` and served from `/ui/assets/*` — with no external dependencies at runtime (no CDNs,
+no telemetry; everything renders locally). It is a distinct browser front-end: it talks only
+to the `/ui/*` HTTP routes below and adds **no MCP tools** and no stdio behaviour.
 
 | Route | Purpose |
 |-------|---------|
-| `GET /ui` | The viewer page (app shell + `/ui/nav.css` + `/ui/graph.css` + `/ui/graph.js`; carries no graph data, so it needs no auth). |
-| `GET /ui/nav.css` | The shared site-navigation stylesheet, linked by both browser shells. |
-| `GET /ui/graph` | A page of the graph: `{ entities, relations, entityTypes, stats, page }`. Entities carry `obsCount` (not the observation bodies — those are lazy-loaded). Query params: `workspaceId` (selected workspace), `entityType` (filter), `offset`, `limit` (≤ 1,000), `token`. |
-| `GET /ui/search` | A page of FTS5 matches (matched nodes only): same shape as `/ui/graph`. Query params: `workspaceId`, `q` (prefix-matched), `entityType`, `offset`, `limit` (≤ 1,000), `token`. |
-| `GET /ui/node` | One entity with its observation **bodies**, lazy-loaded by the inspector on select. Query params: `workspaceId`, `name` (required), `token`. |
-| `GET /ui/expand` | One node's neighbourhood `{ entities, relations }` for double-click traversal. Query params: `workspaceId`, `name` (required), `depth` (1–3), `direction` (`outgoing`/`incoming`/`both`), `token`. |
-| `GET /ui/workspaces` | The caller's accessible workspaces for the dropdown: `{ workspaces, nextCursor }`, the same page shape as the MCP `list_workspaces` tool. Query params: `cursor`, `limit` (≤ 100), `token`. Private graphs of other callers never appear. |
+| `GET /ui`, `GET /ui/search`, `GET /ui/admin`, `GET /ui/admin/callback` | The app shell pages (the built React app; the shell carries no graph data, so it needs no auth). |
+| `GET /ui/assets/{name}` | One built asset (JavaScript or CSS), with the manifest's content type and byte count and immutable cache headers (the hashed names never change). |
+| `GET /ui/api/graph` | A page of the graph: `{ entities, relations, entityTypes, stats, page }`. Entities carry `obsCount` (not the observation bodies — those are lazy-loaded). Query params: `workspaceId` (selected workspace), `entityType` (filter), `offset`, `limit` (≤ 1,000), `token`. |
+| `GET /ui/api/search` | A page of FTS5 matches (matched nodes only): the `{ results, count, elapsedMs }` envelope. Query params: `workspaceId`, `q`, `entityType`, `offset`, `limit` (≤ 1,000), `token`. |
+| `GET /ui/api/node` | One entity with its observation **bodies**, lazy-loaded by the inspector on select. Query params: `workspaceId`, `name` (required), `token`. |
+| `GET /ui/api/expand` | One node's neighbourhood `{ entities, relations }` for double-click traversal. Query params: `workspaceId`, `name` (required), `depth` (1–3), `direction` (`outgoing`/`incoming`/`both`), `token`. |
+| `GET /ui/api/relation` | One exact relation triple (`from`, `to`, `relationType`) with its observations and attributes; 404 when the triple is absent. |
+| `GET /ui/api/types` | The entity and relation type catalogues with their descriptions. |
+| `GET /ui/api/workspaces` | The caller's accessible workspaces for the dropdown: `{ workspaces, nextCursor }`, the same page shape as the MCP `list_workspaces` tool. Query params: `cursor`, `limit` (≤ 100), `token`. Private graphs of other callers never appear. |
+| `GET /ui/api/session` | The caller's scopes, principal name, workspace role and the compiled feature set — what the shell shows as its authentication state. |
+| `POST /ui/api/mutations` | The one write route: `{ workspaceId, operation, payload }` for every graph write the UI offers. |
+| `GET`/`POST /ui/api/attachments{,/{id}}`, `GET /ui/api/attachments/{id}/pages`, `GET /ui/api/attachments/{id}/download` | The attachment routes behind the `attachments` category (see [Entity attachments](#entity-attachments)). |
+| `/ui/api/principals`, `/ui/api/waitlist/*`, `/ui/api/workspaces/*` (admin), `/ui/api/vectors/stats`, `/ui/api/webhooks/*`, `/ui/api/repos/*` | The administration adapters, gated by the `admin` scope and their Cargo features. |
 
-Every data response carries a `page` cursor — `{ offset, limit, returned, hasMore }` — that drives
-the Prev / Next controls without a second round-trip. The list endpoints omit observation bodies
-(they ship only `obsCount`) to keep payloads small; the inspector fetches the bodies for the one
-selected node via `/ui/node`. Responses are gzip/brotli-compressed when the client advertises it,
-and the canvas uses a **Barnes-Hut** (O(_n_ log _n_)) force layout with viewport culling so large
-pages and hub expansions stay at interactive frame rates.
+Every data response carries a `page` cursor — `{ offset, limit, returned, hasMore }` — that
+drives the Prev / Next controls without a second round-trip. The list endpoints omit
+observation bodies (they ship only `obsCount`) to keep payloads small; the inspector fetches
+the bodies for the one selected node via `/ui/api/node`. Responses are gzip/brotli-compressed
+when the client advertises it, and the canvas uses a **Barnes-Hut** (O(_n_ log _n_)) force
+layout with viewport culling so large pages and hub expansions stay at interactive frame
+rates.
 
-The dropdown selection is session-only. Every data request carries the selected `workspaceId`,
-resolved server-side against the caller's read access; the viewer never calls
-`set_default_workspace`. With no saved default it shows no graph until you pick one. A switch
-clears the canvas, inspector, search, type filter and pager, aborts in-flight requests, and
-discards late responses. When a grant is revoked mid-session, the next request fails, the viewer
-clears itself and refreshes the list with the workspace marked unavailable.
-
-The viewer reads the graph, so `/ui/graph`, `/ui/search`, `/ui/node`, and `/ui/expand` require
-**`--enable-graph-read`** (or `--enable-all`); without it they return `403` and the page says so.
-They honor the same credential
+The viewer reads the graph, so `/ui/api/graph`, `/ui/api/search`, `/ui/api/node`,
+`/ui/api/expand`, `/ui/api/relation` and `/ui/api/workspaces` require
+**`--enable-graph-read`** (or `--enable-all`); without it they return `403` and the page says
+so. They honor the same credential
 as the MCP endpoints: with OAuth on, the viewer fetches its own access token
 through the login flow when the server's 401 challenge names the authorization
 server; otherwise pass a token as `Authorization: Bearer <token>`, as a
@@ -1188,6 +1192,32 @@ mcpmem --enable-graph-read --transport http --bind 127.0.0.1:8080 \
   --auth-token "s3cr3t" --legacy-owner-id machine:local
 # then open http://127.0.0.1:8080/ui#token=s3cr3t in a browser
 ```
+
+#### Opting out of the UI
+
+Two switches, one at build time and one at runtime:
+
+- **The `ui` Cargo feature** (on by default) compiles the module. A build without it serves a
+  smaller binary, and it **refuses an explicit `--ui true` at startup** with
+  `the ui build feature is not compiled into this binary`.
+- **`[server] ui = false`** turns the compiled module off at runtime: every `/ui*` path answers
+  a plain 404 (the module never attaches), and the two reserved browser OAuth clients are not
+  seeded, so no browser session exists to sign into. `--ui` takes a value, so the command line
+  beats the file — `--ui true` turns the UI back on for one process.
+
+#### Serving the UI behind a path prefix
+
+The built pages load their assets and their API calls relative to the current page, so a
+**prefix-stripping reverse proxy** can serve the app under any path — for example `/mem`:
+
+```nginx
+location /mem/ { proxy_pass http://127.0.0.1:8080/; }
+```
+
+The app boots at every page under the prefix, requests no root asset and no origin-level OAuth
+URL, and never bypasses the proxy. The OAuth discovery documents still live at the origin
+(RFC 8414 / RFC 9728); the OAuth deployment runbook names every location a stripping proxy
+must forward.
 
 ## Workspaces (isolated knowledge graphs)
 
@@ -1275,7 +1305,8 @@ newly authenticated identity must select one explicitly or set a default over MC
 The `/ui` viewer's workspace dropdown lists every graph the signed-in identity can access,
 starts on the saved default, and shows no graph until selection when there is none. A switch
 changes only this browser session — it never calls `set_default_workspace` — and every
-`/ui/graph`, `/ui/search`, `/ui/node`, and `/ui/expand` request carries the selected
+`/ui/api/graph`, `/ui/api/search`, `/ui/api/node`, and `/ui/api/expand` request carries the
+selected
 `workspaceId`.
 
 ### Admin webhook selection
@@ -1285,7 +1316,7 @@ ownership of the selected workspace. The admin page's webhook controls have thei
 workspace ID** field: a blank field uses the owner's saved default, an explicit ID is appended
 to every webhook request, and access or selection errors are shown beside the field. The page
 works with an `admin`-only token — it never depends on the `graph-read`-gated
-`/ui/workspaces` list.
+`/ui/api/workspaces` list.
 
 ### HTTP startup requires OAuth or a bearer credential
 
@@ -1521,6 +1552,7 @@ rather than an error, so one file can serve several deployments.
 | `--log-file` | stderr | Append logs to this path instead of stderr; created when absent, never truncated |
 | `--role` | `mcp` | Roles to start in this process. See [Runtime roles](#runtime-roles) |
 | `--legacy-observations` | off | The deprecated string-observation adapter. Removed in 2.0.0 |
+| `--ui` | on (with the `ui` feature) | The built-in web UI at `/ui` and its `/ui/api/*` routes; a build without the feature refuses `--ui true`. `[server] ui = false` turns it off at runtime |
 | `--mmap-size` | `67108864` | SQLite mmap size in bytes |
 | `--page-size` | `4096` | SQLite page size. Applies to a fresh database only |
 | `--cache-size-mb` | `32` | SQLite page cache, in MiB |
@@ -1805,10 +1837,11 @@ See [Entity attachments](#entity-attachments).
 main.rs → MCPServer { kg, vs: Option<VectorStore> }
   ├── run_stdio()  — newline-delimited JSON-RPC over stdio
   └── run_http()   — MCP Streamable HTTP (axum, POST/GET /mcp)
-        ├── GET /ui        — graph viewer shell + /ui/nav.css + /ui/graph.css + /ui/graph.js (static)
-        ├── GET /ui/graph  — a paged view of the graph for the viewer (gated by graph-read)
-        ├── GET /ui/search — paged FTS5 search for the viewer (gated)
-        ├── GET /ui/expand — a node's neighbourhood for double-click traversal (gated)
+        ├── crate::ui::attach() — the optional web UI (ui feature + [server] ui flag)
+        │     ├── GET /ui, /ui/search, /ui/admin{,/callback} — the built React shell
+        │     ├── GET /ui/assets/{name} — one built bundle file (manifest content type)
+        │     └── GET/POST /ui/api/* — workspaces, graph, node, expand, relation,
+        │           types, search, session, mutations, attachments, admin adapters
         ├── oauth_routes::attach() — the authorization server (--oidc-issuer)
         │     ├── GET  /.well-known/oauth-protected-resource   — RFC 9728 (always)
         │     ├── GET  /.well-known/oauth-authorization-server — RFC 8414 (always)

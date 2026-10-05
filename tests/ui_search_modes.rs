@@ -662,14 +662,7 @@ fn direct_nodes_find_a_hyphenated_name() {
         },
     );
 
-    let (status, body) = search(
-        srv.port,
-        &srv.workspace_id,
-        "Solo-A",
-        "direct",
-        "nodes",
-        "",
-    );
+    let (status, body) = search(srv.port, &srv.workspace_id, "Solo-A", "direct", "nodes", "");
     assert_eq!(status, 200, "{body}");
     let results = body["results"]
         .as_array()

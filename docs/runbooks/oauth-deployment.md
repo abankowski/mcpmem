@@ -353,22 +353,22 @@ intended, and that your proxy overwrites it.
 ### Opening the viewer in a browser
 
 **With OAuth on, opening `/ui` runs the same login the admin UI runs.** The
-viewer is a seeded PKCE client of this server's own AS (`mcpmem-graph-ui`,
-seeded at startup beside `mcpmem-admin-ui`). The first graph request comes
+viewer is a reserved PKCE client of this server's own AS (`mcpmem-graph-ui`,
+seeded at startup beside `mcpmem-admin-ui`). The first data request comes
 back 401, the `WWW-Authenticate` challenge names the authorization server
-(`resource_metadata=…`), and the page redirects to `/oauth/authorize`. After
-the consent page the provider returns with `?code=`, `graph.js` exchanges it
+(`resource_metadata=…`), and the app redirects to `/oauth/authorize`. After
+the consent page the provider returns with `?code=`, the app exchanges it
 at `/oauth/token`, and the access token is kept in `sessionStorage` and sent
 as `Authorization: Bearer …` on every data request. There is no token to
 paste; there is no separate viewer login. Both browser pages carry the same
-topbar, so a human moves between the graph (`/ui`) and the administration SPA
-(`/ui/admin`) without re-authenticating.
+topbar, so a human moves between the graph (`/ui`) and the administration
+page (`/ui/admin`) without re-authenticating.
 
 The pasted-token routes below are for **deployments with no OAuth**, where
 `--auth-token-file` is the whole gate:
 
-- **The URL fragment `#token=…`.** `src/ui/graph.js` reads it on load, keeps
-  it in `sessionStorage`, removes it from the address bar, and sends it as
+- **The URL fragment `#token=…`.** The app reads it on load, keeps it in
+  `sessionStorage`, removes it from the address bar, and sends it as
   `Authorization: Bearer …` on every data request. The fragment is the part
   of a URL a browser never sends to the server, so the token does not reach
   your proxy log, your access log or a `Referer` header.
@@ -378,25 +378,32 @@ The pasted-token routes below are for **deployments with no OAuth**, where
   echo 'https://mem.example.com/ui#token=<paste the static bearer token>'
   ```
 
-- **The box the viewer shows when a request comes back 401 with a bare
+- **The box the app shows when a request comes back 401 with a bare
   challenge** — one that names no `resource_metadata=`, which only a
   no-OAuth server sends. Pasting there avoids the address bar altogether.
 
 **The `?token=` query fallback is for the static bearer token alone**, and it
-works on the data endpoints (`/ui/graph`, `/ui/search`, `/ui/node`,
-`/ui/expand`), not on `/ui` itself — the shell is unauthenticated, and
-`graph.js` reads only the OAuth `?code=` the provider sends back. It exists
-for scripts and for deployments with no OAuth:
+works on the data endpoints (`/ui/api/graph`, `/ui/api/search`,
+`/ui/api/node`, `/ui/api/expand`), not on `/ui` itself — the shell is
+unauthenticated, and the app reads only the OAuth `?code=` the provider sends
+back. It exists for scripts and for deployments with no OAuth:
 
 ```sh
 # Identical in Bash and fish. The static token only; an OAuth token in a query
 # string is refused.
-curl "https://mem.example.com/ui/graph?token=$(cat /etc/mcpmem/token)"
+curl "https://mem.example.com/ui/api/graph?token=$(cat /etc/mcpmem/token)"
 ```
 
 A credential in a query string is a credential in a history file, a proxy log
 and a `Referer` header, which is why the issued token is not accepted there.
 Narrow what the static token reaches with `--static-bearer-scopes graph-read`.
+
+**When the UI is switched off, there is no viewer to sign into.** The two
+reserved browser clients are seeded only when the UI is compiled (the `ui`
+Cargo feature, on by default) and enabled (`[server] ui = false`, or `--ui
+false`, turns it off at runtime). With the UI off, every `/ui*` path answers a
+plain 404, the connector flows are unaffected, and the consent page never
+offers the two browser clients.
 
 ## 5. Add the connector
 
@@ -407,7 +414,10 @@ Narrow what the static token reaches with `--static-bearer-scopes graph-read`.
 3. Claude fetches the two discovery documents, registers itself at
    `POST /oauth/register`, and opens the login.
 4. Your provider authenticates the human. They land on the `mcpmem` consent
-   page, which names the client, the human, and one checkbox per offered scope.
+   page — a dark card in the mcpmem design that names the client
+   ("Authorize …"), the signed-in identity, the destination host, one
+   checkbox per offered scope, and a note that approving records the
+   consent. Deny or Approve decides.
 5. Approving redirects back to `https://claude.ai/api/mcp/auth_callback` with a
    code, which Claude exchanges.
 
@@ -624,6 +634,11 @@ after the thirty-day expiry.
 
 A 403 here is actionable and a 401 is not: the 403 names the scope, so a
 connector can send its human back through consent for it.
+
+There is no third status for the UI itself: with the UI compiled out or
+turned off (`[server] ui = false`), every `/ui*` path is a plain 404 from
+the router, because the module never attaches — there is nothing to refuse
+and nothing to sign into.
 
 ### Nothing in the log at all
 

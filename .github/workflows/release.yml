@@ -57,8 +57,43 @@ jobs:
         run: command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
       - name: Test real PDF rendering against fake vision
         run: cargo test --locked --target "${{ matrix.target }}" --test attachment_extraction --features extractor pdf_render_routes_page_to_vision -- --exact --test-threads=1
+  # The embedded UI bundle is a git-ignored build output: every release
+  # artifact must be built from the tagged ui/src by this job first, and the
+  # jobs that compile or package the crate restore it into ui/dist.
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      # Node 22 is the floor: the build and check scripts use node:fs globSync.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: ui
+      - name: Build the UI bundle and write the manifest
+        run: npm run build
+        working-directory: ui
+      - name: Check the manifest and the types
+        run: npm run check
+        working-directory: ui
+      - name: Regenerate the embedded asset table
+        run: node scripts/generate-assets-table.mjs
+      - name: The embedded asset table matches the fresh manifest
+        run: git diff --exit-code -- src/ui/assets.rs
+      - name: Upload the built bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+          if-no-files-found: error
+
   publish:
-    needs: pdf-targets
+    needs: [pdf-targets, frontend]
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -75,6 +110,14 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
           fetch-depth: 0
+
+      # Every compile below embeds the bundle from ui/dist; the packaged
+      # crate carries it too (scripts/check-ui-package.mjs gates that).
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -110,6 +153,41 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --all-targets --locked -- --test-threads=1
 
+      # The published binary embeds the bundle: no Node is needed to serve
+      # the UI. This smoke starts the release binary and reads the shell
+      # page plus one real asset, comparing its sha256 and content type
+      # with the embedded manifest.
+      - name: Smoke test the bundled UI from the release binary
+        run: |
+          cargo build --release --locked
+          ./target/release/mcpmem --transport http --bind 127.0.0.1:8091 \
+            --auth-token smoke --legacy-owner-id machine:local \
+            --memory-file /tmp/mcpmem-smoke.mcpmem &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          ready=""
+          attempt=0
+          while [ "${ready}" = "" ] && [ "${attempt}" -lt 60 ]; do
+            attempt=$((attempt + 1))
+            if curl -fsS -o /dev/null http://127.0.0.1:8091/ui 2>/dev/null; then
+              ready=1
+            else
+              sleep 1
+            fi
+          done
+          if [ -z "${ready}" ]; then
+            echo "smoke failed: the server did not answer /ui within 60 s"
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:8091/ui | grep -q '<div id="root">'
+          asset="$(jq -r '.files | keys[0]' ui/dist/ui-manifest.json)"
+          want="$(jq -r --arg a "$asset" '.files[$a].sha256' ui/dist/ui-manifest.json)"
+          ctype="$(jq -r --arg a "$asset" '.files[$a].contentType' ui/dist/ui-manifest.json)"
+          curl -fsS -D - -o /dev/null "http://127.0.0.1:8091${asset}" | grep -qi "content-type: ${ctype}"
+          curl -fsS "http://127.0.0.1:8091${asset}" -o /tmp/mcpmem-smoke-asset
+          test "$(sha256sum /tmp/mcpmem-smoke-asset | cut -d' ' -f1)" = "${want}"
+          echo 'smoke passed: the release binary serves the bundled UI without Node'
+
       # Preferred path: no stored credential. It needs a Trusted Publisher
       # entry on crates.io for every crate, which crates.io accepts only after
       # the crate exists. The first release therefore uses the secret, and the
@@ -139,7 +217,7 @@ jobs:
   # attaches it to the GitHub release, so an install can download the artefact
   # instead of compressing. The crates.io publisher stays the source of record.
   binaries:
-    needs: publish
+    needs: [publish, frontend]
     if: github.event_name == 'release'
     strategy:
       # One target must not cancel the rest: each leg attaches its own artefact
@@ -162,6 +240,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.release.tag_name }}
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

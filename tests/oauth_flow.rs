@@ -160,6 +160,7 @@ async fn oauth_subject_keeps_workspace_ownership_and_grants_after_a_name_change(
 
 /// A legacy runtime row can share the file principal's issuer and subject.
 /// The file scopes must win even when the runtime row contains admin.
+#[cfg(feature = "ui")]
 #[tokio::test]
 async fn a_file_principal_takes_precedence_over_a_runtime_collision_on_oauth_login() {
     let started = Flow::new("graph-read graph-write admin").start().await;
@@ -661,6 +662,7 @@ async fn a_read_only_token_does_not_see_write_tools_in_the_list() {
 // the tool it stands for cannot come to disagree.
 /// Give the token's human a private graph without granting graph-write to the
 /// OAuth client. The viewer request must name this workspace explicitly.
+#[cfg(feature = "ui")]
 fn owned_viewer_workspace(authorized: &Authorized, tokens: &Tokens) -> String {
     let principal = authorized
         .server()
@@ -686,6 +688,7 @@ fn owned_viewer_workspace(authorized: &Authorized, tokens: &Tokens) -> String {
         .workspace_id
 }
 
+#[cfg(feature = "ui")]
 #[tokio::test]
 async fn a_graph_read_token_may_read_the_viewer_graph() {
     let (authorized, tokens) = to_tokens(&["graph-read"]).await;
@@ -704,6 +707,7 @@ async fn a_graph_read_token_may_read_the_viewer_graph() {
 /// scope is refused — the same answer `read_graph` itself would give, and with
 /// the same challenge. A scripted viewer client learns what to ask its human
 /// for from this header and from nowhere else.
+#[cfg(feature = "ui")]
 #[tokio::test]
 async fn a_write_only_token_is_refused_by_the_viewer() {
     let (authorized, tokens) = to_tokens(&["graph-write"]).await;
@@ -723,6 +727,7 @@ async fn a_write_only_token_is_refused_by_the_viewer() {
 
 /// And no token at all is the same 401 challenge `/mcp` sends, so a scripted
 /// viewer client can discover the authorization server from here too.
+#[cfg(feature = "ui")]
 #[tokio::test]
 async fn the_viewer_refuses_an_anonymous_request_with_the_challenge() {
     let (authorized, _tokens) = to_tokens(&["graph-read"]).await;
@@ -743,6 +748,7 @@ async fn the_viewer_refuses_an_anonymous_request_with_the_challenge() {
 /// A break in the seed or in the script's derivation of its own redirect
 /// shows up here as a refused authorization request, which is what the
 /// browser would see.
+#[cfg(feature = "ui")]
 #[tokio::test]
 async fn the_reserved_graph_client_walks_the_viewer_login_and_reads_the_graph() {
     let flow = Flow::new("graph-read").redirect_uri(format!("{PUBLIC_URL}/ui").as_str());
