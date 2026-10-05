@@ -87,3 +87,19 @@ jobs:
             echo 'graph-only build unexpectedly includes an HTTP or AWS client'
             exit 1
           fi
+
+  # The landing page must keep building: its template and content are checked
+  # against each other by the build itself, so a pushed but broken page would
+  # otherwise surface only on deploy.
+  site:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node build.mjs
+        working-directory: site
+        name: Build the landing page
