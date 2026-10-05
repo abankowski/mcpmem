@@ -229,8 +229,14 @@ async fn inner_main() -> Result<()> {
         .roles()
         .contains(&runtime::RuntimeRole::Extractor)
     {
-        let ocr =
-            runtime::ocr_provider(config.ocr.as_ref(), file.as_ref().map(|(_, loaded)| loaded));
+        // The OCR provider builds a reqwest blocking client. Building it in
+        // the async startup drops that client's runtime inside an async
+        // context, which tokio refuses at runtime. block_in_place gives the
+        // constructor a blocking region; the multi-thread runtime supports
+        // it, and startup and shutdown behavior are unchanged.
+        let ocr = tokio::task::block_in_place(|| {
+            runtime::ocr_provider(config.ocr.as_ref(), file.as_ref().map(|(_, loaded)| loaded))
+        });
         services.with_extractor(Arc::new(runtime::ExtractorService::with_workspaces(
             mcp_server.workspace_registry(),
             ocr,

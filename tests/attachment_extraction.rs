@@ -1765,6 +1765,109 @@ fn a_separate_extractor_process_makes_the_upload_ready() {
 
 // ── Builds without the extractor feature ─────────────────────────────────
 
+/// A spawned binary with an `[ocr]` section must start and answer a health
+/// probe. The OCR provider builds a reqwest blocking client, which tokio
+/// refuses to drop inside the async startup; the startup must construct it
+/// in a blocking context instead.
+#[cfg(feature = "extractor")]
+#[test]
+fn ocr_config_does_not_panic_a_spawned_binary_at_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("ocr-startup.mcpmem");
+    let key_path = dir.path().join("vision-key");
+    std::fs::write(&key_path, "fixture-vision-key\n").unwrap();
+    let config_path = dir.path().join("mcpmem.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[ocr]\n\
+             provider = \"openai\"\n\
+             model = \"fixture-vision\"\n\
+             vision-url = \"http://127.0.0.1:9/v1/chat/completions\"\n\
+             api-key-file = \"{}\"\n",
+            key_path.display()
+        ),
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mcpmem"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--memory-file",
+            db_path.to_str().unwrap(),
+            "--transport",
+            "http",
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            "--role",
+            "mcp,extractor",
+            "--enable-all",
+            "--auth-token",
+            "fixture-bearer",
+            "--legacy-owner-id",
+            "machine:local",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the binary with an [ocr] config");
+    let lines = drain_lines(child.stderr.take().unwrap());
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut answered = false;
+    let mut exited = None;
+    while Instant::now() < deadline && !answered {
+        exited = child.try_wait().expect("poll the child");
+        if exited.is_some() {
+            break;
+        }
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _ = stream.write_all(
+                b"GET /ui HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            );
+            let mut head = [0u8; 64];
+            if stream.read(&mut head).unwrap_or(0) > 0 {
+                let head = String::from_utf8_lossy(&head);
+                assert!(
+                    head.starts_with("HTTP/1.1 200"),
+                    "the /ui health probe must answer 200, got: {head}"
+                );
+                answered = true;
+            }
+        }
+        if !answered {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    if let Some(exit) = exited {
+        child.wait().unwrap();
+        panic!(
+            "the binary exited during startup: {exit}; stderr:\n{}",
+            lines.lock().join("\n")
+        );
+    }
+    if !answered {
+        child.kill().expect("stop the binary");
+        child.wait().unwrap();
+        panic!(
+            "the binary never answered the health probe; stderr:\n{}",
+            lines.lock().join("\n")
+        );
+    }
+    child.kill().expect("stop the binary");
+    child.wait().unwrap();
+}
+
 /// A build without the `extractor` feature still accepts an upload and keeps
 /// the job durably queued: upload tools never depend on the local role.
 #[cfg(not(feature = "extractor"))]

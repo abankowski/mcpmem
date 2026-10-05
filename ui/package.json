@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build && node scripts/build-ui.mjs",
-    "check": "node scripts/check-ui-manifest.mjs && tsc --noEmit"
+    "check": "node scripts/check-ui-manifest.mjs && tsc --noEmit",
+    "e2e": "playwright test -c e2e/playwright.config.ts"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
@@ -16,6 +17,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.4",

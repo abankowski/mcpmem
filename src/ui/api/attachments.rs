@@ -426,6 +426,14 @@ async fn download_attachment_handler(
     };
     let content_type = HeaderValue::from_str(&mime)
         .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    // `unfold` panics when a consumer polls it after it returned
+    // `Ready(None)`, and the response-compression layer does exactly that
+    // once when it finalizes an encoded body. A client that advertises
+    // `Accept-Encoding` therefore killed the connection without a response
+    // (`ERR_EMPTY_RESPONSE` in the browser, nothing in the log file) on the
+    // final chunk of every download. Fusing the stream turns that post-end
+    // poll into a no-op: the stream stops forwarding polls once it is done,
+    // and the bytes stream exactly as before.
     let stream = futures::stream::unfold(Some((conn, id, 0_i64, size)), |state| async move {
         let (conn, row_id, offset, size) = state?;
         if offset >= size {
@@ -443,7 +451,8 @@ async fn download_attachment_handler(
         let next_offset = offset + chunk.len() as i64;
         let next_state = (next_offset < size).then_some((conn, row_id, next_offset, size));
         Some((Ok::<Bytes, std::io::Error>(Bytes::from(chunk)), next_state))
-    });
+    })
+    .fuse();
     (
         [
             (header::CONTENT_TYPE, content_type),

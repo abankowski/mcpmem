@@ -131,6 +131,9 @@ code = [
 ]
 
 [dev-dependencies]
+# Decode a negotiated gzip download in tests/ui_attachment_http.rs. Already
+# in the dependency graph through tower-http's compression feature.
+flate2 = "1"
 hmac = "0.12"
 tokio = { version = "1.41", features = ["process"] }
 mcpmem-webhook = { path = "crates/mcpmem-webhook", version = "2.1.6" }

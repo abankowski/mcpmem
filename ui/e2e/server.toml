@@ -1,0 +1,13 @@
+# The e2e server configuration. PDF extraction needs an [ocr] section: the
+# extractor renders each page with Poppler and asks the vision endpoint for
+# the transcription. ui/e2e/e2e-services.mjs answers on 127.0.0.1:8092 with
+# the stable fixture texts the suite asserts on.
+#
+# Everything else comes from the webServer command line; the file only adds
+# what the CLI cannot express.
+
+[ocr]
+provider = "openai"
+model = "e2e-vision"
+vision-url = "http://127.0.0.1:8092/v1/chat/completions"
+api-key-file = "/tmp/mcpmem-e2e/vision-key"

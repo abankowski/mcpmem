@@ -640,6 +640,49 @@ fn direct_nodes_match_name_fts_and_the_spec_envelope() {
     );
 }
 
+/// A hyphenated name must stay findable. The FTS tokenizer splits a stored
+/// name like `Solo-A` into the two tokens `solo` and `a`, so the direct
+/// query has to keep the same token boundary; a query that merged the
+/// halves into one token (`SoloA`) matches nothing and the palette shows
+/// "No nodes found." for a node that exists on the canvas.
+#[cfg(feature = "ui")]
+#[test]
+fn direct_nodes_find_a_hyphenated_name() {
+    let srv = spawn(
+        &[
+            "--enable-graph-read",
+            "--enable-graph-write",
+            "--enable-vectors",
+        ],
+        false,
+        |path| {
+            let kg = graph(path);
+            kg.create_entities(&[entity("Solo-A", "note", None)])
+                .unwrap();
+        },
+    );
+
+    let (status, body) = search(
+        srv.port,
+        &srv.workspace_id,
+        "Solo-A",
+        "direct",
+        "nodes",
+        "",
+    );
+    assert_eq!(status, 200, "{body}");
+    let results = body["results"]
+        .as_array()
+        .expect("results is an array: {body}");
+    assert_eq!(results.len(), 1, "the hyphenated name matches: {body}");
+    assert_eq!(results[0]["name"].as_str(), Some("Solo-A"), "{results:?}");
+    assert_eq!(
+        body["count"].as_u64(),
+        Some(1),
+        "count is the row count: {body}"
+    );
+}
+
 /// Direct relations: the query matches relation-observation FTS and the hit
 /// carries the structured triple.
 #[cfg(feature = "ui")]

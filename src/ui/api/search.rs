@@ -231,19 +231,23 @@ async fn ui_search_handler(
     }
 }
 
-/// Turn a free-text search box query into a safe FTS5 MATCH expression: keep
-/// alphanumeric/underscore tokens (dropping punctuation that would otherwise
-/// be FTS operators and silently fail the query), AND them together, and make
-/// the final token a prefix (`term*`) for a natural search-as-you-type feel.
+/// Turn a free-text search box query into a safe FTS5 MATCH expression:
+/// replace every non-alphanumeric character with a separator, AND the tokens
+/// together, and make the final token a prefix (`term*`) for a natural
+/// search-as-you-type feel.
+///
+/// The separator, not a deletion, is the point: the FTS tokenizer splits a
+/// stored name like `Solo-A` into the two tokens `solo` and `a`, so the
+/// query must keep the same token boundaries. Merging the halves into one
+/// token (`SoloA`) matches nothing, and a bare hyphen or quote would
+/// otherwise be an FTS operator that fails the query.
 fn fts_query(raw: &str) -> String {
     let tokens: Vec<String> = raw
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { ' ' })
+        .collect::<String>()
         .split_whitespace()
-        .map(|t| {
-            t.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_')
-                .collect::<String>()
-        })
-        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
         .collect();
     let n = tokens.len();
     tokens
