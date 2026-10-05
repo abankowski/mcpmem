@@ -1148,9 +1148,12 @@ The `http` transport serves a **React knowledge-graph UI** — open
   reloads the page itself.
 
 The UI is a **built React bundle** (Vite), embedded into the binary at compile time from
-`ui/dist` and served from `/ui/assets/*` — with no external dependencies at runtime (no CDNs,
-no telemetry; everything renders locally). It is a distinct browser front-end: it talks only
-to the `/ui/*` HTTP routes below and adds **no MCP tools** and no stdio behaviour.
+`ui/dist` and served from `/ui/assets/*` — no telemetry, and no external runtime
+dependencies except the Google Fonts stylesheet the shell loads for its designed type
+faces (the token font stacks fall back to system faces when the fonts are unreachable,
+so an airgapped host still renders with correct layout). It is a distinct browser
+front-end: it talks only to the `/ui/*` HTTP routes below and adds **no MCP tools** and no
+stdio behaviour.
 
 | Route | Purpose |
 |-------|---------|
