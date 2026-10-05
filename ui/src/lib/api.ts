@@ -114,8 +114,8 @@ export const api = {
   search: (query: SearchQuery, signal?: AbortSignal) => apiFetch("search", searchSchema, { query, signal }),
   mutate: (workspaceId: string, change: Mutation, signal?: AbortSignal) =>
     jsonRequest("mutations", mutationResultSchema, "POST", { workspaceId, ...mutationSchema.parse(change) }, "graph", undefined, signal),
-  attachments: (workspaceId: string, entityName: string, signal?: AbortSignal) =>
-    apiFetch("attachments", attachmentsSchema, { query: { workspaceId, entityName }, signal }),
+  attachments: (workspaceId: string, entityName: string, limit?: number, signal?: AbortSignal) =>
+    apiFetch("attachments", attachmentsSchema, { query: { workspaceId, entityName, limit }, signal }),
   attachment: (workspaceId: string, attachmentId: number, signal?: AbortSignal) =>
     apiFetch(`attachments/${encodeURIComponent(attachmentId)}`, attachmentDetailSchema, { query: { workspaceId }, signal }),
   attachmentPage: (workspaceId: string, attachmentId: number, page: number, offset = 0, maxChars = 4096, signal?: AbortSignal) =>
