@@ -148,8 +148,12 @@ function Shell() {
       if (!active) return;
       if (!module.Page) {
         // Feature modules such as the Files panel export named components,
-        // not Page. Skip them and keep the route's fallback state.
-        console.warn(`Skipping page module ${key}: it does not export Page.`);
+        // not Page. Skip them and keep the route's fallback state. Log the
+        // skip with the standard error level; legacy console.warn may throw
+        // in a strict console and would flip this branch into the error state.
+        if (typeof console !== "undefined") {
+          console.error(`Skipping page module ${key}: it does not export Page.`);
+        }
         setLoadedPage(null);
         setPageError(false);
         return;
