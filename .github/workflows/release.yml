@@ -20,6 +20,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Verify the tag, workspace versions and crates.io agree BEFORE any heavy
+  # build. The gate used to run as the first step of `publish`, after the
+  # pdf-targets matrix and the frontend build had already consumed minutes;
+  # a mismatched tag burned all of it only to fail there (2026-10-05, v3.0.0:
+  # FAIL tag v3.0.0 does not match version 2.1.6). Fail fast instead: this
+  # ten-second job gates every build job below.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - name: Tag, semver and crates.io agree
+        run: scripts/check-release-version.sh --registry "${{ github.event.release.tag_name || inputs.tag }}"
+      # The release event may also carry a prerelease mismatch that the same
+      # tag string cannot express (v1.0.0-rc.1 without the prerelease box).
+      - name: A prerelease version needs a prerelease GitHub release
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          IS_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          case "${TAG#v}" in
+          *-*) semver_prerelease=true ;;
+          *) semver_prerelease=false ;;
+          esac
+          if [ "${semver_prerelease}" != "${IS_PRERELEASE}" ]; then
+            echo "::error::tag ${TAG} is prerelease=${semver_prerelease}, GitHub release is prerelease=${IS_PRERELEASE}"
+            exit 1
+          fi
+          echo "tag ${TAG} and the GitHub release agree on prerelease=${IS_PRERELEASE}"
+
   # Check the external PDF dependency and real rendering on every binary
   # target before publishing any crate. A missing renderer blocks the release.
   #
@@ -28,7 +60,7 @@ jobs:
   # before compiling. Without it the lib fails to compile on the 
   # include_bytes! of the missing assets (2026-10-05, tag v3.0.0).
   pdf-targets:
-    needs: [frontend]
+    needs: [frontend, version]
     strategy:
       fail-fast: false
       matrix:
@@ -72,6 +104,7 @@ jobs:
   # artifact must be built from the tagged ui/src by this job first, and the
   # jobs that compile or package the crate restore it into ui/dist.
   frontend:
+    needs: [version]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
