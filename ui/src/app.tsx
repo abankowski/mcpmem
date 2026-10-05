@@ -236,8 +236,15 @@ function Shell() {
     </EmptyState>;
   } else if (page === "admin" && !adminSession && adminError) {
     content = <EmptyState title="Admin unavailable" message={adminError.message} error><Button onClick={reload}>Retry</Button></EmptyState>;
-  } else if (page === "admin" && !adminSession) {
-    content = <EmptyState title="Admin access" message="Sign in with an account that holds the admin scope." />;
+  } else if (page === "admin" && !adminSession && !session) {
+    // The workspace group of the admin page belongs to workspace owners
+    // without an admin token; the page still needs a graph session.
+    content = (
+      <EmptyState title="Admin sign-in needed" message="The workspace group needs graph access; the server group needs a human admin session." error>
+        {canAuthorize("graph") && <Button variant="primary" onClick={() => { void beginAuth("graph"); }}>Sign in for workspace access</Button>}
+        {canAuthorize("admin") && <Button onClick={() => { void beginAuth("admin"); }}>Sign in as admin</Button>}
+      </EmptyState>
+    );
   } else if (pageError) {
     content = <EmptyState title="Page unavailable" message="The page module could not load." error><Button onClick={() => location.reload()}>Retry</Button></EmptyState>;
   } else if (!loadedPage) {
