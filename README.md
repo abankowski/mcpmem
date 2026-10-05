@@ -1157,7 +1157,7 @@ to the `/ui/*` HTTP routes below and adds **no MCP tools** and no stdio behaviou
 | `GET /ui`, `GET /ui/search`, `GET /ui/admin`, `GET /ui/admin/callback` | The app shell pages (the built React app; the shell carries no graph data, so it needs no auth). |
 | `GET /ui/assets/{name}` | One built asset (JavaScript or CSS), with the manifest's content type and byte count and immutable cache headers (the hashed names never change). |
 | `GET /ui/api/graph` | A page of the graph: `{ entities, relations, entityTypes, stats, page }`. Entities carry `obsCount` (not the observation bodies — those are lazy-loaded). Query params: `workspaceId` (selected workspace), `entityType` (filter), `offset`, `limit` (≤ 1,000), `token`. |
-| `GET /ui/api/search` | A page of FTS5 matches (matched nodes only): the `{ results, count, elapsedMs }` envelope. Query params: `workspaceId`, `q`, `entityType`, `offset`, `limit` (≤ 1,000), `token`. |
+| `GET /ui/api/search` | The `{ results, count, elapsedMs }` envelope of SearchHit rows: entity, relation, or attachment kinds. Query params: `workspaceId`, `q` (required), `mode` (`direct` default, `semantic`, `hybrid`), `scope` (`nodes` default, `relations`), `type` (the entity type in nodes scope, the relation type in relations scope), `from`/`to`/`relationType` (relation filters), `k` (`10`/`20`/`50`; results may be fewer), `token`. |
 | `GET /ui/api/node` | One entity with its observation **bodies**, lazy-loaded by the inspector on select. Query params: `workspaceId`, `name` (required), `token`. |
 | `GET /ui/api/expand` | One node's neighbourhood `{ entities, relations }` for double-click traversal. Query params: `workspaceId`, `name` (required), `depth` (1–3), `direction` (`outgoing`/`incoming`/`both`), `token`. |
 | `GET /ui/api/relation` | One exact relation triple (`from`, `to`, `relationType`) with its observations and attributes; 404 when the triple is absent. |
@@ -1168,8 +1168,7 @@ to the `/ui/*` HTTP routes below and adds **no MCP tools** and no stdio behaviou
 | `GET`/`POST /ui/api/attachments{,/{id}}`, `GET /ui/api/attachments/{id}/pages`, `GET /ui/api/attachments/{id}/download` | The attachment routes behind the `attachments` category (see [Entity attachments](#entity-attachments)). |
 | `/ui/api/principals`, `/ui/api/waitlist/*`, `/ui/api/workspaces/*` (admin), `/ui/api/vectors/stats`, `/ui/api/webhooks/*`, `/ui/api/repos/*` | The administration adapters, gated by the `admin` scope and their Cargo features. |
 
-Every data response carries a `page` cursor — `{ offset, limit, returned, hasMore }` — that
-drives the Prev / Next controls without a second round-trip. The list endpoints omit
+Every data response from the graph and list endpoints carries a `page` cursor — `{ offset, limit, returned, hasMore }` — that drives the Prev / Next controls without a second round-trip. Search returns a result set, not a cursor: its `count` is the number of rows in this response and `k` bounds it. The list endpoints omit
 observation bodies (they ship only `obsCount`) to keep payloads small; the inspector fetches
 the bodies for the one selected node via `/ui/api/node`. Responses are gzip/brotli-compressed
 when the client advertises it, and the canvas uses a **Barnes-Hut** (O(_n_ log _n_)) force
