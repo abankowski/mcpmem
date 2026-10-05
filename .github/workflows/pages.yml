@@ -1,0 +1,38 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+# Only the latest run on a ref publishes; earlier runs stop.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the landing page
+        run: node build.mjs
+        working-directory: site
+      - name: Upload the artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+      - name: Publish
+        id: deployment
+        uses: actions/deploy-pages@v4
