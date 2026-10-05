@@ -66,6 +66,10 @@ export function Page() {
     ];
   })();
 
+  // A group with zero items (an owner without admin sees an empty Server
+  // group) is not a caption worth rendering.
+  const navGroups = groups.filter((group) => group.items.length > 0);
+
   // A pane whose gate closed (workspace switch, token change) must not keep
   // rendering. Fall back to the Workspaces landing.
   const visible: Record<string, boolean> = {};
@@ -83,7 +87,7 @@ export function Page() {
   const Pane = PANES[activePane];
   return (
     <div className="ui-admin">
-      <AdminSubNav groups={groups} active={activePane} onSelect={(id) => setPane(id)} />
+      <AdminSubNav groups={navGroups} active={activePane} onSelect={(id) => setPane(id)} />
       <section className="ui-admin__content" aria-label={`Admin - ${activePane}`}>
         <Pane
           key={`${activePane}:${workspaceId}`}
