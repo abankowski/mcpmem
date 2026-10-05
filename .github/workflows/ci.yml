@@ -58,7 +58,7 @@ jobs:
         run: |
           version="$(awk '/^\[package\]/ {inpkg = 1; next}
                      /^\[/ {inpkg = 0}
-                     inpkg && /^version = / {gsub(/[",]/, "", \$3); print \$3; exit}' Cargo.toml)"
+                     inpkg && /^version = / {gsub(/[",]/, "", $3); print $3; exit}' Cargo.toml)"
           if git ls-remote --tags origin "refs/tags/v${version}" | grep -q "refs/tags/v${version}"; then
             echo "::error::version ${version} already has a release tag v${version}; this version was shipped. Advance the version before merging work onto it (see scripts/next-version.sh)"
             exit 1
