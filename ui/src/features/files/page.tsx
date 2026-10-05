@@ -124,40 +124,42 @@ export function FilesPanel({ workspaceId, entityName, canWrite, onApiError, onCo
       if (inFlight) return;
       inFlight = true;
       try {
-        const ids = activeIds.split(",").map(Number);
-        const results: Array<{ row: Attachment | null; error: ApiError | null }> = await Promise.all(ids.map(async (id) => {
-          try {
-            const row = await api.attachment(workspaceId, id, controller.signal);
-            return { row, error: null };
-          } catch (cause) {
-            const error = cause instanceof ApiError ? cause : new ApiError(0, "network_error", "The file status could not be loaded.");
-            return { row: null, error };
-          }
-        }));
-        if (cancelled || !isCurrent()) return;
-        const failure = results.find((result) => result.error != null)?.error ?? null;
-        setPollError((previous) =>
-          previous?.status === failure?.status && previous?.code === failure?.code &&
-          previous?.message === failure?.message ? previous : failure,
-        );
-        const byId = new Map<number, Attachment>();
-        for (const { row } of results) {
-          if (row != null) byId.set(row.attachmentId, row);
+        // One list read per tick reconciles every active row for this entity.
+        // A per-id fan-out would fire the whole active set at once: a node
+        // with a thousand queued extractions would burst a thousand requests
+        // every interval. The list has the same 1000-row cap the rows use.
+        let rows: Attachment[] = [];
+        let failure: ApiError | null = null;
+        try {
+          const response = await api.attachments(workspaceId, entityName, LIST_LIMIT, controller.signal);
+          rows = response.attachments;
+        } catch (cause) {
+          if (cancelled || !isCurrent() || controller.signal.aborted) return;
+          failure = cause instanceof ApiError ? cause : new ApiError(0, "network_error", "The file status could not be loaded.");
         }
-        if (byId.size === 0) return;
-        setRows((previous) => {
-          let changed = false;
-          const next = previous.map((row) => {
-            const update = byId.get(row.attachmentId);
-            if (!update) return row;
-            if (
-              update.status !== row.status || update.errorStage !== row.errorStage ||
-              update.lastError !== row.lastError || update.pageCount !== row.pageCount || update.revision !== row.revision
-            ) changed = true;
-            return update;
+        const byId = new Map<number, Attachment>();
+        for (const row of rows) byId.set(row.attachmentId, row);
+        if (failure == null && byId.size > 0) {
+          setRows((previous) => {
+            let changed = false;
+            const next = previous.map((row) => {
+              const update = byId.get(row.attachmentId);
+              if (!update) return row;
+              if (
+                update.status !== row.status || update.errorStage !== row.errorStage ||
+                update.lastError !== row.lastError || update.pageCount !== row.pageCount || update.revision !== row.revision
+              ) changed = true;
+              return update;
+            });
+            return changed ? next : previous;
           });
-          return changed ? next : previous;
-        });
+        }
+        if (!cancelled && isCurrent()) {
+          setPollError((previous) =>
+            previous?.status === failure?.status && previous?.code === failure?.code &&
+            previous?.message === failure?.message ? previous : failure,
+          );
+        }
       } finally {
         inFlight = false;
       }

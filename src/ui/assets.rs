@@ -24,20 +24,20 @@ const MANIFEST: &str = include_str!("../../ui/dist/ui-manifest.json");
 /// manifest exactly. The name is the path after `/ui/assets/`.
 const UI_ASSET_BYTES: &[(&str, &[u8])] = &[
     (
+        "index-C3TUkMSs.js",
+        include_bytes!("../../ui/dist/assets/index-C3TUkMSs.js"),
+    ),
+    (
         "index-CGyvWhOu.css",
         include_bytes!("../../ui/dist/assets/index-CGyvWhOu.css"),
     ),
     (
-        "index-DPiJ_KbD.js",
-        include_bytes!("../../ui/dist/assets/index-DPiJ_KbD.js"),
-    ),
-    (
-        "page-2e8MqwCo.js",
-        include_bytes!("../../ui/dist/assets/page-2e8MqwCo.js"),
-    ),
-    (
         "page-C3KEu0l_.css",
         include_bytes!("../../ui/dist/assets/page-C3KEu0l_.css"),
+    ),
+    (
+        "page-QzbbjlrZ.js",
+        include_bytes!("../../ui/dist/assets/page-QzbbjlrZ.js"),
     ),
 ];
 
