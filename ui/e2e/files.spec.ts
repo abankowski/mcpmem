@@ -10,9 +10,14 @@ import { TEMP_DIR, TEXT_FIXTURE, ensureServer, openWorkspace, seedWorkspace, typ
 test.describe.configure({ mode: "serial" });
 
 let ws: WorkspaceShape;
+let teardownServer: (() => void) | undefined;
+
+test.afterAll(async () => {
+  teardownServer?.();
+});
 
 test.beforeAll(async () => {
-  await ensureServer();
+  teardownServer = await ensureServer();
   ws = await seedWorkspace(`e2e-files-${Date.now()}`, {
     entities: [{ name: "files-node", entityType: "note" }],
   });
