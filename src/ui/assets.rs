@@ -24,20 +24,52 @@ const MANIFEST: &str = include_str!("../../ui/dist/ui-manifest.json");
 /// manifest exactly. The name is the path after `/ui/assets/`.
 const UI_ASSET_BYTES: &[(&str, &[u8])] = &[
     (
-        "index-C3TUkMSs.js",
-        include_bytes!("../../ui/dist/assets/index-C3TUkMSs.js"),
+        "Sheet-BBoA2Y9c.js",
+        include_bytes!("../../ui/dist/assets/Sheet-BBoA2Y9c.js"),
     ),
     (
-        "index-CGyvWhOu.css",
-        include_bytes!("../../ui/dist/assets/index-CGyvWhOu.css"),
+        "format-CId7Fp65.js",
+        include_bytes!("../../ui/dist/assets/format-CId7Fp65.js"),
+    ),
+    (
+        "index-DR4cGs9B.css",
+        include_bytes!("../../ui/dist/assets/index-DR4cGs9B.css"),
+    ),
+    (
+        "index-jBvLtbRX.js",
+        include_bytes!("../../ui/dist/assets/index-jBvLtbRX.js"),
+    ),
+    (
+        "page-BXEDKUgk.js",
+        include_bytes!("../../ui/dist/assets/page-BXEDKUgk.js"),
     ),
     (
         "page-C3KEu0l_.css",
         include_bytes!("../../ui/dist/assets/page-C3KEu0l_.css"),
     ),
     (
-        "page-QzbbjlrZ.js",
-        include_bytes!("../../ui/dist/assets/page-QzbbjlrZ.js"),
+        "page-CqUhjdJo.css",
+        include_bytes!("../../ui/dist/assets/page-CqUhjdJo.css"),
+    ),
+    (
+        "page-Cx2ewgXl.js",
+        include_bytes!("../../ui/dist/assets/page-Cx2ewgXl.js"),
+    ),
+    (
+        "page-D-tb6T8C.js",
+        include_bytes!("../../ui/dist/assets/page-D-tb6T8C.js"),
+    ),
+    (
+        "page-D6I4gLNh.css",
+        include_bytes!("../../ui/dist/assets/page-D6I4gLNh.css"),
+    ),
+    (
+        "page-DvrLyc8e.js",
+        include_bytes!("../../ui/dist/assets/page-DvrLyc8e.js"),
+    ),
+    (
+        "page-UU_xKSHs.css",
+        include_bytes!("../../ui/dist/assets/page-UU_xKSHs.css"),
     ),
 ];
 
