@@ -1,0 +1,91 @@
+/* Files tab and lightbox. Shared tokens only; no new palette. */
+
+.ui-files { display: flex; flex-direction: column; gap: 12px; }
+
+.ui-files-dropzone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; padding: 20px 16px; border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md); color: var(--ink-muted); text-align: center;
+  cursor: pointer;
+}
+.ui-files-dropzone:hover { border-color: var(--orange-deep); }
+.ui-files-dropzone--over { border-color: var(--orange); background: var(--orange-tint); }
+.ui-files-dropzone--disabled { opacity: .55; cursor: not-allowed; }
+.ui-files-dropzone:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.ui-files-dropzone svg { color: var(--ink-faint); }
+.ui-files-dropzone__text { font-size: 13px; }
+.ui-files-dropzone__browse { color: var(--orange-deep); text-decoration: underline; }
+
+.ui-files-mono { font: 11px/16px var(--font-mono); }
+.ui-files-mono--muted { color: var(--ink-faint); }
+
+.ui-files-error { margin: 0; color: var(--red-deep); font: 11px/16px var(--font-mono); }
+.ui-files-error__retry { margin-left: 8px; }
+
+.ui-files-state { padding: 8px 4px; color: var(--ink-faint); font: 11px/16px var(--font-mono); }
+
+.ui-files-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.ui-files-row { display: flex; align-items: flex-start; gap: 12px; padding: 10px 8px; border-radius: var(--radius-md); }
+.ui-files-row:hover { background: var(--surface-1); }
+
+.ui-files-thumb {
+  display: grid; place-items: center; flex: none;
+  width: 64px; height: 64px; border: 1px solid var(--line);
+  border-radius: var(--radius-md); background: var(--surface-2);
+}
+.ui-files-thumb__label { color: var(--ink-muted); font: 600 11px/16px var(--font-mono); letter-spacing: .04em; }
+
+.ui-files-row__main { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.ui-files-row__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.ui-files-row__meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; color: var(--ink-faint); }
+.ui-files-row__actions { display: flex; gap: 2px; }
+.ui-files-row__actions .ui-button--ghost { color: var(--orange-deep); }
+
+.ui-files-progress {
+  position: relative; height: 4px; border-radius: 2px; overflow: hidden;
+  background: var(--surface-2);
+}
+.ui-files-progress::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%;
+  background: var(--orange); animation: ui-files-progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes ui-files-progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+.ui-files-lightbox {
+  display: flex; flex-direction: column;
+  width: min(920px, calc(100vw - 32px)); max-width: 100%;
+  height: min(680px, calc(100vh - 48px)); max-height: calc(100vh - 48px);
+  margin: auto; padding: 0; overflow: hidden;
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--surface-1); box-shadow: var(--shadow-float);
+}
+.ui-files-lightbox:not([open]) { display: none; }
+.ui-files-lightbox__header {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+  padding: 16px 20px; border-bottom: 1px solid var(--line);
+}
+.ui-files-lightbox__title { min-width: 0; }
+.ui-files-lightbox__title h2 {
+  margin: 0 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 600 18px/24px var(--font-display);
+}
+.ui-files-lightbox__body { flex: 1; min-height: 0; overflow: auto; }
+.ui-files-lightbox__toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line);
+}
+.ui-files-lightbox__text {
+  margin: 0; padding: 16px 20px; white-space: pre-wrap; word-break: break-word;
+  font: 13px/20px var(--font-ui);
+}
+.ui-files-lightbox__more { padding: 0 16px 16px; }
+.ui-files-lightbox__pdf { display: block; width: 100%; height: 100%; border: 0; }
+.ui-files-lightbox__note { padding: 16px 20px; color: var(--ink-muted); }
+.ui-files-lightbox__note.ui-files-error { color: var(--red-deep); }
+.ui-files-lightbox__footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 12px 20px; border-top: 1px solid var(--line);
+}

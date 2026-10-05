@@ -138,14 +138,22 @@ function Shell() {
 
   useEffect(() => {
     if (!page) { setLoadedPage(null); return; }
-    const load = pages[`./features/${page}/page.tsx`];
+    const key = `./features/${page}/page.tsx`;
+    const load = pages[key];
     if (!load) { setLoadedPage(null); setPageError(false); return; }
     let active = true;
     setLoadedPage(null);
     setPageError(false);
     load().then((module) => {
       if (!active) return;
-      if (!module.Page) { setPageError(true); return; }
+      if (!module.Page) {
+        // Feature modules such as the Files panel export named components,
+        // not Page. Skip them and keep the route's fallback state.
+        console.warn(`Skipping page module ${key}: it does not export Page.`);
+        setLoadedPage(null);
+        setPageError(false);
+        return;
+      }
       setLoadedPage(module);
     })
       .catch(() => { if (active) setPageError(true); });
