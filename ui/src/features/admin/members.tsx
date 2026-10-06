@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { CircleAlert } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
-import { requestConsent } from "../../lib/auth";
+import { canAuthorize, requestConsent } from "../../lib/auth";
 import { Button } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Tag } from "../../components/Tag";
@@ -154,9 +154,9 @@ export function MembersPane({ workspace, session, adminSession, onCountChange }:
       </header>
 
       {!canWrite && (
-        <p className="ui-admin-warn">
-          Changing members needs the graph-write scope.{" "}
-          <Button variant="ghost" size="sm" onClick={() => { void requestConsent(["graph-write"]); }}>Grant graph-write</Button>
+        <p className="ui-admin-warn ui-admin-warn--action">
+          <span>Changing members needs the graph-write scope.</span>
+          {canAuthorize("graph") && <Button variant="ghost" size="sm" onClick={() => { void requestConsent(["graph-write"]); }}>Grant graph-write</Button>}
         </p>
       )}
 

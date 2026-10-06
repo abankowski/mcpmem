@@ -68,6 +68,7 @@
   background: var(--orange-tint); color: var(--orange-deep); font: 12px/18px var(--font-mono);
 }
 .ui-admin-warn svg { flex: none; margin-top: 3px; }
+.ui-admin-warn--action { align-items: center; }
 .ui-admin-state { padding: 8px 4px; color: var(--ink-faint); font: 11px/16px var(--font-mono); }
 .ui-admin-empty {
   padding: 24px; text-align: center; color: var(--ink-muted);
