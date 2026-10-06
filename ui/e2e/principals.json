@@ -1,0 +1,9 @@
+[
+  {
+    "name": "e2e-admin",
+    "iss": "https://idp.e2e.invalid",
+    "sub": "e2e-admin@example.test",
+    "label": "E2E Admin",
+    "scopes": ["admin", "code", "graph-read", "graph-write", "vectors", "attachments"]
+  }
+]

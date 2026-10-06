@@ -24,24 +24,28 @@ const MANIFEST: &str = include_str!("../../ui/dist/ui-manifest.json");
 /// manifest exactly. The name is the path after `/ui/assets/`.
 const UI_ASSET_BYTES: &[(&str, &[u8])] = &[
     (
-        "Sheet-lhVBKXRx.js",
-        include_bytes!("../../ui/dist/assets/Sheet-lhVBKXRx.js"),
+        "Sheet-CRzT9Yom.js",
+        include_bytes!("../../ui/dist/assets/Sheet-CRzT9Yom.js"),
     ),
     (
-        "format-DKIG9UYo.js",
-        include_bytes!("../../ui/dist/assets/format-DKIG9UYo.js"),
+        "format-C8n7ZH1F.js",
+        include_bytes!("../../ui/dist/assets/format-C8n7ZH1F.js"),
     ),
     (
-        "index-2miRrxV0.js",
-        include_bytes!("../../ui/dist/assets/index-2miRrxV0.js"),
+        "index-BnlHTsyY.js",
+        include_bytes!("../../ui/dist/assets/index-BnlHTsyY.js"),
     ),
     (
         "index-DUH1G7-3.css",
         include_bytes!("../../ui/dist/assets/index-DUH1G7-3.css"),
     ),
     (
-        "page-BR5ugKYl.js",
-        include_bytes!("../../ui/dist/assets/page-BR5ugKYl.js"),
+        "page-BMNA6wPV.js",
+        include_bytes!("../../ui/dist/assets/page-BMNA6wPV.js"),
+    ),
+    (
+        "page-Bq1yg568.js",
+        include_bytes!("../../ui/dist/assets/page-Bq1yg568.js"),
     ),
     (
         "page-C0eQn-H6.css",
@@ -52,20 +56,16 @@ const UI_ASSET_BYTES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/dist/assets/page-C3KEu0l_.css"),
     ),
     (
-        "page-CFJllRzb.js",
-        include_bytes!("../../ui/dist/assets/page-CFJllRzb.js"),
-    ),
-    (
-        "page-Cixrr18w.js",
-        include_bytes!("../../ui/dist/assets/page-Cixrr18w.js"),
+        "page-CGNFZIy5.js",
+        include_bytes!("../../ui/dist/assets/page-CGNFZIy5.js"),
     ),
     (
         "page-D6I4gLNh.css",
         include_bytes!("../../ui/dist/assets/page-D6I4gLNh.css"),
     ),
     (
-        "page-DVlDoIAH.js",
-        include_bytes!("../../ui/dist/assets/page-DVlDoIAH.js"),
+        "page-DuXudf_A.js",
+        include_bytes!("../../ui/dist/assets/page-DuXudf_A.js"),
     ),
     (
         "page-UU_xKSHs.css",
