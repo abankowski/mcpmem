@@ -360,4 +360,10 @@ jobs:
             --base main \
             --head "${branch}" \
             --title "Open ${next} after releasing ${released}" \
-            --body "The release tagged \`${released}\` is complete. This moves \`main\` to \`${next}\` so the next release starts from a fresh version. Merge this whenever convenient; nothing blocks on it."
+            --body "The release tagged \`${released}\` is complete. This moves \`main\` to \`${next}\` so the next release starts from a fresh version."
+          # Land the bump without a human. main must always name the coming
+          # version; a bump that waits "whenever convenient" leaves main on a
+          # released version and every later PR fails the version gate
+          # (chore/open-3.0.3 sat unmerged, 2026-10-06, and blocked rust on
+          # every PR). Auto-merge completes once the required checks pass.
+          gh pr merge "${branch}" --auto
