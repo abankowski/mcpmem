@@ -93,9 +93,10 @@ which keeps a re-run and a manual bump from fighting each other.
    `scripts/check-ui-package.mjs` runs the Cargo package dry-run and asserts
    the packaged crate ships `ui/dist/ui-manifest.json` and every manifest
    asset with matching bytes — the crate must compile its embedded asset
-   table. CI runs the same check on every PR. A `cargo install mcpmem`
+   table. CI runs the same check on every PR. A prebuilt server binary
    therefore needs **no Node runtime** to serve the UI: the bundle is inside
-   the binary.
+   the binary. Install that binary from the GitHub release assets (see
+   "Deploying the server binary" below), not from crates.io.
 
 3. Merge to `main` through a pull request.
 
@@ -209,3 +210,53 @@ and it fails with a clear message when neither credential is available.
 - An environment named `crates-io`. Add required reviewers there when a manual
   approval before publishing is wanted.
 - The job holds `id-token: write`, which the OIDC exchange needs.
+
+## Deploying the server binary
+
+The server runs from a **GitHub release asset**, not from crates.io.
+
+The crates.io `mcpmem` package builds with **default features**, which omit
+`extractor` and `webhooks`. A config whose `roles` list those names then
+fails at startup with `unknown runtime role '<name>'`. The GitHub release
+asset is built `--all-features` and knows every role.
+
+Install from the release assets:
+
+```sh
+cargo binstall mcpmem            # fetches the latest release asset (x86_64
+                                 # and aarch64 Linux and macOS are available)
+# or download mcpmem-v<tag>-<platform>.tar.gz from the GitHub release page
+```
+
+Launch the server with the config and the tool categories it must expose:
+
+```sh
+mcpmem --config mcpmem.toml --enable-all
+```
+
+- `roles` live in the TOML, under `roles`. Runtime roles are `mcp`,
+  `indexer`, `webhooks` and `extractor`.
+- The `--enable-*` flags expose tool categories to clients. With no flag, no
+  category is exposed, even when a role is active.
+
+### Attachments are a flag, not a role
+
+`attachments` is **not** a runtime role, and it does not belong in `roles`.
+Three separate things make attachments work:
+
+1. The `extractor` role processes uploads (`roles = [..., "extractor"]`).
+2. The caller holds the OAuth/tool scope `attachments` (in `principals.json`
+   or the consent grant).
+3. The server starts with `--enable-attachments` (or `--enable-all`).
+
+The `[attachments]` TOML section only tunes limits (`max-bytes`,
+`workspace-byte-budget`, `allow-mime`); an absent section keeps the defaults.
+
+### A restart invalidates OAuth token families
+
+A served token is a row in the OAuth store; a family that predates the
+latest process start is dead, and a client that only retries a dead refresh
+token stays stuck at `401`. After every deploy: re-authorize MCP clients in
+the browser flow. Browser logins mint fresh families automatically. The omp
+client needs the stale credential cleared before it offers the interactive
+flow.
