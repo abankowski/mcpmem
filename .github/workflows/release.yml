@@ -366,4 +366,7 @@ jobs:
           # released version and every later PR fails the version gate
           # (chore/open-3.0.3 sat unmerged, 2026-10-06, and blocked rust on
           # every PR). Auto-merge completes once the required checks pass.
-          gh pr merge "${branch}" --auto
+          # --rebase matches the repository's merge method; gh refuses
+          # --auto without an explicit method outside a terminal
+          # (chore/open-3.0.4, 2026-10-06, PR created but bump job failed).
+          gh pr merge "${branch}" --auto --rebase
