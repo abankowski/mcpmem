@@ -213,14 +213,19 @@ and it fails with a clear message when neither credential is available.
 
 ## Deploying the server binary
 
-The server runs from a **GitHub release asset**, not from crates.io.
+For a production server, install the **GitHub release asset**; for a
+dev host, `cargo install mcpmem` also works. The difference is where the
+build happens and which features it carries.
 
-The crates.io `mcpmem` package builds with **default features**, which omit
-`extractor` and `webhooks`. A config whose `roles` list those names then
-fails at startup with `unknown runtime role '<name>'`. The GitHub release
-asset is built `--all-features` and knows every role.
+- The GitHub release asset is compiled by CI with `--all-features` and knows
+  every runtime role. It needs no Rust toolchain on the host.
+- `cargo install mcpmem` compiles from the crates.io sources with **default
+  features**, which omit `extractor` and `webhooks`. A config whose `roles`
+  list those names then fails at startup with `unknown runtime role
+  '<name>'`. To use those roles from crates.io, pass the features:
+  `cargo install mcpmem --features extractor,webhooks`.
 
-Install from the release assets:
+Install the release asset:
 
 ```sh
 cargo binstall mcpmem            # fetches the latest release asset (x86_64
