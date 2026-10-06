@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, Plus } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
+import { requestConsent } from "../../lib/auth";
 import { loadWorkspaces } from "../../lib/workspaces";
 import { Button } from "../../components/Button";
 import { Sheet } from "../../components/Sheet";
@@ -62,6 +63,9 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
 
   async function createWorkspace(): Promise<void> {
     if (!name.trim()) return;
+    // The graph session may hold graph-read only; the consent flow asks for
+    // graph-write and returns here on the fresh session.
+    if (!(await requestConsent(["graph-write"]))) return;
     setBusy(true);
     setCreateError(null);
     try {
@@ -87,6 +91,7 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
   }
 
   async function toggleVisibility(row: Workspace): Promise<void> {
+    if (!(await requestConsent(["graph-write"]))) return;
     const target = row.visibility === "private" ? "public" : "private";
     setTogglingId(row.workspaceId);
     try {
@@ -117,7 +122,12 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
         </div>
       </header>
 
-      {!canWrite && <p className="ui-admin-warn">Creating workspaces needs the graph-write scope.</p>}
+      {!canWrite && (
+        <p className="ui-admin-warn">
+          Creating workspaces needs the graph-write scope.{" "}
+          <Button variant="ghost" size="sm" onClick={() => { void requestConsent(["graph-write"]); }}>Grant graph-write</Button>
+        </p>
+      )}
       {loadError && (
         <div className="ui-admin-error" role="alert">
           <span>{formatError(loadError)}</span>

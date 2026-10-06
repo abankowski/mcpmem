@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { CircleAlert } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
+import { requestConsent } from "../../lib/auth";
 import { Button } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { Tag } from "../../components/Tag";
@@ -102,6 +103,7 @@ export function MembersPane({ workspace, session, adminSession, onCountChange }:
 
   async function submitGrant(): Promise<void> {
     if (!picker || !workspace || !canAdmin) return;
+    if (!(await requestConsent(["graph-write"]))) return;
     setGranting(true);
     setGrantError(null);
     try {
@@ -127,6 +129,7 @@ export function MembersPane({ workspace, session, adminSession, onCountChange }:
 
   async function revokeGrant(): Promise<void> {
     if (!revoking || !workspace) return;
+    if (!(await requestConsent(["graph-write"]))) return;
     try {
       await api.revokeGrant(workspace.workspaceId, revoking.principalId);
       setRevoking(null);
@@ -150,7 +153,12 @@ export function MembersPane({ workspace, session, adminSession, onCountChange }:
         </div>
       </header>
 
-      {!canWrite && <p className="ui-admin-warn">Changing members needs the graph-write scope.</p>}
+      {!canWrite && (
+        <p className="ui-admin-warn">
+          Changing members needs the graph-write scope.{" "}
+          <Button variant="ghost" size="sm" onClick={() => { void requestConsent(["graph-write"]); }}>Grant graph-write</Button>
+        </p>
+      )}
 
       <div className="ui-admin-table-wrap">
         <table className="ui-admin-table">

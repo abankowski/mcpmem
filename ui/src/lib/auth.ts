@@ -96,7 +96,7 @@ export async function beginAuth(audience: Audience, scopes?: readonly string[]):
     response_type: "code",
     client_id: client.id,
     redirect_uri: pageUrl(client.redirect).href,
-    scope: audience === "admin" ? "admin" : [...new Set(["graph-read", ...(scopes ?? [])])].join(" "),
+    scope: [...new Set(audience === "admin" ? ["admin", ...(scopes ?? [])] : ["graph-read", ...(scopes ?? [])])].join(" "),
     state,
     code_challenge_method: "S256",
     code_challenge: base64url(new Uint8Array(digest)),
