@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ComponentType, type FormEvent, type ReactNode } from "react";
 import { Brain, CircleAlert, RotateCw } from "lucide-react";
 import { api, ApiError } from "./lib/api";
-import { beginAuth, canAuthorize, captureHashToken, completeAuthCallback, requestConsent, setGraphScopes, setStaticToken } from "./lib/auth";
+import { beginAuth, canAuthorize, captureHashToken, clearToken, completeAuthCallback, requestConsent, setGraphScopes, setStaticToken } from "./lib/auth";
 import { shellContext } from "./lib/app-context";
 import { currentWorkspace, invalidateWorkspaces, loadWorkspaces, selectWorkspace } from "./lib/workspaces";
 import { PAGE_PATHS, pageUrl, type Page } from "./lib/urls";
@@ -17,6 +17,11 @@ const pages = import.meta.glob<PageModule>("./features/*/page.tsx", { eager: fal
 // React StrictMode runs the mount effect twice. Reuse one token exchange;
 // an OAuth authorization code must never be exchanged twice.
 let initialAuth: Promise<string | null> | null = null;
+
+// The category scopes the admin page needs on its own: workspace read and
+// write, and the vector stats. Files consent separately through the graph
+// flow, which asks for the attachments scope when a file action starts.
+const ADMIN_LOGIN_SCOPES: readonly string[] = ["graph-read", "graph-write", "vectors"];
 
 function finishInitialAuth(): Promise<string | null> {
   if (!initialAuth) {
@@ -232,7 +237,7 @@ function Shell() {
       message={workspaces.length ? "Choose an accessible workspace in the top bar." : "Create a workspace or ask its owner for access."} />;
   } else if (page === "admin" && adminError?.status === 401) {
     content = <EmptyState title="Admin sign-in needed" message="Admin access requires a separate human OAuth session." error>
-      {canAuthorize("admin") && <Button variant="primary" onClick={() => { void beginAuth("admin"); }}>Sign in as admin</Button>}
+      {canAuthorize("admin") && <Button variant="primary" onClick={() => { void beginAuth("admin", ADMIN_LOGIN_SCOPES); }}>Sign in as admin</Button>}
     </EmptyState>;
   } else if (page === "admin" && !adminSession && adminError) {
     content = <EmptyState title="Admin unavailable" message={adminError.message} error><Button onClick={reload}>Retry</Button></EmptyState>;
@@ -241,8 +246,8 @@ function Shell() {
     // without an admin token; the page still needs a graph session.
     content = (
       <EmptyState title="Admin sign-in needed" message="The workspace group needs graph access; the server group needs a human admin session." error>
-        {canAuthorize("graph") && <Button variant="primary" onClick={() => { void beginAuth("graph"); }}>Sign in for workspace access</Button>}
-        {canAuthorize("admin") && <Button onClick={() => { void beginAuth("admin"); }}>Sign in as admin</Button>}
+        {canAuthorize("graph") && <Button variant="primary" onClick={() => { void requestConsent(["graph-write", "vectors"]); }}>Sign in for workspace access</Button>}
+        {canAuthorize("admin") && <Button onClick={() => { void beginAuth("admin", ADMIN_LOGIN_SCOPES); }}>Sign in as admin</Button>}
       </EmptyState>
     );
   } else if (pageError) {
@@ -261,7 +266,8 @@ function Shell() {
         <a className="ui-visually-hidden ui-skip-link" href="#content">Skip to content</a>
         <TopBar page={page ?? "graph"} current={workspace} workspaces={workspaces}
           principalName={session?.principalName ?? adminSession?.principalName ?? null}
-          onWorkspaceChange={switchWorkspace} onOpenCommand={() => setPaletteOpen(true)} />
+          onWorkspaceChange={switchWorkspace} onOpenCommand={() => setPaletteOpen(true)}
+          onSignOut={() => { clearToken("graph"); clearToken("admin"); reload(); }} />
         {content}
         <CommandPalette open={paletteOpen} workspaceId={workspace?.workspaceId ?? null}
           onClose={() => setPaletteOpen(false)} onPick={pickNode} />
