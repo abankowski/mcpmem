@@ -231,7 +231,10 @@ function Shell() {
   } else if (page !== "admin" && graphError?.status === 503) {
     content = <EmptyState title="Service unavailable" message={graphError.message} error><Button onClick={reload}>Retry</Button></EmptyState>;
   } else if (page !== "admin" && graphError) {
-    content = <EmptyState title="Workspace unavailable" message={graphError.message} error><Button onClick={reload}><RotateCw size={16} aria-hidden="true" />Retry</Button></EmptyState>;
+    content = <EmptyState title="Workspace unavailable" message={graphError.message} error>
+      {canAuthorize("graph") && <Button variant="primary" onClick={() => { void beginAuth("graph"); }}>Sign in for graph access</Button>}
+      <Button onClick={reload}><RotateCw size={16} aria-hidden="true" />Retry</Button>
+    </EmptyState>;
   } else if (page !== "admin" && !workspace) {
     content = <EmptyState title={workspaces.length ? "Select a workspace" : "No workspaces yet"}
       message={workspaces.length ? "Choose an accessible workspace in the top bar." : "Create a workspace or ask its owner for access."} />;

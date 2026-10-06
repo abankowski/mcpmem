@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, Plus } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
-import { requestConsent } from "../../lib/auth";
+import { canAuthorize, requestConsent } from "../../lib/auth";
 import { loadWorkspaces } from "../../lib/workspaces";
 import { Button } from "../../components/Button";
 import { Sheet } from "../../components/Sheet";
@@ -123,9 +123,9 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
       </header>
 
       {!canWrite && (
-        <p className="ui-admin-warn">
-          Creating workspaces needs the graph-write scope.{" "}
-          <Button variant="ghost" size="sm" onClick={() => { void requestConsent(["graph-write"]); }}>Grant graph-write</Button>
+        <p className="ui-admin-warn ui-admin-warn--action">
+          <span>Creating workspaces needs the graph-write scope.</span>
+          {canAuthorize("graph") && <Button variant="ghost" size="sm" onClick={() => { void requestConsent(["graph-write"]); }}>Grant graph-write</Button>}
         </p>
       )}
       {loadError && (
