@@ -8,6 +8,26 @@ version 5.2.1, commit `d6fe34b`. The license stays Apache-2.0, and
 This entry lists every change since that snapshot. The version line restarts at
 1.0.0, because the upstream crate name belongs to another author.
 
+## 3.0.4 (unreleased)
+
+### Fixed
+
+- **UI sign-in asks for every grant the server advertises.** The graph
+  audience requested `graph-read` only and the admin audience requested
+  `admin` only, so the consent page could never offer `graph-write`,
+  `vectors`, `code` or `attachments` and every feature past the fragment
+  needed a second consent round (2026-10-06: admin sign-in landed without
+  `graph-write`; workspaces and members stayed gated until a manual
+  "Grant graph-write"). `beginAuth` now requests the full advertised scope
+  set from the resource's `WWW-Authenticate` challenge, and the consent page
+  offers the intersection with what the human holds. A scope the human
+  declines keeps the per-action grant buttons.
+- **The sign-in grant paths now have browser tests.** `ui/e2e/sign-in-grants.spec.ts`
+  asserts the authorize request carries every advertised scope for both
+  audiences, that each audience keeps its own `sessionStorage` token slot and
+  an OAuth graph sign-in replaces the static graph token, and that admin API
+  calls carry the admin token.
+
 ## 3.0.1 (unreleased)
 
 ### Fixed

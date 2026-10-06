@@ -41,6 +41,22 @@ export function serverArgs(): string[] {
     "machine:local",
     "--role",
     "mcp,extractor",
+    // A fake OIDC issuer: nothing in the suite completes a provider exchange
+    // (authorize requests are intercepted or never signed), but the resource
+    // must advertise the OAuth challenge so the UI's sign-in grant paths run.
+    // The issuer and public-url must be https (config.rs refuses anything else);
+    // traffic still goes to 127.0.0.1, the https values are canonical only.
+    "--oidc-issuer",
+    "https://idp.e2e.invalid",
+    "--public-url",
+    "https://ui.e2e.invalid",
+    "--oidc-client-id",
+    "e2e-oidc-client",
+    "--oidc-client-secret-file",
+    `${TEMP_DIR}/oidc-secret`,
+    "--principals-file",
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "principals.json"),
+    "--oauth-trust-forwarded-proto",
     "--log-level",
     "info",
     "--log-file",
@@ -147,6 +163,7 @@ export async function ensureServer(): Promise<() => void> {
   rmSync(TEMP_DIR, { recursive: true, force: true });
   mkdirSync(TEMP_DIR, { recursive: true });
   writeFileSync(path.join(TEMP_DIR, "vision-key"), "e2e-vision-key\n");
+  writeFileSync(path.join(TEMP_DIR, "oidc-secret"), "e2e-oidc-secret\n");
   const stopServices = await startE2eServices();
   spawned = spawn(BINARY, serverArgs(), { stdio: "ignore" });
   await waitForServer();

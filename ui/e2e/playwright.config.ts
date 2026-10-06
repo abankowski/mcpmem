@@ -29,6 +29,7 @@ process.on("exit", () => services.kill("SIGTERM"));
 const serverCommand = [
   `rm -rf ${TEMP_DIR} && mkdir -p ${TEMP_DIR} &&`,
   `printf 'e2e-vision-key\\n' > ${TEMP_DIR}/vision-key &&`,
+  `printf 'e2e-oidc-secret\\n' > ${TEMP_DIR}/oidc-secret &&`,
   binary,
   ...serverArgs(),
 ].join(" ");

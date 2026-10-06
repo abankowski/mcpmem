@@ -24,6 +24,7 @@ const clients = {
 
 const tokenResponse = z.object({ access_token: z.string().min(1) });
 const oauthAvailable: Record<Audience, boolean> = { graph: false, admin: false };
+const advertisedScopes: Record<Audience, Set<string>> = { graph: new Set(), admin: new Set() };
 let graphScopes = new Set<string>();
 
 function base64url(bytes: Uint8Array): string {
@@ -71,7 +72,18 @@ export function clearToken(audience: Audience): void {
 }
 
 export function noteChallenge(audience: Audience, challenge: string | null): void {
-  if (challenge?.includes("resource_metadata=")) oauthAvailable[audience] = true;
+  if (!challenge?.includes("resource_metadata=")) return;
+  oauthAvailable[audience] = true;
+  // The server advertises the scopes its resource honours in the challenge:
+  // `..., scope="graph-read graph-write ..."`. Sign-in asks for every one of
+  // them, so the consent page can offer the intersection with what the human
+  // holds and the human grants once instead of scope by scope.
+  const match = /(?:^|,\s*)scope="([^"]*)"/.exec(challenge);
+  if (match) {
+    for (const slug of match[1].split(/\s+/)) {
+      if (slug) advertisedScopes[audience].add(slug);
+    }
+  }
 }
 
 export function canAuthorize(audience: Audience): boolean {
@@ -91,12 +103,25 @@ export async function beginAuth(audience: Audience, scopes?: readonly string[]):
   sessionStorage.setItem(client.verifierKey, secret);
   sessionStorage.setItem(client.stateKey, state);
   sessionStorage.setItem(client.returnKey, location.pathname + location.search);
-  const url = oauthUrl("authorize");
+const url = oauthUrl("authorize");
+  // Ask for every scope the server advertises, plus the audience's own:
+  // consent then offers the intersection with what the human holds, so one
+  // sign-in grants everything at once and a scope the human declined keeps
+  // the per-action Grant path. Before this, each audience asked for a
+  // fragment (admin alone, graph-read alone), the consent page could not
+  // offer the rest, and every feature past the fragment needed a second
+  // consent round (2026-10-06, admin sign-in without graph-write).
+  const requested = new Set<string>([
+    "graph-read",
+    ...(scopes ?? []),
+    ...advertisedScopes[audience],
+  ]);
+  if (audience === "admin") requested.add("admin");
   url.search = new URLSearchParams({
     response_type: "code",
     client_id: client.id,
     redirect_uri: pageUrl(client.redirect).href,
-    scope: [...new Set(audience === "admin" ? ["admin", ...(scopes ?? [])] : ["graph-read", ...(scopes ?? [])])].join(" "),
+    scope: [...requested].join(" "),
     state,
     code_challenge_method: "S256",
     code_challenge: base64url(new Uint8Array(digest)),
