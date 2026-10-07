@@ -250,7 +250,9 @@ export async function seedBulkEntities(workspaceId: string, names: readonly stri
 
 /** Open the app as the static bearer. The token lives in the fragment only. */
 export async function openApp(page: Page, path = "/ui"): Promise<void> {
-  await page.goto(`${path}#token=${TEST_BEARER}`);
+  const url = new URL(path, SERVER_ORIGIN);
+  url.hash = `token=${TEST_BEARER}`;
+  await page.goto(url.href);
 }
 
 /** Open the app with a pinned workspace selection for every navigation. */

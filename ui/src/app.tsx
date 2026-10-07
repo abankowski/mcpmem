@@ -3,7 +3,7 @@ import { Brain, CircleAlert, RotateCw } from "lucide-react";
 import { api, ApiError } from "./lib/api";
 import { beginAuth, canAuthorize, captureHashToken, clearToken, completeAuthCallback, requestConsent, setGraphScopes, setStaticToken } from "./lib/auth";
 import { shellContext } from "./lib/app-context";
-import { currentWorkspace, invalidateWorkspaces, loadWorkspaces, selectWorkspace } from "./lib/workspaces";
+import { currentWorkspace, currentWorkspaces, invalidateWorkspaces, loadWorkspaces, onWorkspaceChange, selectWorkspace } from "./lib/workspaces";
 import { PAGE_PATHS, pageUrl, type Page } from "./lib/urls";
 import type { Session, Workspace } from "./lib/schemas";
 import { Button } from "./components/Button";
@@ -67,6 +67,11 @@ function Shell() {
   const [tokenInput, setTokenInput] = useState("");
   const [revision, setRevision] = useState(0);
   const reload = useCallback(() => setRevision((previous) => previous + 1), []);
+
+  useEffect(() => onWorkspaceChange(() => {
+    setWorkspace(currentWorkspace());
+    setWorkspaces(currentWorkspaces());
+  }), []);
 
   useEffect(() => {
     const controller = new AbortController();

@@ -110,6 +110,7 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
   }
 
   async function renameWorkspace(row: Workspace): Promise<void> {
+    if (busy) return;
     const newName = renameName.trim();
     if (!newName || newName === row.name) return;
     if (!(await requestConsent(["graph-write"]))) return;
@@ -245,8 +246,8 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
         <div className="ui-admin-field">
           <label htmlFor="workspace-rename">New name</label>
           <input id="workspace-rename" className="ui-admin-input" type="text"
-            value={renameName} autoComplete="off"
-            onKeyDown={(event) => { if (event.key === "Enter" && renameRow) void renameWorkspace(renameRow); }}
+            value={renameName} autoComplete="off" disabled={busy}
+            onKeyDown={(event) => { if (event.key === "Enter" && renameRow && !busy) void renameWorkspace(renameRow); }}
             onChange={(event) => setRenameName(event.target.value)} />
           <span className="ui-admin-hint">The workspace keeps its id, grants and graph; only the name changes.</span>
         </div>

@@ -3,7 +3,7 @@
 // named unavailable states, and the nested admin callback route.
 
 import { expect, test, type Page } from "@playwright/test";
-import { ensureServer, openWorkspace, seedWorkspace, TEST_BEARER, type WorkspaceShape } from "./helpers";
+import { ensureServer, openWorkspace, seedWorkspace, SERVER_ORIGIN, TEST_BEARER, type WorkspaceShape } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -85,6 +85,46 @@ test("an owner renames their workspace and the row follows", async ({ page }) =>
   await expect(renamed).toBeVisible();
   await expect(renamed).toContainText("owner");
   await expect(row).toHaveCount(0);
+  await expect(page.locator("#workspace-switcher option:checked")).toContainText("renamed-workspace");
+});
+
+test("a mixed workspace patch cannot silently ignore visibility", async ({ request }) => {
+  const url = `${SERVER_ORIGIN}/ui/api/workspaces/${ws.workspaceId}`;
+  const headers = { Authorization: `Bearer ${TEST_BEARER}` };
+  const response = await request.patch(url, {
+    headers,
+    data: { name: "partial-rename", visibility: "public" },
+  });
+  expect(response.status()).toBe(400);
+
+  const view = await request.get(url, { headers });
+  expect(view.status()).toBe(200);
+  const body: { workspace: { name: string; visibility: string } } = await view.json();
+  expect(body.workspace.name).toBe("renamed-workspace");
+  expect(body.workspace.visibility).toBe("private");
+});
+
+test("a pending rename cannot submit twice through Enter", async ({ page }) => {
+  let patches = 0;
+  await page.route(`**/ui/api/workspaces/${ws.workspaceId}`, async (route) => {
+    if (route.request().method() === "PATCH") {
+      patches += 1;
+      const delay = Promise.withResolvers<void>();
+      setTimeout(delay.resolve, 1_000);
+      await delay.promise;
+    }
+    await route.continue();
+  });
+  await openWorkspace(page, ws.workspaceId, "/ui/admin", { adminToken: TEST_BEARER });
+  const row = page.locator("table.ui-admin-table tbody tr", { hasText: ws.workspaceId });
+  await row.getByRole("button", { name: "Rename" }).click();
+  const input = page.locator("#workspace-rename");
+  await input.fill("rename-once");
+  await page.getByRole("button", { name: "Rename workspace" }).click();
+  await expect(input).toBeDisabled();
+  await page.keyboard.press("Enter");
+  await expect(row).toContainText("rename-once");
+  expect(patches).toBe(1);
 });
 
 test("the nested admin callback route loads the admin page", async ({ page }) => {

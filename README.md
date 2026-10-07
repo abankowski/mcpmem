@@ -1171,7 +1171,8 @@ stdio behaviour.
 | `GET`/`POST /ui/api/attachments{,/{id}}`, `GET /ui/api/attachments/{id}/pages`, `GET /ui/api/attachments/{id}/download` | The attachment routes behind the `attachments` category (see [Entity attachments](#entity-attachments)). |
 | `/ui/api/principals`, `/ui/api/waitlist/*`, `/ui/api/workspaces/*` (admin), `/ui/api/vectors/stats`, `/ui/api/webhooks/*`, `/ui/api/repos/*` | The administration adapters, gated by the `admin` scope and their Cargo features. |
 
-Every data response from the graph and list endpoints carries a `page` cursor — `{ offset, limit, returned, hasMore }` — that drives the Prev / Next controls without a second round-trip. Search returns a result set, not a cursor: its `count` is the number of rows in this response and `k` bounds it. The list endpoints omit
+Each graph or list response carries a `page` cursor: `{ offset, limit, returned, hasMore }`.
+The cursor controls Prev and Next without a second request. Search returns a result set, not a cursor: its `count` is the number of rows in this response and `k` bounds it. The list endpoints omit
 observation bodies (they ship only `obsCount`) to keep payloads small; the inspector fetches
 the bodies for the one selected node via `/ui/api/node`. Responses are gzip/brotli-compressed
 when the client advertises it, and the canvas uses a **Barnes-Hut** (O(_n_ log _n_)) force
@@ -1251,6 +1252,14 @@ workspace a caller creates becomes that caller's saved default; a later one neve
 public — sorted by immutable workspace ID, with an opaque `cursor` and `limit` (default and
 maximum 100); `nextCursor` is `null` after the last page. `get_workspace` reads one; only the
 owner sees the `ownerId`.
+
+### Renaming a workspace in the web UI
+
+The owner can use **Rename** in the admin Workspaces page with the
+`graph-write` scope. The page sends `PATCH /ui/api/workspaces/{id}` with
+`{"name":"Research archive"}`. A name already used by another workspace
+the same owner owns returns HTTP 409. The workspace ID, grants, visibility,
+graph data, and saved defaults do not change.
 
 ### Ownership and stable identities
 

@@ -24,28 +24,28 @@ const MANIFEST: &str = include_str!("../../ui/dist/ui-manifest.json");
 /// manifest exactly. The name is the path after `/ui/assets/`.
 const UI_ASSET_BYTES: &[(&str, &[u8])] = &[
     (
-        "Sheet-B6iqvDNj.js",
-        include_bytes!("../../ui/dist/assets/Sheet-B6iqvDNj.js"),
+        "Sheet-DxXa2spC.js",
+        include_bytes!("../../ui/dist/assets/Sheet-DxXa2spC.js"),
     ),
     (
-        "format-DisH1_IM.js",
-        include_bytes!("../../ui/dist/assets/format-DisH1_IM.js"),
+        "format-xjWPhMHS.js",
+        include_bytes!("../../ui/dist/assets/format-xjWPhMHS.js"),
     ),
     (
-        "index-BEj6xi8s.js",
-        include_bytes!("../../ui/dist/assets/index-BEj6xi8s.js"),
+        "index-Cqd4EY39.js",
+        include_bytes!("../../ui/dist/assets/index-Cqd4EY39.js"),
     ),
     (
         "index-DUH1G7-3.css",
         include_bytes!("../../ui/dist/assets/index-DUH1G7-3.css"),
     ),
     (
-        "page-BGzC8Zl8.js",
-        include_bytes!("../../ui/dist/assets/page-BGzC8Zl8.js"),
+        "page-BUQ4-aAK.js",
+        include_bytes!("../../ui/dist/assets/page-BUQ4-aAK.js"),
     ),
     (
-        "page-BYUle6fv.js",
-        include_bytes!("../../ui/dist/assets/page-BYUle6fv.js"),
+        "page-BZmqp5IT.js",
+        include_bytes!("../../ui/dist/assets/page-BZmqp5IT.js"),
     ),
     (
         "page-C0eQn-H6.css",
@@ -56,20 +56,20 @@ const UI_ASSET_BYTES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/dist/assets/page-C3KEu0l_.css"),
     ),
     (
-        "page-CY87YlGc.js",
-        include_bytes!("../../ui/dist/assets/page-CY87YlGc.js"),
+        "page-Ck9UBRk4.js",
+        include_bytes!("../../ui/dist/assets/page-Ck9UBRk4.js"),
     ),
     (
         "page-D6I4gLNh.css",
         include_bytes!("../../ui/dist/assets/page-D6I4gLNh.css"),
     ),
     (
-        "page-UU_xKSHs.css",
-        include_bytes!("../../ui/dist/assets/page-UU_xKSHs.css"),
+        "page-Dk8lTc7A.js",
+        include_bytes!("../../ui/dist/assets/page-Dk8lTc7A.js"),
     ),
     (
-        "page-jY6idU3E.js",
-        include_bytes!("../../ui/dist/assets/page-jY6idU3E.js"),
+        "page-UU_xKSHs.css",
+        include_bytes!("../../ui/dist/assets/page-UU_xKSHs.css"),
     ),
 ];
 

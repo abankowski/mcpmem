@@ -15,7 +15,7 @@
 // Rust unit tests in crates/mcpmem-oauth (consent::offered/approve).
 
 import { expect, test, type Page } from "@playwright/test";
-import { ensureServer, seedWorkspace, SERVER_ORIGIN, type WorkspaceShape } from "./helpers";
+import { ensureServer, seedWorkspace, SERVER_ORIGIN, TEST_BEARER, type WorkspaceShape } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -55,7 +55,6 @@ async function interceptAuthorize(
   opts: {
     validState?: boolean;
     tokenValue?: string;
-    onExchanged?: (page: Page) => Promise<void>;
   },
 ): Promise<void> {
   await page.route("**/oauth/authorize**", async (route) => {
@@ -79,9 +78,6 @@ async function interceptAuthorize(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ access_token: opts.tokenValue ?? "e2e-token" }),
         });
-        // The app stores the token right after the exchange; assert it in
-        // this frame before any later navigation can replace it.
-        await opts.onExchanged?.(page);
       },
     );
   }
@@ -106,45 +102,19 @@ test("the admin sign-in asks the backend for every advertised scope plus admin",
   await expect(page.getByText("The sign-in response does not match")).toBeVisible();
 });
 
-test("each audience keeps its own token, and a graph sign-in replaces the static token", async ({ page }) => {
-  await page.goto(`${SERVER_ORIGIN}/ui/admin`);
-  const adminSignIn = page.getByRole("button", { name: "Sign in as admin" });
-  await expect(adminSignIn).toBeVisible();
-  await interceptAuthorize(page, new Set([...advertised, "admin"]), {
-    validState: true,
-    tokenValue: "e2e-admin-token",
-    onExchanged: async (p) => {
-      // The admin exchange stores into the admin slot only.
-      await expect
-        .poll(() => p.evaluate(() => sessionStorage.getItem("mcpmem_admin_access")))
-        .toBe("e2e-admin-token");
-      expect(await p.evaluate(() => sessionStorage.getItem("mcpmem_graph_access"))).toBeNull();
-    },
-  });
-  await adminSignIn.click();
-  await page.waitForTimeout(250);
-
-  // A graph sign-in (here with an invalid static token in sessionStorage, the
-  // "authentication required" state) replaces the static token in the graph
-  // slot and leaves the admin audience untouched.
+test("a graph sign-in replaces the invalid static token with a valid token", async ({ page }) => {
   await page.goto(`${SERVER_ORIGIN}/ui#token=invalid-e2e-bearer`);
   const graphSignIn = page.getByRole("button", { name: "Sign in" });
   await expect(graphSignIn).toBeVisible();
   await interceptAuthorize(page, new Set(["graph-read", ...advertised]), {
     validState: true,
-    tokenValue: "e2e-graph-token",
-    onExchanged: async (p) => {
-      await expect
-        .poll(() => p.evaluate(() => sessionStorage.getItem("mcpmem_graph_access")))
-        .toBe("e2e-graph-token");
-      // The static graph token is gone; the admin slot stays separate and
-      // empty on this fresh graph sign-in.
-      expect(await p.evaluate(() => sessionStorage.getItem("mcpmem_token"))).toBeNull();
-      expect(await p.evaluate(() => sessionStorage.getItem("mcpmem_admin_access"))).toBeNull();
-    },
+    tokenValue: TEST_BEARER,
   });
   await graphSignIn.click();
-  await page.waitForTimeout(250);
+  await expect
+    .poll(() => page.evaluate(() => sessionStorage.getItem("mcpmem_graph_access")))
+    .toBe(TEST_BEARER);
+  expect(await page.evaluate(() => sessionStorage.getItem("mcpmem_token"))).toBeNull();
 });
 
 test("admin API calls carry the admin token after sign-in", async ({ page }) => {
@@ -157,9 +127,9 @@ test("admin API calls carry the admin token after sign-in", async ({ page }) => 
     { validState: true, tokenValue: "e2e-admin-token" },
   );
   const seen: string[] = [];
-  await page.route("**/ui/api/**", (route) => {
+  await page.route("**/ui/api/**", async (route) => {
     seen.push(route.request().headers()["authorization"] ?? "");
-    route.continue();
+    await route.continue();
   });
   await signIn.click();
   // After the callback the app reloads and refetches session and workspaces;

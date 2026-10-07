@@ -679,6 +679,7 @@ pub(crate) fn not_found() -> Response {
 pub(crate) fn workspace_failure(error: &WorkspaceError) -> Response {
     match error {
         WorkspaceError::NotFound | WorkspaceError::AccessDenied => not_found(),
+        WorkspaceError::NameConflict => conflict(error.to_string()),
         WorkspaceError::SelectionRequired | WorkspaceError::InvalidInput(_) => {
             bad_request(error.to_string())
         }

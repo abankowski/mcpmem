@@ -1522,9 +1522,9 @@ fn management_error(error: crate::workspace::WorkspaceError) -> MCSError {
         WorkspaceError::NotFound
         | WorkspaceError::SelectionRequired
         | WorkspaceError::AccessDenied => MCSError::MemoryError(error.to_string()),
-        WorkspaceError::InvalidInput(_) | WorkspaceError::Graph(_) => {
-            MCSError::InvalidParams(error.to_string())
-        }
+        WorkspaceError::NameConflict
+        | WorkspaceError::InvalidInput(_)
+        | WorkspaceError::Graph(_) => MCSError::InvalidParams(error.to_string()),
         WorkspaceError::Storage(_) | WorkspaceError::Io(_) => {
             MCSError::MemoryError(error.to_string())
         }
