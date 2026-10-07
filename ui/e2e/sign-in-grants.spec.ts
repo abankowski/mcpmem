@@ -138,3 +138,26 @@ test("an all-scope admin grant authenticates workspace requests", async ({ page 
   await expect(row).toBeVisible();
   expect(workspaceHeaders).toContain(`Bearer ${TEST_BEARER}`);
 });
+
+test("a stale graph token recovers with a valid admin grant", async ({ page }) => {
+  const staleToken = "stale-graph-token";
+  await page.goto(`${SERVER_ORIGIN}/ui/admin`);
+  const signIn = page.getByRole("button", { name: "Sign in as admin" });
+  await expect(signIn).toBeVisible();
+  await interceptAuthorize(
+    page,
+    new Set([...advertised, "admin"]),
+    { validState: true, tokenValue: TEST_BEARER },
+  );
+
+  await signIn.click();
+  const row = page.locator("table.ui-admin-table tbody tr", { hasText: ws.name });
+  await expect(row).toBeVisible();
+  await page.evaluate((token) => {
+    sessionStorage.setItem("mcpmem_graph_access", token);
+  }, staleToken);
+
+  await page.goto(`${SERVER_ORIGIN}/ui?node=GrantTarget`);
+
+  await expect(page.locator(".g-inspector__header h2")).toHaveText("GrantTarget");
+});

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ComponentType, type FormEvent, type ReactNode } from "react";
 import { Brain, CircleAlert, RotateCw } from "lucide-react";
 import { api, ApiError } from "./lib/api";
-import { beginAuth, canAuthorize, captureHashToken, clearToken, completeAuthCallback, requestConsent, setGraphScopes, setStaticToken } from "./lib/auth";
+import { beginAuth, canAuthorize, captureHashToken, clearToken, completeAuthCallback, getToken, requestConsent, setGraphScopes, setStaticToken } from "./lib/auth";
 import { shellContext } from "./lib/app-context";
 import { currentWorkspace, currentWorkspaces, invalidateWorkspaces, loadWorkspaces, onWorkspaceChange, selectWorkspace } from "./lib/workspaces";
 import { PAGE_PATHS, pageUrl, type Page } from "./lib/urls";
@@ -88,36 +88,54 @@ function Shell() {
         setCallbackError(callback);
         const resolvedPage = routePage(location.pathname);
         setPage(resolvedPage);
-        try {
+        async function loadGraphState(): Promise<boolean> {
           const items = await loadWorkspaces(false, controller.signal);
-          if (!active) return;
+          if (!active) return false;
           setWorkspaces(items);
           const selected = currentWorkspace();
           setWorkspace(selected);
           const graphSession = await api.session(selected?.workspaceId, "graph", controller.signal);
-          if (!active) return;
+          if (!active) return false;
           setSession(graphSession);
           setGraphScopes(graphSession.scopes);
+          return true;
+        }
+
+        let graphLoaded = false;
+        let graphFailure: unknown | null = null;
+        try {
+          graphLoaded = await loadGraphState();
         } catch (cause) {
-          if (active && !controller.signal.aborted) {
-            setGraphError(cause instanceof ApiError ? cause : new ApiError(0, "network_error", "The workspace or session request failed."));
-            setGraphScopes([]);
-            if (cause instanceof ApiError && cause.status === 404) {
-              invalidateWorkspaces();
-              try {
-                const fresh = await loadWorkspaces(true, controller.signal);
-                if (active) {
-                  setWorkspaces(fresh);
-                  setWorkspace(currentWorkspace());
-                }
-              } catch {
-                if (active) { setWorkspaces([]); setWorkspace(null); }
-              }
-            } else if (cause instanceof ApiError && cause.status === 401) {
-              invalidateWorkspaces();
-              setWorkspaces([]);
-              setWorkspace(null);
+          if (cause instanceof ApiError && cause.status === 401 && getToken("graph") !== null) {
+            try {
+              graphLoaded = await loadGraphState();
+            } catch (retryCause) {
+              graphFailure = retryCause;
             }
+          } else {
+            graphFailure = cause;
+          }
+        }
+        if (!graphLoaded) {
+          if (!active || controller.signal.aborted) return;
+          const cause = graphFailure ?? new ApiError(0, "network_error", "The workspace or session request failed.");
+          setGraphError(cause instanceof ApiError ? cause : new ApiError(0, "network_error", "The workspace or session request failed."));
+          setGraphScopes([]);
+          if (cause instanceof ApiError && cause.status === 404) {
+            invalidateWorkspaces();
+            try {
+              const fresh = await loadWorkspaces(true, controller.signal);
+              if (active) {
+                setWorkspaces(fresh);
+                setWorkspace(currentWorkspace());
+              }
+            } catch {
+              if (active) { setWorkspaces([]); setWorkspace(null); }
+            }
+          } else if (cause instanceof ApiError && cause.status === 401) {
+            invalidateWorkspaces();
+            setWorkspaces([]);
+            setWorkspace(null);
           }
         }
         if (resolvedPage === "admin") {
