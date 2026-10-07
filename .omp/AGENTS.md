@@ -53,9 +53,11 @@ The exact chain to run before every push/PR (identical in Bash and fish):
 15. write the marker: `git rev-parse HEAD > "$(git rev-parse --git-dir)/omp-preflight-pass"`
 
 Legs 8–10 need real Poppler (`pdfinfo`, `pdftoppm`) on the PATH; CI installs
-`poppler-utils` for them. The `-D warnings` clippy must use `--all-features`;
-the plain default-feature run fails on pre-existing findings unrelated to the
-change.
+`poppler-utils` for them. Leg 14 needs `rg` (ripgrep) on the PATH; CI runners
+ship it, a macOS machine needs `brew install ripgrep`.
+
+The `-D warnings` clippy must use `--all-features`; the plain default-feature
+run fails on pre-existing findings unrelated to the change.
 
 ## Second Brain workflow
 
