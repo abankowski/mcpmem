@@ -120,6 +120,8 @@ export class GraphCanvas {
   private raf = 0;
   private tick = 0;
   private settled = false;
+  /** True until the human picks their own view; cleared by pan, zoom or drag. */
+  private fitOnSettle = true;
   private pulseFrames = 0;
   private drag: DragState | null = null;
   private pan: PanState | null = null;
@@ -307,7 +309,15 @@ export class GraphCanvas {
       this.raf = 0;
       if (this.vm && this.vm.nodes.length > 0 && !this.settled) {
         this.settled = this.step();
-        if (!this.settled) this.frame();
+        if (!this.settled) {
+          this.frame();
+        } else if (this.fitOnSettle) {
+          // The nodes start stacked on the view centre and the layout only
+          // spreads them wide over the ticks; the initial fit therefore fits
+          // a tiny box and the spread graph ends up off-centre. Re-fit once
+          // the layout settles, unless the human already took the view.
+          this.fit();
+        }
       }
       this.render();
     });
@@ -629,6 +639,7 @@ export class GraphCanvas {
         return;
       }
       this.drag = { name: node.name, startX: event.clientX, startY: event.clientY, moved: false };
+      this.fitOnSettle = false;
       this.canvas.style.cursor = "grabbing";
       return;
     }
@@ -661,8 +672,9 @@ export class GraphCanvas {
       }
       return;
     }
-    if (this.pan) {
-      this.view = {
+if (this.pan) {
+        this.fitOnSettle = false;
+        this.view = {
         x: this.pan.viewX + (event.clientX - this.pan.startX),
         y: this.pan.viewY + (event.clientY - this.pan.startY),
         scale: this.view.scale,
@@ -746,6 +758,7 @@ export class GraphCanvas {
   }
 
   private zoomBy(factor: number, pivotX?: number, pivotY?: number): void {
+    this.fitOnSettle = false;
     const cx = pivotX ?? this.width / 2;
     const cy = pivotY ?? this.height / 2;
     const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.view.scale * factor));
