@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../../lib/api";
+import { canAuthorize, requestConsent } from "../../lib/auth";
 import { formatBytes } from "../../lib/format";
 import { useToast } from "../../components/Toast";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
@@ -19,7 +20,7 @@ export interface FilesPanelProps {
   entityName: string;
   /** Hide upload and delete unless the selected workspace allows writes. */
   canWrite: boolean;
-  /** Report API errors upward (the graph page bootstraps attachments consent). */
+  /** Report an attachment API failure to an enclosing page. */
   onApiError?: (error: ApiError) => void;
   /** Report the row count for a tab badge. */
   onCountChange?: (count: number) => void;
@@ -316,6 +317,11 @@ export function FilesPanel({ workspaceId, entityName, canWrite, onApiError, onCo
       {loadError && (
         <div className="ui-files-state" role="alert">
           <span className="ui-files-error">{formatError(loadError)}</span>
+          {loadError.status === 403 && loadError.code === "insufficient_scope" && canAuthorize("graph") && (
+            <Button size="sm" variant="ghost" onClick={() => { void requestConsent(["attachments"]); }}>
+              Grant attachments
+            </Button>
+          )}
           <Button size="sm" variant="ghost" className="ui-files-error__retry" onClick={() => setReloadKey((key) => key + 1)}>
             Retry
           </Button>

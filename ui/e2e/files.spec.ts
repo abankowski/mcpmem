@@ -5,7 +5,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { TEMP_DIR, TEXT_FIXTURE, ensureServer, openWorkspace, seedWorkspace, type WorkspaceShape } from "./helpers";
+import { SERVER_ORIGIN, TEMP_DIR, TEXT_FIXTURE, ensureServer, openWorkspace, seedWorkspace, type WorkspaceShape } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
@@ -67,6 +67,43 @@ test("upload, poll to ready, preview text, and download the exact bytes", async 
   const target = path.join(TEMP_DIR, "downloaded-notes.txt");
   await download.saveAs(target);
   expect(readFileSync(target, "utf8")).toBe(TEXT_FIXTURE);
+});
+
+test("files offer attachment consent after an attachment scope refusal", async ({ page }) => {
+  await page.route("**/ui/api/session**", async (route) => {
+    const response = await route.fetch();
+    const body: { scopes: string[] } = await response.json();
+    await route.fulfill({
+      response,
+      json: { ...body, scopes: body.scopes.filter((scope) => scope !== "attachments") },
+    });
+  });
+  await page.route("**/ui/api/attachments*", async (route) => {
+    await route.fulfill({
+      status: 403,
+      contentType: "application/json",
+      headers: {
+        "WWW-Authenticate": `Bearer resource_metadata="${SERVER_ORIGIN}/.well-known/oauth-protected-resource", scope="graph-read graph-write vectors code attachments"`,
+      },
+      body: JSON.stringify({ code: "insufficient_scope", message: "insufficient scope" }),
+    });
+  });
+  await openWorkspace(page, ws.workspaceId, "/ui?node=files-node");
+  await expect(page.locator(".g-inspector__header h2")).toHaveText("files-node");
+  await page.locator(".g-inspector").getByRole("tab", { name: "Files" }).click();
+  await expect(page.locator(".ui-files [role=alert]")).toContainText("insufficient_scope: insufficient scope");
+
+  const grant = page.getByRole("button", { name: "Grant attachments" });
+  await expect(grant).toBeVisible();
+  let requestedScopes = new Set<string>();
+  await page.route("**/oauth/authorize**", async (route) => {
+    const url = new URL(route.request().url());
+    requestedScopes = new Set((url.searchParams.get("scope") ?? "").split(/\s+/).filter(Boolean));
+    await route.abort();
+  });
+
+  await grant.click();
+  await expect.poll(() => requestedScopes.has("attachments")).toBe(true);
 });
 
 test("the dropzone refuses a file type outside text and PDF", async ({ page }) => {
