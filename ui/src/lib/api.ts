@@ -99,6 +99,8 @@ export const api = {
     jsonRequest("workspaces", workspaceResultSchema, "POST", { name }, "graph", undefined, signal),
   setWorkspaceVisibility: (id: string, visibility: "private" | "public", signal?: AbortSignal) =>
     jsonRequest(`workspaces/${encodeURIComponent(id)}`, workspaceResultSchema, "PATCH", { visibility }, "graph", undefined, signal),
+  renameWorkspace: (id: string, name: string, signal?: AbortSignal) =>
+    jsonRequest(`workspaces/${encodeURIComponent(id)}`, workspaceResultSchema, "PATCH", { name }, "graph", undefined, signal),
   grants: (id: string, signal?: AbortSignal) =>
     apiFetch(`workspaces/${encodeURIComponent(id)}/grants`, grantsSchema, { signal }),
   grant: (id: string, principalId: string, role: "reader" | "writer", signal?: AbortSignal) =>

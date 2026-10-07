@@ -10,8 +10,20 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ## 3.0.4 (unreleased)
 
+### Added
+
+- **Workspaces can be renamed by their owner.** `PATCH /ui/api/workspaces/{id}`
+  with `{"name": …}` renames an owned workspace (owner role and the
+  graph-write scope; a name the caller already owns answers 409, like create),
+  and the admin Workspaces pane gets a Rename action. The workspace keeps its
+  id, grants, visibility and saved default.
+
 ### Fixed
 
+- **The graph refits once the force layout settles.** Nodes start stacked on
+  the view centre, so the initial fit framed a tiny box and the spread graph
+  stayed off-centre; the view now re-fits when the layout settles unless the
+  human already panned, zoomed or dragged a node.
 - **UI sign-in asks for every grant the server advertises.** The graph
   audience requested `graph-read` only and the admin audience requested
   `admin` only, so the consent page could never offer `graph-write`,
