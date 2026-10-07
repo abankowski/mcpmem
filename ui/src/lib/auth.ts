@@ -59,8 +59,11 @@ export function setStaticToken(token: string): void {
 }
 
 export function getToken(audience: Audience): string | null {
-  return sessionStorage.getItem(clients[audience].tokenKey) ||
-    (audience === "graph" ? sessionStorage.getItem("mcpmem_token") : null);
+  const audienceToken = sessionStorage.getItem(clients[audience].tokenKey);
+  if (audienceToken) return audienceToken;
+  if (audience !== "graph") return null;
+  // An all-scope admin grant can authorize the same graph resource.
+  return sessionStorage.getItem("mcpmem_token") || sessionStorage.getItem(clients.admin.tokenKey);
 }
 
 export function clearToken(audience: Audience): void {

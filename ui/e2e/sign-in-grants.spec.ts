@@ -3,8 +3,8 @@
 // the admin sign-in holding only `admin` and every other feature needing a
 // second consent round (2026-10-06): each audience must ask for every scope
 // the server advertises (plus its own), the consent page then offers the
-// intersection with what the human holds, and each audience's token must live
-// in its own sessionStorage slot and be the one its API calls carry.
+// intersection with what the human holds. Each token has its own storage slot.
+// Graph API calls use the all-scope admin token when no graph token exists.
 //
 // The OAuth provider is stubbed with Playwright route interception: the
 // authorize request is captured and answered with a redirect, the token
@@ -117,24 +117,24 @@ test("a graph sign-in replaces the invalid static token with a valid token", asy
   expect(await page.evaluate(() => sessionStorage.getItem("mcpmem_token"))).toBeNull();
 });
 
-test("admin API calls carry the admin token after sign-in", async ({ page }) => {
+test("an all-scope admin grant authenticates workspace requests", async ({ page }) => {
   await page.goto(`${SERVER_ORIGIN}/ui/admin`);
   const signIn = page.getByRole("button", { name: "Sign in as admin" });
   await expect(signIn).toBeVisible();
   await interceptAuthorize(
     page,
     new Set([...advertised, "admin"]),
-    { validState: true, tokenValue: "e2e-admin-token" },
+    { validState: true, tokenValue: TEST_BEARER },
   );
-  const seen: string[] = [];
-  await page.route("**/ui/api/**", async (route) => {
-    seen.push(route.request().headers()["authorization"] ?? "");
+  const workspaceHeaders: string[] = [];
+  await page.route("**/ui/api/workspaces", async (route) => {
+    workspaceHeaders.push(route.request().headers()["authorization"] ?? "");
     await route.continue();
   });
+
   await signIn.click();
-  // After the callback the app reloads and refetches session and workspaces;
-  // those requests must carry the admin bearer.
-  await expect
-    .poll(() => seen.some((header) => header === "Bearer e2e-admin-token"))
-    .toBe(true);
+
+  const row = page.locator("table.ui-admin-table tbody tr", { hasText: ws.name });
+  await expect(row).toBeVisible();
+  expect(workspaceHeaders).toContain(`Bearer ${TEST_BEARER}`);
 });
