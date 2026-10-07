@@ -70,6 +70,23 @@ test("the vector pane shows the measured unavailable state and no refresh contro
   ).toHaveCount(0);
 });
 
+test("an owner renames their workspace and the row follows", async ({ page }) => {
+  await openWorkspace(page, ws.workspaceId, "/ui/admin", { adminToken: TEST_BEARER });
+
+  const row = page.locator("table.ui-admin-table tbody tr", { hasText: ws.name });
+  await expect(row).toBeVisible();
+  await row.getByRole("button", { name: "Rename" }).click();
+  const input = page.locator("input#workspace-rename");
+  await expect(input).toBeVisible();
+  await input.fill("renamed-workspace");
+  await page.getByRole("button", { name: "Rename workspace" }).click();
+
+  const renamed = page.locator("table.ui-admin-table tbody tr", { hasText: "renamed-workspace" });
+  await expect(renamed).toBeVisible();
+  await expect(renamed).toContainText("owner");
+  await expect(row).toHaveCount(0);
+});
+
 test("the nested admin callback route loads the admin page", async ({ page }) => {
   await openWorkspace(page, ws.workspaceId, "/ui/admin/callback", { adminToken: TEST_BEARER });
 

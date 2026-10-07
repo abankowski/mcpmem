@@ -610,10 +610,15 @@ struct WorkspaceCreate {
     name: String,
 }
 
-/// The visibility patch body: `{visibility}` with `private` or `public`.
+/// The workspace patch body: `{visibility}` with `private` or `public`, or
+/// `{name}` — the two are independent and either may be present.
 #[derive(Deserialize)]
-struct WorkspaceVisibilityPatch {
-    visibility: String,
+#[serde(rename_all = "camelCase")]
+struct WorkspacePatch {
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 /// The grant body: `{principalId, role}` with `reader` or `writer`. The
@@ -721,9 +726,10 @@ async fn admin_get_workspace(
     }
 }
 
-/// `PATCH /ui/api/workspaces/{id}` — flip one workspace's visibility.
-/// Needs the workspace owner and the graph-write scope; the echo is the
-/// updated view.
+/// `PATCH /ui/api/workspaces/{id}` — change one workspace's visibility or
+/// name. Needs the workspace owner and the graph-write scope; the echo is the
+/// updated view. A rename colliding with another name the caller owns answers
+/// 409, the same status create gives.
 async fn admin_update_workspace(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -734,26 +740,65 @@ async fn admin_update_workspace(
         Ok(principal) => principal,
         Err(response) => return *response,
     };
-    let patch: WorkspaceVisibilityPatch = match serde_json::from_str(&body) {
+    let patch: WorkspacePatch = match serde_json::from_str(&body) {
         Ok(patch) => patch,
-        Err(_) => return bad_request("the body must be JSON with a visibility member"),
+        Err(_) => return bad_request("the body must be JSON with a visibility or name member"),
     };
-    let visibility = match patch.visibility.as_str() {
-        "private" => Visibility::Private,
-        "public" => Visibility::Public,
-        _ => return bad_request("'visibility' must be 'private' or 'public'"),
+    let visibility = match patch.visibility.as_ref() {
+        None => None,
+        Some(v) if v == "private" => Some(Visibility::Private),
+        Some(v) if v == "public" => Some(Visibility::Public),
+        Some(_) => return bad_request("'visibility' must be 'private' or 'public'"),
     };
+    let rename = match patch.name.as_ref() {
+        None => None,
+        Some(raw) => {
+            let name = raw.trim().to_owned();
+            if name.is_empty() {
+                return bad_request("a workspace name is needed");
+            }
+            Some(name)
+        }
+    };
+    if visibility.is_none() && rename.is_none() {
+        return bad_request("the body must carry a visibility or a name");
+    }
+    // Read for the conflict message before the closure moves the captures.
+    let name_for_conflict = rename.as_deref().unwrap_or_default().to_owned();
     let registry = state.registry;
     match tokio::task::spawn_blocking(move || {
-        registry.set_visibility(&principal.id, &id, visibility)
+        if let Some(name) = rename.as_ref() {
+            // The registry stores no name uniqueness; the adapter keeps the
+            // caller's own list free of two rows with one name, exactly like
+            // create does.
+            let page = registry.list(&principal.id, None, 100)?;
+            if page
+                .workspaces
+                .iter()
+                .any(|w| w.role == "owner" && w.name == *name && w.workspace_id != id)
+            {
+                return Ok(None);
+            }
+            Ok(Some(registry.rename(&principal.id, &id, name)?))
+        } else {
+            Ok(Some(registry.set_visibility(
+                &principal.id,
+                &id,
+                visibility.expect("a visibility is present when no rename is"),
+            )?))
+        }
     })
     .await
     {
-        Ok(Ok(view)) => (
+        Ok(Ok(Some(view))) => (
             StatusCode::OK,
             Json(serde_json::json!({ "workspace": view })),
         )
             .into_response(),
+        Ok(Ok(None)) => conflict(format!(
+            "a workspace named '{}' already exists",
+            name_for_conflict
+        )),
         Ok(Err(error)) => workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/workspaces update task panicked: {error}");

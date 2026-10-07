@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Check, Plus } from "lucide-react";
+import { Check, Pencil, Plus } from "lucide-react";
 import { api, ApiError } from "../../lib/api";
 import { canAuthorize, requestConsent } from "../../lib/auth";
 import { loadWorkspaces } from "../../lib/workspaces";
@@ -28,6 +28,9 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
   const [createError, setCreateError] = useState<ApiError | null>(null);
   const [busy, setBusy] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [renameRow, setRenameRow] = useState<Workspace | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [renameError, setRenameError] = useState<ApiError | null>(null);
 
   const canWrite = session?.scopes.includes("graph-write") ?? false;
   const countHandler = useRef(onCountChange);
@@ -106,6 +109,29 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
     }
   }
 
+  async function renameWorkspace(row: Workspace): Promise<void> {
+    const newName = renameName.trim();
+    if (!newName || newName === row.name) return;
+    if (!(await requestConsent(["graph-write"]))) return;
+    setBusy(true);
+    setRenameError(null);
+    try {
+      const result = await api.renameWorkspace(row.workspaceId, newName);
+      setRows((previous) => previous.map((item) => item.workspaceId === result.workspace.workspaceId ? result.workspace : item));
+      setRenameRow(null);
+      setRenameName("");
+      // The top-bar switcher keeps its own validated cache; refresh it so the
+      // new name appears there without a full reload.
+      void loadWorkspaces(true).catch(() => undefined);
+      notify("success", "Workspace renamed.");
+    } catch (cause) {
+      // A failed mutation keeps the sheet open and the input intact.
+      setRenameError(cause instanceof ApiError ? cause : new ApiError(0, "network_error", "The workspace could not be renamed."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <header className="ui-admin__head">
@@ -163,12 +189,20 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
                   </td>
                   <td className="ui-admin-cell-actions">
                     {row.role === "owner" && (
-                      <Button size="sm" variant="ghost"
-                        disabled={!canWrite || togglingId === row.workspaceId}
-                        title={canWrite ? undefined : "Visibility changes need the graph-write scope."}
-                        onClick={() => void toggleVisibility(row)}>
-                        {row.visibility === "private" ? "Make public" : "Make private"}
-                      </Button>
+                      <>
+                        <Button size="sm" variant="ghost"
+                          disabled={!canWrite || busy}
+                          title={canWrite ? undefined : "Renaming needs the graph-write scope."}
+                          onClick={() => { setRenameRow(row); setRenameName(row.name); setRenameError(null); }}>
+                          <Pencil size={13} aria-hidden="true" />Rename
+                        </Button>
+                        <Button size="sm" variant="ghost"
+                          disabled={!canWrite || togglingId === row.workspaceId}
+                          title={canWrite ? undefined : "Visibility changes need the graph-write scope."}
+                          onClick={() => void toggleVisibility(row)}>
+                          {row.visibility === "private" ? "Make public" : "Make private"}
+                        </Button>
+                      </>
                     )}
                   </td>
                 </tr>
@@ -199,6 +233,28 @@ export function WorkspacesPane({ session, onCountChange }: AdminPaneProps) {
           </div>
           {createError && <p className="ui-admin-error" role="alert">{formatError(createError)}</p>}
         </form>
+      </Sheet>
+
+      <Sheet open={renameRow !== null} title={renameRow ? `Rename ${renameRow.name}` : "Rename workspace"} onClose={() => setRenameRow(null)}
+        footer={<>
+          <Button onClick={() => setRenameRow(null)} disabled={busy}>Cancel</Button>
+          <Button variant="primary" onClick={() => { if (renameRow) void renameWorkspace(renameRow); }} disabled={busy || !renameName.trim() || renameName.trim() === renameRow?.name}>
+            {busy ? "Renaming…" : "Rename workspace"}
+          </Button>
+        </>}>
+        <div className="ui-admin-field">
+          <label htmlFor="workspace-rename">New name</label>
+          <input id="workspace-rename" className="ui-admin-input" type="text"
+            value={renameName} autoComplete="off"
+            onKeyDown={(event) => { if (event.key === "Enter" && renameRow) void renameWorkspace(renameRow); }}
+            onChange={(event) => setRenameName(event.target.value)} />
+          <span className="ui-admin-hint">The workspace keeps its id, grants and graph; only the name changes.</span>
+        </div>
+        {renameError && (
+          <div className="ui-admin-error" role="alert">
+            <span>{formatError(renameError)}</span>
+          </div>
+        )}
       </Sheet>
     </>
   );

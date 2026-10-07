@@ -841,6 +841,42 @@ impl WorkspaceRegistry {
         })
     }
 
+    pub fn rename(
+        &self,
+        owner: &str,
+        workspace_id: &str,
+        new_name: &str,
+    ) -> Result<WorkspaceView, WorkspaceError> {
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Err(WorkspaceError::InvalidInput(
+                "a workspace name is needed".into(),
+            ));
+        }
+        let record = self.resolve(owner, Some(workspace_id), WorkspaceAccess::Owner)?;
+        let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE workspace SET name=?1 WHERE workspace_id=?2",
+            params![name, record.workspace_id],
+        )?;
+        tx.commit()?;
+        // A rename lands where the caller's eye is, so the saved default follows
+        // it; a default pointing at another workspace stays untouched.
+        let is_default = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_default WHERE principal_id=?1 AND workspace_id=?2)",
+            params![owner, record.workspace_id], |row| row.get(0),
+        )?;
+        let visibility = record.visibility;
+        Ok(WorkspaceView {
+            workspace_id: record.workspace_id,
+            name: name.to_owned(),
+            visibility,
+            role: "owner".into(),
+            is_default,
+        })
+    }
+
     pub fn grants(
         &self,
         owner: &str,
