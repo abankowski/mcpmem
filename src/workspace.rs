@@ -28,6 +28,8 @@ pub enum WorkspaceError {
     SelectionRequired,
     #[error("workspace access denied")]
     AccessDenied,
+    #[error("a workspace with this name already exists")]
+    NameConflict,
     #[error("invalid workspace input: {0}")]
     InvalidInput(String),
     #[error("workspace registry error: {0}")]
@@ -856,13 +858,22 @@ impl WorkspaceRegistry {
         let record = self.resolve(owner, Some(workspace_id), WorkspaceAccess::Owner)?;
         let mut conn = self.conn.lock().expect("workspace registry lock poisoned");
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let occupied: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace
+             WHERE owner_id=?1 AND name=?2 AND workspace_id<>?3)",
+            params![owner, name, record.workspace_id],
+            |row| row.get(0),
+        )?;
+        if occupied {
+            return Err(WorkspaceError::NameConflict);
+        }
         tx.execute(
             "UPDATE workspace SET name=?1 WHERE workspace_id=?2",
             params![name, record.workspace_id],
         )?;
         tx.commit()?;
-        // A rename lands where the caller's eye is, so the saved default follows
-        // it; a default pointing at another workspace stays untouched.
+        // A rename changes the display name only. The saved default still
+        // refers to the immutable workspace ID.
         let is_default = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM workspace_default WHERE principal_id=?1 AND workspace_id=?2)",
             params![owner, record.workspace_id], |row| row.get(0),
@@ -1360,6 +1371,62 @@ mod tests {
                     .clone()
             ),
             "the cached legacy handle must be the server's own handle, not a re-open"
+        );
+    }
+
+    /// A second owned workspace with this name must reject the rename even
+    /// when its ID falls after the first page of accessible workspaces.
+    #[test]
+    fn rename_rejects_an_owned_name_after_the_first_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = dir.path().join("memory.sqlite");
+        let registry =
+            WorkspaceRegistry::open(&memory, Some("machine:local")).expect("registry opens");
+        let target = registry
+            .create(
+                "machine:local",
+                "rename-target",
+                Visibility::Private,
+                |_| Ok(()),
+            )
+            .expect("target created");
+        for index in 0..101 {
+            registry
+                .create(
+                    "machine:local",
+                    &format!("owned-{index}"),
+                    Visibility::Private,
+                    |_| Ok(()),
+                )
+                .expect("workspace created");
+        }
+        let first = registry
+            .list("machine:local", None, 100)
+            .expect("first page");
+        assert_eq!(first.workspaces.len(), 100);
+        let second = registry
+            .list("machine:local", first.next_cursor.as_deref(), 100)
+            .expect("second page");
+        let conflict = second
+            .workspaces
+            .iter()
+            .find(|view| view.workspace_id != target.workspace_id)
+            .expect("a second owned workspace is beyond the first page");
+        assert!(
+            !first
+                .workspaces
+                .iter()
+                .any(|view| view.name == conflict.name)
+        );
+        let result = registry.rename("machine:local", &target.workspace_id, &conflict.name);
+        assert!(matches!(result, Err(WorkspaceError::NameConflict)));
+        assert_eq!(
+            registry
+                .view("machine:local", &target.workspace_id)
+                .expect("target remains accessible")
+                .1
+                .name,
+            "rename-target"
         );
     }
 }

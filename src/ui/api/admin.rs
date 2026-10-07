@@ -610,8 +610,8 @@ struct WorkspaceCreate {
     name: String,
 }
 
-/// The workspace patch body: `{visibility}` with `private` or `public`, or
-/// `{name}` — the two are independent and either may be present.
+/// The workspace patch body: exactly one of `{visibility}` (`private` or
+/// `public`) and `{name}`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspacePatch {
@@ -726,10 +726,9 @@ async fn admin_get_workspace(
     }
 }
 
-/// `PATCH /ui/api/workspaces/{id}` — change one workspace's visibility or
-/// name. Needs the workspace owner and the graph-write scope; the echo is the
-/// updated view. A rename colliding with another name the caller owns answers
-/// 409, the same status create gives.
+/// `PATCH /ui/api/workspaces/{id}` — change a workspace's name or visibility.
+/// The body must select exactly one. The caller needs the owner role and
+/// graph-write scope. A name used by another owned workspace answers 409.
 async fn admin_update_workspace(
     State(state): State<HttpState>,
     headers: HeaderMap,
@@ -760,45 +759,28 @@ async fn admin_update_workspace(
             Some(name)
         }
     };
-    if visibility.is_none() && rename.is_none() {
-        return bad_request("the body must carry a visibility or a name");
+    if visibility.is_some() == rename.is_some() {
+        return bad_request("the body must carry either visibility or name, not both");
     }
-    // Read for the conflict message before the closure moves the captures.
-    let name_for_conflict = rename.as_deref().unwrap_or_default().to_owned();
     let registry = state.registry;
     match tokio::task::spawn_blocking(move || {
         if let Some(name) = rename.as_ref() {
-            // The registry stores no name uniqueness; the adapter keeps the
-            // caller's own list free of two rows with one name, exactly like
-            // create does.
-            let page = registry.list(&principal.id, None, 100)?;
-            if page
-                .workspaces
-                .iter()
-                .any(|w| w.role == "owner" && w.name == *name && w.workspace_id != id)
-            {
-                return Ok(None);
-            }
-            Ok(Some(registry.rename(&principal.id, &id, name)?))
+            registry.rename(&principal.id, &id, name)
         } else {
-            Ok(Some(registry.set_visibility(
+            registry.set_visibility(
                 &principal.id,
                 &id,
-                visibility.expect("a visibility is present when no rename is"),
-            )?))
+                visibility.expect("visibility is present when name is absent"),
+            )
         }
     })
     .await
     {
-        Ok(Ok(Some(view))) => (
+        Ok(Ok(view)) => (
             StatusCode::OK,
             Json(serde_json::json!({ "workspace": view })),
         )
             .into_response(),
-        Ok(Ok(None)) => conflict(format!(
-            "a workspace named '{}' already exists",
-            name_for_conflict
-        )),
         Ok(Err(error)) => workspace_failure(&error),
         Err(error) => {
             error!("/ui/api/workspaces update task panicked: {error}");

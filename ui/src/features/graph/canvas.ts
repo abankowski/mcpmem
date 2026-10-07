@@ -268,6 +268,7 @@ export class GraphCanvas {
   focus(name: string): void {
     const placed = this.positions.get(name);
     if (!placed) return;
+    this.fitOnSettle = false;
     // Keep the current zoom; move the node into the viewport centre.
     this.view = {
       x: this.width / 2 - placed.x * this.view.scale,
@@ -639,7 +640,6 @@ export class GraphCanvas {
         return;
       }
       this.drag = { name: node.name, startX: event.clientX, startY: event.clientY, moved: false };
-      this.fitOnSettle = false;
       this.canvas.style.cursor = "grabbing";
       return;
     }
@@ -662,7 +662,10 @@ export class GraphCanvas {
       if (!placed) { this.drag = null; return; }
       const dxv = event.clientX - drag.startX;
       const dyv = event.clientY - drag.startY;
-      if (Math.hypot(dxv, dyv) > 5) drag.moved = true;
+      if (Math.hypot(dxv, dyv) > 5) {
+        drag.moved = true;
+        this.fitOnSettle = false;
+      }
       if (drag.moved) {
         placed.x = point.x;
         placed.y = point.y;
@@ -672,11 +675,14 @@ export class GraphCanvas {
       }
       return;
     }
-if (this.pan) {
-        this.fitOnSettle = false;
-        this.view = {
-        x: this.pan.viewX + (event.clientX - this.pan.startX),
-        y: this.pan.viewY + (event.clientY - this.pan.startY),
+    if (this.pan) {
+      const dx = event.clientX - this.pan.startX;
+      const dy = event.clientY - this.pan.startY;
+      if (dx === 0 && dy === 0) return;
+      this.fitOnSettle = false;
+      this.view = {
+        x: this.pan.viewX + dx,
+        y: this.pan.viewY + dy,
         scale: this.view.scale,
       };
       this.render();

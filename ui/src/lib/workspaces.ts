@@ -25,6 +25,10 @@ export function currentWorkspace(): Workspace | null {
   return selected;
 }
 
+export function currentWorkspaces(): readonly Workspace[] {
+  return list;
+}
+
 export function onWorkspaceChange(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
