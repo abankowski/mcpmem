@@ -16,8 +16,85 @@ permissions:
   contents: read
 
 jobs:
+  # The only file set a release bump touches is the version manifests
+  # (Cargo.toml, Cargo.lock, crates/*/Cargo.toml; see scripts/set-version.sh).
+  # For a bump, the compile-and-test matrix proves nothing new: the code is
+  # unchanged, so a 6-minute wait per leg buys no signal (2026-10-07,
+  # chore/open-3.0.6: the bump PR queued the whole matrix for nothing).
+  # This job runs for every change, owns the version contract checks, and
+  # tells every heavy job below whether the diff is a pure version bump.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      bump-only: ${{ steps.detect.outputs.bump-only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # An invalid workflow file otherwise fails as a run with no logs, which
+      # names no cause. This step names it. It lives here so it runs for
+      # every change, including a bump-only one.
+      - name: Lint workflows
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+      - name: Workspace versions agree and are valid semver
+        run: scripts/check-release-version.sh
+      # The version in the code must not already carry a release tag: a tag
+      # means that version was released, and work merged on top of it would
+      # silently extend a shipped version. The release workflow bumps the
+      # version on a dedicated PR right after publishing, so any other PR
+      # against main is expected to sit on a version with no tag yet. The
+      # name is read from the root manifest so this stays in sync with the
+      # rest of the version tooling. For a version bump this single gate is
+      # the only check that matters: it proves the new version is not taken.
+      - name: The version in the code has no release tag yet
+        if: github.event_name == 'pull_request'
+        run: |
+          version="$(awk '/^\[package\]/ {inpkg = 1; next}
+                     /^\[/ {inpkg = 0}
+                     inpkg && /^version = / {gsub(/[",]/, "", $3); print $3; exit}' Cargo.toml)"
+          if git ls-remote --tags origin "refs/tags/v${version}" | grep -q "refs/tags/v${version}"; then
+            echo "::error::version ${version} already has a release tag v${version}; this version was shipped. Advance the version before merging work onto it (see scripts/next-version.sh)"
+            exit 1
+          fi
+          echo "version ${version} has no release tag yet"
+      - name: Detect a pure version bump
+        id: detect
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request)
+              base="${{ github.event.pull_request.base.sha }}"
+              ;;
+            push)
+              if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+                echo "bump-only=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              base="${{ github.event.before }}"
+              ;;
+            *)
+              echo "bump-only=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          changed="$(git diff --name-only "${base}..HEAD" | sort -u)"
+          before="$(git show "${base}:Cargo.toml" | awk '/^\[package\]/ {p = 1; next} /^\[/ {p = 0} p && /^version = / {gsub(/[",]/, "", $3); print $3; exit}')"
+          after="$(awk '/^\[package\]/ {p = 1; next} /^\[/ {p = 0} p && /^version = / {gsub(/[",]/, "", $3); print $3; exit}' Cargo.toml)"
+          non_manifest="$(printf '%s\n' "${changed}" | grep -vx 'Cargo.toml\|Cargo.lock\|crates/.*/Cargo\.toml' || true)"
+          # A pure bump: the root package version moved and no file outside
+          # the version manifests changed. A dependency edit touches the same
+          # files, so the version-line comparison is what separates it out.
+          if [ -n "${before}" ] && [ "${before}" != "${after}" ] && [ -z "${non_manifest}" ]; then
+            echo "::notice::only the version manifests changed; heavy checks are skipped (release version bump)"
+            echo "bump-only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bump-only=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust:
-    needs: frontend
+    needs: [frontend, version]
+    if: needs.version.outputs.bump-only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,11 +107,7 @@ jobs:
           name: ui-dist
           path: ui/dist
       # An invalid workflow file otherwise fails as a run with no logs, which
-      # names no cause. This step names it.
-      - name: Lint workflows
-        uses: docker://rhysd/actionlint:1.7.12
-        with:
-          args: -color
+      # names no cause. The `version` job above names it.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -44,26 +117,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - name: Check PDF renderer commands
         run: command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
-      - name: Workspace versions agree and are valid semver
-        run: scripts/check-release-version.sh
-      # The version in the code must not already carry a release tag: a tag
-      # means that version was released, and work merged on top of it would
-      # silently extend a shipped version. The release workflow bumps the
-      # version on a dedicated PR right after publishing, so any other PR
-      # against main is expected to sit on a version with no tag yet. The
-      # name is read from the root manifest so this stays in sync with the
-      # rest of the version tooling.
-      - name: The version in the code has no release tag yet
-        if: github.event_name == 'pull_request'
-        run: |
-          version="$(awk '/^\[package\]/ {inpkg = 1; next}
-                     /^\[/ {inpkg = 0}
-                     inpkg && /^version = / {gsub(/[",]/, "", $3); print $3; exit}' Cargo.toml)"
-          if git ls-remote --tags origin "refs/tags/v${version}" | grep -q "refs/tags/v${version}"; then
-            echo "::error::version ${version} already has a release tag v${version}; this version was shipped. Advance the version before merging work onto it (see scripts/next-version.sh)"
-            exit 1
-          fi
-          echo "version ${version} has no release tag yet"
       # The v1.0.0-rc.1 release failed while verifying the packaged crate,
       # because an include_str! read a file outside the crate root. CI now
       # answers that question before a release does.
@@ -119,6 +172,8 @@ jobs:
   # against each other by the build itself, so a pushed but broken page would
   # otherwise surface only on deploy.
   site:
+    needs: version
+    if: needs.version.outputs.bump-only != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -134,6 +189,8 @@ jobs:
   # job rebuilds the output from the source, checks the manifest contract,
   # and uploads the bundle for every job whose cargo build embeds it.
   frontend:
+    needs: version
+    if: needs.version.outputs.bump-only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -176,7 +233,8 @@ jobs:
   # and the package check instead; the check packs the dry-run's own file
   # list and verifies the manifest contract against those bytes.
   ui-package:
-    needs: frontend
+    needs: [frontend, version]
+    if: needs.version.outputs.bump-only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -198,7 +256,8 @@ jobs:
   # names the tests that make sense for its feature set: the oauth legs run
   # the full token flow, the ui legs run the router matrix.
   feature-matrix:
-    needs: frontend
+    needs: [frontend, version]
+    if: needs.version.outputs.bump-only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -226,7 +285,8 @@ jobs:
   # endpoint from ui/e2e. The suite spawns target/debug/mcpmem, so the job
   # builds it with the features ui/e2e/server.toml requires.
   browser:
-    needs: frontend
+    needs: [frontend, version]
+    if: needs.version.outputs.bump-only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
