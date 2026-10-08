@@ -21,7 +21,7 @@ use parking_lot::Mutex;
 
 use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::workspace::{WorkspaceAccess, WorkspaceRegistry};
-use mcpmem_core::attachments::{AttachmentLimits, AttachmentRepository};
+use mcpmem_core::attachments::{AttachmentJobRepository, AttachmentLimits, AttachmentRepository};
 use mcpmem_core::events::now_us;
 use mcpmem_core::graph::GraphHandle;
 use mcpmem_core::types::EntityInput;
@@ -1347,6 +1347,70 @@ fn transient_provider_failure_retains_extracting_then_succeeds() {
 }
 
 #[cfg(feature = "extractor")]
+#[test]
+fn a_retry_deadline_requeues_without_a_new_upload() {
+    let _guard = ENV_LOCK.lock();
+    let dir = tempfile::tempdir().unwrap();
+    let (path, entity_id) = test_graph(&dir);
+    let attachment = upload(&path, entity_id, "scan.pdf", "application/pdf", PDF);
+
+    let worker = ExtractionWorker::new(
+        &path,
+        Some(Arc::new(FlakyOcr {
+            calls: AtomicUsize::new(0),
+        })),
+    );
+    let first = worker.run_once(now_us()).unwrap();
+    assert_eq!(first.claimed, 1);
+    assert_eq!(first.retried, 1);
+    assert_eq!(first.committed, 0);
+
+    // The failure schedules a durable retry deadline. No new upload exists:
+    // the deadline alone must make the job claimable again.
+    let conn = Connection::open(&path).unwrap();
+    let (state, next_attempt_us): (String, i64) = conn
+        .query_row(
+            "SELECT state, next_attempt_us FROM attachment_job WHERE attachment_id=?1",
+            [attachment],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    drop(conn);
+    assert_eq!(state, "pending", "the failure returns the job to the queue");
+    assert!(
+        next_attempt_us > now_us(),
+        "the durable retry deadline lies in the future"
+    );
+
+    // Before the deadline, an idle turn must not claim the job.
+    let early = worker.run_once(now_us()).unwrap();
+    assert_eq!(
+        early.claimed, 0,
+        "a retry is not claimable before its deadline"
+    );
+
+    // Poll the durable deadline, up to a stated bound. The wait is bounded
+    // by the one-second retry delay, not by any fixed test sleep.
+    let guard = Instant::now() + Duration::from_secs(10);
+    while now_us() < next_attempt_us {
+        assert!(
+            Instant::now() < guard,
+            "the retry deadline never arrived within the stated bound"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // The deadline, not any new upload, makes the job claimable again.
+    let second = worker.run_once(now_us()).unwrap();
+    assert_eq!(
+        second.claimed, 1,
+        "the retry deadline makes the job claimable"
+    );
+    assert_eq!(second.committed, 1, "the retried attempt completes");
+    assert_eq!(attachment_status(&path, attachment), "ready");
+}
+
+#[cfg(feature = "extractor")]
 struct AlwaysFailOcr;
 
 #[cfg(feature = "extractor")]
@@ -1460,6 +1524,75 @@ fn a_lost_lease_publishes_no_pages() {
     assert_eq!(count(&conn, "attachment_text"), 0);
     assert_eq!(count(&conn, "attachment_chunk"), 0);
     assert_eq!(attachment_status(&path, attachment), "extracting");
+}
+
+#[cfg(feature = "extractor")]
+#[test]
+fn an_expired_lease_is_reclaimed_and_the_attachment_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, entity_id) = test_graph(&dir);
+    let attachment = upload(
+        &path,
+        entity_id,
+        "memo.txt",
+        "text/plain",
+        b"durable text\n",
+    );
+
+    // Take a short lease: one second, so the test can wait it out by
+    // polling the durable lease deadline instead of a fixed sleep.
+    let conn = Connection::open(&path).unwrap();
+    let jobs = AttachmentJobRepository::new(&conn);
+    let claimed = jobs.claim_due(now_us(), 1_000_000).unwrap().unwrap();
+    assert_eq!(claimed.attachment_id, attachment);
+    let (state, lease_until_us, epoch): (String, i64, i64) = conn
+        .query_row(
+            "SELECT state, lease_until_us, lease_epoch FROM attachment_job WHERE attachment_id=?1",
+            [attachment],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    drop(conn);
+    assert_eq!(state, "leased", "the claimed job holds a live lease");
+    assert_eq!(epoch, 1, "the first claim bumps the lease epoch once");
+    assert!(lease_until_us > now_us(), "the lease starts unexpired");
+
+    // A live lease is never stolen: no turn may recover the job before the
+    // durable lease deadline.
+    let worker = ExtractionWorker::new(&path, None);
+    let before = worker.run_once(now_us()).unwrap();
+    assert_eq!(before.claimed, 0, "a live lease is not recoverable");
+    assert_eq!(attachment_status(&path, attachment), "extracting");
+
+    // Poll the durable lease deadline, up to a stated bound.
+    let guard = Instant::now() + Duration::from_secs(10);
+    while now_us() < lease_until_us {
+        assert!(
+            Instant::now() < guard,
+            "the lease never expired within the stated bound"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // The expired lease is reclaimed by a fresh lease, and the durable job
+    // completes through the new claim.
+    let recovered = worker.run_once(now_us()).unwrap();
+    assert_eq!(recovered.claimed, 1, "the expired lease is reclaimed");
+    assert_eq!(recovered.committed, 1, "the reclaimed job completes");
+    assert_eq!(attachment_status(&path, attachment), "ready");
+
+    let conn = Connection::open(&path).unwrap();
+    let (state, epoch, attempts): (String, i64, i64) = conn
+        .query_row(
+            "SELECT state, lease_epoch, attempts FROM attachment_job WHERE attachment_id=?1",
+            [attachment],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    drop(conn);
+    assert_eq!(state, "done", "the recovered job finished");
+    assert_eq!(epoch, 2, "recovery takes a fresh lease epoch");
+    assert_eq!(attempts, 2, "recovery counts as a new attempt");
 }
 
 // ── Render failures, absent commands, empty images ───────────────────────
@@ -1677,6 +1810,11 @@ fn a_separate_extractor_process_makes_the_upload_ready() {
     );
     assert_eq!(attachment_status(&legacy, attachment), "uploaded");
 
+    // A separate extractor process has no local wake: it can only find the
+    // durable upload through its fallback poll. The bound runs from the
+    // durable commit, not from the extractor's start.
+    let discovery_deadline = Instant::now() + Duration::from_secs(30);
+
     let binary = env!("CARGO_BIN_EXE_mcpmem");
     let memory = legacy.to_str().unwrap();
 
@@ -1734,12 +1872,11 @@ fn a_separate_extractor_process_makes_the_upload_ready() {
         .expect("spawn the extractor process");
     let b_lines = drain_lines(b.stderr.take().unwrap());
 
-    let deadline = Instant::now() + Duration::from_secs(30);
     while attachment_status(&legacy, attachment) != "ready" {
         assert!(
-            Instant::now() < deadline,
-            "the separate extractor process must claim and complete the job; \
-             stderr:\n{}",
+            Instant::now() < discovery_deadline,
+            "the separate extractor process must discover the durable upload \
+             within 30 seconds; stderr:\n{}",
             b_lines.lock().join("\n")
         );
         std::thread::sleep(Duration::from_millis(100));
