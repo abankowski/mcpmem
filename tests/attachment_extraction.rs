@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use mcpmem::config::{Durability, SqliteTuning};
 use mcpmem::workspace::{WorkspaceAccess, WorkspaceRegistry};
 use mcpmem_core::attachments::{AttachmentJobRepository, AttachmentLimits, AttachmentRepository};
@@ -26,6 +27,7 @@ use mcpmem_core::events::now_us;
 use mcpmem_core::graph::GraphHandle;
 use mcpmem_core::types::EntityInput;
 use rusqlite::Connection;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "extractor")]
@@ -1779,6 +1781,83 @@ fn wait_for_line(lines: &Arc<Mutex<Vec<String>>>, needle: &str, timeout: Duratio
     }
 }
 
+/// Drain a child's stdout on a background thread into a line queue, so a
+/// test thread can wait for one JSON-RPC response with a timeout instead
+/// of blocking on the pipe forever. The stdio transport writes responses
+/// in request order, so the queue order is the response order.
+#[cfg(feature = "extractor")]
+fn drain_stdout(
+    mut stdout: std::process::ChildStdout,
+) -> Arc<Mutex<std::collections::VecDeque<String>>> {
+    let lines = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+    let captured = Arc::clone(&lines);
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(&mut stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => captured.lock().push_back(line.trim_end().to_owned()),
+            }
+        }
+    });
+    lines
+}
+
+/// One JSON-RPC `tools/call` over a spawned process's line-delimited stdio
+/// transport: one request line in, one response line out, matched by id.
+#[cfg(feature = "extractor")]
+fn mcp_call(
+    stdin: &mut std::process::ChildStdin,
+    stdout_lines: &Arc<Mutex<std::collections::VecDeque<String>>>,
+    id: u64,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> serde_json::Value {
+    let mut request = serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    }))
+    .unwrap();
+    request.push('\n');
+    stdin.write_all(request.as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    let wait_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(line) = stdout_lines.lock().pop_front() {
+            let response: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|error| {
+                panic!("invalid JSON-RPC response for request {id}: {error}: {line}")
+            });
+            assert_eq!(
+                response["id"], id,
+                "the response must answer request {id}: {response}"
+            );
+            return response;
+        }
+        assert!(
+            Instant::now() < wait_deadline,
+            "timed out waiting for the MCP process to answer request {id}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The tool payload of a successful `tools/call` response, parsed from its
+/// text content.
+#[cfg(feature = "extractor")]
+fn mcp_result(response: &serde_json::Value) -> serde_json::Value {
+    assert!(
+        !response["result"]["isError"].as_bool().unwrap_or(false),
+        "unexpected MCP tool failure: {response}"
+    );
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected MCP text content: {response}"));
+    serde_json::from_str(text).unwrap()
+}
+
 #[cfg(feature = "extractor")]
 #[test]
 fn a_separate_extractor_process_makes_the_upload_ready() {
@@ -1789,6 +1868,7 @@ fn a_separate_extractor_process_makes_the_upload_ready() {
         .resolve("machine:local", None, WorkspaceAccess::Owner)
         .unwrap();
     assert_eq!(record.graph_path, legacy);
+    let workspace_id = record.workspace_id;
 
     let handle = graph(&legacy);
     handle.create_entities(&[entity("doc")]).unwrap();
@@ -1800,27 +1880,69 @@ fn a_separate_extractor_process_makes_the_upload_ready() {
             row.get(0)
         })
         .unwrap();
+    // An unfinished upload whose session has already expired: the
+    // extractor's first turn must sweep it, the durable handshake that
+    // the turn has run.
+    AttachmentRepository::new(&conn)
+        .begin_upload(
+            "alice",
+            entity_id,
+            "stale.txt",
+            "text/plain",
+            4,
+            &digest(b"1234"),
+            now_us() - 1,
+            &limits(),
+        )
+        .unwrap();
     drop(conn);
-    let attachment = upload(
-        &legacy,
-        entity_id,
-        "memo.txt",
-        "text/plain",
-        b"durable text\n",
-    );
-    assert_eq!(attachment_status(&legacy, attachment), "uploaded");
-
-    // A separate extractor process has no local wake: it can only find the
-    // durable upload through its fallback poll. The bound runs from the
-    // durable commit, not from the extractor's start.
-    let discovery_deadline = Instant::now() + Duration::from_secs(30);
 
     let binary = env!("CARGO_BIN_EXE_mcpmem");
     let memory = legacy.to_str().unwrap();
 
+    // Process B: the separate extractor process on the same workspace
+    // graph, started while only the expired session exists. Nothing in
+    // this process can fire its local wake, so it can only discover the
+    // later durable upload through the fallback poll.
+    let mut b = Command::new(binary)
+        .args(["--memory-file", memory, "--role", "extractor"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the extractor process");
+    let b_lines = drain_lines(b.stderr.take().unwrap());
+
+    // Wait for B's first full turn by polling the durable graph until the
+    // expired session is swept. Settle afterwards so the post-turn
+    // deadline scan also completes before the upload commits below:
+    // otherwise the scan would see the due upload and start an immediate
+    // turn instead of arming the fallback timer.
+    let sweep_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let conn = Connection::open(&legacy).unwrap();
+        let unfinished: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM attachment_upload WHERE attachment_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        if unfinished == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < sweep_deadline,
+            "the extractor never completed its first turn; stderr:\n{}",
+            b_lines.lock().join("\n")
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+
     // Process A: the MCP process with attachment tools enabled and no
-    // extractor role. It must warn at startup and never extract, while the
-    // upload stays durably queued.
+    // extractor role. It must warn at startup and never extract.
     let mut a = Command::new(binary)
         .args([
             "--memory-file",
@@ -1831,11 +1953,10 @@ fn a_separate_extractor_process_makes_the_upload_ready() {
             "--enable-graph-read",
         ])
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn the MCP process");
-    let _a_stdin = a.stdin.take();
     let a_lines = drain_lines(a.stderr.take().unwrap());
     assert!(
         wait_for_line(
@@ -1853,25 +1974,54 @@ fn a_separate_extractor_process_makes_the_upload_ready() {
             .any(|line| line.contains("extractor process is running")),
         "the warning must not claim a remote worker exists"
     );
+
+    // Commit the real upload through process A's attachment tools. The
+    // durable commit is the instant the fallback bound starts from.
+    let mut a_stdin = a.stdin.take().unwrap();
+    let a_stdout_lines = drain_stdout(a.stdout.take().unwrap());
+    let content = b"durable text\n";
+    let sha256 = format!("{:x}", Sha256::digest(content));
+    let upload_id = {
+        let response = mcp_call(
+            &mut a_stdin,
+            &a_stdout_lines,
+            1,
+            "begin_attachment_upload",
+            &json!({"workspaceId": workspace_id, "entityName": "doc",
+                "filename": "memo.txt", "mime": "text/plain",
+                "expectedBytes": content.len(), "sha256": sha256}),
+        );
+        let payload = mcp_result(&response);
+        assert_eq!(payload["nextIndex"], 0);
+        payload["uploadId"].as_str().unwrap().to_owned()
+    };
+    let response = mcp_call(
+        &mut a_stdin,
+        &a_stdout_lines,
+        2,
+        "append_attachment_chunk",
+        &json!({"workspaceId": workspace_id, "uploadId": upload_id,
+            "index": 0, "content": STANDARD.encode(content)}),
+    );
+    assert_eq!(mcp_result(&response)["nextIndex"], 1);
+    let response = mcp_call(
+        &mut a_stdin,
+        &a_stdout_lines,
+        3,
+        "finish_attachment_upload",
+        &json!({"workspaceId": workspace_id, "uploadId": upload_id}),
+    );
+    let attachment = mcp_result(&response)["attachmentId"].as_i64().unwrap();
     assert_eq!(
         attachment_status(&legacy, attachment),
         "uploaded",
         "a process without the extractor role must not extract"
     );
-    a.kill().expect("stop the MCP process");
-    a.wait().unwrap();
 
-    // Process B: a separate extractor process on the same workspace graph.
-    // No local worker on the MCP process is involved.
-    let mut b = Command::new(binary)
-        .args(["--memory-file", memory, "--role", "extractor"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn the extractor process");
-    let b_lines = drain_lines(b.stderr.take().unwrap());
-
+    // B is idle on its fallback timer: no local signal can reach it, so
+    // only the fallback poll can discover the durable commit. The bound
+    // runs from the commit.
+    let discovery_deadline = Instant::now() + Duration::from_secs(30);
     while attachment_status(&legacy, attachment) != "ready" {
         assert!(
             Instant::now() < discovery_deadline,
@@ -1879,13 +2029,15 @@ fn a_separate_extractor_process_makes_the_upload_ready() {
              within 30 seconds; stderr:\n{}",
             b_lines.lock().join("\n")
         );
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
     }
     assert!(
         wait_for_line(&b_lines, "attachment extracted", Duration::from_secs(10)),
         "the extractor process logs the completed extraction; stderr:\n{}",
         b_lines.lock().join("\n")
     );
+    a.kill().expect("stop the MCP process");
+    a.wait().unwrap();
     b.kill().expect("stop the extractor process");
     b.wait().unwrap();
 
