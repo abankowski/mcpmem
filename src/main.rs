@@ -66,6 +66,20 @@ async fn inner_main() -> Result<()> {
         );
     }
 
+    #[cfg(feature = "extractor")]
+    let extractor_wake = config
+        .roles
+        .roles()
+        .contains(&runtime::RuntimeRole::Extractor)
+        .then(runtime::ExtractorWake::new);
+
+    #[cfg(feature = "extractor")]
+    let mcp_server = Arc::new(server::MCPServer::new_with_extractor_wake(
+        (*config).clone(),
+        args.vector_config(),
+        extractor_wake.clone(),
+    )?);
+    #[cfg(not(feature = "extractor"))]
     let mcp_server = Arc::new(server::MCPServer::new(
         (*config).clone(),
         args.vector_config(),
@@ -224,11 +238,7 @@ async fn inner_main() -> Result<()> {
     // turn. OCR resolution never fails startup: an invalid `[ocr]` section
     // fails PDF jobs at stage `config`, while text extraction keeps working.
     #[cfg(feature = "extractor")]
-    let services = if config
-        .roles
-        .roles()
-        .contains(&runtime::RuntimeRole::Extractor)
-    {
+    let services = if let Some(extractor_wake) = extractor_wake {
         // The OCR provider builds a reqwest blocking client. Building it in
         // the async startup drops that client's runtime inside an async
         // context, which tokio refuses at runtime. block_in_place gives the
@@ -237,10 +247,13 @@ async fn inner_main() -> Result<()> {
         let ocr = tokio::task::block_in_place(|| {
             runtime::ocr_provider(config.ocr.as_ref(), file.as_ref().map(|(_, loaded)| loaded))
         });
-        services.with_extractor(Arc::new(runtime::ExtractorService::with_workspaces(
-            mcp_server.workspace_registry(),
-            ocr,
-        )))
+        services.with_extractor(Arc::new(
+            runtime::ExtractorService::with_workspaces_and_wake(
+                mcp_server.workspace_registry(),
+                ocr,
+                extractor_wake,
+            ),
+        ))
     } else {
         services
     };

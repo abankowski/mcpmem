@@ -19,12 +19,16 @@ use uuid::Uuid;
 
 use crate::config_file::AttachmentsSection;
 use crate::errors::{MCSError, Result};
+#[cfg(feature = "extractor")]
+use crate::runtime::ExtractorWake;
 use crate::workspace::WorkspaceRegistry;
 
 #[derive(Clone)]
 pub(crate) struct ToolSettings {
     pub limits: Arc<AttachmentLimits>,
     pub busy_timeout_ms: u64,
+    #[cfg(feature = "extractor")]
+    pub extractor_wake: Option<ExtractorWake>,
 }
 
 // A dispatch receives a registry, not the MCPServer. Key the settings by that
@@ -36,6 +40,7 @@ pub(crate) fn configure(
     registry: &Arc<WorkspaceRegistry>,
     attachments: &AttachmentsSection,
     busy_timeout_ms: u64,
+    #[cfg(feature = "extractor")] extractor_wake: Option<ExtractorWake>,
 ) {
     let mut settings = SETTINGS.lock().expect("attachment settings lock poisoned");
     settings.retain(|(owner, _)| owner.strong_count() != 0);
@@ -48,6 +53,8 @@ pub(crate) fn configure(
                 allow_mime: attachments.allow_mime.clone(),
             }),
             busy_timeout_ms,
+            #[cfg(feature = "extractor")]
+            extractor_wake,
         },
     ));
 }
@@ -195,16 +202,16 @@ fn text_response(body: &Value) -> Result<Value> {
 
 /// The dispatcher calls this only after the category, principal, and workspace
 /// checks. The core repository owns upload sessions and file finalization.
-pub fn handle(
+pub(crate) fn handle(
     name: &str,
     args: Option<&Value>,
     principal_id: &str,
     graph_path: &Path,
-    limits: &AttachmentLimits,
-    busy_timeout_ms: u64,
+    settings: &ToolSettings,
 ) -> Result<Value> {
     let args = arguments(args)?;
-    let conn = open_graph(graph_path, busy_timeout_ms)?;
+    let conn = open_graph(graph_path, settings.busy_timeout_ms)?;
+    let limits = &settings.limits;
     let repository = AttachmentRepository::new(&conn);
     let response = match name {
         "begin_attachment_upload" => {
@@ -252,6 +259,10 @@ pub fn handle(
         "finish_attachment_upload" => {
             let upload = upload_id(args)?;
             let id = repository.finish_upload(principal_id, upload, now_us(), limits)?;
+            #[cfg(feature = "extractor")]
+            if let Some(extractor_wake) = settings.extractor_wake.as_ref() {
+                extractor_wake.wake();
+            }
             json!({"attachmentId": id, "status": "uploaded"})
         }
         "cancel_attachment_upload" => {

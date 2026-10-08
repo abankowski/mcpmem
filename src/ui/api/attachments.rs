@@ -683,6 +683,8 @@ async fn post_attachment_handler(
         Err(response) => return *response,
     };
     let limits = Arc::clone(&state.attachment_limits);
+    #[cfg(feature = "extractor")]
+    let extractor_wake = state.extractor_wake.clone();
     let entity_name_copy = entity_name.clone();
     match attachment_result(path, move |conn| {
         let entity_id = conn
@@ -711,6 +713,10 @@ async fn post_attachment_handler(
                 mcpmem_core::events::now_us(),
             )
             .map_err(attachment_failure)?;
+        #[cfg(feature = "extractor")]
+        if let Some(extractor_wake) = extractor_wake {
+            extractor_wake.wake();
+        }
         Ok(Json(json!({
             "attachmentId": attachment_id,
             "status": "uploaded",
