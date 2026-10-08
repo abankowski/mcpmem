@@ -129,6 +129,10 @@ export function PrincipalForm({ title, submitLabel, busy, defaults, showIdentity
           <legend style={{ color: "var(--ink-faint)", font: "500 11px/16px var(--font-mono)", letterSpacing: ".06em", textTransform: "uppercase" }}>
             Scopes
           </legend>
+          <div className="ui-admin-row-actions" style={{ justifyContent: "flex-start" }}>
+            <Button size="sm" variant="ghost" onClick={() => setScopes(SCOPE_OPTIONS.map((option) => option.slug))}>Select all</Button>
+            <Button size="sm" variant="ghost" onClick={() => setScopes([])}>Clear</Button>
+          </div>
           <div className="ui-admin-scopes">
             {SCOPE_OPTIONS.map((option) => (
               <label key={option.slug} className="ui-admin-scope">

@@ -137,6 +137,20 @@ legend { padding: 0; }
 }
 .scope-card:hover { border-color: var(--line-strong); }
 .scope-card:has(input:checked) { border-color: var(--line-strong); }
+.select-all {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--ink-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.select-all input[type="checkbox"] {
+  accent-color: var(--orange);
+  width: 16px;
+  height: 16px;
+}
 .scope-card input[type="checkbox"] {
   accent-color: var(--orange);
   width: 16px;
@@ -227,6 +241,7 @@ legend { padding: 0; }
       <input type="hidden" name="state" value="{{state}}">
       <fieldset>
         <legend class="cap">Grant only what it needs</legend>
+        <label class="select-all"><input type="checkbox" id="select-all-scopes"> Select all</label>
         {{scopes}}
       </fieldset>
       <div class="identity">You are signed in as <bdi>{{principal_label}}</bdi>.</div>
@@ -235,6 +250,26 @@ legend { padding: 0; }
         <button type="submit" class="btn primary" name="approve" value="1">Approve</button>
       </div>
     </form>
+    <script>
+      // One click grants everything the client asked for. The scopes the
+      // human grants are the box states at submit time, so this only ticks
+      // the boxes; it never changes what the form sends.
+      (function () {
+        var master = document.getElementById("select-all-scopes");
+        if (!master) return;
+        var boxes = Array.prototype.slice.call(
+          document.querySelectorAll('.scope-card input[name="scope"]')
+        );
+        var sync = function () {
+          master.checked = boxes.length > 0 && boxes.every(function (box) { return box.checked; });
+        };
+        master.addEventListener("change", function () {
+          boxes.forEach(function (box) { box.checked = master.checked; });
+        });
+        boxes.forEach(function (box) { box.addEventListener("change", sync); });
+        sync();
+      })();
+    </script>
   </div>
 
   <div class="revoke">You can revoke this grant any time in Admin · Principals.</div>

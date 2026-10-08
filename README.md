@@ -1055,7 +1055,8 @@ all.
 connector**, with the URL `https://mem.example.com/mcp`. Claude reads the two
 discovery documents, registers itself at `POST /oauth/register`, and opens the
 Google login. After Google answers, `mcpmem` serves its own consent page, which
-names the client, the human, and one checkbox per offered scope. Approving sends
+names the client, the human, and one checkbox per offered scope, with a
+**Select all** box that ticks every scope at once. Approving sends
 Claude back to `https://claude.ai/api/mcp/auth_callback` with a code, which it
 exchanges for a token.
 
@@ -1087,10 +1088,12 @@ on the principals list at all — which is where the approval waitlist below can
 record you as pending instead.
 
 The page lists all principals together — built-ins and runtime rows — and
-offers edit, add and remove for the runtime ones. Removing a runtime principal
-revokes its live token families immediately — an already-minted access token
-is refused from the moment of deletion, not after its one-hour TTL — and every
-refresh and new login is refused from that moment.
+offers edit, add and remove for the runtime ones. The scopes list in the
+principal form has **Select all** and **Clear** buttons that tick or empty
+every scope at once. Removing a runtime principal revokes its live token
+families immediately — an already-minted access token is refused from the
+moment of deletion, not after its one-hour TTL — and every refresh and new
+login is refused from that moment.
 
 The graph viewer signs in the same way: `/ui` is a reserved PKCE client too
 (`mcpmem-graph-ui`, asking for the `graph-read` scope alone), so an OAuth
