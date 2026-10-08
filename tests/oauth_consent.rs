@@ -635,6 +635,42 @@ fn every_value_the_page_draws_is_isolated_from_the_text_around_it() {
     );
 }
 
+/// The whole page offers one select-all control that ticks every scope card.
+/// The human has to act — the master box starts unticked — and the box the
+/// human sees is the box the form posts: the script only mirrors `checked`
+/// onto the scope inputs, it never adds a scope to the request.
+#[test]
+fn the_consent_page_carries_one_select_all_control() {
+    let html = page(
+        "Claude",
+        "adam@example.com",
+        "https://claude.ai/api/mcp/auth_callback",
+        &["graph-read".to_string(), "graph-write".to_string()],
+        "csrf-value",
+        "state-value",
+    );
+    assert_eq!(
+        html.matches(r#"id="select-all-scopes""#).count(),
+        1,
+        "the select-all master must appear exactly once: {html}"
+    );
+    assert!(
+        html.contains(r#"querySelectorAll('.scope-card input[name="scope"]')"#),
+        "the script must address the scope cards: {html}"
+    );
+    assert!(
+        html.contains("box.checked = master.checked"),
+        "the master must tick the scope boxes: {html}"
+    );
+    // The master box itself never submits as a scope.
+    assert!(
+        html.contains(r#"<input type="checkbox" id="select-all-scopes">"#),
+        "the master box must not carry name=\"scope\": {html}"
+    );
+}
+
+/// Escape the few HTML-significant characters; the name comes from an
+/// upstream identity provider.
 #[test]
 fn escape_html_covers_every_dangerous_character() {
     assert_eq!(escape_html(r#"<>&"'"#), "&lt;&gt;&amp;&quot;&#39;");
