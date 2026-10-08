@@ -54,31 +54,31 @@ flowchart LR
 - Produces: `AttachmentJobRepository::next_due_us(now_us: i64) -> Result<Option<i64>, AttachmentError>`.
 - Produces: `ExtractionWorker::next_due_us(now_us: i64) -> Result<Option<i64>, ExtractionError>`.
 
-- [ ] **Step 1: Write failing repository tests**
+- [x] **Step 1: Write failing repository tests**
 
 Add tests that create a pending retry, an expired lease, and an unfinished upload. Assert that `next_due_us` returns their minimum deadline. Add a test that asserts `None` when no future work exists.
 
-- [ ] **Step 2: Run the new core tests and verify red**
+- [x] **Step 2: Run the new core tests and verify red**
 
 Run: `cargo test -p mcpmem-core next_due_us -- --exact`
 
 Expected: FAIL because the repository has no `next_due_us` method.
 
-- [ ] **Step 3: Add the repository query**
+- [x] **Step 3: Add the repository query**
 
 Add one SQL query in `AttachmentJobRepository`. Use the same live entity, revision, attachment state, and attempt predicates as `claim_due`. Combine pending job retry, leased job recovery, and upload expiry with `MIN`.
 
-- [ ] **Step 4: Add the worker forwarding method**
+- [x] **Step 4: Add the worker forwarding method**
 
 Add `ExtractionWorker::next_due_us`. Open the graph, set the current busy timeout, initialize the schema, and call the repository method.
 
-- [ ] **Step 5: Run the core and worker tests and verify green**
+- [x] **Step 5: Run the core and worker tests and verify green**
 
 Run: `cargo test -p mcpmem-core next_due_us && cargo test -p mcpmem-extractor next_due_us`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Commit the repository and worker deadline interface with its tests.
 
@@ -95,35 +95,35 @@ Commit the repository and worker deadline interface with its tests.
 - Produces: cloneable `ExtractorWake` with `new() -> Self` and `wake(&self)`.
 - Produces: wake-aware `ExtractorService` constructors. The current constructors keep no wake so existing callers stay valid until Task 3.
 
-- [ ] **Step 1: Write failing runtime tests**
+- [x] **Step 1: Write failing runtime tests**
 
 Add a test that starts an idle extractor role, sends `ExtractorWake::wake`, and observes a new turn without a 250 ms delay. Add a test that gives a retry deadline in the future and observes a turn at the deadline without a wake. Keep the two-workspace fairness test.
 
-- [ ] **Step 2: Run the runtime tests and verify red**
+- [x] **Step 2: Run the runtime tests and verify red**
 
 Run: `cargo test --lib --features extractor workspace_extractor_tests -- --test-threads=1`
 
 Expected: FAIL because `ExtractorWake` and the deadline-aware loop do not exist.
 
-- [ ] **Step 3: Add a report predicate and wake type**
+- [x] **Step 3: Add a report predicate and wake type**
 
 Add `ExtractionReport::has_work()` or an equivalent pure predicate. It returns true when `claimed`, `committed`, `retried`, `dead`, or `expired_sessions` is nonzero. Add `ExtractorWake` over `Arc<tokio::sync::Notify>`.
 
-- [ ] **Step 4: Replace the fixed sleep**
+- [x] **Step 4: Replace the fixed sleep**
 
 After each turn, scan the registered graph paths for their earliest durable deadlines. Select between one local wake and a timer to the earlier durable deadline or 30-second fallback. Start another turn without a wait when a deadline is due.
 
-- [ ] **Step 5: Stop zero-report completion logs**
+- [x] **Step 5: Stop zero-report completion logs**
 
 Emit `extractor turn finished` only when the report predicate is true. Retain the existing error logs.
 
-- [ ] **Step 6: Run the runtime tests and verify green**
+- [x] **Step 6: Run the runtime tests and verify green**
 
 Run: `cargo test --lib --features extractor workspace_extractor_tests -- --test-threads=1`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 Commit the runtime scheduler and its tests.
 
@@ -145,31 +145,31 @@ Commit the runtime scheduler and its tests.
 - Consumes: optional `ExtractorWake` in the tool and HTTP settings.
 - Produces: a wake only after `finish_upload` or `store_reader` returns a committed attachment.
 
-- [ ] **Step 1: Write failing MCP and HTTP wake tests**
+- [x] **Step 1: Write failing MCP and HTTP wake tests**
 
 In the MCP test, complete an upload with an injected wake and assert one receiver notification. In the HTTP test, upload a text file with an injected wake and assert one receiver notification. Add failure cases that use an invalid upload and assert no notification.
 
-- [ ] **Step 2: Run the upload tests and verify red**
+- [x] **Step 2: Run the upload tests and verify red**
 
 Run: `cargo test --test attachment_mcp --test attachment_http --features extractor -- --test-threads=1`
 
 Expected: FAIL because neither surface owns a wake handle.
 
-- [ ] **Step 3: Construct and inject the one local wake**
+- [x] **Step 3: Construct and inject the one local wake**
 
 In `main`, create one wake when the extractor role is active. Call the wake-aware `ExtractorService` constructor. Pass clones to `ToolSettings` and `HttpState`. Pass `None` when the role is absent.
 
-- [ ] **Step 4: Notify only after success**
+- [x] **Step 4: Notify only after success**
 
 Call `wake()` after `AttachmentRepository::finish_upload` succeeds in the MCP path. Call `wake()` after `AttachmentRepository::store_reader` succeeds in the HTTP path. Do not notify for failures, cancels, or incomplete sessions.
 
-- [ ] **Step 5: Run the upload tests and verify green**
+- [x] **Step 5: Run the upload tests and verify green**
 
 Run: `cargo test --test attachment_mcp --test attachment_http --features extractor -- --test-threads=1`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 Commit the production wiring and both upload-path tests.
 
@@ -184,27 +184,27 @@ Commit the production wiring and both upload-path tests.
 - Consumes: the deadline-aware scheduler and upload wake wiring.
 - Produces: coverage for retry, lease, expiry, and separate-process fallback behavior.
 
-- [ ] **Step 1: Write failing integration tests**
+- [x] **Step 1: Write failing integration tests**
 
 Add a test that waits for a retry deadline without a new upload. Add a test that makes a lease expired and observes recovery. Update the separate-process test to assert discovery within 30 seconds after a durable upload.
 
-- [ ] **Step 2: Run the integration tests and verify red**
+- [x] **Step 2: Run the integration tests and verify red**
 
 Run: `cargo test --test attachment_extraction --features extractor -- --test-threads=1`
 
 Expected: FAIL before the scheduler behavior is fully wired.
 
-- [ ] **Step 3: Make the tests repeatable**
+- [x] **Step 3: Make the tests repeatable**
 
 Use short durable timestamps in a test graph. Do not use a fixed sleep as the assertion. Poll only the durable attachment state up to the stated deadline.
 
-- [ ] **Step 4: Run the integration tests and verify green**
+- [x] **Step 4: Run the integration tests and verify green**
 
 Run: `cargo test --test attachment_extraction --features extractor -- --test-threads=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit the scheduler recovery coverage.
 
@@ -223,7 +223,7 @@ Commit the scheduler recovery coverage.
 - Consumes: all prior scheduler work.
 - Produces: full feature-matrix verification evidence.
 
-- [ ] **Step 1: Run the full relevant matrix**
+- [x] **Step 1: Run the full relevant matrix**
 
 Run:
 
@@ -237,10 +237,10 @@ cargo test --test role_composition --features extractor,webhooks
 
 Expected: PASS.
 
-- [ ] **Step 2: Exercise the local wake path**
+- [x] **Step 2: Exercise the local wake path**
 
 Start the local role with an attachment upload. Observe that the attachment becomes ready without the former 250 ms fixed wait.
 
-- [ ] **Step 3: Commit any verification-only correction**
+- [x] **Step 3: Commit any verification-only correction**
 
 Commit only an actual defect that the matrix exposes.

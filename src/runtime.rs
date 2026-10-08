@@ -826,20 +826,6 @@ impl ExtractorService {
         }
     }
 
-    /// Preserve the one-file constructor for callers with one graph.
-    pub fn new(
-        database: impl Into<std::path::PathBuf>,
-        ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
-    ) -> Self {
-        Self::from_target(
-            ExtractorTarget::Single {
-                database: database.into(),
-            },
-            ocr,
-            None,
-        )
-    }
-
     /// Build a one-graph extractor with a local wake handle.
     pub fn new_with_wake(
         database: impl Into<std::path::PathBuf>,
@@ -852,23 +838,6 @@ impl ExtractorService {
             },
             ocr,
             Some(wake),
-        )
-    }
-
-    /// Read trusted graph paths anew on every bounded worker turn.
-    pub fn with_workspaces(
-        registry: Arc<crate::workspace::WorkspaceRegistry>,
-        ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
-    ) -> Self {
-        Self::from_target(
-            ExtractorTarget::Workspaces {
-                registry,
-                state: Mutex::new(WorkspaceExtractorState::default()),
-                #[cfg(test)]
-                test_barrier: Mutex::new(None),
-            },
-            ocr,
-            None,
         )
     }
 
