@@ -93,7 +93,7 @@ Commit the repository and worker deadline interface with its tests.
 **Interfaces:**
 - Consumes: `ExtractionWorker::next_due_us(now_us: i64) -> Result<Option<i64>, ExtractionError>`.
 - Produces: cloneable `ExtractorWake` with `new() -> Self` and `wake(&self)`.
-- Produces: `ExtractorService` constructors that receive an optional `ExtractorWake`.
+- Produces: wake-aware `ExtractorService` constructors. The current constructors keep no wake so existing callers stay valid until Task 3.
 
 - [ ] **Step 1: Write failing runtime tests**
 
@@ -157,7 +157,7 @@ Expected: FAIL because neither surface owns a wake handle.
 
 - [ ] **Step 3: Construct and inject the one local wake**
 
-In `main`, create one wake when the extractor role is active. Pass clones to `ExtractorService`, `ToolSettings`, and `HttpState`. Pass `None` when the role is absent.
+In `main`, create one wake when the extractor role is active. Call the wake-aware `ExtractorService` constructor. Pass clones to `ToolSettings` and `HttpState`. Pass `None` when the role is absent.
 
 - [ ] **Step 4: Notify only after success**
 

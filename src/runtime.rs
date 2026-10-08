@@ -567,10 +567,105 @@ pub fn ocr_provider(
 }
 
 #[cfg(feature = "extractor")]
+#[derive(Clone)]
+pub struct ExtractorWake {
+    notify: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(feature = "extractor")]
+impl ExtractorWake {
+    /// Make a handle that wakes the local extractor.
+    pub fn new() -> Self {
+        Self {
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    pub fn wake(&self) {
+        self.notify.notify_one();
+    }
+}
+
+#[cfg(feature = "extractor")]
 #[derive(Default)]
 struct WorkspaceExtractorState {
     cursor: usize,
     warned_empty: bool,
+}
+
+#[cfg(all(test, feature = "extractor"))]
+#[derive(Clone)]
+struct ExtractorTestWaitProbe {
+    timer_polled: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(all(test, feature = "extractor"))]
+impl ExtractorTestWaitProbe {
+    fn new() -> Self {
+        Self {
+            timer_polled: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn signal_timer_poll(&self) {
+        self.timer_polled.notify_one();
+    }
+
+    async fn wait_for_timer_poll(&self) {
+        self.timer_polled.notified().await;
+    }
+}
+
+#[cfg(all(test, feature = "extractor"))]
+struct ExtractorTestTimer {
+    timer: std::pin::Pin<Box<tokio::time::Sleep>>,
+    probe: Option<ExtractorTestWaitProbe>,
+}
+
+#[cfg(all(test, feature = "extractor"))]
+impl ExtractorTestTimer {
+    fn new(duration: std::time::Duration, probe: Option<ExtractorTestWaitProbe>) -> Self {
+        Self {
+            timer: Box::pin(tokio::time::sleep(duration)),
+            probe,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "extractor"))]
+impl Future for ExtractorTestTimer {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let outcome = Future::poll(this.timer.as_mut(), context);
+        if let Some(probe) = this.probe.take() {
+            probe.signal_timer_poll();
+        }
+        outcome
+    }
+}
+
+#[cfg(all(test, feature = "extractor"))]
+#[derive(Clone)]
+struct ExtractorTestBarrier {
+    idle_turn_finished: Arc<tokio::sync::Barrier>,
+    scan_ready: Arc<tokio::sync::Barrier>,
+    wait_probe: ExtractorTestWaitProbe,
+}
+
+#[cfg(all(test, feature = "extractor"))]
+impl ExtractorTestBarrier {
+    fn new() -> Self {
+        Self {
+            idle_turn_finished: Arc::new(tokio::sync::Barrier::new(2)),
+            scan_ready: Arc::new(tokio::sync::Barrier::new(2)),
+            wait_probe: ExtractorTestWaitProbe::new(),
+        }
+    }
 }
 
 #[cfg(feature = "extractor")]
@@ -581,13 +676,26 @@ enum ExtractorTarget {
     Workspaces {
         registry: Arc<crate::workspace::WorkspaceRegistry>,
         state: Mutex<WorkspaceExtractorState>,
+        #[cfg(test)]
+        test_barrier: Mutex<Option<ExtractorTestBarrier>>,
     },
+}
+
+#[cfg(all(test, feature = "extractor"))]
+impl ExtractorTarget {
+    fn take_test_barrier(&self) -> Option<ExtractorTestBarrier> {
+        match self {
+            Self::Single { .. } => None,
+            Self::Workspaces { test_barrier, .. } => test_barrier.lock().take(),
+        }
+    }
 }
 
 #[cfg(feature = "extractor")]
 pub struct ExtractorService {
     target: Arc<ExtractorTarget>,
     ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+    wake: Option<ExtractorWake>,
 }
 
 #[cfg(feature = "extractor")]
@@ -599,6 +707,64 @@ fn run_extractor_graph(
     mcpmem_extractor::ExtractionWorker::new(path, ocr)
         .run_once(now_us)
         .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "extractor")]
+const EXTRACTOR_FALLBACK_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(feature = "extractor")]
+fn extractor_report_has_work(report: &mcpmem_extractor::ExtractionReport) -> bool {
+    report.claimed != 0
+        || report.committed != 0
+        || report.retried != 0
+        || report.dead != 0
+        || report.expired_sessions != 0
+}
+
+#[cfg(feature = "extractor")]
+fn extractor_graph_next_due_us(path: &std::path::Path, now_us: i64) -> Result<Option<i64>, String> {
+    mcpmem_extractor::ExtractionWorker::new(path, None)
+        .next_due_us(now_us)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "extractor")]
+fn extractor_next_due_us(target: &ExtractorTarget, now_us: i64) -> Result<Option<i64>, String> {
+    match target {
+        ExtractorTarget::Single { database } => extractor_graph_next_due_us(database, now_us),
+        ExtractorTarget::Workspaces { registry, .. } => {
+            let mut earliest_due_us: Option<i64> = None;
+            for (id, path) in registry.all_paths().map_err(|error| error.to_string())? {
+                match extractor_graph_next_due_us(&path, now_us) {
+                    Ok(Some(due_us)) => {
+                        earliest_due_us =
+                            Some(earliest_due_us.map_or(due_us, |earliest| earliest.min(due_us)));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::error!(
+                            workspace_id = %id,
+                            %error,
+                            "extractor deadline scan failed for one workspace; the fallback poll stays scheduled"
+                        );
+                    }
+                }
+            }
+            Ok(earliest_due_us)
+        }
+    }
+}
+
+#[cfg(feature = "extractor")]
+fn extractor_wait_duration(next_due_us: Option<i64>, now_us: i64) -> Option<std::time::Duration> {
+    match next_due_us {
+        Some(due_us) if due_us <= now_us => None,
+        Some(due_us) => Some(
+            std::time::Duration::from_micros(due_us.saturating_sub(now_us) as u64)
+                .min(EXTRACTOR_FALLBACK_DELAY),
+        ),
+        None => Some(EXTRACTOR_FALLBACK_DELAY),
+    }
 }
 
 #[cfg(feature = "extractor")]
@@ -619,11 +785,13 @@ fn run_extractor_workspace_turn(
     };
     match run_extractor_graph(&path, ocr, now_us) {
         Ok(report) => {
-            tracing::debug!(
-                workspace_id = %id,
-                report = ?report,
-                "extractor turn finished"
-            );
+            if extractor_report_has_work(&report) {
+                tracing::debug!(
+                    workspace_id = %id,
+                    report = ?report,
+                    "extractor turn finished"
+                );
+            }
             Ok(report)
         }
         Err(error) => {
@@ -639,17 +807,45 @@ fn run_extractor_workspace_turn(
 
 #[cfg(feature = "extractor")]
 impl ExtractorService {
+    fn from_target(
+        target: ExtractorTarget,
+        ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+        wake: Option<ExtractorWake>,
+    ) -> Self {
+        Self {
+            target: Arc::new(target),
+            ocr,
+            wake,
+        }
+    }
+
     /// Preserve the one-file constructor for callers with one graph.
     pub fn new(
         database: impl Into<std::path::PathBuf>,
         ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
     ) -> Self {
-        Self {
-            target: Arc::new(ExtractorTarget::Single {
+        Self::from_target(
+            ExtractorTarget::Single {
                 database: database.into(),
-            }),
+            },
             ocr,
-        }
+            None,
+        )
+    }
+
+    /// Build a one-graph extractor with a local wake handle.
+    pub fn new_with_wake(
+        database: impl Into<std::path::PathBuf>,
+        ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+        wake: ExtractorWake,
+    ) -> Self {
+        Self::from_target(
+            ExtractorTarget::Single {
+                database: database.into(),
+            },
+            ocr,
+            Some(wake),
+        )
     }
 
     /// Read trusted graph paths anew on every bounded worker turn.
@@ -657,13 +853,34 @@ impl ExtractorService {
         registry: Arc<crate::workspace::WorkspaceRegistry>,
         ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
     ) -> Self {
-        Self {
-            target: Arc::new(ExtractorTarget::Workspaces {
+        Self::from_target(
+            ExtractorTarget::Workspaces {
                 registry,
                 state: Mutex::new(WorkspaceExtractorState::default()),
-            }),
+                #[cfg(test)]
+                test_barrier: Mutex::new(None),
+            },
             ocr,
-        }
+            None,
+        )
+    }
+
+    /// Read trusted graph paths anew with a local wake handle.
+    pub fn with_workspaces_and_wake(
+        registry: Arc<crate::workspace::WorkspaceRegistry>,
+        ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+        wake: ExtractorWake,
+    ) -> Self {
+        Self::from_target(
+            ExtractorTarget::Workspaces {
+                registry,
+                state: Mutex::new(WorkspaceExtractorState::default()),
+                #[cfg(test)]
+                test_barrier: Mutex::new(None),
+            },
+            ocr,
+            Some(wake),
+        )
     }
 }
 
@@ -671,30 +888,95 @@ impl ExtractorService {
 fn extractor_role_loop(
     target: Arc<ExtractorTarget>,
     ocr: Option<Arc<dyn mcpmem_extractor::OcrProvider>>,
+    wake: Option<ExtractorWake>,
 ) -> mcpmem_runtime::RoleFuture {
     Box::pin(async move {
+        #[cfg(test)]
+        let mut test_barrier = target.take_test_barrier();
+
         loop {
+            #[cfg(test)]
+            let first_turn_barrier = test_barrier.take();
+
             let now_us = mcpmem_core::events::now_us();
-            let target = Arc::clone(&target);
-            let ocr = ocr.clone();
-            let result = tokio::task::spawn_blocking(move || match target.as_ref() {
-                ExtractorTarget::Single { database } => run_extractor_graph(database, ocr, now_us),
-                ExtractorTarget::Workspaces { registry, state } => {
-                    run_extractor_workspace_turn(registry, &mut state.lock(), ocr, now_us)
+            let turn_target = Arc::clone(&target);
+            let turn_ocr = ocr.clone();
+            let result = tokio::task::spawn_blocking(move || match turn_target.as_ref() {
+                ExtractorTarget::Single { database } => {
+                    run_extractor_graph(database, turn_ocr, now_us)
                 }
+                ExtractorTarget::Workspaces {
+                    registry, state, ..
+                } => run_extractor_workspace_turn(registry, &mut state.lock(), turn_ocr, now_us),
             })
             .await
             .map_err(|error| RuntimeError::RoleFailed {
                 role: RuntimeRole::Extractor,
                 message: error.to_string(),
             })?;
+            #[cfg(test)]
+            if let Some(test_barrier) = &first_turn_barrier {
+                let report = result
+                    .as_ref()
+                    .expect("the test barrier needs a successful extractor turn");
+                assert!(
+                    !extractor_report_has_work(report),
+                    "the test barrier needs an idle extractor turn"
+                );
+                test_barrier.idle_turn_finished.wait().await;
+                test_barrier.scan_ready.wait().await;
+            }
+
             if let Err(error) = result {
                 tracing::error!(
                     %error,
                     "extractor poll failed for one workspace; the next workspace stays scheduled"
                 );
             }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+            let scan_now_us = mcpmem_core::events::now_us();
+            let scan_target = Arc::clone(&target);
+            let next_due_us = match tokio::task::spawn_blocking(move || {
+                extractor_next_due_us(scan_target.as_ref(), scan_now_us)
+            })
+            .await
+            .map_err(|error| RuntimeError::RoleFailed {
+                role: RuntimeRole::Extractor,
+                message: error.to_string(),
+            })? {
+                Ok(next_due_us) => next_due_us,
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "extractor deadline scan failed; the fallback poll stays scheduled"
+                    );
+                    None
+                }
+            };
+            let Some(wait_duration) =
+                extractor_wait_duration(next_due_us, mcpmem_core::events::now_us())
+            else {
+                continue;
+            };
+
+            #[cfg(test)]
+            let timer = ExtractorTestTimer::new(
+                wait_duration,
+                first_turn_barrier
+                    .as_ref()
+                    .map(|barrier| barrier.wait_probe.clone()),
+            );
+            #[cfg(not(test))]
+            let timer = tokio::time::sleep(wait_duration);
+
+            if let Some(wake) = &wake {
+                tokio::select! {
+                    _ = wake.notify.notified() => {}
+                    _ = timer => {}
+                }
+            } else {
+                timer.await;
+            }
         }
     })
 }
@@ -702,7 +984,11 @@ fn extractor_role_loop(
 #[cfg(feature = "extractor")]
 impl RoleService for ExtractorService {
     fn run(&self) -> mcpmem_runtime::RoleFuture {
-        extractor_role_loop(Arc::clone(&self.target), self.ocr.clone())
+        extractor_role_loop(
+            Arc::clone(&self.target),
+            self.ocr.clone(),
+            self.wake.clone(),
+        )
     }
 }
 
@@ -1275,7 +1561,10 @@ mod workspace_extractor_tests {
     use std::io::Cursor;
     use std::num::NonZeroUsize;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::prelude::*;
 
     fn limits() -> AttachmentLimits {
         AttachmentLimits {
@@ -1309,12 +1598,12 @@ mod workspace_extractor_tests {
         }
     }
 
-    /// One live entity with one queued text attachment, as an upload would
-    /// leave it.
-    fn uploaded(path: &Path) -> i64 {
+    fn create_document(path: &Path) {
         let handle = graph(path);
         handle.create_entities(&[entity("doc")]).unwrap();
-        drop(handle);
+    }
+
+    fn upload_document(path: &Path) -> i64 {
         let conn = Connection::open(path).unwrap();
         AttachmentRepository::new(&conn)
             .store_reader(
@@ -1328,6 +1617,13 @@ mod workspace_extractor_tests {
                 mcpmem_core::events::now_us(),
             )
             .unwrap()
+    }
+
+    /// One live entity with one queued text attachment, as an upload would
+    /// leave it.
+    fn uploaded(path: &Path) -> i64 {
+        create_document(path);
+        upload_document(path)
     }
 
     fn entity_id(path: &Path) -> i64 {
@@ -1346,6 +1642,129 @@ mod workspace_extractor_tests {
             |row| row.get(0),
         )
         .unwrap()
+    }
+
+    struct CompletionEventVisitor {
+        is_completion_event: bool,
+    }
+
+    impl Visit for CompletionEventVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" && format!("{value:?}").contains("extractor turn finished")
+            {
+                self.is_completion_event = true;
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct ExtractorCompletionCapture {
+        completion_events: Arc<AtomicUsize>,
+    }
+
+    impl ExtractorCompletionCapture {
+        fn new() -> Self {
+            Self {
+                completion_events: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for ExtractorCompletionCapture
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().level() != &tracing::Level::DEBUG {
+                return;
+            }
+            let mut visitor = CompletionEventVisitor {
+                is_completion_event: false,
+            };
+            event.record(&mut visitor);
+            if visitor.is_completion_event {
+                self.completion_events.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn capture_extractor_completion_events<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        let capture = ExtractorCompletionCapture::new();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let result = tracing::subscriber::with_default(subscriber, operation);
+        (result, capture.completion_events.load(Ordering::Relaxed))
+    }
+
+    fn workspace_extractor_target(
+        registry: Arc<WorkspaceRegistry>,
+        test_barrier: Option<ExtractorTestBarrier>,
+    ) -> Arc<ExtractorTarget> {
+        Arc::new(ExtractorTarget::Workspaces {
+            registry,
+            state: Mutex::new(WorkspaceExtractorState::default()),
+            test_barrier: Mutex::new(test_barrier),
+        })
+    }
+
+    #[test]
+    fn extractor_report_has_work_for_each_nonzero_counter() {
+        assert!(!extractor_report_has_work(
+            &mcpmem_extractor::ExtractionReport::default()
+        ));
+        for report in [
+            mcpmem_extractor::ExtractionReport {
+                claimed: 1,
+                ..Default::default()
+            },
+            mcpmem_extractor::ExtractionReport {
+                committed: 1,
+                ..Default::default()
+            },
+            mcpmem_extractor::ExtractionReport {
+                retried: 1,
+                ..Default::default()
+            },
+            mcpmem_extractor::ExtractionReport {
+                dead: 1,
+                ..Default::default()
+            },
+            mcpmem_extractor::ExtractionReport {
+                expired_sessions: 1,
+                ..Default::default()
+            },
+        ] {
+            assert!(extractor_report_has_work(&report));
+        }
+    }
+
+    #[test]
+    fn extractor_workspace_turn_emits_completion_event_only_when_report_has_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.sqlite");
+        let registry = WorkspaceRegistry::open(&legacy_path, Some("machine:local")).unwrap();
+        let legacy = registry
+            .resolve("machine:local", None, WorkspaceAccess::Owner)
+            .unwrap();
+        create_document(&legacy.graph_path);
+        let mut state = WorkspaceExtractorState::default();
+
+        let (zero_report, zero_events) = capture_extractor_completion_events(|| {
+            run_extractor_workspace_turn(&registry, &mut state, None, mcpmem_core::events::now_us())
+        });
+        assert_eq!(zero_report.unwrap().committed, 0);
+        assert_eq!(zero_events, 0);
+
+        let attachment = upload_document(&legacy.graph_path);
+        let (nonzero_report, nonzero_events) = capture_extractor_completion_events(|| {
+            run_extractor_workspace_turn(&registry, &mut state, None, mcpmem_core::events::now_us())
+        });
+        assert_eq!(nonzero_report.unwrap().committed, 1);
+        assert_eq!(status(&legacy.graph_path, attachment), "ready");
+        assert_eq!(nonzero_events, 1);
     }
 
     #[test]
@@ -1406,6 +1825,89 @@ mod workspace_extractor_tests {
     }
 
     #[tokio::test]
+    async fn extractor_role_processes_a_local_wake_before_the_legacy_poll_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.sqlite");
+        let registry =
+            Arc::new(WorkspaceRegistry::open(&legacy_path, Some("machine:local")).unwrap());
+        let legacy = registry
+            .resolve("machine:local", None, WorkspaceAccess::Owner)
+            .unwrap();
+        create_document(&legacy.graph_path);
+        let wake = ExtractorWake::new();
+        let barrier = ExtractorTestBarrier::new();
+        let target = workspace_extractor_target(Arc::clone(&registry), Some(barrier.clone()));
+        let role = tokio::spawn(extractor_role_loop(target, None, Some(wake.clone())));
+
+        barrier.idle_turn_finished.wait().await;
+        barrier.scan_ready.wait().await;
+        barrier.wait_probe.wait_for_timer_poll().await;
+        let attachment = upload_document(&legacy.graph_path);
+        wake.wake();
+        let ready = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                if status(&legacy.graph_path, attachment) == "ready" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        role.abort();
+
+        ready.expect("the local wake must start the extractor before the poll delay");
+    }
+
+    #[tokio::test]
+    async fn extractor_role_processes_a_retry_at_its_durable_deadline_without_a_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("legacy.sqlite");
+        let registry =
+            Arc::new(WorkspaceRegistry::open(&legacy_path, Some("machine:local")).unwrap());
+        let legacy = registry
+            .resolve("machine:local", None, WorkspaceAccess::Owner)
+            .unwrap();
+        create_document(&legacy.graph_path);
+        let barrier = ExtractorTestBarrier::new();
+        let target = workspace_extractor_target(Arc::clone(&registry), Some(barrier.clone()));
+        let role = tokio::spawn(extractor_role_loop(target, None, None));
+
+        barrier.idle_turn_finished.wait().await;
+        let attachment = upload_document(&legacy.graph_path);
+        let retry_due_us = mcpmem_core::events::now_us() + 100_000;
+        Connection::open(&legacy.graph_path)
+            .unwrap()
+            .execute(
+                "UPDATE attachment_job
+                 SET next_attempt_us=?2
+                 WHERE attachment_id=?1",
+                [attachment, retry_due_us],
+            )
+            .unwrap();
+        assert_eq!(
+            mcpmem_extractor::ExtractionWorker::new(&legacy.graph_path, None)
+                .next_due_us(mcpmem_core::events::now_us())
+                .unwrap(),
+            Some(retry_due_us)
+        );
+        barrier.scan_ready.wait().await;
+        barrier.wait_probe.wait_for_timer_poll().await;
+
+        let ready = tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                if status(&legacy.graph_path, attachment) == "ready" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        role.abort();
+
+        ready.expect("the durable deadline must start an extractor turn without a wake");
+    }
+
+    #[tokio::test]
     async fn extractor_role_keeps_scheduling_after_a_graph_turn_fails() {
         let dir = tempfile::tempdir().unwrap();
         let legacy_path = dir.path().join("legacy.sqlite");
@@ -1428,11 +1930,8 @@ mod workspace_extractor_tests {
             .unwrap();
         std::fs::remove_file(&broken.graph_path).unwrap();
 
-        let target = Arc::new(ExtractorTarget::Workspaces {
-            registry: Arc::clone(&registry),
-            state: Mutex::new(WorkspaceExtractorState::default()),
-        });
-        let mut role = tokio::spawn(extractor_role_loop(target, None));
+        let target = workspace_extractor_target(Arc::clone(&registry), None);
+        let mut role = tokio::spawn(extractor_role_loop(target, None, None));
         tokio::select! {
             outcome = &mut role => panic!("one broken graph ended the extractor role: {outcome:?}"),
             ready = tokio::time::timeout(Duration::from_secs(10), async {
