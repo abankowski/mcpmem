@@ -689,6 +689,40 @@ impl<'a> AttachmentJobRepository<'a> {
         Ok(result)
     }
 
+    pub fn next_due_us(&self, _now_us: i64) -> AttachmentResult<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT MIN(due_us) FROM (
+                     SELECT j.next_attempt_us AS due_us
+                     FROM attachment_job j
+                     JOIN attachment a ON a.id=j.attachment_id
+                     JOIN entity e ON e.id=a.entity_id
+                     JOIN entity_revision r ON r.entity_id=e.id
+                     WHERE e.flags=0 AND r.deleted=0
+                       AND a.status IN ('uploaded','extracting')
+                       AND j.attempts<8 AND j.state='pending'
+                     UNION ALL
+                     SELECT j.lease_until_us
+                     FROM attachment_job j
+                     JOIN attachment a ON a.id=j.attachment_id
+                     JOIN entity e ON e.id=a.entity_id
+                     JOIN entity_revision r ON r.entity_id=e.id
+                     WHERE e.flags=0 AND r.deleted=0
+                       AND a.status IN ('uploaded','extracting')
+                       AND j.state='leased'
+                     UNION ALL
+                     SELECT u.expires_us
+                     FROM attachment_upload u
+                     JOIN entity e ON e.id=u.entity_id
+                     JOIN entity_revision r ON r.entity_id=e.id
+                     WHERE u.attachment_id IS NULL AND e.flags=0 AND r.deleted=0
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db)
+    }
+
     fn fenced(&self, job: &AttachmentJob, now_us: i64) -> AttachmentResult<bool> {
         self.conn
             .query_row(
@@ -1666,5 +1700,94 @@ mod tests {
             repo.append_chunk("alice", memo, 0, b"abc", 100).unwrap(),
             (1, 3)
         );
+    }
+
+    #[test]
+    fn next_due_us_returns_the_eighth_attempt_lease_deadline() {
+        let conn = fixture();
+        let jobs = AttachmentJobRepository::new(&conn);
+        let attachment = upload(&conn, 1, "lease.txt", b"a");
+        let job = jobs.claim_due(100, 10).unwrap().unwrap();
+        assert_eq!(job.attachment_id, attachment);
+        conn.execute(
+            "UPDATE attachment_job
+             SET attempts=8, state='leased', lease_until_us=500
+             WHERE attachment_id=?1",
+            [attachment],
+        )
+        .unwrap();
+
+        assert_eq!(jobs.next_due_us(200).unwrap(), Some(500));
+    }
+
+    #[test]
+    fn next_due_us() {
+        let conn = fixture();
+        let attachments = AttachmentRepository::new(&conn);
+        let jobs = AttachmentJobRepository::new(&conn);
+        let retrying = upload(&conn, 1, "retry.txt", b"a");
+        let retry_job = jobs.claim_due(100, 10).unwrap().unwrap();
+        assert_eq!(retry_job.attachment_id, retrying);
+        assert!(
+            jobs.retry(&retry_job, 101, 500, "provider", "timeout", false)
+                .unwrap()
+        );
+
+        let leased = upload(&conn, 1, "lease.txt", b"b");
+        let lease_job = jobs.claim_due(100, 10).unwrap().unwrap();
+        assert_eq!(lease_job.attachment_id, leased);
+        let unfinished = attachments
+            .begin_upload_at(
+                "alice",
+                2,
+                "unfinished.txt",
+                "text/plain",
+                1,
+                &hash(b"c"),
+                100,
+                300,
+                &limits(50, 100),
+            )
+            .unwrap();
+
+        assert_eq!(jobs.next_due_us(200).unwrap(), Some(110));
+        conn.execute(
+            "UPDATE attachment_job SET state='done' WHERE attachment_id=?1",
+            [leased],
+        )
+        .unwrap();
+        assert_eq!(jobs.next_due_us(200).unwrap(), Some(300));
+        conn.execute(
+            "UPDATE attachment_upload SET attachment_id=?2 WHERE upload_id=?1",
+            params![unfinished.to_string(), retrying],
+        )
+        .unwrap();
+        assert_eq!(jobs.next_due_us(200).unwrap(), Some(500));
+        conn.execute(
+            "UPDATE attachment_job SET state='done' WHERE attachment_id=?1",
+            [retrying],
+        )
+        .unwrap();
+
+        let completed = attachments
+            .begin_upload_at(
+                "alice",
+                2,
+                "complete.txt",
+                "text/plain",
+                0,
+                &hash(b""),
+                100,
+                400,
+                &limits(50, 100),
+            )
+            .unwrap();
+        let attachment = attachments
+            .finish_upload("alice", completed, 100, &limits(50, 100))
+            .unwrap();
+        let complete_job = jobs.claim_due(100, 10).unwrap().unwrap();
+        assert_eq!(complete_job.attachment_id, attachment);
+        assert!(jobs.complete(&complete_job, 101, &[]).unwrap());
+        assert_eq!(jobs.next_due_us(200).unwrap(), None);
     }
 }

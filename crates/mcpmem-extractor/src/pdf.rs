@@ -102,6 +102,13 @@ impl ExtractionWorker {
         }
     }
 
+    pub fn next_due_us(&self, now_us: i64) -> Result<Option<i64>, ExtractionError> {
+        let conn = Connection::open(&self.database)?;
+        conn.busy_timeout(Duration::from_secs(10))?;
+        mcpmem_core::schema::initialize_database(&conn)?;
+        Ok(AttachmentJobRepository::new(&conn).next_due_us(now_us)?)
+    }
+
     /// One bounded turn: sweep expired upload sessions, then claim and
     /// process at most one due extraction job. A lost lease publishes
     /// nothing, and a transient failure keeps the job claimable.
@@ -699,6 +706,48 @@ mod tests {
     use super::*;
     use crate::ocr::VISION_TIMEOUT_US;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn next_due_us() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("graph.sqlite");
+        let conn = Connection::open(&database).unwrap();
+        mcpmem_core::schema::initialize_database(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO type_dict(id,kind,name,count,revision) VALUES(3,0,'note',0,1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity(id,name_hash,name,type_id,created_us,updated_us) \
+             VALUES(1,1,'doc',3,1,1)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO entity_revision VALUES(1,1,0)", [])
+            .unwrap();
+        mcpmem_core::attachments::AttachmentRepository::new(&conn)
+            .begin_upload_at(
+                "alice",
+                1,
+                "unfinished.txt",
+                "text/plain",
+                0,
+                &[0; 32],
+                100,
+                300,
+                &mcpmem_core::attachments::AttachmentLimits {
+                    max_bytes: 50,
+                    workspace_byte_budget: 100,
+                    allow_mime: vec!["text/*".into()],
+                },
+            )
+            .unwrap();
+        drop(conn);
+
+        let worker = ExtractionWorker::new(&database, None);
+        assert_eq!(worker.next_due_us(200).unwrap(), Some(300));
+    }
 
     #[test]
     fn size_line_pixels_accepts_fractional_point_boxes() {
