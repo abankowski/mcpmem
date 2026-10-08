@@ -573,6 +573,13 @@ pub struct ExtractorWake {
 }
 
 #[cfg(feature = "extractor")]
+impl Default for ExtractorWake {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "extractor")]
 impl ExtractorWake {
     /// Make a handle that wakes the local extractor.
     pub fn new() -> Self {
@@ -713,7 +720,7 @@ fn run_extractor_graph(
 const EXTRACTOR_FALLBACK_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(feature = "extractor")]
-fn extractor_report_has_work(report: &mcpmem_extractor::ExtractionReport) -> bool {
+const fn extractor_report_has_work(report: &mcpmem_extractor::ExtractionReport) -> bool {
     report.claimed != 0
         || report.committed != 0
         || report.retried != 0
