@@ -17,6 +17,9 @@ use crate::actions::webhooks as webhooks_actions;
 use crate::attachment_actions;
 use crate::authz::{self, Principal};
 use crate::config::Config;
+#[cfg(feature = "extractor")]
+use crate::runtime::ExtractorWake;
+
 use crate::errors::{MCSError, Result};
 use crate::kg::GraphHandle;
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
@@ -397,6 +400,8 @@ pub struct MCPServer {
     /// `Some` when vector support is enabled (`--vectors`); drives the extra
     /// `vector_*` / `hybrid_search` tools. `None` for a pure knowledge-graph server.
     vs: Option<Arc<VectorStore>>,
+    #[cfg(feature = "extractor")]
+    extractor_wake: Option<ExtractorWake>,
 }
 
 impl MCPServer {
@@ -404,6 +409,31 @@ impl MCPServer {
     /// only constructed when `config.vectors_enabled` is set; `vec_config` is
     /// ignored otherwise.
     pub fn new(config: Config, vec_config: VectorConfig) -> Result<Self> {
+        #[cfg(feature = "extractor")]
+        {
+            Self::new_with_optional_extractor_wake(config, vec_config, None)
+        }
+        #[cfg(not(feature = "extractor"))]
+        {
+            Self::new_with_optional_extractor_wake(config, vec_config)
+        }
+    }
+
+    /// Build a server with an optional local extractor wake.
+    #[cfg(feature = "extractor")]
+    pub fn new_with_extractor_wake(
+        config: Config,
+        vec_config: VectorConfig,
+        extractor_wake: Option<ExtractorWake>,
+    ) -> Result<Self> {
+        Self::new_with_optional_extractor_wake(config, vec_config, extractor_wake)
+    }
+
+    fn new_with_optional_extractor_wake(
+        config: Config,
+        vec_config: VectorConfig,
+        #[cfg(feature = "extractor")] extractor_wake: Option<ExtractorWake>,
+    ) -> Result<Self> {
         if config.legacy_observations
             && !config
                 .roles
@@ -511,6 +541,14 @@ impl MCPServer {
                 .contains(&ToolCategory::Attachments),
             std::sync::atomic::Ordering::Relaxed,
         );
+        #[cfg(feature = "extractor")]
+        attachment_actions::configure(
+            &registry,
+            &config.attachments,
+            config.busy_timeout_ms,
+            extractor_wake.clone(),
+        );
+        #[cfg(not(feature = "extractor"))]
         attachment_actions::configure(&registry, &config.attachments, config.busy_timeout_ms);
 
         #[cfg(feature = "code")]
@@ -556,6 +594,8 @@ impl MCPServer {
             kg,
             handles,
             vs,
+            #[cfg(feature = "extractor")]
+            extractor_wake,
         })
     }
 
@@ -564,6 +604,16 @@ impl MCPServer {
         let mut config = config;
         config.vectors_enabled = false;
         Self::new(config, VectorConfig::new(0))
+    }
+
+    /// Build a non-vector server with an optional local extractor wake.
+    #[cfg(feature = "extractor")]
+    pub fn new_kg_with_extractor_wake(
+        mut config: Config,
+        extractor_wake: Option<ExtractorWake>,
+    ) -> Result<Self> {
+        config.vectors_enabled = false;
+        Self::new_with_extractor_wake(config, VectorConfig::new(0), extractor_wake)
     }
 
     /// Expose the legacy graph handle for local callers and tests.
@@ -641,6 +691,8 @@ impl MCPServer {
             bearer_scopes: Arc::from(self.config.bearer_scopes.clone()),
             enabled_categories: Arc::from(self.config.enabled_categories.clone()),
             attachments: self.config.attachments.clone(),
+            #[cfg(feature = "extractor")]
+            extractor_wake: self.extractor_wake.clone(),
             oauth,
             ui_enabled: self.config.ui_enabled,
             tls_cert: self.config.tls_cert.clone(),
@@ -1361,8 +1413,7 @@ fn handle_tools_call(
                 tool_args,
                 &principal.id,
                 &record.graph_path,
-                &settings.limits,
-                settings.busy_timeout_ms,
+                &settings,
             )
         });
         return Ok(HandlerResult::Value(result.unwrap_or_else(|error| {

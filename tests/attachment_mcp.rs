@@ -2,12 +2,21 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "extractor")]
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use mcpmem::authz::{Principal, local_principal};
 use mcpmem::config::Config;
+#[cfg(feature = "extractor")]
+use mcpmem::runtime::{ExtractorService, ExtractorWake, RoleService};
+#[cfg(feature = "extractor")]
+use mcpmem_core::attachments::{AttachmentLimits, AttachmentRepository};
+#[cfg(feature = "extractor")]
+use mcpmem_core::events::now_us;
+
 use mcpmem::server::{HttpOutcome, MAX_REQUEST_BYTES, MCPServer, dispatch_http_body};
 use mcpmem::tools::{ATTACHMENT_TOOL_NAMES, ToolCategory};
 use mcpmem::workspace::{Visibility, WorkspaceAccess, WorkspaceHandles, WorkspaceRegistry};
@@ -109,6 +118,128 @@ impl Fixture {
     }
 }
 
+#[cfg(feature = "extractor")]
+fn fixture_with_extractor_wake(wake: ExtractorWake) -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        memory_file_path: dir
+            .path()
+            .join("memory.sqlite")
+            .to_string_lossy()
+            .into_owned(),
+        legacy_owner_id: Some("machine:local".into()),
+        enabled_categories: vec![
+            ToolCategory::GraphRead,
+            ToolCategory::GraphWrite,
+            ToolCategory::Attachments,
+        ],
+        ..Config::default()
+    };
+    let server = MCPServer::new_kg_with_extractor_wake(config, Some(wake)).unwrap();
+    let registry = server.workspace_registry();
+    let handles = server.workspace_handles();
+    let selected = registry
+        .resolve("machine:local", None, WorkspaceAccess::Owner)
+        .unwrap();
+    Fixture {
+        _dir: dir,
+        registry,
+        handles,
+        workspace_id: selected.workspace_id,
+        path: selected.graph_path,
+    }
+}
+
+#[cfg(feature = "extractor")]
+fn extractor_limits() -> AttachmentLimits {
+    let attachments = Config::default().attachments;
+    AttachmentLimits {
+        max_bytes: attachments.max_bytes,
+        workspace_byte_budget: attachments.workspace_byte_budget,
+        allow_mime: attachments.allow_mime,
+    }
+}
+
+#[cfg(feature = "extractor")]
+fn attachment_status(fixture: &Fixture, id: i64) -> String {
+    Connection::open(&fixture.path)
+        .unwrap()
+        .query_row("SELECT status FROM attachment WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[cfg(feature = "extractor")]
+fn entity_id(fixture: &Fixture) -> i64 {
+    Connection::open(&fixture.path)
+        .unwrap()
+        .query_row("SELECT id FROM entity WHERE name='doc'", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[cfg(feature = "extractor")]
+fn seed_expired_upload(fixture: &Fixture) {
+    let conn = Connection::open(&fixture.path).unwrap();
+    let digest: [u8; 32] = Sha256::digest(b"").into();
+    AttachmentRepository::new(&conn)
+        .begin_upload_at(
+            "machine:local",
+            entity_id(fixture),
+            "expired.txt",
+            "text/plain",
+            0,
+            &digest,
+            0,
+            0,
+            &extractor_limits(),
+        )
+        .unwrap();
+}
+
+#[cfg(feature = "extractor")]
+fn queue_attachment_without_wake(fixture: &Fixture) -> i64 {
+    let conn = Connection::open(&fixture.path).unwrap();
+    let content = b"queued";
+    let digest: [u8; 32] = Sha256::digest(content).into();
+    AttachmentRepository::new(&conn)
+        .store_reader(
+            entity_id(fixture),
+            "queued.txt",
+            "text/plain",
+            &mut std::io::Cursor::new(content.as_slice()),
+            content.len() as i64,
+            &digest,
+            &extractor_limits(),
+            now_us(),
+        )
+        .unwrap()
+}
+
+#[cfg(feature = "extractor")]
+async fn wait_for_idle_extractor(fixture: &Fixture) {
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while fixture.count("attachment_upload") != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the extractor must finish its expired-upload turn");
+}
+
+#[cfg(feature = "extractor")]
+async fn wait_for_ready_attachment(fixture: &Fixture, id: i64) {
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while attachment_status(fixture, id) != "ready" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the extractor must receive the local wake");
+}
+
 fn body_of(outcome: HttpOutcome) -> Value {
     match outcome {
         HttpOutcome::Body(value) => value,
@@ -154,6 +285,74 @@ fn begin(fixture: &Fixture, principal: &Principal, filename: &str, content: &[u8
     let payload = result(&response);
     assert_eq!(payload["nextIndex"], 0);
     payload["uploadId"].as_str().unwrap().to_owned()
+}
+
+#[cfg(feature = "extractor")]
+#[tokio::test]
+async fn completed_mcp_upload_wakes_the_injected_extractor() {
+    let wake = ExtractorWake::new();
+    let fixture = fixture_with_extractor_wake(wake.clone());
+    fixture.create("doc");
+    seed_expired_upload(&fixture);
+
+    let service = ExtractorService::new_with_wake(fixture.path.clone(), None, wake);
+    let role = tokio::spawn(service.run());
+    wait_for_idle_extractor(&fixture).await;
+
+    let principal = local_principal();
+    let content = b"wake the extractor";
+    let upload = begin(&fixture, &principal, "wake.txt", content);
+    result(&fixture.call(
+        &principal,
+        "append_attachment_chunk",
+        json!({"workspaceId": fixture.workspace_id, "uploadId": upload,
+            "index": 0, "content": STANDARD.encode(content)}),
+    ));
+    let attachment = result(&fixture.call(
+        &principal,
+        "finish_attachment_upload",
+        json!({"workspaceId": fixture.workspace_id, "uploadId": upload}),
+    ))["attachmentId"]
+        .as_i64()
+        .unwrap();
+
+    wait_for_ready_attachment(&fixture, attachment).await;
+    role.abort();
+}
+
+#[cfg(feature = "extractor")]
+#[tokio::test]
+async fn failed_cancelled_and_incomplete_mcp_uploads_do_not_wake_the_extractor() {
+    let wake = ExtractorWake::new();
+    let fixture = fixture_with_extractor_wake(wake.clone());
+    fixture.create("doc");
+    seed_expired_upload(&fixture);
+
+    let service = ExtractorService::new_with_wake(fixture.path.clone(), None, wake);
+    let role = tokio::spawn(service.run());
+    wait_for_idle_extractor(&fixture).await;
+
+    let queued = queue_attachment_without_wake(&fixture);
+    let principal = local_principal();
+    let incomplete = begin(&fixture, &principal, "incomplete.txt", b"missing");
+    assert_error(
+        &fixture.call(
+            &principal,
+            "finish_attachment_upload",
+            json!({"workspaceId": fixture.workspace_id, "uploadId": incomplete}),
+        ),
+        "incomplete",
+    );
+    let cancelled = begin(&fixture, &principal, "cancelled.txt", b"cancelled");
+    result(&fixture.call(
+        &principal,
+        "cancel_attachment_upload",
+        json!({"workspaceId": fixture.workspace_id, "uploadId": cancelled}),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(attachment_status(&fixture, queued), "uploaded");
+    role.abort();
 }
 
 #[test]

@@ -38,6 +38,8 @@ use tracing::{error, info};
 use crate::authz::Principal;
 use crate::errors::{MCSError, Result};
 use crate::oauth_routes::OauthState;
+#[cfg(feature = "extractor")]
+use crate::runtime::ExtractorWake;
 use crate::server::{self, HttpOutcome};
 use crate::tools::ToolCategory;
 use crate::workspace::WorkspaceError;
@@ -77,6 +79,9 @@ pub struct HttpState {
     /// finishes, so abandoned or disconnected uploads cannot stack anonymous
     /// spool files past the bound.
     pub(crate) attachment_spools: Arc<tokio::sync::Semaphore>,
+    /// The local wake for attachment uploads in an extractor process.
+    #[cfg(feature = "extractor")]
+    pub(crate) extractor_wake: Option<ExtractorWake>,
     /// The resolved runtime switch for the optional browser UI. The `ui`
     /// module registers its routes only when this is true; otherwise every
     /// `/ui/*` path is an ordinary 404.
@@ -142,7 +147,29 @@ impl HttpState {
     /// runbook sells, where both are configured and `principal_of` falls
     /// through from the first to the second.
     #[doc(hidden)]
+    #[cfg(feature = "extractor")]
     pub fn for_test(setup: TestSetup) -> HttpState {
+        Self::for_test_inner(setup, None)
+    }
+
+    #[cfg(not(feature = "extractor"))]
+    pub fn for_test(setup: TestSetup) -> HttpState {
+        Self::for_test_inner(setup)
+    }
+
+    #[cfg(feature = "extractor")]
+    #[doc(hidden)]
+    pub fn for_test_with_extractor_wake(
+        setup: TestSetup,
+        extractor_wake: ExtractorWake,
+    ) -> HttpState {
+        Self::for_test_inner(setup, Some(extractor_wake))
+    }
+
+    fn for_test_inner(
+        setup: TestSetup,
+        #[cfg(feature = "extractor")] extractor_wake: Option<ExtractorWake>,
+    ) -> HttpState {
         let TestSetup {
             db_path,
             oauth,
@@ -163,6 +190,11 @@ impl HttpState {
         };
         let attachment_limits = attachment_limits(config.attachments.clone());
         let busy_timeout_ms = config.busy_timeout_ms;
+        #[cfg(feature = "extractor")]
+        let server =
+            crate::server::MCPServer::new_kg_with_extractor_wake(config, extractor_wake.clone())
+                .expect("build the test server");
+        #[cfg(not(feature = "extractor"))]
         let server = crate::server::MCPServer::new_kg(config).expect("build the test server");
         let registry = server.workspace_registry();
         let handles = server.workspace_handles();
@@ -190,6 +222,8 @@ impl HttpState {
             attachment_spools: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_ATTACHMENT_SPOOLS,
             )),
+            #[cfg(feature = "extractor")]
+            extractor_wake,
             ui_enabled,
         };
         // The seed is the server.rs startup step the test fixture stands in
@@ -219,6 +253,9 @@ pub struct HttpRunConfig {
     pub enabled_categories: Arc<[ToolCategory]>,
     /// The upload cap, budget, and MIME policy from the server configuration.
     pub attachments: crate::config_file::AttachmentsSection,
+    /// The local wake for attachment uploads in an extractor process.
+    #[cfg(feature = "extractor")]
+    pub extractor_wake: Option<ExtractorWake>,
     pub oauth: Option<Arc<OauthState>>,
     /// The resolved runtime switch for the optional browser UI.
     pub ui_enabled: bool,
@@ -268,6 +305,8 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
         bearer_scopes,
         enabled_categories,
         attachments,
+        #[cfg(feature = "extractor")]
+        extractor_wake,
         oauth,
         ui_enabled,
         tls_cert,
@@ -293,6 +332,8 @@ pub async fn run(config: HttpRunConfig) -> Result<()> {
         attachment_spools: Arc::new(tokio::sync::Semaphore::new(
             MAX_CONCURRENT_ATTACHMENT_SPOOLS,
         )),
+        #[cfg(feature = "extractor")]
+        extractor_wake,
         oauth,
         ui_enabled,
     };
@@ -774,6 +815,8 @@ mod tests {
             attachment_spools: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_ATTACHMENT_SPOOLS,
             )),
+            #[cfg(feature = "extractor")]
+            extractor_wake: None,
             ui_enabled: true,
         }
     }

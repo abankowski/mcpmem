@@ -2,6 +2,8 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
+#[cfg(feature = "extractor")]
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +13,23 @@ use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode, header};
 use futures::stream;
 use http_body_util::BodyExt;
+#[cfg(feature = "extractor")]
+use mcpmem::http::{HttpState, TestSetup};
+#[cfg(feature = "extractor")]
+use mcpmem::runtime::{ExtractorService, ExtractorWake, RoleService};
+#[cfg(feature = "extractor")]
+use mcpmem::tools::ToolCategory;
+#[cfg(feature = "extractor")]
+use mcpmem_core::attachments::{AttachmentLimits, AttachmentRepository};
+#[cfg(feature = "extractor")]
+use mcpmem_core::events::now_us;
+#[cfg(feature = "extractor")]
+use rusqlite::Connection;
 use serde_json::{Value, json};
+#[cfg(feature = "extractor")]
+use sha2::{Digest, Sha256};
+#[cfg(feature = "extractor")]
+use tower::ServiceExt;
 
 mod support;
 
@@ -259,6 +277,281 @@ fn chunked_body(chunks: usize, bytes_per_chunk: usize) -> Body {
             )
         })
     }))
+}
+
+#[cfg(feature = "extractor")]
+struct WakeFixture {
+    _dir: tempfile::TempDir,
+    app: axum::Router,
+    owner: String,
+    workspace: String,
+    graph_path: PathBuf,
+}
+
+#[cfg(feature = "extractor")]
+impl WakeFixture {
+    async fn upload(&self, filename: &str, body: Body, mime: &str) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::post(upload_path(&self.workspace, "Alice", filename))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", self.owner))
+                    .header(header::CONTENT_TYPE, mime)
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+}
+
+#[cfg(feature = "extractor")]
+async fn wake_mcp(app: &axum::Router, token: &str, tool: &str, arguments: Value) -> Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"name": tool, "arguments": arguments},
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{tool}");
+    data(response).await
+}
+
+#[cfg(feature = "extractor")]
+async fn wake_fixture(wake: ExtractorWake) -> WakeFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("wake.mcpmem");
+    let mut oauth = support::oauth_config("https://idp.invalid");
+    oauth.principals[0].scopes.push("attachments".into());
+    let owner_id = mcpmem::principals::human_id(&oauth.principals[0].iss, &oauth.principals[0].sub);
+    let state = HttpState::for_test_with_extractor_wake(
+        TestSetup {
+            db_path: db_path.clone(),
+            oauth: Some(oauth),
+            auth_token: None,
+            metadata_fetch: None,
+            bearer_scopes: Vec::new(),
+            enabled_categories: ToolCategory::ALL.to_vec(),
+            now_us: None,
+            ui_enabled: true,
+        },
+        wake,
+    );
+    let owner = state.oauth().unwrap().with_store(|store| {
+        support::plant(
+            store,
+            &owner_id,
+            &["graph-read", "graph-write", "attachments"],
+        )
+    });
+    let app = mcpmem::http::router(state);
+    let created = wake_mcp(
+        &app,
+        &owner,
+        "create_workspace",
+        json!({"name": "wake", "visibility": "private"}),
+    )
+    .await;
+    assert!(
+        created["result"]["isError"].as_bool() != Some(true),
+        "workspace setup failed: {created}"
+    );
+    let workspace = created["result"]["workspace"]["workspaceId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let seeded = wake_mcp(
+        &app,
+        &owner,
+        "create_entities",
+        json!({
+            "workspaceId": workspace,
+            "entities": [
+                {"name": "Alice", "entityType": "person", "observations": []},
+            ],
+        }),
+    )
+    .await;
+    assert!(
+        seeded["result"]["isError"].as_bool() != Some(true),
+        "entity setup failed: {seeded}"
+    );
+    let registry = Connection::open(format!("{}.workspaces.sqlite", db_path.display())).unwrap();
+    let graph_path = registry
+        .query_row(
+            "SELECT graph_path FROM workspace WHERE workspace_id=?1",
+            [&workspace],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+        .into();
+    WakeFixture {
+        _dir: dir,
+        app,
+        owner,
+        workspace,
+        graph_path,
+    }
+}
+
+#[cfg(feature = "extractor")]
+fn wake_limits() -> AttachmentLimits {
+    let attachments = mcpmem::config::Config::default().attachments;
+    AttachmentLimits {
+        max_bytes: attachments.max_bytes,
+        workspace_byte_budget: attachments.workspace_byte_budget,
+        allow_mime: attachments.allow_mime,
+    }
+}
+
+#[cfg(feature = "extractor")]
+fn wake_entity_id(fixture: &WakeFixture) -> i64 {
+    Connection::open(&fixture.graph_path)
+        .unwrap()
+        .query_row("SELECT id FROM entity WHERE name='Alice'", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[cfg(feature = "extractor")]
+fn seed_expired_http_upload(fixture: &WakeFixture) {
+    let conn = Connection::open(&fixture.graph_path).unwrap();
+    let digest: [u8; 32] = Sha256::digest(b"").into();
+    AttachmentRepository::new(&conn)
+        .begin_upload_at(
+            "human:fixture",
+            wake_entity_id(fixture),
+            "expired.txt",
+            "text/plain",
+            0,
+            &digest,
+            0,
+            0,
+            &wake_limits(),
+        )
+        .unwrap();
+}
+
+#[cfg(feature = "extractor")]
+fn queue_http_attachment_without_wake(fixture: &WakeFixture) -> i64 {
+    let conn = Connection::open(&fixture.graph_path).unwrap();
+    let content = b"queued";
+    let digest: [u8; 32] = Sha256::digest(content).into();
+    AttachmentRepository::new(&conn)
+        .store_reader(
+            wake_entity_id(fixture),
+            "queued.txt",
+            "text/plain",
+            &mut std::io::Cursor::new(content.as_slice()),
+            content.len() as i64,
+            &digest,
+            &wake_limits(),
+            now_us(),
+        )
+        .unwrap()
+}
+
+#[cfg(feature = "extractor")]
+fn http_attachment_status(fixture: &WakeFixture, id: i64) -> String {
+    Connection::open(&fixture.graph_path)
+        .unwrap()
+        .query_row("SELECT status FROM attachment WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[cfg(feature = "extractor")]
+fn http_upload_count(fixture: &WakeFixture) -> i64 {
+    Connection::open(&fixture.graph_path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM attachment_upload", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[cfg(feature = "extractor")]
+async fn wait_for_idle_http_extractor(fixture: &WakeFixture) {
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while http_upload_count(fixture) != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the extractor must finish its expired-upload turn");
+}
+
+#[cfg(feature = "extractor")]
+async fn wait_for_ready_http_attachment(fixture: &WakeFixture, id: i64) {
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while http_attachment_status(fixture, id) != "ready" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the extractor must receive the local wake");
+}
+
+#[cfg(feature = "extractor")]
+#[tokio::test]
+async fn completed_http_upload_wakes_the_injected_extractor() {
+    let wake = ExtractorWake::new();
+    let fixture = wake_fixture(wake.clone()).await;
+    seed_expired_http_upload(&fixture);
+
+    let service = ExtractorService::new_with_wake(fixture.graph_path.clone(), None, wake);
+    let role = tokio::spawn(service.run());
+    wait_for_idle_http_extractor(&fixture).await;
+
+    let response = fixture
+        .upload("wake.txt", Body::from("wake the extractor"), "text/plain")
+        .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let attachment = data(response).await["attachmentId"].as_i64().unwrap();
+
+    wait_for_ready_http_attachment(&fixture, attachment).await;
+    role.abort();
+}
+
+#[cfg(feature = "extractor")]
+#[tokio::test]
+async fn failed_http_upload_does_not_wake_the_extractor() {
+    let wake = ExtractorWake::new();
+    let fixture = wake_fixture(wake.clone()).await;
+    seed_expired_http_upload(&fixture);
+
+    let service = ExtractorService::new_with_wake(fixture.graph_path.clone(), None, wake);
+    let role = tokio::spawn(service.run());
+    wait_for_idle_http_extractor(&fixture).await;
+
+    let queued = queue_http_attachment_without_wake(&fixture);
+    let response = fixture
+        .upload(
+            "invalid.bin",
+            Body::from("invalid"),
+            "application/octet-stream",
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(http_attachment_status(&fixture, queued), "uploaded");
+    role.abort();
 }
 
 #[tokio::test]
