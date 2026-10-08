@@ -625,6 +625,12 @@ delete; the admin page has no attachment panel. `merge_entities` refuses to
 merge a source that owns attachments or unfinished upload sessions; move or
 delete those first.
 
+The UI Files tab uses the same selected workspace and attachment consent. The
+example below uses generated names and synthetic text.
+
+![The UI Files tab shows one ready text attachment.](docs/images/readme-files.png)
+
+
 ### Upload and read limits
 
 Allowed MIME types are `text/*`, `text/markdown`, and `application/pdf`; a
@@ -857,12 +863,17 @@ mcpmem --enable-all --transport http --auth-token "s3cr3t" \
 
 ### OAuth 2.1 (remote connectors)
 
-`--oidc-issuer` makes `mcpmem` its own **OAuth 2.1 authorization server**, so a
-remote MCP connector — Claude's custom connectors, ChatGPT's — can discover it,
-register itself, send its human to your OpenID Connect provider, take consent
-for a subset of scopes, and call tools under an issued token. `mcpmem` mints
-its own opaque tokens and stores only their digests; the provider authenticates
-the human and nothing more.
+`--oidc-issuer` makes `mcpmem` its own **OAuth 2.1 authorization server**. A
+remote MCP connector can discover it, register itself, send its human to your
+OpenID Connect provider, request enabled tool-category scopes, and call tools
+under an issued token. `mcpmem` mints opaque tokens and stores only their
+digests. The provider authenticates the human and nothing more.
+
+The connector scopes are `graph-read`, `graph-write`, `vectors`,
+`attachments`, and `code`. A principal entry is the ceiling for each connector
+consent grant. The separate `admin` scope is for the reserved administration UI
+client. Machine credentials can never hold `admin`.
+
 
 A build without the `oauth` feature **refuses `--oidc-issuer` at startup**: it
 serves no authorization, consent or token endpoint, and half an authorization
@@ -1131,29 +1142,39 @@ mcpmem --enable-all --transport http --bind 0.0.0.0:8080 --auth-token "s3cr3t" \
 
 ### Web UI
 
-The `http` transport serves a **React knowledge-graph UI** — open
-[`http://<bind>/ui`](http://127.0.0.1:8080/ui) in any browser to explore the graph interactively:
+The hosted landing page is
+[`https://mcpmem.abankowski.pl`](https://mcpmem.abankowski.pl). Its hosted UI
+is [`https://mcpmem.abankowski.pl/ui`](https://mcpmem.abankowski.pl/ui). You
+must sign in to use the hosted UI. It is not an anonymous graph demo.
 
-- The **graph page** at `/ui`: a force-directed `<canvas>` layout with pan / zoom, coloured rings,
-  drag-pin and connect mode, a live legend, double-click neighbourhood expansion, a node
-  inspector (type, observations, relationships, entity attachments), and a workspace dropdown
-  that lists every [workspace](#workspaces-isolated-knowledge-graphs) the signed-in identity
-  can access and starts on the saved default.
-- The **search page** at `/ui/search`: full-text (FTS5, prefix / search-as-you-type) and
-  vector-mode search with entity-type and relation-scope filters.
-- The **administration page** at `/ui/admin`: principals, the approval waitlist, workspaces and
-  grants, webhook subscriptions, managed repositories and vector-store stats. It is its own
-  OAuth client (the reserved `mcpmem-admin-ui`, asking for the `admin` scope). The nested
-  `/ui/admin/callback` path serves the same shell, so an OAuth return on an admin subpage
-  reloads the page itself.
+The `http` transport also serves a **React knowledge-graph UI**. Open
+[`http://<bind>/ui`](http://127.0.0.1:8080/ui) in a browser to explore a graph:
 
-The UI is a **built React bundle** (Vite), embedded into the binary at compile time from
-`ui/dist` and served from `/ui/assets/*` — no telemetry, and no external runtime
-dependencies except the Google Fonts stylesheet the shell loads for its designed type
-faces (the token font stacks fall back to system faces when the fonts are unreachable,
-so an airgapped host still renders with correct layout). It is a distinct browser
-front-end: it talks only to the `/ui/*` HTTP routes below and adds **no MCP tools** and no
-stdio behaviour.
+- The **graph page** at `/ui`: a force-directed `<canvas>` layout with pan and
+  zoom, coloured rings, drag-pin and connect mode, a live legend, double-click
+  neighbourhood expansion, a node inspector, and a workspace dropdown.
+- The **search page** at `/ui/search`: full-text (FTS5, prefix /
+  search-as-you-type) and vector-mode search with entity-type and relation-scope
+  filters.
+- The **administration page** at `/ui/admin`: principals, the approval
+  waitlist, workspaces and grants, webhook subscriptions, managed repositories,
+  and vector-store statistics. It is its own OAuth client with the `admin`
+  scope. The `/ui/admin/callback` path serves the same shell.
+
+The images below use an isolated local graph with generated names and
+synthetic text.
+
+![The graph page shows four synthetic note entities.](docs/images/readme-graph.png)
+
+![The search page returns a synthetic direct-search result.](docs/images/readme-search.png)
+
+The UI is a **built React bundle** (Vite), embedded into the binary at compile
+time from `ui/dist` and served from `/ui/assets/*`. It has no telemetry and no
+external runtime dependencies except the Google Fonts stylesheet that the shell
+loads for its designed type faces. The token font stacks fall back to system
+faces when the fonts are unreachable, so an airgapped host still renders with
+the correct layout. It is a distinct browser front-end. It uses only the
+`/ui/*` HTTP routes below and adds no MCP tools or stdio behavior.
 
 | Route | Purpose |
 |-------|---------|
@@ -1168,7 +1189,7 @@ stdio behaviour.
 | `GET /ui/api/workspaces` | The caller's accessible workspaces for the dropdown: `{ workspaces, nextCursor }`, the same page shape as the MCP `list_workspaces` tool. Query params: `cursor`, `limit` (≤ 100), `token`. Private graphs of other callers never appear. |
 | `GET /ui/api/session` | The caller's scopes, principal name, workspace role and the compiled feature set — what the shell shows as its authentication state. |
 | `POST /ui/api/mutations` | The one write route: `{ workspaceId, operation, payload }` for every graph write the UI offers. |
-| `GET`/`POST /ui/api/attachments{,/{id}}`, `GET /ui/api/attachments/{id}/pages`, `GET /ui/api/attachments/{id}/download` | The attachment routes behind the `attachments` category (see [Entity attachments](#entity-attachments)). |
+| `GET`/`POST` /ui/api/attachments, `GET`/`DELETE` /ui/api/attachments/{id}, `GET /ui/api/attachments/{id}/pages`, `GET /ui/api/attachments/{id}/download` | The attachment routes behind the `attachments` category (see [Entity attachments](#entity-attachments)). |
 | `/ui/api/principals`, `/ui/api/waitlist/*`, `/ui/api/workspaces/*` (admin), `/ui/api/vectors/stats`, `/ui/api/webhooks/*`, `/ui/api/repos/*` | The administration adapters, gated by the `admin` scope and their Cargo features. |
 
 Each graph or list response carries a `page` cursor: `{ offset, limit, returned, hasMore }`.
@@ -1294,9 +1315,10 @@ admin UI and MCP refuse the deletion.
 `grant_workspace_access` grants `reader` or `writer` access to a registered identity;
 `revoke_workspace_access` removes the grant; `list_workspace_grants` lists them. Only the
 **owner** grants, revokes, changes visibility (`set_workspace_visibility`), and manages webhook
-subscriptions. A public graph is readable by **any authenticated identity** and grants
-no writes; an unrelated caller reading a public graph gets role `"public"`. A known public
-workspace with no write grant returns an access error on writes.
+subscriptions. A public graph is readable by **any authenticated identity** and
+grants no writes. Public does not mean anonymous. An unrelated caller reading a
+public graph gets role `"public"`. A known public workspace with no write grant
+returns an access error on writes.
 
 An unknown workspace ID and an inaccessible *private* workspace ID return the **same not-found
 result** — the response leaks neither the name nor the owner.
