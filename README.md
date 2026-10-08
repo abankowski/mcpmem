@@ -696,6 +696,11 @@ the caller has `vectors` **and** `attachments` scopes. Hits include
 `includeAttachments: false` excludes attachments before ranking and `topK`;
 without attachment consent, entity and relation search still works.
 
+A local extractor wakes immediately after an upload commit, so `ready`
+follows the upload without a fixed poll interval. A separate extractor
+process has no local wake: it checks the durable queue for new work every
+30 seconds. An idle extractor emits no repeating completion log.
+
 PDF hosts need Poppler **outside** the Rust binary and crates.io package.
 Install `poppler-utils` on Debian/Ubuntu or `poppler` with Homebrew, and
 put both `pdfinfo` and `pdftoppm` on the extractor process's `PATH`.
