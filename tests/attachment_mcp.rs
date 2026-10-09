@@ -200,14 +200,14 @@ fn seed_expired_upload(fixture: &Fixture) {
 }
 
 #[cfg(feature = "extractor")]
-fn queue_attachment_without_wake(fixture: &Fixture) -> i64 {
+fn queue_attachment_without_wake(fixture: &Fixture, filename: &str, next_attempt_us: i64) -> i64 {
     let conn = Connection::open(&fixture.path).unwrap();
     let content = b"queued";
     let digest: [u8; 32] = Sha256::digest(content).into();
-    AttachmentRepository::new(&conn)
+    let id = AttachmentRepository::new(&conn)
         .store_reader(
             entity_id(fixture),
-            "queued.txt",
+            filename,
             "text/plain",
             &mut std::io::Cursor::new(content.as_slice()),
             content.len() as i64,
@@ -215,7 +215,18 @@ fn queue_attachment_without_wake(fixture: &Fixture) -> i64 {
             &extractor_limits(),
             now_us(),
         )
-        .unwrap()
+        .unwrap();
+    // The extractor loop re-scans due jobs after every turn, so a due-now row
+    // is processed promptly even without a wake. The negative wake test needs
+    // a job whose due time is far in the future: only a spurious wake would
+    // process it early. Keep the default (0) for rows the first turn must
+    // consume immediately.
+    conn.execute(
+        "UPDATE attachment_job SET next_attempt_us=?1 WHERE attachment_id=?2",
+        [next_attempt_us, id],
+    )
+    .unwrap();
+    id
 }
 
 #[cfg(feature = "extractor")]
@@ -326,13 +337,20 @@ async fn failed_cancelled_and_incomplete_mcp_uploads_do_not_wake_the_extractor()
     let wake = ExtractorWake::new();
     let fixture = fixture_with_extractor_wake(wake.clone());
     fixture.create("doc");
-    seed_expired_upload(&fixture);
+    // Prove the extractor's first turn has fully finished before the rest of
+    // the test runs. The first turn sweeps expired sessions, then claims one
+    // due job; a row inserted after the sweep but before `claim_due` would be
+    // picked up by that same turn, which made the old count-based idle wait
+    // racy under nextest's per-test processes (2026-10-09, CI pre-flight).
+    // A completed attachment inserted before the service starts is claimed by
+    // the first turn; waiting for it to reach "ready" proves that turn ended.
+    let sentinel = queue_attachment_without_wake(&fixture, "sentinel.txt", 0);
 
     let service = ExtractorService::new_with_wake(fixture.path.clone(), None, wake);
     let role = tokio::spawn(service.run());
-    wait_for_idle_extractor(&fixture).await;
+    wait_for_ready_attachment(&fixture, sentinel).await;
 
-    let queued = queue_attachment_without_wake(&fixture);
+    let queued = queue_attachment_without_wake(&fixture, "queued.txt", now_us() + 3_600_000_000);
     let principal = local_principal();
     let incomplete = begin(&fixture, &principal, "incomplete.txt", b"missing");
     assert_error(

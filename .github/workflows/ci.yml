@@ -92,7 +92,7 @@ jobs:
             echo "bump-only=false" >> "$GITHUB_OUTPUT"
           fi
 
-  rust:
+  rust-checks:
     needs: [frontend, version]
     if: needs.version.outputs.bump-only != 'true'
     runs-on: ubuntu-latest
@@ -113,10 +113,6 @@ jobs:
           components: rustfmt, clippy
       # After the toolchain: the cache key includes the rustc version.
       - uses: Swatinem/rust-cache@v2
-      - name: Install external PDF renderer
-        run: sudo apt-get update && sudo apt-get install -y poppler-utils
-      - name: Check PDF renderer commands
-        run: command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
       # The v1.0.0-rc.1 release failed while verifying the packaged crate,
       # because an include_str! read a file outside the crate root. CI now
       # answers that question before a release does.
@@ -128,39 +124,6 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint every feature combination
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Test workspace
-        run: cargo test --workspace --all-targets -- --test-threads=1
-      - name: Test indexer worker feature
-        run: |
-          cargo test --test indexer_worker --features indexer -- --test-threads=1
-          cargo test --test indexer_worker --no-default-features --features indexer -- --test-threads=1
-      - name: Test attachment extraction and real PDF vision routing
-        run: |
-          cargo test --test attachment_extraction --features extractor -- --test-threads=1
-          cargo test --test attachment_extraction --features extractor pdf_render_routes_page_to_vision -- --exact --test-threads=1
-      - name: Test attachment MCP and HTTP interfaces
-        run: |
-          cargo test --test attachment_mcp --test attachment_http --features extractor -- --test-threads=1
-      - name: Test attachment search and inspector
-        run: |
-          cargo test --test vector_e2e --test semantic_search --test ui_http --features extractor -- --test-threads=1
-      # The taxonomy unit tests are gated on the `indexer` feature, so the
-      # default workspace run never builds them and the `--test indexer_worker`
-      # leg does not run them. This leg executes them directly.
-      - name: Test lib with the indexer feature
-        run: cargo test --lib --features indexer -- --test-threads=1
-      - name: Test runtime role feature matrix
-        run: |
-          cargo test --test role_composition --no-default-features
-          cargo test --test role_composition --features indexer
-          cargo test --test role_composition --features webhooks
-          cargo test --test role_composition --features extractor
-          cargo test --test role_composition --no-default-features --features extractor
-          cargo test --test role_composition --features extractor,webhooks
-          cargo test --test role_composition --features indexer,webhooks
-      - name: Test webhook subscription feature
-        run: |
-          cargo test --test webhook_tools --test webhook_admin --features webhooks -- --test-threads=1
       - name: Keep graph-only build free of HTTP and AWS clients
         run: |
           if cargo tree --no-default-features -e normal | rg -q '(^| )(reqwest|aws-[a-z0-9-]+|aws_sdk_[a-z0-9_]+) v'; then
@@ -168,6 +131,129 @@ jobs:
             exit 1
           fi
 
+  tests-default:
+    needs: [frontend, version]
+    if: needs.version.outputs.bump-only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # After the toolchain: the cache key includes the rustc version.
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Test workspace
+        run: cargo nextest run --workspace --all-targets
+
+  tests-indexer:
+    needs: [frontend, version]
+    if: needs.version.outputs.bump-only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # After the toolchain: the cache key includes the rustc version.
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Test indexer worker feature
+        run: |
+          cargo nextest run --test indexer_worker --features indexer
+          cargo nextest run --test indexer_worker --no-default-features --features indexer
+      # The taxonomy unit tests are gated on the `indexer` feature, so the
+      # default workspace run never builds them and the `--test indexer_worker`
+      # leg does not run them. This leg executes them directly.
+      - name: Test lib with the indexer feature
+        run: cargo nextest run --lib --features indexer
+
+  tests-extractor:
+    needs: [frontend, version]
+    if: needs.version.outputs.bump-only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # After the toolchain: the cache key includes the rustc version.
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Install external PDF renderer
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+      - name: Check PDF renderer commands
+        run: command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
+      - name: Test attachment extraction and real PDF vision routing
+        run: |
+          cargo nextest run --test attachment_extraction --features extractor
+          cargo nextest run --test attachment_extraction --features extractor -- pdf_render_routes_page_to_vision --exact
+      - name: Test attachment MCP and HTTP interfaces
+        run: cargo nextest run --test attachment_mcp --test attachment_http --features extractor
+      - name: Test attachment search and inspector
+        run: cargo nextest run --test vector_e2e --test semantic_search --test ui_http --features extractor
+
+  tests-webhooks:
+    needs: [frontend, version]
+    if: needs.version.outputs.bump-only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # After the toolchain: the cache key includes the rustc version.
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Test webhook subscription feature
+        run: cargo nextest run --test webhook_tools --test webhook_admin --features webhooks
+
+  tests-roles:
+    needs: [frontend, version]
+    if: needs.version.outputs.bump-only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the built UI bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # After the toolchain: the cache key includes the rustc version.
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Test runtime role feature matrix
+        run: |
+          cargo nextest run --test role_composition --no-default-features
+          cargo nextest run --test role_composition --features indexer
+          cargo nextest run --test role_composition --features webhooks
+          cargo nextest run --test role_composition --features extractor
+          cargo nextest run --test role_composition --no-default-features --features extractor
+          cargo nextest run --test role_composition --features extractor,webhooks
+          cargo nextest run --test role_composition --features indexer,webhooks
   # The landing page must keep building: its template and content are checked
   # against each other by the build itself, so a pushed but broken page would
   # otherwise surface only on deploy.
@@ -266,19 +352,20 @@ jobs:
           components: rustfmt, clippy
       # After the toolchain: the cache key includes the rustc version.
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - name: Restore the built UI bundle
         uses: actions/download-artifact@v4
         with:
           name: ui-dist
           path: ui/dist
       - name: Route matrix and OAuth flow with default features
-        run: cargo test --test ui_router --test oauth_flow --features ui -- --test-threads=1
+        run: cargo nextest run --test ui_router --test oauth_flow --features ui
       - name: Route matrix without default features
-        run: cargo test --test ui_router --no-default-features -- --test-threads=1
+        run: cargo nextest run --test ui_router --no-default-features
       - name: Route matrix with the ui feature only
-        run: cargo test --test ui_router --no-default-features --features ui -- --test-threads=1
+        run: cargo nextest run --test ui_router --no-default-features --features ui
       - name: OAuth flow with the oauth feature only
-        run: cargo test --test oauth_flow --no-default-features --features oauth -- --test-threads=1
+        run: cargo nextest run --test oauth_flow --no-default-features --features oauth
 
   # The browser behavior suite: real headless Chromium against a real
   # server binary, with Poppler for the PDF legs and the fixture vision

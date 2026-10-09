@@ -1959,12 +1959,25 @@ Each library crate has its own README with the detail for that layer.
 
 ## Development
 
+Install cargo-nextest before the first test. Run the command check after the
+install:
+
 ```sh
-cargo test                       # unit + integration tests
-cargo clippy --all-targets       # lint
-cargo build --release            # LTO + fat, opt-level 3
-cargo run --release --bin bench  # standalone benchmark; pass --help for flags
+cargo install cargo-nextest --locked
+cargo nextest --version
 ```
+
+The commands below are identical in Bash and fish:
+
+```sh
+cargo nextest run --workspace --all-targets # unit + integration tests
+cargo clippy --all-targets                   # lint
+cargo build --release                        # LTO + fat, opt-level 3
+cargo run --release --bin bench              # standalone benchmark; pass --help for flags
+```
+
+Before a push, run the [local pre-flight](.omp/AGENTS.md#pre-flight-before-publishing-a-pr).
+It runs each Rust test group from CI.
 
 The suite covers protocol handling, every tool handler, CRUD/search/path persistence,
 concurrency, fuzzy invariant checks, the chunked vector store and its search tools (vector,
