@@ -365,16 +365,8 @@ jobs:
           # version; a bump that waits "whenever convenient" leaves main on a
           # released version and every later PR fails the version gate
           # (chore/open-3.0.3 sat unmerged, 2026-10-06, and blocked rust on
-          # every PR). --rebase matches the repository's merge method.
-          # A fresh bump PR has no check runs yet, so GitHub already reports
-          # it clean; enabling auto-merge on a clean PR is refused ("Pull
-          # request is in clean status") and gh turns that refusal into a run
-          # failure (v3.0.5, 2026-10-07: PR #77 created, bump job failed).
-          # Merge immediately when clean; otherwise arm auto-merge and let it
-          # land once the checks settle.
-          merge_state="$(gh pr view "${branch}" --json mergeStateStatus --jq .mergeStateStatus)"
-          if [ "${merge_state}" = "CLEAN" ]; then
-            gh pr merge "${branch}" --rebase
-          else
-            gh pr merge "${branch}" --auto --rebase
-          fi
+          # every PR). The helper uses --rebase for direct and auto merges.
+          # It merges clean pull requests directly. For other states, it arms
+          # auto-merge. If GitHub changes the state while the request runs, it
+          # retries once for the new state.
+          scripts/merge-bump-pr.sh "${branch}"
