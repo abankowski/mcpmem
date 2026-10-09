@@ -20,18 +20,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Verify the tag, workspace versions and crates.io agree BEFORE any heavy
-  # build. The gate used to run as the first step of `publish`, after the
-  # pdf-targets matrix and the frontend build had already consumed minutes;
-  # a mismatched tag burned all of it only to fail there (2026-10-05, v3.0.0:
-  # FAIL tag v3.0.0 does not match version 2.1.6). Fail fast instead: this
-  # ten-second job gates every build job below.
+  # Verify the tag, workspace versions, main ancestry, and exact CI proof
+  # before target work. This job gates the frontend and archive jobs.
   version:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
       - name: Tag, semver and crates.io agree
         run: scripts/check-release-version.sh --registry "${{ github.event.release.tag_name || inputs.tag }}"
       # The release event may also carry a prerelease mismatch that the same
@@ -51,15 +51,24 @@ jobs:
             exit 1
           fi
           echo "tag ${TAG} and the GitHub release agree on prerelease=${IS_PRERELEASE}"
+      - name: The tag commit is on main
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::${TAG} is not an ancestor of origin/main"
+            exit 1
+          fi
+          echo "tag commit is on main"
+      - name: CI passed for the tag commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-release-ci.sh "$(git rev-parse HEAD)"
 
-  # Check the external PDF dependency and real rendering on every binary
-  # target before publishing any crate. A missing renderer blocks the release.
-  #
-  # The crate embeds the UI bundle from ui/dist (git-ignored) under the
-  # default `ui` feature, so this job restores the bundle built by `frontend`
-  # before compiling. Without it the lib fails to compile on the 
-  # include_bytes! of the missing assets (2026-10-05, tag v3.0.0).
-  pdf-targets:
+  # Build and verify every target archive before any crate publish. The crate
+  # embeds ui/dist, so each leg restores the tagged bundle from `frontend`.
+  archive:
     needs: [frontend, version]
     strategy:
       fail-fast: false
@@ -100,6 +109,55 @@ jobs:
         run: command -v pdfinfo && command -v pdftoppm && pdfinfo -v && pdftoppm -v
       - name: Test real PDF rendering against fake vision
         run: cargo test --locked --target "${{ matrix.target }}" --test attachment_extraction --features extractor pdf_render_routes_page_to_vision -- --exact --test-threads=1
+      - name: Build the release binaries
+        run: cargo build --release --all-features --locked --target "${{ matrix.target }}"
+      # The Linux x64 binary is the portable release smoke target. Other legs
+      # prove their target build and archive before publication.
+      - name: Smoke test the bundled UI from the Linux x64 release binary
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          binary="target/${{ matrix.target }}/release/mcpmem"
+          "${binary}" --transport http --bind 127.0.0.1:8091 \
+            --auth-token smoke --legacy-owner-id machine:local \
+            --memory-file /tmp/mcpmem-smoke.mcpmem &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          ready=""
+          attempt=0
+          while [ "${ready}" = "" ] && [ "${attempt}" -lt 60 ]; do
+            attempt=$((attempt + 1))
+            if curl -fsS -o /dev/null http://127.0.0.1:8091/ui 2>/dev/null; then
+              ready=1
+            else
+              sleep 1
+            fi
+          done
+          if [ -z "${ready}" ]; then
+            echo "smoke failed: the server did not answer /ui within 60 s"
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:8091/ui | grep -q '<div id="root">'
+          asset="$(jq -r '.files | keys[0]' ui/dist/ui-manifest.json)"
+          want="$(jq -r --arg a "$asset" '.files[$a].sha256' ui/dist/ui-manifest.json)"
+          ctype="$(jq -r --arg a "$asset" '.files[$a].contentType' ui/dist/ui-manifest.json)"
+          curl -fsS -D - -o /dev/null "http://127.0.0.1:8091${asset}" | grep -qi "content-type: ${ctype}"
+          curl -fsS "http://127.0.0.1:8091${asset}" -o /tmp/mcpmem-smoke-asset
+          test "$(sha256sum /tmp/mcpmem-smoke-asset | cut -d' ' -f1)" = "${want}"
+          echo 'smoke passed: the release binary serves the bundled UI without Node'
+      - name: Archive the release binaries
+        id: archive
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          archive="mcpmem-${TAG}-${{ matrix.target }}.tar.gz"
+          tar -C "target/${{ matrix.target }}/release" -czf "${archive}" mcpmem mcpmem-maintenance bench
+          printf 'path=%s\n' "${archive}" >> "${GITHUB_OUTPUT}"
+      - name: Store the target archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive-${{ matrix.target }}
+          path: ${{ steps.archive.outputs.path }}
+          if-no-files-found: error
   # The embedded UI bundle is a git-ignored build output: every release
   # artifact must be built from the tagged ui/src by this job first, and the
   # jobs that compile or package the crate restore it into ui/dist.
@@ -136,8 +194,10 @@ jobs:
           path: ui/dist
           if-no-files-found: error
 
+  # The archive job already checks every target artifact. This job restores
+  # ui-dist for package contents, then publishes without another build or test.
   publish:
-    needs: [pdf-targets, frontend]
+    needs: [archive]
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -153,85 +213,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
-          fetch-depth: 0
-
-      # Every compile below embeds the bundle from ui/dist; the packaged
-      # crate carries it too (scripts/check-ui-package.mjs gates that).
       - name: Restore the built UI bundle
         uses: actions/download-artifact@v4
         with:
           name: ui-dist
           path: ui/dist
-
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Tag, semver and crates.io agree
-        run: scripts/check-release-version.sh --registry "${{ github.event.release.tag_name || inputs.tag }}"
-
-      - name: A prerelease version needs a prerelease GitHub release
-        if: github.event_name == 'release'
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-          IS_PRERELEASE: ${{ github.event.release.prerelease }}
-        run: |
-          case "${TAG#v}" in
-          *-*) semver_prerelease=true ;;
-          *) semver_prerelease=false ;;
-          esac
-          if [ "${semver_prerelease}" != "${IS_PRERELEASE}" ]; then
-            echo "::error::tag ${TAG} is prerelease=${semver_prerelease}, GitHub release is prerelease=${IS_PRERELEASE}"
-            exit 1
-          fi
-          echo "tag ${TAG} and the GitHub release agree on prerelease=${IS_PRERELEASE}"
-
-      - name: The released commit is on main
-        if: github.event_name == 'release'
-        run: |
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "::error::${{ github.event.release.tag_name }} is not an ancestor of origin/main"
-            exit 1
-          fi
-          echo "released commit is on main"
-
-      - name: Test workspace
-        run: cargo test --workspace --all-targets --locked -- --test-threads=1
-
-      # The published binary embeds the bundle: no Node is needed to serve
-      # the UI. This smoke starts the release binary and reads the shell
-      # page plus one real asset, comparing its sha256 and content type
-      # with the embedded manifest.
-      - name: Smoke test the bundled UI from the release binary
-        run: |
-          cargo build --release --locked
-          ./target/release/mcpmem --transport http --bind 127.0.0.1:8091 \
-            --auth-token smoke --legacy-owner-id machine:local \
-            --memory-file /tmp/mcpmem-smoke.mcpmem &
-          pid=$!
-          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
-          ready=""
-          attempt=0
-          while [ "${ready}" = "" ] && [ "${attempt}" -lt 60 ]; do
-            attempt=$((attempt + 1))
-            if curl -fsS -o /dev/null http://127.0.0.1:8091/ui 2>/dev/null; then
-              ready=1
-            else
-              sleep 1
-            fi
-          done
-          if [ -z "${ready}" ]; then
-            echo "smoke failed: the server did not answer /ui within 60 s"
-            exit 1
-          fi
-          curl -fsS http://127.0.0.1:8091/ui | grep -q '<div id="root">'
-          asset="$(jq -r '.files | keys[0]' ui/dist/ui-manifest.json)"
-          want="$(jq -r --arg a "$asset" '.files[$a].sha256' ui/dist/ui-manifest.json)"
-          ctype="$(jq -r --arg a "$asset" '.files[$a].contentType' ui/dist/ui-manifest.json)"
-          curl -fsS -D - -o /dev/null "http://127.0.0.1:8091${asset}" | grep -qi "content-type: ${ctype}"
-          curl -fsS "http://127.0.0.1:8091${asset}" -o /tmp/mcpmem-smoke-asset
-          test "$(sha256sum /tmp/mcpmem-smoke-asset | cut -d' ' -f1)" = "${want}"
-          echo 'smoke passed: the release binary serves the bundled UI without Node'
-
       # Preferred path: no stored credential. It needs a Trusted Publisher
       # entry on crates.io for every crate, which crates.io accepts only after
       # the crate exists. The first release therefore uses the secret, and the
@@ -240,7 +227,6 @@ jobs:
         id: auth
         if: env.HAS_STORED_TOKEN != 'true'
         uses: rust-lang/crates-io-auth-action@v1
-
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token }}
@@ -256,58 +242,27 @@ jobs:
             scripts/publish-crates.sh
           fi
 
-  # crates.io ships source only, so every `cargo install` recompiles the whole
-  # workspace on the client. This job builds the binary once, per target, and
-  # attaches it to the GitHub release, so an install can download the artefact
-  # instead of compressing. The crates.io publisher stays the source of record.
-  binaries:
-    needs: [publish, frontend]
+  # The archive matrix stores all target files before crates.io accepts the
+  # packages. Attach those stored files only after publishing succeeds.
+  upload-binaries:
+    needs: [publish]
     if: github.event_name == 'release'
-    strategy:
-      # One target must not cancel the rest: each leg attaches its own artefact
-      # with --clobber, so they are independent and individually re-runnable.
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-14
-            target: x86_64-apple-darwin
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.release.tag_name }}
-      - name: Restore the built UI bundle
+      - name: Restore target archives
         uses: actions/download-artifact@v4
         with:
-          name: ui-dist
-          path: ui/dist
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Build the release binary
-        run: cargo build --release --all-features --locked --target "${{ matrix.target }}"
-      - name: Archive and attach
+          pattern: release-archive-*
+          path: release-assets
+          merge-multiple: true
+      - name: Upload release archives
         env:
           TAG: ${{ github.event.release.tag_name }}
-          # gh does not read the runner's ambient token; it needs the variable
-          # named. Without it the upload fails at exit 4, which is how the
-          # v1.0.3 release lost all four binaries (2026-09-12).
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          archive="/tmp/mcpmem-${TAG}-${{ matrix.target }}.tar.gz"
-          # Every binary the crate declares goes in, not only the server:
-          # cargo-binstall validates the archive against the crate's bin set
-          # and rejects one that lacks mcpmem-maintenance or the benchmark.
-          tar -C "target/${{ matrix.target }}/release" -czf "${archive}" mcpmem mcpmem-maintenance bench
-          gh release upload "${TAG}" "${archive}" --clobber
+        run: gh release upload "${TAG}" release-assets/*.tar.gz --clobber
 
   # After a release, `main` names the version that is coming next, never the one
   # already published. Owner decision, 2026-09-10, after two releases failed
@@ -318,10 +273,10 @@ jobs:
   # was rejected by the repository rules), and a workflow pushing past its own
   # rule would fail loudly anyway.
   bump:
-    # publish alone gates the bump. The binaries job is a distribution nicety;
+    # publish alone gates the bump. The upload job is a distribution nicety;
     # letting it fail skip the bump left main naming v1.0.3 while crates.io
     # already held 1.0.3, and every later release repeated the publish (v1.0.3,
-    # 2026-09-12). The bump runs in parallel with the binaries instead.
+    # 2026-09-12). The bump runs in parallel with the upload job instead.
     needs: publish
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
