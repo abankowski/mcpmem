@@ -1972,7 +1972,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcpmem"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "mcpmem-core"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "parking_lot",
  "rusqlite",
@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "mcpmem-extractor"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "base64",
  "libc",
@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "mcpmem-indexer"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "aws-config",
  "aws-sdk-bedrockruntime",
@@ -2082,7 +2082,7 @@ dependencies = [
 
 [[package]]
 name = "mcpmem-oauth"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "base64",
  "getrandom 0.4.3",
@@ -2101,7 +2101,7 @@ dependencies = [
 
 [[package]]
 name = "mcpmem-runtime"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "mcpmem-core",
  "thiserror",
@@ -2110,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "mcpmem-webhook"
-version = "3.0.6"
+version = "3.0.7"
 dependencies = [
  "hmac 0.12.1",
  "mcpmem-core",
