@@ -7,22 +7,24 @@ The commands below are identical in Bash and fish.
 
 ## The version rules
 
-- The workspace holds six crates. All six carry the same version.
+- The workspace has seven crates. Six library crates and root `mcpmem` use the same version.
 - A tag is `v` plus the version, for example `v1.0.0`.
 - The version is strict semver 2.0.0. Build metadata is rejected: crates.io
   stores it, but no dependency can request it, so the release is unreachable.
 - A prerelease version, for example `1.0.0-rc.1`, needs a GitHub release that
   is marked as a prerelease. The workflow fails when the two disagree.
 - The released commit must be an ancestor of `origin/main`.
+- The tag commit must have one completed successful `CI` push run on `main`.
 
-`scripts/check-release-version.sh` enforces every rule above. Ordinary CI runs
+`scripts/check-release-version.sh` enforces the version rules. Ordinary CI runs
 it without arguments. The release workflow adds `--registry`, which also
-requires the version to be unpublished.
+checks that the version is unpublished. `scripts/check-release-ci.sh` checks
+the exact tag SHA after the workflow proves main ancestry.
 
 ## The first release binds the names on crates.io
 
 A crate name belongs to nobody until a version of it exists. The first release
-is therefore `1.0.0-rc.1`, a prerelease: it takes all six names, and it lets
+is therefore `1.0.0-rc.1`, a prerelease: it takes all seven names, and it lets
 crates.io accept the Trusted Publisher entries, which it refuses for a crate
 that does not exist.
 
@@ -115,21 +117,27 @@ For a prerelease, add `--prerelease`:
 gh release create v1.1.0-rc.1 --title v1.1.0-rc.1 --notes 'release candidate' --prerelease --target main
 ```
 
-The `release: published` event starts the workflow. It re-runs the version
-gate, checks the prerelease flag, checks the ancestry of the commit, runs the
-whole test suite, and then publishes. Before the cargo build, the workflow's
-frontend job rebuilds the UI bundle from the tagged `ui/src` and uploads it;
-the publish and binaries jobs restore it into `ui/dist`. The publish job then
-builds the release binary and smoke-tests it serving `/ui` and a real asset —
-from the binary's own embedded bytes, with no Node on the host — before
-crates.io is touched.
+The `release: published` event starts the workflow. The `version` job checks
+the version, prerelease flag, main ancestry, and exact-SHA `CI` push run.
+
+The `frontend` job builds `ui-dist` from the tagged `ui/src` and stores it. The
+four-leg `archive` matrix restores that bundle. Each leg checks the PDF
+renderer, runs the PDF test, builds all feature binaries, archives them, and
+stores its target archive. The Linux x64 leg smoke tests the binary. It serves
+`/ui` and a real asset from its embedded bytes, with no Node runtime.
+
+The `publish` job waits for every archive and restores `ui-dist` for the root
+package. It does not rerun the workspace suite or rebuild the smoke binary.
+`upload-binaries` attaches the stored archives only after crates.io publishing
+succeeds. The `bump` job also waits only for `publish`.
 
 ## Publish order
 
 `scripts/publish-crates.sh` publishes in dependency order:
 
 1. `mcpmem-core`
-2. `mcpmem-runtime`, `mcpmem-indexer`, `mcpmem-webhook`
+2. `mcpmem-extractor`, `mcpmem-runtime`, `mcpmem-indexer`, `mcpmem-webhook`,
+   `mcpmem-oauth`
 3. `mcpmem`
 
 `cargo publish` waits for each crate to appear in the index before it returns,
@@ -139,26 +147,25 @@ The root `mcpmem` package changes shape here, not order: it carries `ui/dist`
 (the embedded bundle), which is why the workflow builds the frontend first and
 CI gates the packaged bytes with `scripts/check-ui-package.mjs`.
 
+The six library crates use `--no-verify`. Exact-SHA CI and the archive matrix
+already check them before publishing. The root `mcpmem` crate retains Cargo
+verification and uses `--allow-dirty`. Its package includes the fresh,
+git-ignored `ui/dist` bundle. The dirty files are release inputs, not a source
+change.
+
 The script skips a crate that crates.io already holds at this version. A
 re-run after a partial failure therefore completes the release instead of
 aborting on the crates that already went out.
 
-One failure mode needed a flag. On 2026-10-05 the v3.0.0 release published
-the six library crates and failed on the root crate: the package include
-list pulls in the freshly built, git-ignored `ui/dist`, and cargo's dirty
-check refuses uncommitted files. The root crate now publishes with
-`--allow-dirty`; the library crates stay strict. A release that stops
-mid-way needs a new version for the re-run.
-
 ## Dry run
 
 `workflow_dispatch` accepts a tag and a `dry_run` flag, which defaults to true.
-A dry run packages and verifies instead of publishing.
+A dry run packages crates and does not publish. It uses the same flag split:
+the library crates skip Cargo verification and root `mcpmem` verifies.
 
-One limitation, and it is not a defect: `cargo publish --dry-run` verifies a
-crate against crates.io, so a dependent cannot be verified before its
-dependency is published. Before the first release, only `mcpmem-core` verifies.
-The script reports the others and continues.
+Cargo can reject a dependent dry run before its new dependency reaches
+crates.io. The script reports that result and continues. Exact-SHA CI and the
+archive matrix remain the release proof.
 
 ## The crates.io credential
 
@@ -183,7 +190,7 @@ No credential is stored in the repository.
 crates.io accepts a Trusted Publisher entry only for a crate that exists, so
 the first release must use the API token. After that release:
 
-1. Open each of the six crates on crates.io. Add a Trusted Publisher: owner
+1. Open each of the seven crates on crates.io. Add a Trusted Publisher: owner
    `abankowski`, repository `mcpmem`, workflow `release.yml`, environment
    `crates-io`.
 2. Delete the `CARGO_REGISTRY_TOKEN` secret in the GitHub repository.
@@ -206,7 +213,7 @@ and it fails with a clear message when neither credential is available.
 ## Requirements in the repository settings
 
 - Either the secret `CARGO_REGISTRY_TOKEN`, or a Trusted Publisher entry for
-  all six crates.
+  all seven crates.
 - An environment named `crates-io`. Add required reviewers there when a manual
   approval before publishing is wanted.
 - The job holds `id-token: write`, which the OIDC exchange needs.

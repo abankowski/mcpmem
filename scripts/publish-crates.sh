@@ -47,9 +47,13 @@ for crate in "${ORDER[@]}"; do
 		# artifact lands in the package and cargo's dirty check refuses it.
 		# The release on 2026-10-05 (v3.0.0) published the six library
 		# crates and failed here; the uncommitted files are the bundle the
-		# crate must embed, not contamination. The library crates package no
-		# dist, so they stay strict.
+		# crate must embed, not contamination. Keep root verification because
+		# this package changes when it carries ui/dist.
 		publish_args+=(--allow-dirty)
+	else
+		# CI proves the exact tag, and the archive matrix builds every target
+		# before publishing. Library packages do not carry the generated bundle.
+		publish_args+=(--no-verify)
 	fi
 	if [[ ${dry_run} -eq 1 ]]; then
 		printf 'dry-run  %s\n' "${crate}"
