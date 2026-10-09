@@ -1,30 +1,16 @@
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
-
-static DB_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 struct McpClient {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
     stdout: std::process::ChildStdout,
-    db_path: String,
+    _temp_dir: tempfile::TempDir,
 }
 
 impl Drop for McpClient {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        for ext in [
-            "",
-            "-wal",
-            "-shm",
-            ".workspaces.sqlite",
-            ".workspaces.sqlite-wal",
-            ".workspaces.sqlite-shm",
-        ] {
-            let _ = std::fs::remove_file(format!("{}{}", self.db_path, ext));
-        }
-        let _ = std::fs::remove_dir_all(format!("{}.workspaces", self.db_path));
     }
 }
 
@@ -33,19 +19,12 @@ fn spawn_server() -> McpClient {
 }
 
 fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient {
-    let n = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let db_path = format!("/tmp/test_e2e_{n}.db");
-    for ext in [
-        "",
-        "-wal",
-        "-shm",
-        ".workspaces.sqlite",
-        ".workspaces.sqlite-wal",
-        ".workspaces.sqlite-shm",
-    ] {
-        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
-    }
-    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
+    let temp_dir = tempfile::tempdir().expect("create temporary test directory");
+    let db_path = temp_dir
+        .path()
+        .join("graph.db")
+        .to_string_lossy()
+        .into_owned();
 
     let bin =
         std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
@@ -74,7 +53,7 @@ fn spawn_server_with_legacy_observations(legacy_observations: bool) -> McpClient
         stdin: child.stdin.take().unwrap(),
         stdout: child.stdout.take().unwrap(),
         child,
-        db_path,
+        _temp_dir: temp_dir,
     }
 }
 
@@ -981,19 +960,12 @@ fn e2e_strict_ordering_with_concurrency_one() {
     // dependent writes (create entity, then relate it) work.
     use std::io::{BufRead, BufReader, Write};
 
-    let n = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let db_path = format!("/tmp/test_e2e_{n}.db");
-    for ext in [
-        "",
-        "-wal",
-        "-shm",
-        ".workspaces.sqlite",
-        ".workspaces.sqlite-wal",
-        ".workspaces.sqlite-shm",
-    ] {
-        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
-    }
-    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
+    let temp_dir = tempfile::tempdir().expect("create temporary test directory");
+    let db_path = temp_dir
+        .path()
+        .join("graph.db")
+        .to_string_lossy()
+        .into_owned();
     let bin =
         std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut child = Command::new(&bin)
@@ -1052,15 +1024,4 @@ fn e2e_strict_ordering_with_concurrency_one() {
 
     let _ = child.kill();
     let _ = child.wait();
-    for ext in [
-        "",
-        "-wal",
-        "-shm",
-        ".workspaces.sqlite",
-        ".workspaces.sqlite-wal",
-        ".workspaces.sqlite-shm",
-    ] {
-        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
-    }
-    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
 }

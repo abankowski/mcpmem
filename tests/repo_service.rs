@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 fn git(args: &[&str], cwd: Option<&Path>) {
     let mut cmd = Command::new("git");
-    cmd.args(args)
+    cmd.args(["-c", "commit.gpgSign=false"])
+        .args(args)
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")

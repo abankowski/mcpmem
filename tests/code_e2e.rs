@@ -4,9 +4,6 @@
 #![cfg(feature = "code")]
 
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 const RUST_SRC: &str = r#"
 /// Adds two numbers.
@@ -247,7 +244,7 @@ struct Client {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
     stdout: std::process::ChildStdout,
-    db_path: String,
+    _temp_dir: tempfile::TempDir,
     src_dir: std::path::PathBuf,
 }
 
@@ -255,20 +252,6 @@ impl Drop for Client {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        for ext in [
-            "",
-            "-wal",
-            "-shm",
-            ".workspaces.sqlite",
-            ".workspaces.sqlite-wal",
-            ".workspaces.sqlite-shm",
-        ] {
-            let _ = std::fs::remove_file(format!("{}{}", self.db_path, ext));
-        }
-        let _ = std::fs::remove_dir_all(format!("{}.workspaces", self.db_path));
-        // Per-project code databases live in `<db_path>.code/`.
-        let _ = std::fs::remove_dir_all(format!("{}.code", self.db_path));
-        let _ = std::fs::remove_dir_all(&self.src_dir);
     }
 }
 
@@ -308,21 +291,13 @@ impl Client {
 }
 
 fn setup() -> Client {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let db_path = format!("/tmp/code_e2e_{n}.db");
-    for ext in [
-        "",
-        "-wal",
-        "-shm",
-        ".workspaces.sqlite",
-        ".workspaces.sqlite-wal",
-        ".workspaces.sqlite-shm",
-    ] {
-        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
-    }
-    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
-    let src_dir = std::env::temp_dir().join(format!("code_e2e_src_{n}"));
-    let _ = std::fs::remove_dir_all(&src_dir);
+    let temp_dir = tempfile::tempdir().expect("create temporary test directory");
+    let db_path = temp_dir
+        .path()
+        .join("code.db")
+        .to_string_lossy()
+        .into_owned();
+    let src_dir = temp_dir.path().join("source");
     std::fs::create_dir_all(&src_dir).unwrap();
     std::fs::write(src_dir.join("lib.rs"), RUST_SRC).unwrap();
     std::fs::write(src_dir.join("app.py"), PY_SRC).unwrap();
@@ -354,7 +329,7 @@ fn setup() -> Client {
         stdin: child.stdin.take().unwrap(),
         stdout: child.stdout.take().unwrap(),
         child,
-        db_path,
+        _temp_dir: temp_dir,
         src_dir,
     }
 }
@@ -544,19 +519,12 @@ fn code_index_is_incremental() {
 #[test]
 fn code_tools_present_when_enabled() {
     // Code tools are advertised once the `code` category is enabled.
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let db_path = format!("/tmp/code_e2e_default_{n}.db");
-    for ext in [
-        "",
-        "-wal",
-        "-shm",
-        ".workspaces.sqlite",
-        ".workspaces.sqlite-wal",
-        ".workspaces.sqlite-shm",
-    ] {
-        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
-    }
-    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
+    let temp_dir = tempfile::tempdir().expect("create temporary test directory");
+    let db_path = temp_dir
+        .path()
+        .join("code.db")
+        .to_string_lossy()
+        .into_owned();
     let bin =
         std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
     let mut child = Command::new(&bin)
@@ -604,17 +572,6 @@ fn code_tools_present_when_enabled() {
     }
     let _ = child.kill();
     let _ = child.wait();
-    for ext in [
-        "",
-        "-wal",
-        "-shm",
-        ".workspaces.sqlite",
-        ".workspaces.sqlite-wal",
-        ".workspaces.sqlite-shm",
-    ] {
-        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
-    }
-    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
 }
 
 // ── New Language Integration Tests ──────────────────────────────────────

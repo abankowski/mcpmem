@@ -1,33 +1,10 @@
 use std::process::{Command, Stdio};
-use std::sync::Once;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-static DB_COUNTER: AtomicU32 = AtomicU32::new(0);
-static CLEANUP: Once = Once::new();
-
-/// Remove any orphaned test DB files left over from prior runs.
-fn cleanup_orphaned_dbs() {
-    CLEANUP.call_once(|| {
-        if let Ok(entries) = std::fs::read_dir("/tmp") {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                    && name.starts_with("vec_e2e_")
-                    && (name.ends_with(".db")
-                        || name.ends_with(".db-wal")
-                        || name.ends_with(".db-shm"))
-                {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-        }
-    });
-}
 
 struct VecClient {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
     stdout: std::process::ChildStdout,
+    _temp_dir: tempfile::TempDir,
     db_path: String,
 }
 
@@ -35,17 +12,6 @@ impl Drop for VecClient {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        for ext in [
-            "",
-            "-wal",
-            "-shm",
-            ".workspaces.sqlite",
-            ".workspaces.sqlite-wal",
-            ".workspaces.sqlite-shm",
-        ] {
-            let _ = std::fs::remove_file(format!("{}{}", self.db_path, ext));
-        }
-        let _ = std::fs::remove_dir_all(format!("{}.workspaces", self.db_path));
     }
 }
 
@@ -55,20 +21,12 @@ fn spawn_vec_server() -> VecClient {
 
 /// Spawn a stdio server, appending `extra` CLI args after the defaults.
 fn spawn_vec_server_with(extra: &[&str]) -> VecClient {
-    cleanup_orphaned_dbs();
-    let n = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let db_path = format!("/tmp/vec_e2e_{n}.db");
-    for ext in [
-        "",
-        "-wal",
-        "-shm",
-        ".workspaces.sqlite",
-        ".workspaces.sqlite-wal",
-        ".workspaces.sqlite-shm",
-    ] {
-        let _ = std::fs::remove_file(format!("{db_path}{ext}"));
-    }
-    let _ = std::fs::remove_dir_all(format!("{db_path}.workspaces"));
+    let temp_dir = tempfile::tempdir().expect("create temporary test directory");
+    let db_path = temp_dir
+        .path()
+        .join("vector.db")
+        .to_string_lossy()
+        .into_owned();
 
     let bin =
         std::env::var("CARGO_BIN_EXE_mcpmem").unwrap_or_else(|_| "target/debug/mcpmem".into());
@@ -100,6 +58,7 @@ fn spawn_vec_server_with(extra: &[&str]) -> VecClient {
         stdin: child.stdin.take().unwrap(),
         stdout: child.stdout.take().unwrap(),
         child,
+        _temp_dir: temp_dir,
         db_path,
     }
 }
