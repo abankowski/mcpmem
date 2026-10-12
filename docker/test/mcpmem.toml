@@ -1,0 +1,15 @@
+[server]
+memory-file = "/var/lib/mcpmem/memory.mcpmem"
+transport = "http"
+bind = "0.0.0.0:8080"
+roles = ["mcp"]
+ui = true
+
+[workspaces]
+legacy-owner-id = "machine:local"
+
+[tools]
+all = true
+
+[security]
+auth-token-file = "/run/secrets/mcpmem-auth-token"

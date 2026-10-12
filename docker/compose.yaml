@@ -1,0 +1,28 @@
+services:
+  mcpmem:
+    image: "${MCPMEM_IMAGE:?Set MCPMEM_IMAGE to an image tag.}"
+    ports:
+      - "8443:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - mcpmem-data:/var/lib/mcpmem
+      - ./config/mcpmem.toml:/etc/mcpmem/mcpmem.toml:ro
+      - ./tls/tls.crt:/etc/mcpmem/tls/tls.crt:ro
+      - ./tls/tls.key:/etc/mcpmem/tls/tls.key:ro
+    secrets:
+      - source: mcpmem-auth-token
+        target: mcpmem-auth-token
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+
+volumes:
+  mcpmem-data:
+
+secrets:
+  mcpmem-auth-token:
+    file: ./secrets/mcpmem-auth-token

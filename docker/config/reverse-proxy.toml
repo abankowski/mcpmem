@@ -1,0 +1,29 @@
+# The proxy ends TLS.
+# Use this file only on an internal network.
+# Make the proxy the only client that can reach this process.
+# Make the proxy replace X-Forwarded-For with the client address.
+# Do not append a client-provided X-Forwarded-For value.
+# Replace the example OAuth values and principals file before use.
+
+[server]
+memory-file = "/var/lib/mcpmem/memory.mcpmem"
+transport = "http"
+bind = "0.0.0.0:8080"
+roles = ["mcp", "indexer", "extractor", "webhooks"]
+ui = true
+
+[workspaces]
+legacy-owner-id = "machine:local"
+
+[tools]
+all = true
+
+[security]
+auth-token-file = "/run/secrets/mcpmem-auth-token"
+
+[oauth]
+public-url = "https://mem.example.com"
+issuer = "https://accounts.example.com"
+client-id = "mcpmem-prod"
+principals-file = "/etc/mcpmem/principals.json"
+trust-forwarded-proto = true
