@@ -92,6 +92,25 @@ jobs:
             echo "bump-only=false" >> "$GITHUB_OUTPUT"
           fi
 
+  container:
+    needs: version
+    if: needs.version.outputs.bump-only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the AMD64 runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: mcpmem:ci
+      - name: Smoke-test the runtime image
+        run: MCPMEM_IMAGE=mcpmem:ci scripts/test-container-image.sh
+
   rust-checks:
     needs: [frontend, version]
     if: needs.version.outputs.bump-only != 'true'
