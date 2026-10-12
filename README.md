@@ -175,6 +175,106 @@ cargo build --release --all-features       # everything on
 # the binary lands in target/release/mcpmem
 ```
 
+## Docker images
+
+Image publication starts with the next release. No `mcpmem` image is published
+before that release. The release will publish the same multi-platform image to:
+
+- `ghcr.io/abankowski/mcpmem`
+- `docker.io/abankowski/mcpmem`
+
+Both registries will support `linux/amd64` and `linux/arm64`. Every release
+will have an immutable `<major>.<minor>.<patch>` tag. Stable releases will
+also update `<major>.<minor>` and `latest`. A prerelease will not update either
+floating tag.
+
+The image will include all Cargo features, the embedded browser UI, Poppler,
+and CA certificates. It will not include a reverse proxy, a certificate
+authority client, a secret, or a Docker `VOLUME`.
+
+### Direct TLS
+
+Use the direct-TLS configuration with a bearer-token file, a certificate, and
+a private key. The default configuration reads all three from mounts and fails
+at startup when any required mount is absent. It never starts an unauthenticated
+HTTP server.
+
+Before the first start, create the host paths and copy the supplied
+configuration. These commands are identical in Bash and fish:
+
+```sh
+mkdir -p data config tls secrets
+cp docker/config/mcpmem.toml config/mcpmem.toml
+sudo chown 10001:10001 data
+```
+
+Put the certificate at `tls/tls.crt`, its key at `tls/tls.key`, and the bearer
+token in `secrets/mcpmem-auth-token`. The image runs as the fixed non-root UID
+and GID `10001`. A bind-mounted `data` directory must be writable by that UID.
+Use a named Docker volume when Docker should manage the directory owner.
+
+After the next release, run a versioned direct-TLS image. This command is
+identical in Bash and fish:
+
+```sh
+docker run --rm --name mcpmem \
+  --publish 8443:8080 \
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges:true \
+  --mount type=bind,src="$PWD/data",dst=/var/lib/mcpmem \
+  --mount type=bind,src="$PWD/config/mcpmem.toml",dst=/etc/mcpmem/mcpmem.toml,readonly \
+  --mount type=bind,src="$PWD/tls/tls.crt",dst=/etc/mcpmem/tls/tls.crt,readonly \
+  --mount type=bind,src="$PWD/tls/tls.key",dst=/etc/mcpmem/tls/tls.key,readonly \
+  --mount type=bind,src="$PWD/secrets/mcpmem-auth-token",dst=/run/secrets/mcpmem-auth-token,readonly \
+  ghcr.io/abankowski/mcpmem:<major>.<minor>.<patch>
+```
+
+Mount the complete `/var/lib/mcpmem` directory. Do not mount only
+`memory.mcpmem`: the workspace registry and workspace graph files use the
+same directory. On a fresh data mount, the supplied configuration assigns the
+legacy workspace to `machine:local`. Mount a replacement TOML file before the
+first start when another owner is required.
+
+The following external paths are available to an operator:
+
+| Purpose | Container path | Access |
+| --- | --- | --- |
+| Durable data | `/var/lib/mcpmem` | Read-write |
+| Configuration | `/etc/mcpmem/mcpmem.toml` | Read-only |
+| TLS certificate | `/etc/mcpmem/tls/tls.crt` | Read-only |
+| TLS key | `/etc/mcpmem/tls/tls.key` | Read-only |
+| Bearer token | `/run/secrets/mcpmem-auth-token` | Read-only |
+| OAuth principals | `/etc/mcpmem/principals.json` | Read-only |
+| OAuth, indexer, OCR, and webhook keys | `/run/secrets/*` | Read-only |
+
+The Compose example uses the same direct-TLS interface. Set the image after
+the next release:
+
+```bash
+MCPMEM_IMAGE=ghcr.io/abankowski/mcpmem:<major>.<minor>.<patch> \
+  docker compose -f docker/compose.yaml up
+```
+
+```fish
+env MCPMEM_IMAGE=ghcr.io/abankowski/mcpmem:<major>.<minor>.<patch> \
+  docker compose -f docker/compose.yaml up
+```
+
+### Reverse proxy
+
+The image does not supply a proxy. An operator who uses a reverse proxy for TLS
+must mount `docker/config/reverse-proxy.toml` as the replacement
+configuration. Put the application on an internal-only network where only the
+proxy can reach it. Configure the proxy to replace `X-Forwarded-For` with the
+client address. Do not append a client-supplied value.
+
+The reverse-proxy configuration enables `oauth.trust-forwarded-proto` and
+needs the OAuth issuer, client ID, public URL, and principals file changed
+before use. It still needs the read-only bearer-token mount. Do not use this
+configuration for a direct public container port.
+
 ## Runtime roles
 
 One process runs the MCP server, a background worker, or any compiled combination. `--role`

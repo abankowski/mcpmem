@@ -218,6 +218,43 @@ and it fails with a clear message when neither credential is available.
   approval before publishing is wanted.
 - The job holds `id-token: write`, which the OIDC exchange needs.
 
+## Docker image release settings
+
+Image publication starts with the next published GitHub release. No image exists
+before that release. The release publishes `ghcr.io/abankowski/mcpmem` first,
+then copies its completed manifest to `docker.io/abankowski/mcpmem`.
+
+Before the first Docker release:
+
+1. Set the GitHub Container Registry package `mcpmem` to **Public**. The
+   published package must use the repository name `abankowski/mcpmem`.
+2. Create the public Docker Hub repository `abankowski/mcpmem`.
+3. Add the Docker Hub account name as the repository variable
+   `DOCKERHUB_USERNAME`.
+4. Add a Docker Hub access token with write access as the repository secret
+   `DOCKERHUB_TOKEN`.
+5. Keep `packages: write` on the new container jobs only. Do not add it to an
+   existing release job.
+
+The release builds each image on its native Linux runner. It publishes Linux
+AMD64 and ARM64 manifests to both registries. It always creates an immutable
+`<major>.<minor>.<patch>` tag. A stable release also creates
+`<major>.<minor>` and `latest`. A prerelease creates no floating tag.
+
+The manifest job must inspect every tag in both registries. It must fail unless
+each tag lists `linux/amd64` and `linux/arm64`. GHCR is the source of truth.
+Docker Hub receives a manifest copy and does not start a second image build.
+
+### Retry a Docker publication failure
+
+If crate publication succeeds and Docker publication fails, do not create
+another release or rerun crate publication. Rerun only the failed container
+jobs from the same GitHub release workflow. If GHCR has the complete manifest,
+retry only the Docker Hub copy from that manifest.
+
+After the retry, inspect every required GHCR and Docker Hub tag. Confirm that
+each manifest lists Linux AMD64 and ARM64 before you call the release complete.
+
 ## Deploying the server binary
 
 For a production server, install the **GitHub release asset**; for a
