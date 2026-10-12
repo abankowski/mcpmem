@@ -93,22 +93,26 @@ start_container() {
 }
 
 wait_for_ui() {
-  local label="$1" attempt status
+  local label="$1" attempt session_status status
 
   for ((attempt = 1; attempt <= 60; attempt++)); do
+    session_status="$(curl --silent --request GET --output /dev/null \
+      --write-out '%{http_code}' \
+      --header "Authorization: Bearer ${TOKEN}" \
+      "http://127.0.0.1:${PORT}/ui/api/session" || true)"
     : >"${RESPONSE_FILE}"
     status="$(curl --silent --request GET --output "${RESPONSE_FILE}" \
       --write-out '%{http_code}' \
       --header "Authorization: Bearer ${TOKEN}" \
       "http://127.0.0.1:${PORT}/ui" || true)"
-    if [[ ${status} == 200 ]] && grep -Fq '<div id="root">' "${RESPONSE_FILE}"; then
+    if [[ ${session_status} == 200 ]] && [[ ${status} == 200 ]] && grep -Fq '<div id="root">' "${RESPONSE_FILE}"; then
       printf 'PASS %s\n' "${label}"
       return
     fi
     sleep 1
   done
 
-  printf 'The container did not serve the authenticated UI request.\n' >&2
+  printf 'The container did not serve the authenticated session API and the UI shell.\n' >&2
   docker logs "${CONTAINER}" >&2 || true
   return 1
 }
