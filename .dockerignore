@@ -1,0 +1,22 @@
+.git
+target
+ui/node_modules
+ui/dist
+.worktrees
+.superpowers
+
+# Local data
+*.mcpmem
+*.mcpmem-*
+*.sqlite
+*.sqlite-*
+
+# Secrets and local environment
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+certs
+certificates

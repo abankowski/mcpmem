@@ -1,0 +1,17 @@
+[server]
+memory-file = "/var/lib/mcpmem/memory.mcpmem"
+transport = "http"
+bind = "0.0.0.0:8080"
+roles = ["mcp", "indexer", "extractor", "webhooks"]
+ui = true
+
+[workspaces]
+legacy-owner-id = "machine:local"
+
+[tools]
+all = true
+
+[security]
+auth-token-file = "/run/secrets/mcpmem-auth-token"
+tls-cert = "/etc/mcpmem/tls/tls.crt"
+tls-key = "/etc/mcpmem/tls/tls.key"
