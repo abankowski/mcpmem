@@ -249,31 +249,47 @@ The following external paths are available to an operator:
 | OAuth principals | `/etc/mcpmem/principals.json` | Read-only |
 | OAuth, indexer, OCR, and webhook keys | `/run/secrets/*` | Read-only |
 
-The Compose example uses the same direct-TLS interface. Set the image after
-the next release:
+The Compose example uses the same direct-TLS interface. Run Compose with the
+repository root as the project directory. Set the image after the next release:
 
 ```bash
 MCPMEM_IMAGE=ghcr.io/abankowski/mcpmem:<major>.<minor>.<patch> \
-  docker compose -f docker/compose.yaml up
+  docker compose --project-directory . -f docker/compose.yaml up
 ```
 
 ```fish
 env MCPMEM_IMAGE=ghcr.io/abankowski/mcpmem:<major>.<minor>.<patch> \
-  docker compose -f docker/compose.yaml up
+  docker compose --project-directory . -f docker/compose.yaml up
 ```
 
 ### Reverse proxy
 
 The image does not supply a proxy. An operator who uses a reverse proxy for TLS
-must mount `docker/config/reverse-proxy.toml` as the replacement
-configuration. Put the application on an internal-only network where only the
-proxy can reach it. Configure the proxy to replace `X-Forwarded-For` with the
-client address. Do not append a client-supplied value.
+must use `docker/config/reverse-proxy.toml` as the replacement configuration.
+Put the application on an internal-only network where only the proxy can reach
+it. Configure the proxy to replace `X-Forwarded-For` with the client address.
+Do not append a client-supplied value.
 
 The reverse-proxy configuration enables `oauth.trust-forwarded-proto` and
 needs the OAuth issuer, client ID, public URL, and principals file changed
 before use. It still needs the read-only bearer-token mount. Do not use this
 configuration for a direct public container port.
+
+Run this command instead of the direct-TLS command when a reverse proxy ends
+TLS. This command is identical in Bash and fish:
+
+```sh
+docker run --rm --name mcpmem \
+  --network internal \
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec \
+  --cap-drop=ALL \
+  --security-opt no-new-privileges:true \
+  --mount type=bind,src="$PWD/data",dst=/var/lib/mcpmem \
+  --mount type=bind,src="$PWD/docker/config/reverse-proxy.toml",dst=/etc/mcpmem/mcpmem.toml,readonly \
+  --mount type=bind,src="$PWD/secrets/mcpmem-auth-token",dst=/run/secrets/mcpmem-auth-token,readonly \
+  ghcr.io/abankowski/mcpmem:<major>.<minor>.<patch>
+```
 
 ## Runtime roles
 
