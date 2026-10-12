@@ -12,6 +12,12 @@ This entry lists every change since that snapshot. The version line restarts at
 
 ### Added
 
+- **Docker image distribution starts with the next release.** The release will
+  publish full-featured `linux/amd64` and `linux/arm64` images to
+  `ghcr.io/abankowski/mcpmem` and `docker.io/abankowski/mcpmem`. Every release
+  will have a version tag. Stable releases will also update the minor and
+  `latest` tags. Prereleases will not update floating tags.
+
 - **Workspaces can be renamed by their owner.** `PATCH /ui/api/workspaces/{id}`
   with `{"name": …}` renames an owned workspace (owner role and the
   graph-write scope; a name the caller already owns answers 409, like create),
