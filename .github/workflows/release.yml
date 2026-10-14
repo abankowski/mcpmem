@@ -242,6 +242,186 @@ jobs:
             scripts/publish-crates.sh
           fi
 
+  # Build each final image on the matching native runner. The local image gets
+  # a smoke test before this workflow authenticates or pushes to GHCR.
+  container-platform:
+    needs: [publish]
+    if: github.event_name == 'release'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            architecture: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build the native runtime image
+        env:
+          LOCAL_IMAGE: mcpmem:release-${{ matrix.architecture }}
+        run: |
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --target runtime \
+            --load \
+            --tag "${LOCAL_IMAGE}" \
+            .
+      - name: Smoke test the native runtime image
+        env:
+          MCPMEM_IMAGE: mcpmem:release-${{ matrix.architecture }}
+        run: scripts/test-container-image.sh
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the platform image and record its digest
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+          IMAGE: ghcr.io/abankowski/mcpmem
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          local_image="mcpmem:release-${ARCHITECTURE}"
+          temporary_image="${IMAGE}:platform-${TAG#v}-${ARCHITECTURE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker tag "${local_image}" "${temporary_image}"
+          docker push "${temporary_image}"
+          digest="$(docker buildx imagetools inspect "${temporary_image}" --format '{{.Digest}}')"
+          case "${digest}" in
+          sha256:*) ;;
+          *)
+            echo "::error::GHCR did not return a digest for ${temporary_image}"
+            exit 1
+            ;;
+          esac
+          printf '%s@%s\n' "${IMAGE}" "${digest}" > "container-digest-${ARCHITECTURE}.txt"
+      - name: Store the immutable platform digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-digest-${{ matrix.architecture }}
+          path: container-digest-${{ matrix.architecture }}.txt
+          if-no-files-found: error
+
+  # Construct tags only from registry digests. A rebuilt temporary tag cannot
+  # change the content of a completed release manifest.
+  container-manifest:
+    needs: [container-platform]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Restore the platform digest references
+        uses: actions/download-artifact@v4
+        with:
+          pattern: container-digest-*
+          path: container-digests
+          merge-multiple: true
+      - name: Create and inspect GHCR manifests
+        env:
+          IMAGE: ghcr.io/abankowski/mcpmem
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          amd64="$(cat container-digests/container-digest-amd64.txt)"
+          arm64="$(cat container-digests/container-digest-arm64.txt)"
+          for digest_reference in "${amd64}" "${arm64}"; do
+            case "${digest_reference}" in
+            "${IMAGE}@sha256:"*) ;;
+            *)
+              echo "::error::invalid platform digest reference: ${digest_reference}"
+              exit 1
+              ;;
+            esac
+          done
+
+          version="${TAG#v}"
+          tags=("${IMAGE}:${version}")
+          if [ "${PRERELEASE}" = "false" ]; then
+            tags+=("${IMAGE}:${version%.*}" "${IMAGE}:latest")
+          fi
+
+          for image_tag in "${tags[@]}"; do
+            docker buildx imagetools create \
+              --tag "${image_tag}" \
+              "${amd64}" \
+              "${arm64}"
+          done
+
+          for image_tag in "${tags[@]}"; do
+            architectures="$(docker buildx imagetools inspect "${image_tag}" --raw |
+              jq -r '.manifests[]?.platform | select(.os == "linux") | .architecture' |
+              sort -u)"
+            for architecture in amd64 arm64; do
+              if ! printf '%s\n' "${architectures}" | grep -qx "${architecture}"; then
+                echo "::error::${image_tag} does not include linux/${architecture}"
+                exit 1
+              fi
+            done
+            echo "verified ${image_tag}: linux/amd64 and linux/arm64"
+          done
+      - name: Authenticate to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Set up ORAS 1.2.2
+        uses: oras-project/setup-oras@v1
+        with:
+          version: 1.2.2
+      - name: Copy and inspect Docker Hub manifests
+        env:
+          DESTINATION_IMAGE: docker.io/abankowski/mcpmem
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          SOURCE_IMAGE: ghcr.io/abankowski/mcpmem
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          copy_and_inspect() {
+            local tag="$1"
+            local architectures
+
+            # ORAS copies the index and every referenced platform manifest.
+            oras cp "${SOURCE_IMAGE}:${tag}" "${DESTINATION_IMAGE}:${tag}"
+            architectures="$(docker buildx imagetools inspect "${DESTINATION_IMAGE}:${tag}" --raw |
+              jq -r '.manifests[]?.platform | select(.os == "linux") | .architecture' |
+              sort -u)"
+            for architecture in amd64 arm64; do
+              if ! printf '%s\n' "${architectures}" | grep -qx "${architecture}"; then
+                echo "::error::${DESTINATION_IMAGE}:${tag} does not include linux/${architecture}"
+                exit 1
+              fi
+            done
+            echo "verified ${DESTINATION_IMAGE}:${tag}: linux/amd64 and linux/arm64"
+          }
+
+          version="${TAG#v}"
+          copy_and_inspect "${version}"
+          if [ "${PRERELEASE}" = "false" ]; then
+            copy_and_inspect "${version%.*}"
+            copy_and_inspect "latest"
+          fi
   # The archive matrix stores all target files before crates.io accepts the
   # packages. Attach those stored files only after publishing succeeds.
   upload-binaries:
