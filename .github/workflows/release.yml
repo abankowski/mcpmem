@@ -298,7 +298,7 @@ jobs:
           temporary_image="${IMAGE}:platform-${TAG#v}-${ARCHITECTURE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker tag "${local_image}" "${temporary_image}"
           docker push "${temporary_image}"
-          digest="$(docker buildx imagetools inspect "${temporary_image}" --format '{{.Digest}}')"
+          digest="$(docker buildx imagetools inspect "${temporary_image}" --format '{{json .Manifest}}' | jq -er '.digest')"
           case "${digest}" in
           sha256:*) ;;
           *)
