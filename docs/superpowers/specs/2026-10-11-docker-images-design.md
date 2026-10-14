@@ -60,8 +60,8 @@ It enables every product tool and runtime role. It declares the direct-TLS paths
 | Durable data | `/var/lib/mcpmem` | Read-write | Mount one named volume or host directory. |
 | Configuration | `/etc/mcpmem/mcpmem.toml` | Read-only | Replace the default file when settings differ. |
 | TLS certificate | `/etc/mcpmem/tls/tls.crt` | Read-only | Mount only for direct TLS. |
-| TLS key | `/etc/mcpmem/tls/tls.key` | Read-only | Mount only for direct TLS. |
-| Bearer token | `/run/secrets/mcpmem-auth-token` | Read-only | Mount a Docker secret or host secret file. |
+| TLS key | `/etc/mcpmem/tls/tls.key` | Read-only | Mount only for direct TLS. Set host ownership to `10001:10001` and mode to `0400`. |
+| Bearer token | `/run/secrets/mcpmem-auth-token` | Read-only | Mount a host secret file. For a Compose `file:` secret, set source ownership to `10001:10001` and mode to `0400`. |
 | OAuth principals | `/etc/mcpmem/principals.json` | Read-only | Mount only for OAuth. |
 | OAuth, indexer, OCR, and webhook keys | `/run/secrets/*` | Read-only | Mount only when the selected configuration uses them. |
 
@@ -69,9 +69,15 @@ The operator must mount the whole data directory. They must not mount only `memo
 
 The supplied direct-TLS configuration uses `auth-token-file`. It must fail on startup if the token or certificate mount is absent. The image must never start an unauthenticated HTTP server.
 
-A fresh data volume needs `legacy-owner-id`. The default configuration uses `machine:local`. Operators who need a different owner must mount a replacement TOML file before first startup.
+A fresh data volume needs `legacy-owner-id`. The default configuration uses
+`machine:static`, the static bearer identity. The bearer owns the first
+workspace and its default. Operators who need another owner must mount a
+replacement TOML file before the first start.
 
-A reverse-proxy deployment uses a replacement TOML file with `oauth-trust-forwarded-proto`. The documentation must state that the application network is internal-only and the proxy overwrites `X-Forwarded-For`.
+A reverse-proxy deployment uses a replacement TOML file with
+`oauth-trust-forwarded-proto`. It must mount an OAuth principals file at
+`/etc/mcpmem/principals.json`. The documentation must state that the application
+network is internal-only and the proxy overwrites `X-Forwarded-For`.
 
 The image must not declare a Docker `VOLUME`. The Compose example declares the named data volume explicitly. The direct `docker run` example must include an explicit data mount.
 
@@ -82,6 +88,7 @@ Provide one direct-TLS Compose example. It must:
 - expose port `8443`;
 - mount the named data volume at `/var/lib/mcpmem`;
 - mount configuration, certificate material, and secrets read-only;
+- set the source bearer token and TLS key owner to `10001:10001` and mode to `0400`;
 - set `read_only: true` for the root filesystem;
 - mount a writable `tmpfs` at `/tmp` for PDF rendering;
 - drop all Linux capabilities;
@@ -110,7 +117,7 @@ A prerelease must not move `latest` or a floating minor tag.
 
 Give only the new container jobs `packages: write`. Do not widen permissions for existing release jobs. Store the Docker Hub token in `DOCKERHUB_TOKEN`. Store the Docker Hub username in the `DOCKERHUB_USERNAME` repository variable.
 
-The release must fail when either registry does not contain each required platform manifest and tag. Crates.io publication remains the release gate. A Docker publication failure after crate publication needs an operator retry; it must not republish crates.
+The release must fail when either registry does not contain each needed platform manifest and tag. Crates.io publication remains the release gate. A Docker publication failure after crate publication needs an operator retry; it must not republish crates.
 
 ## CI and Verification
 
@@ -120,12 +127,12 @@ Add `scripts/test-container-image.sh`. The script must prove the user-visible co
 
 1. Build the final image.
 2. Start it with a temporary data directory, an explicit test configuration, and a bearer-token file.
-3. Use a fresh data directory with `legacy-owner-id`.
-4. Wait for `GET /ui` with the bearer credential to return HTTP 200.
-5. Confirm that the response contains `<div id="root">`.
+3. Use a fresh data directory with `legacy-owner-id = "machine:static"`.
+4. Confirm that `GET /ui/api/session` reports `workspaceRole` as `owner` for the bearer credential.
+5. Wait for `GET /ui` with the bearer credential to return HTTP 200 and contain `<div id="root">`.
 6. Stop the container.
 7. Start a second container against the same data directory without `legacy-owner-id`.
-8. Repeat the authenticated `/ui` request.
+8. Repeat the session and UI checks.
 
 This test proves both first-start initialization and durable storage reuse. It does not need a new product health endpoint.
 
@@ -135,9 +142,9 @@ The manifest job must inspect both registry tags after publication. It must veri
 
 ## Documentation and Change Record
 
-Add a Docker section to `README.md`. It must describe image names, tags, architecture support, required mounts, direct TLS, reverse-proxy requirements, and first-start ownership.
+Add a Docker section to `README.md`. It must describe image names, tags, architecture support, mount paths, direct TLS, reverse-proxy rules, and first-start ownership.
 
-Update `CHANGES.md` with the new distribution channel. Update the release runbook with Docker Hub setup, GHCR package visibility, required repository secret and variable, and image retry steps.
+Update `CHANGES.md` with the new distribution channel. Update the release runbook with Docker Hub setup, GHCR package visibility, the needed repository secret and variable, and image retry steps.
 
 ## Acceptance Criteria
 
@@ -146,5 +153,5 @@ Update `CHANGES.md` with the new distribution channel. Update the release runboo
 3. A user can replace the TOML file, certificates, principals, and every secret with read-only mounts.
 4. A user can preserve all mcpmem data by mounting one writable data directory.
 5. The browser UI works from the final image without Node or `ui/dist` at runtime.
-6. A fresh data mount initializes with the configured legacy owner, and a second start reuses it.
+6. A fresh data mount assigns the static bearer the configured legacy workspace and default. A second start reuses it.
 7. Pull-request CI proves the final image build and smoke path without registry publication.

@@ -13,12 +13,12 @@ services:
       - ./config/mcpmem.toml:/etc/mcpmem/mcpmem.toml:ro
       - ./tls/tls.crt:/etc/mcpmem/tls/tls.crt:ro
       - ./tls/tls.key:/etc/mcpmem/tls/tls.key:ro
+    # File-backed secrets keep the source owner and mode.
+    # Set the source owner to 10001:10001 before `docker compose up`.
+    # Set the source mode to 0400 before `docker compose up`.
     secrets:
       - source: mcpmem-auth-token
         target: mcpmem-auth-token
-        uid: "10001"
-        gid: "10001"
-        mode: 0400
 
 volumes:
   mcpmem-data:

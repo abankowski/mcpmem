@@ -1,6 +1,6 @@
 # Docker Image Publication Implementation Plan
 
-> **For the implementation agent:** Use `skill://executing-plans` to execute this plan task by task.
+> **For the implementation agent:** Use `skill://executing-plans` to run this plan task by task.
 
 **Goal:** Publish a full-featured mcpmem image for Linux AMD64 and ARM64 to GHCR and Docker Hub.
 
@@ -34,7 +34,7 @@ roles = ["mcp", "indexer", "extractor", "webhooks"]
 ui = true
 
 [workspaces]
-legacy-owner-id = "machine:local"
+legacy-owner-id = "machine:static"
 
 [tools]
 all = true
@@ -53,10 +53,10 @@ tls-key = "/etc/mcpmem/tls/tls.key"
 
 1. Add a direct-TLS Compose example. Use `MCPMEM_IMAGE`, expose `8443:8080`, mount a named data volume, and mount configuration, TLS files, and token read-only.
 2. Set `read_only: true`, `tmpfs: /tmp`, `cap_drop: [ALL]`, and `security_opt: [no-new-privileges:true]`.
-3. Add a direct-TLS TOML file and a separate OAuth reverse-proxy TOML. The reverse-proxy file sets `oauth.trust-forwarded-proto = true` and states the internal-network and `X-Forwarded-For` requirements.
+3. Add a direct-TLS TOML file and a separate OAuth reverse-proxy TOML. The reverse-proxy file sets `oauth.trust-forwarded-proto = true` and states the internal-network and `X-Forwarded-For` rules.
 4. Add a smoke script that accepts `MCPMEM_IMAGE` and supports `--build`. It must never publish an image.
-5. Start the image with a temporary data directory, HTTP-only test TOML, bearer-token file, and `legacy-owner-id`. Poll authenticated `GET /ui` for HTTP 200 and `<div id="root">`.
-6. Restart against the same data directory with a TOML that omits `legacy-owner-id`. Repeat the UI request. Use a shell trap for all cleanup.
+5. Start the image with a temporary data directory, HTTP-only test TOML, a bearer-token file, and `legacy-owner-id = "machine:static"`. Assert that the authenticated session reports `workspaceRole` as `owner` and that `GET /ui` returns HTTP 200 with `<div id="root">`.
+6. Restart against the same data directory with a TOML that omits `legacy-owner-id`. Repeat the owner and UI checks. Use a shell trap for all cleanup.
 7. Verify with `MCPMEM_IMAGE=mcpmem:local scripts/test-container-image.sh`.
 
 ## Task 3: Add pull-request validation
@@ -87,7 +87,7 @@ tls-key = "/etc/mcpmem/tls/tls.key"
 1. In the manifest job, authenticate with `${{ vars.DOCKERHUB_USERNAME }}` and `${{ secrets.DOCKERHUB_TOKEN }}`.
 2. Use a fixed, versioned manifest copy tool. Copy completed GHCR manifests and platform images to `docker.io/abankowski/mcpmem`; do not rebuild.
 3. Copy the immutable tag first. Copy minor and `latest` only after the stable immutable tag passes.
-4. Inspect each Docker Hub tag. Confirm both required platforms by content.
+4. Inspect each Docker Hub tag. Confirm `linux/amd64` and `linux/arm64` by content.
 5. Document that a Docker failure after crates.io needs a Docker-only retry or a manual copy from GHCR. Do not republish crates.
 
 ## Task 6: Document the public image
@@ -95,11 +95,12 @@ tls-key = "/etc/mcpmem/tls/tls.key"
 **Files:** `README.md`, `CHANGES.md`, the release runbook.
 
 1. Add image names, architecture support, tag rules, and direct-TLS commands to the README.
-2. Add external mount access, data-directory scope, UID 10001, first owner, and reverse-proxy trust boundary to the README.
-3. Include Bash and fish commands when the forms differ. State when they are identical.
-4. State that the image has no bundled proxy, certificate authority client, or secret.
-5. List the `DOCKERHUB_USERNAME` repository variable, `DOCKERHUB_TOKEN` secret, GHCR visibility decision, manifest inspection, and Docker-only retry procedure in the release runbook.
-6. Add a user-facing Docker distribution entry to `CHANGES.md`.
+2. Add external mount access, data-directory scope, UID `10001`, static-bearer first ownership, and the reverse-proxy trust boundary to the README.
+3. State the host ownership and mode contract for Compose-backed secrets.
+4. Include Bash and fish commands when the forms differ. State when they are identical.
+5. State that the image has no bundled proxy, certificate authority client, or secret.
+6. List the `DOCKERHUB_USERNAME` repository variable, `DOCKERHUB_TOKEN` secret, GHCR visibility decision, manifest inspection, and Docker-only retry procedure in the release runbook.
+7. Add a user-facing Docker distribution entry to `CHANGES.md`.
 
 ## Task 7: Run the verification set
 

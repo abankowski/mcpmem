@@ -6,7 +6,7 @@ roles = ["mcp"]
 ui = true
 
 [workspaces]
-legacy-owner-id = "machine:local"
+legacy-owner-id = "machine:static"
 
 [tools]
 all = true
