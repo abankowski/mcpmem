@@ -236,24 +236,39 @@ Before the first Docker release:
 5. Keep `packages: write` on the new container jobs only. Do not add it to an
    existing release job.
 
-The release builds each image on its native Linux runner. It publishes Linux
-AMD64 and ARM64 manifests to both registries. It always creates an immutable
-`<major>.<minor>.<patch>` tag. A stable release also creates
-`<major>.<minor>` and `latest`. A prerelease creates no floating tag.
+The release builds each image on its native Linux runner. It publishes the Linux
+AMD64 and ARM64 platform images to GHCR. ORAS 1.2.2 copies every verified GHCR
+manifest and its platform manifests to Docker Hub. The copy does not build a
+second image. It always creates an immutable `<major>.<minor>.<patch>` tag. A
+stable release also creates `<major>.<minor>` and `latest`. A prerelease creates
+no floating tag.
 
 The manifest job must inspect every tag in both registries. It must fail unless
-each tag lists `linux/amd64` and `linux/arm64`. GHCR is the source of truth.
-Docker Hub receives a manifest copy and does not start a second image build.
+each tag lists `linux/amd64` and `linux/arm64`. It copies and inspects the
+immutable Docker Hub tag before it copies a floating tag. GHCR is the source of
+truth.
 
 ### Retry a Docker publication failure
 
 If crate publication succeeds and Docker publication fails, do not create
-another release or rerun crate publication. Rerun only the failed container
-jobs from the same GitHub release workflow. If GHCR has the complete manifest,
-retry only the Docker Hub copy from that manifest.
+another release, rerun crate publication, or republish a crate. Rerun only the
+failed container jobs from the same release workflow. To retry a completed GHCR
+manifest, re-run `container-manifest`; it copies from GHCR and does not build an
+image or publish a crate.
 
-After the retry, inspect every required GHCR and Docker Hub tag. Confirm that
-each manifest lists Linux AMD64 and ARM64 before you call the release complete.
+If the workflow retry is not available, do a Docker-only manual copy. Sign in
+to both registries. Use ORAS 1.2.2 to copy the verified immutable tag:
+
+```sh
+oras cp ghcr.io/abankowski/mcpmem:1.2.3 docker.io/abankowski/mcpmem:1.2.3
+docker buildx imagetools inspect docker.io/abankowski/mcpmem:1.2.3 --raw |
+  jq -r '.manifests[]?.platform | select(.os == "linux") | .architecture' |
+  sort -u
+```
+
+The inspection output must contain `amd64` and `arm64`. For a stable release,
+copy and inspect `<major>.<minor>` and `latest` only after the immutable tag
+passes. Do not republish crates.
 
 ## Deploying the server binary
 
