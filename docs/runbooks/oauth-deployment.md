@@ -140,7 +140,7 @@ Then write the file:
 ```
 
 - `name` is what the audit log calls this human, and what the consent page
-  shows. Required and non-empty.
+  shows. It must not be empty.
 - `iss` must equal the provider's own issuer identifier exactly.
 - `label` is optional display text for the consent page; `name` is used when it
   is absent.
@@ -249,6 +249,26 @@ Those three are the whole of what a connector discovers.
 
 Two facts here have already broken a deployment each. Read both.
 
+### Docker image files
+
+If you use the Docker image behind a proxy, copy the reverse-proxy
+configuration before the first start. These commands are identical in Bash and
+fish:
+
+```sh
+mkdir -p config
+cp docker/config/reverse-proxy.toml config/mcpmem.toml
+```
+
+Write `config/principals.json` as described in
+[section 2](#2-find-each-humans-sub-and-write-the-principals-file). Mount that
+file read-only at `/etc/mcpmem/principals.json`. The image refuses to start
+when this OAuth file is absent or invalid.
+
+The mounted bearer token has the `machine:static` identity. It owns the first
+workspace and its default. Use that bearer to grant an OAuth human access
+before the human uses the default workspace.
+
 ### The proxy must forward the origin's well-known paths
 
 Both specifications place the discovery documents at the **origin**, not under
@@ -302,8 +322,8 @@ catches for you:
   chooses its own bucket with one header, and every limit is bypassable.
 - The flag set, and the process reachable **without** going through the proxy:
   the same bypass, and overwriting the header at the proxy does not close it.
-  Binding where only the proxy can reach you is a requirement of using this
-  flag, not a hardening step — [section 9](#9-the-limits) gives the addresses.
+  Binding where only the proxy can reach you is needed to use this
+  flag. It is not a hardening step — [section 9](#9-the-limits) gives the addresses.
 - The flag unset behind a proxy: every caller counts as the proxy, so one
   misbehaving client locks the whole internet out of the endpoint.
 
@@ -534,7 +554,7 @@ systemctl restart mcpmem
 **`&&` on one line is the same in both shells.** What differs is the
 continuation: fish **rejects** a line that begins with `&&`
 (`fish: Expected a string, but found '&&'`), so the second command must start
-with `and`. That is a syntax requirement, not a style choice — a `\`
+with `and`. That is a syntax rule, not a style choice — a `\`
 continuation would also work, but `and` is what reads correctly when the first
 line already ends in a redirect.
 
@@ -728,8 +748,8 @@ names scope failures; the missing-tool case above never produces one, because
 
 ## 9. The limits
 
-Six endpoints answer an anonymous caller, because the specifications require
-it. Each is bounded per peer address, in a fixed one-minute window:
+Six endpoints answer an anonymous caller, because the specifications say they
+must. Each is bounded per peer address, in a fixed one-minute window:
 
 | Endpoint | Requests per minute per peer |
 | --- | --- |
@@ -789,7 +809,7 @@ separately and always: 256-byte client name, 8 redirect URIs, 2048-byte URL,
 
 ### With the trust flag set, bind where only the proxy can reach you
 
-**This is a requirement, not a hardening step.** With
+**Only the proxy must reach the process. This is not a hardening step.** With
 `--oauth-trust-forwarded-proto` the peer address comes from a header the caller
 wrote, so anyone who can open a socket to the process directly chooses their
 own bucket and **every limit in the table above is bypassable**. Making the

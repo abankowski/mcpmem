@@ -196,7 +196,7 @@ authority client, a secret, or a Docker `VOLUME`.
 
 Use the direct-TLS configuration with a bearer-token file, a certificate, and
 a private key. The default configuration reads all three from mounts and fails
-at startup when any required mount is absent. It never starts an unauthenticated
+at startup when a needed mount is absent. It never starts an unauthenticated
 HTTP server.
 
 Before the first start, create the host paths and copy the supplied
@@ -212,6 +212,18 @@ Put the certificate at `tls/tls.crt`, its key at `tls/tls.key`, and the bearer
 token in `secrets/mcpmem-auth-token`. The image runs as the fixed non-root UID
 and GID `10001`. A bind-mounted `data` directory must be writable by that UID.
 Use a named Docker volume when Docker should manage the directory owner.
+
+Set the token and private-key file owner to `10001:10001`. Set their mode to
+`0400`. These commands are identical in Bash and fish:
+
+```sh
+sudo chown 10001:10001 tls/tls.key secrets/mcpmem-auth-token
+sudo chmod 0400 tls/tls.key secrets/mcpmem-auth-token
+```
+
+Compose `file:` secrets retain the host owner and mode. Compose ignores secret
+`uid`, `gid`, and `mode` fields. This host-file contract lets UID `10001` read
+the token and private key without wider access.
 
 After the next release, run a versioned direct-TLS image. This command is
 identical in Bash and fish:
@@ -234,8 +246,9 @@ docker run --rm --name mcpmem \
 Mount the complete `/var/lib/mcpmem` directory. Do not mount only
 `memory.mcpmem`: the workspace registry and workspace graph files use the
 same directory. On a fresh data mount, the supplied configuration assigns the
-legacy workspace to `machine:local`. Mount a replacement TOML file before the
-first start when another owner is required.
+legacy workspace and default to `machine:static`, the bearer-token identity.
+Mount a replacement TOML file before the first start when another identity must
+own it.
 
 The following external paths are available to an operator:
 
@@ -270,10 +283,18 @@ Put the application on an internal-only network where only the proxy can reach
 it. Configure the proxy to replace `X-Forwarded-For` with the client address.
 Do not append a client-supplied value.
 
-The reverse-proxy configuration enables `oauth.trust-forwarded-proto` and
-needs the OAuth issuer, client ID, public URL, and principals file changed
-before use. It still needs the read-only bearer-token mount. Do not use this
-configuration for a direct public container port.
+The reverse-proxy configuration enables `oauth.trust-forwarded-proto`. Before
+use, copy it to `config/mcpmem.toml`, set its OAuth values, and write valid
+OAuth principals to `config/principals.json`. This file must be mounted for
+startup. See [the OAuth deployment runbook](docs/runbooks/oauth-deployment.md)
+for its content. It still needs the read-only bearer-token mount. Do not use
+this configuration for a direct public container port.
+
+```sh
+# Identical in Bash and fish.
+mkdir -p config
+cp docker/config/reverse-proxy.toml config/mcpmem.toml
+```
 
 Run this command instead of the direct-TLS command when a reverse proxy ends
 TLS. This command is identical in Bash and fish:
@@ -286,7 +307,8 @@ docker run --rm --name mcpmem \
   --cap-drop=ALL \
   --security-opt no-new-privileges:true \
   --mount type=bind,src="$PWD/data",dst=/var/lib/mcpmem \
-  --mount type=bind,src="$PWD/docker/config/reverse-proxy.toml",dst=/etc/mcpmem/mcpmem.toml,readonly \
+  --mount type=bind,src="$PWD/config/mcpmem.toml",dst=/etc/mcpmem/mcpmem.toml,readonly \
+  --mount type=bind,src="$PWD/config/principals.json",dst=/etc/mcpmem/principals.json,readonly \
   --mount type=bind,src="$PWD/secrets/mcpmem-auth-token",dst=/run/secrets/mcpmem-auth-token,readonly \
   ghcr.io/abankowski/mcpmem:<major>.<minor>.<patch>
 ```
@@ -312,9 +334,8 @@ mcpmem --role mcp,indexer,extractor      # server and both attachment workers in
 mcpmem --role extractor                  # extraction beside a separate MCP server
 mcpmem --role indexer                    # the embedding worker beside a separate server
 ```
-
-Both deployment shapes use the same binary. There is no separate worker executable, and a
-worker-only process still opens the graph and the vector store.
+Both deployment shapes use the same binary. There is no separate worker
+program, and a worker-only process still opens the graph and the vector store.
 
 If attachment tools are enabled without the local `extractor` role, startup
 warns that another extractor process must run. The warning does not prove
@@ -799,7 +820,7 @@ or vectors. The inspector polls `uploaded` and `extracting` and stops at
 `ready` or `error`.
 
 Run `mcpmem --role mcp,indexer,extractor --enable-attachments --enable-vectors`
-with the required workspace and provider settings, or run `--role extractor`
+with the needed workspace and provider settings, or run `--role extractor`
 in a separate process against the same workspace graph as the MCP process.
 An MCP process without the local extractor role accepts uploads and warns
 at startup: **another extractor must run**. The warning is not evidence
@@ -907,7 +928,7 @@ authored type is new. Suggestions are advisory only — nothing enforces them.
   `similarTypes`.
 
 The offline tier always runs: it compares the authored name against existing
-type names in the same graph. The semantic tier is additive: it requires
+type names in the same graph. The semantic tier is additive: it needs
 `--enable-vectors`, a build with the `indexer` Cargo feature, and a serving
 `[indexer]` profile (see [Configuring the embedding worker](#configuring-the-embedding-worker)).
 With those in place, the indexer worker also embeds taxonomy subjects (type
@@ -915,7 +936,7 @@ names and relation triples) and the suggestion engine matches against the
 serving snapshot.
 
 `suggest_taxonomy` exposes the same engine as a standalone tool (category
-`graph-read`). It takes `query` (required), an optional `kind`
+`graph-read`). It takes a `query` value, an optional `kind`
 (`entityType`, `relationType`, `entity` or `relation`; default
 `entityType`), and an optional `topK` (1..100; default 10). The response
 shape matches `taxonomySuggestions` above.
@@ -939,7 +960,7 @@ MCP observation writes use objects: `{ "body": "…", "occurredAtUs": 1780000000
 `body`.
 
 `--legacy-observations` is a deprecated 1.x MCP-only compatibility adapter for clients that
-still send and receive string arrays. It is disabled by default, requires the `mcp` runtime
+still send and receive string arrays. It is disabled by default, needs the `mcp` runtime
 role, and will be removed in 2.0.0. It does not change stored data or the web UI.
 
 ### Transports
@@ -949,8 +970,8 @@ role, and will be removed in 2.0.0. It does not change stored data or the web UI
 | stdio | `--transport stdio` | Newline-delimited JSON-RPC over stdin/stdout (default; for Claude Desktop / Claude Code) |
 | http | `--transport http --bind 0.0.0.0:8080` | MCP Streamable HTTP (POST/GET `/mcp`, SSE) |
 
-The stdio transport dispatches up to `--stdio-concurrency` requests in parallel (default 8), so
-clients that pipeline requests get concurrent execution; responses are correlated by JSON-RPC id
+The stdio transport dispatches up to `--stdio-concurrency` requests in parallel (default 8).
+The server can process pipelined requests at the same time. Responses are correlated by JSON-RPC id
 and may arrive in completion order. Set `--stdio-concurrency 1` for strict request/response
 ordering (e.g. when pipelining order-dependent writes without awaiting each response).
 
@@ -1254,8 +1275,8 @@ Deployment, connector setup, revocation, and what each refusal means:
 ### TLS (HTTPS)
 
 The `http` transport can be served over TLS (rustls, `ring` provider). Provide a PEM certificate
-chain and private key via `--tls-cert` / `--tls-key` (both required together, or startup is
-refused); the `MCP_TLS_CERT` / `MCP_TLS_KEY` environment variables are accepted as fallbacks.
+chain and private key via `--tls-cert` / `--tls-key` (both must be set together, or startup
+refuses); the `MCP_TLS_CERT` / `MCP_TLS_KEY` environment variables are accepted as fallbacks.
 TLS encrypts the channel but is not a credential, so without OAuth the server still needs a
 bearer token to start (see [Workspaces](#workspaces-isolated-knowledge-graphs)).
 
@@ -1305,9 +1326,9 @@ the correct layout. It is a distinct browser front-end. It uses only the
 | `GET /ui`, `GET /ui/search`, `GET /ui/admin`, `GET /ui/admin/callback` | The app shell pages (the built React app; the shell carries no graph data, so it needs no auth). |
 | `GET /ui/assets/{name}` | One built asset (JavaScript or CSS), with the manifest's content type and byte count and immutable cache headers (the hashed names never change). |
 | `GET /ui/api/graph` | A page of the graph: `{ entities, relations, entityTypes, stats, page }`. Entities carry `obsCount` (not the observation bodies — those are lazy-loaded). Query params: `workspaceId` (selected workspace), `entityType` (filter), `offset`, `limit` (≤ 1,000), `token`. |
-| `GET /ui/api/search` | The `{ results, count, elapsedMs }` envelope of SearchHit rows: entity, relation, or attachment kinds. Query params: `workspaceId`, `q` (required), `mode` (`direct` default, `semantic`, `hybrid`), `scope` (`nodes` default, `relations`), `type` (the entity type in nodes scope, the relation type in relations scope), `from`/`to`/`relationType` (relation filters), `k` (`10`/`20`/`50`; results may be fewer), `token`. |
-| `GET /ui/api/node` | One entity with its observation **bodies**, lazy-loaded by the inspector on select. Query params: `workspaceId`, `name` (required), `token`. |
-| `GET /ui/api/expand` | One node's neighbourhood `{ entities, relations }` for double-click traversal. Query params: `workspaceId`, `name` (required), `depth` (1–3), `direction` (`outgoing`/`incoming`/`both`), `token`. |
+| `GET /ui/api/search` | The `{ results, count, elapsedMs }` envelope of SearchHit rows: entity, relation, or attachment kinds. Query params: `workspaceId`, `q` (must be given), `mode` (`direct` default, `semantic`, `hybrid`), `scope` (`nodes` default, `relations`), `type` (the entity type in nodes scope, the relation type in relations scope), `from`/`to`/`relationType` (relation filters), `k` (`10`/`20`/`50`; results may be fewer), `token`. |
+| `GET /ui/api/node` | One entity with its observation **bodies**, lazy-loaded by the inspector on select. Query params: `workspaceId`, `name` (must be given), `token`. |
+| `GET /ui/api/expand` | One node's neighbourhood `{ entities, relations }` for double-click traversal. Query params: `workspaceId`, `name` (must be given), `depth` (1–3), `direction` (`outgoing`/`incoming`/`both`), `token`. |
 | `GET /ui/api/relation` | One exact relation triple (`from`, `to`, `relationType`) with its observations and attributes; 404 when the triple is absent. |
 | `GET /ui/api/types` | The entity and relation type catalogues with their descriptions. |
 | `GET /ui/api/workspaces` | The caller's accessible workspaces for the dropdown: `{ workspaces, nextCursor }`, the same page shape as the MCP `list_workspaces` tool. Query params: `cursor`, `limit` (≤ 100), `token`. Private graphs of other callers never appear. |
@@ -1325,7 +1346,7 @@ layout with viewport culling so large pages and hub expansions stay at interacti
 rates.
 
 The viewer reads the graph, so `/ui/api/graph`, `/ui/api/search`, `/ui/api/node`,
-`/ui/api/expand`, `/ui/api/relation` and `/ui/api/workspaces` require
+`/ui/api/expand`, `/ui/api/relation` and `/ui/api/workspaces` need
 **`--enable-graph-read`** (or `--enable-all`); without it they return `403` and the page says
 so. They honor the same credential
 as the MCP endpoints: with OAuth on, the viewer fetches its own access token
@@ -1475,7 +1496,7 @@ to every webhook request, and access or selection errors are shown beside the fi
 works with an `admin`-only token — it never depends on the `graph-read`-gated
 `/ui/api/workspaces` list.
 
-### HTTP startup requires OAuth or a bearer credential
+### HTTP startup needs OAuth or a bearer credential
 
 The `http` transport now **refuses to start** without OAuth or a bearer credential, instead of
 binding an open, unauthenticated listener:
@@ -1629,7 +1650,7 @@ top of the other gates (above). The deployed-connector case, with the checks:
 
 ### Tuning
 
-All require `--enable-vectors`:
+All need `--enable-vectors`:
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -1720,7 +1741,7 @@ rather than an error, so one file can serve several deployments.
 | `--read-pool-size` | `4` | Read-only SQLite connections. `0` auto-scales to the CPU count |
 | `--durability` | `MCP_MEMORY_DURABILITY`, else `async` | SQLite synchronous mode: `async` or `sync`. See [Durability](#durability) |
 | `--config` | `MCP_MEMORY_CONFIG` | TOML configuration file |
-| `--legacy-owner-id` | — | Stable identity that owns the memory file during the first workspace migration. Required only while no workspace registry exists, then ignored. See [Workspaces](#workspaces-isolated-knowledge-graphs) |
+| `--legacy-owner-id` | — | Stable identity that owns the memory file during the first workspace migration. It applies only while no workspace registry exists, then the server ignores it. See [Workspaces](#workspaces-isolated-knowledge-graphs) |
 
 ### Tool categories
 
@@ -2119,8 +2140,8 @@ scripts/check-release-version.sh --registry v2.0.0   # tag, versions, crates.io
 gh release create v2.0.0 --target main --notes-file CHANGES.md
 ```
 
-The workflow re-runs the gate, requires a prerelease tag to carry a
-prerelease GitHub release, and requires the commit to be on `main`. Before
+The workflow runs the gate again. A prerelease tag must carry a
+prerelease GitHub release. The commit must be on `main`. Before
 any crate is published, each release target installs Poppler, checks
 `pdfinfo` and `pdftoppm`, and runs the real-PDF render-to-fake-vision test.
 No missing renderer is treated as a skipped test. The workflow then runs
@@ -2147,4 +2168,4 @@ project keeps the crate name `mcp-memory`.
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE). [`NOTICE`](NOTICE) records the
-derivation from the original project, as the license requires.
+derivation from the original project, as the license says.

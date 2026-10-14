@@ -3,7 +3,8 @@
 # Make the proxy the only client that can reach this process.
 # Make the proxy replace X-Forwarded-For with the client address.
 # Do not append a client-provided X-Forwarded-For value.
-# Replace the example OAuth values and principals file before use.
+# Replace the example OAuth values before use.
+# Mount a principals file at /etc/mcpmem/principals.json before use.
 
 [server]
 memory-file = "/var/lib/mcpmem/memory.mcpmem"
@@ -13,7 +14,7 @@ roles = ["mcp", "indexer", "extractor", "webhooks"]
 ui = true
 
 [workspaces]
-legacy-owner-id = "machine:local"
+legacy-owner-id = "machine:static"
 
 [tools]
 all = true
