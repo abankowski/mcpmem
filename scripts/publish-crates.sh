@@ -7,8 +7,8 @@
 # The script skips a crate that crates.io already holds at this version, so a
 # re-run after a partial failure completes the release instead of aborting.
 #
-# `cargo publish` waits for each crate to appear in the index before it
-# returns, so the next crate in the order resolves it.
+# Cargo index resolution can lag crates.io API visibility. Before each real
+# publish, retry a Cargo dry run until Cargo resolves the crate dependencies.
 #
 # The command is identical in Bash and fish.
 set -euo pipefail
@@ -33,6 +33,27 @@ published() {
 	local body
 	body="$(curl -sS -H "User-Agent: ${UA}" "https://crates.io/api/v1/crates/$1/${version}")"
 	[[ ${body} == *'"num":"'"${version}"'"'* ]]
+}
+
+wait_until_resolvable() {
+	local crate="$1"
+	shift
+	local -a publish_args=("$@")
+	local attempt
+	local max_attempts=12
+
+	for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+		if cargo publish -p "${crate}" "${publish_args[@]}" --dry-run; then
+			return 0
+		fi
+		if [[ ${attempt} -lt ${max_attempts} ]]; then
+			printf 'wait     %s Cargo cannot resolve dependencies (%d/%d)\n' "${crate}" "${attempt}" "${max_attempts}"
+			sleep 5
+		fi
+	done
+
+	printf 'error: %s Cargo could not resolve dependencies after %d dry-run attempts\n' "${crate}" "${max_attempts}" >&2
+	return 1
 }
 
 for crate in "${ORDER[@]}"; do
@@ -64,6 +85,8 @@ for crate in "${ORDER[@]}"; do
 			continue
 		}
 	else
+		printf 'verify   %s\n' "${crate}"
+		wait_until_resolvable "${crate}" "${publish_args[@]}"
 		printf 'publish  %s\n' "${crate}"
 		cargo publish -p "${crate}" "${publish_args[@]}"
 	fi
