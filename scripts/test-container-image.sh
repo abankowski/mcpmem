@@ -37,6 +37,9 @@ cleanup() {
     docker rm --force "${CONTAINER}" >/dev/null 2>&1 || true
   fi
   if [[ -n ${TMP} ]]; then
+    docker run --rm --user 0:0 --entrypoint /bin/sh \
+      --mount "type=bind,src=${TMP},dst=/cleanup" \
+      "${IMAGE}" -c 'find /cleanup -mindepth 1 -delete'
     rm -rf "${TMP}"
   fi
 }
