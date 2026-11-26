@@ -357,6 +357,59 @@ one returns or fails, so a dead worker never leaves a half-running server. A fai
 therefore takes a co-hosted MCP transport down with it. Run the process under something that
 restarts it: systemd `Restart=on-failure`, or a container restart policy.
 
+### Run as a user service on Ubuntu or Debian
+
+With systemd running for your user, you can start mcpmem now and enable it for
+future logins without sudo. Install the binary somewhere permanent first. From
+the directory where you want mcpmem to resolve relative paths, save a config
+such as `mcpmem.toml`:
+
+```toml
+[server]
+transport = "http"
+bind = "127.0.0.1:8080"
+
+[security]
+auth-token-file = "bearer-token"
+
+[tools]
+graph-read = true
+graph-write = true
+```
+
+Place your private, nonempty bearer token in `bearer-token`, readable only by
+your account. With this config, point your MCP client at
+`http://127.0.0.1:8080/mcp` and use that token. The following commands are
+identical in Bash and fish:
+
+```sh
+mcpmem service install --config ./mcpmem.toml
+mcpmem service status
+journalctl --user -u mcpmem.service -f
+```
+
+`mcpmem service status` is read-only. It exits successfully when the user
+manager has loaded the mcpmem-installed unit, the unit is enabled for future
+logins, the service is running, and systemd has no pending unit-file reload.
+An unhealthy or missing installation returns a nonzero exit code with a diagnostic.
+
+For an MCP server, use HTTP transport. The usual stdio transport needs a
+client attached to the process. Worker-only configurations can also run as
+services. You can omit `--config` if `MCP_MEMORY_CONFIG` names the file.
+
+The unit lives in `~/.config/systemd/user/mcpmem.service` (or under
+`$XDG_CONFIG_HOME/systemd/user/` if set). It records the executable,
+configuration path and working directory.
+Run the install command again if you move them. After editing the TOML,
+run `systemctl --user restart mcpmem.service`. Supply any required environment
+variables to the user service manager or through a systemd drop-in. For service
+across logouts and at boot, your account needs systemd *lingering* enabled.
+Check with `loginctl show-user "$USER" --property=Linger` (Bash and fish).
+
+To stop the service, disable future starts and remove the unit, run
+`mcpmem service uninstall` (Bash and fish). Your config, token and memory
+database stay in place.
+
 ### Configuring the embedding worker
 
 The provider comes from the environment, or from the `[indexer]` section of the configuration

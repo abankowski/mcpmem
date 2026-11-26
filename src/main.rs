@@ -1,20 +1,23 @@
+mod service;
+
 use anyhow::Result;
 use mcpmem::{config, config_file, runtime, server};
 use std::sync::Arc;
 use tracing::info;
 
 fn main() -> Result<()> {
+    let (mut args, file) = config_file::resolve(std::env::args_os())?;
+    if let Some(mcpmem::ServerCommand::Service(action)) = args.command.take() {
+        return service::run(action);
+    }
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(inner_main())
+    rt.block_on(inner_main(args, file))
 }
 
-async fn inner_main() -> Result<()> {
-    // One entry point, shared with `tests/config_file.rs`: parse the command
-    // line, then layer the configuration file under it. A flag stays ahead of
-    // a file value because the merge records what the command line actually
-    // carried, rather than comparing a parsed value against its default.
-    let (args, file) = config_file::resolve(std::env::args_os())?;
-
+async fn inner_main(
+    args: mcpmem::Args,
+    file: Option<(std::path::PathBuf, config_file::FileConfig)>,
+) -> Result<()> {
     // Install the rustls `ring` crypto provider as the process default up front
     // (idempotent) so the HTTPS transport can build its TLS config. See src/tls.rs.
     mcpmem::tls::ensure_crypto_provider();
