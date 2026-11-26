@@ -29,7 +29,7 @@ fn service_commands_use_the_user_manager_and_preserve_server_files() {
     fs::write(&ctl, r#"#!/bin/sh
 echo "$*" >> "$LOG"
 if [ "$2" = show ]; then
-    if [ -f missing-unit ]; then
+    if [ -f missing-unit ] || [ ! -f "$XDG_CONFIG_HOME/systemd/user/mcpmem.service" ]; then
         echo LoadState=not-found
         exit 4
     fi
@@ -115,13 +115,19 @@ fi
     assert_eq!(
         fs::read_to_string(log).unwrap().lines().collect::<Vec<_>>(),
         [
+            "--user show --all --property LoadState,FragmentPath mcpmem.service",
             "--user daemon-reload",
+            "--user show --all --property LoadState,FragmentPath mcpmem.service",
             "--user enable mcpmem.service",
+            "--user show --all --property LoadState,FragmentPath mcpmem.service",
             "--user restart mcpmem.service",
             "--user show --all --property LoadState,UnitFileState,ActiveState,SubState,FragmentPath,NeedDaemonReload mcpmem.service",
             "--user show --all --property LoadState,UnitFileState,ActiveState,SubState,FragmentPath,NeedDaemonReload mcpmem.service",
             "--user show --all --property LoadState,UnitFileState,ActiveState,SubState,FragmentPath,NeedDaemonReload mcpmem.service",
-            "--user disable --now mcpmem.service",
+            "--user show --all --property LoadState,FragmentPath mcpmem.service",
+            "--user daemon-reload",
+            "--user show --all --property LoadState,FragmentPath mcpmem.service",
+            "--user --no-reload disable --now mcpmem.service",
             "--user daemon-reload",
         ]
     );

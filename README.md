@@ -402,8 +402,10 @@ The unit lives in `~/.config/systemd/user/mcpmem.service` (or under
 configuration path and working directory.
 Run the install command again if you move them. After editing the TOML,
 run `systemctl --user restart mcpmem.service`. Supply any required environment
-variables to the user service manager or through a systemd drop-in. For service
-across logouts and at boot, your account needs systemd *lingering* enabled.
+variables to the user service manager or through a systemd drop-in. Installation
+also validates the config in your current shell. If you use a bearer token from
+the environment, make it available to both the installer and the service.
+For service across logouts and at boot, your account needs systemd *lingering* enabled.
 Check with `loginctl show-user "$USER" --property=Linger` (Bash and fish).
 
 To stop the service, disable future starts and remove the unit, run
