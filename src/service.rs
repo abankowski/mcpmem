@@ -31,19 +31,24 @@ pub(super) fn run(action: ServiceAction) -> Result<()> {
         ServiceAction::Uninstall => None,
         ServiceAction::Status => return status(&directory.join(UNIT)),
     };
-    manage(&directory, unit.as_deref(), |args| {
-        let status = Command::new("systemctl")
-            .arg("--user")
-            .args(args)
-            .status()
-            .context("cannot execute systemctl --user")?;
-        ensure!(
-            status.success(),
-            "systemctl --user {} failed ({status})",
-            args.join(" ")
-        );
-        Ok(())
-    })?;
+    manage(
+        &directory,
+        unit.as_deref(),
+        || show("LoadState,FragmentPath"),
+        |args| {
+            let status = Command::new("systemctl")
+                .arg("--user")
+                .args(args)
+                .status()
+                .context("cannot execute systemctl --user")?;
+            ensure!(
+                status.success(),
+                "systemctl --user {} failed ({status})",
+                args.join(" ")
+            );
+            Ok(())
+        },
+    )?;
     println!(
         "{} {UNIT}",
         if unit.is_some() {
@@ -100,6 +105,10 @@ fn quote(value: &Path) -> Result<String> {
 }
 
 fn render(exe: &Path, cwd: &Path, config: &Path) -> Result<String> {
+    ensure!(
+        !exe.as_os_str().as_encoded_bytes().contains(&b'='),
+        "the executable path contains '=' and would be interpreted as an environment assignment; install mcpmem at a path without '='"
+    );
     // env -C preserves all relative paths in the TOML, including file-backed
     // credentials. Its arguments use the same quoting rules as the executable.
     Ok(format!(
@@ -141,40 +150,7 @@ fn status(path: &Path) -> Result<()> {
         "{UNIT} is not installed at {}",
         path.display()
     );
-    let output = Command::new("systemctl")
-        .args([
-            "--user",
-            "show",
-            "--all",
-            "--property",
-            STATUS_PROPERTIES,
-            UNIT,
-        ])
-        .output()
-        .context("cannot execute systemctl --user show")?;
-    let stdout = std::str::from_utf8(&output.stdout)?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
-        if !detail.is_empty() {
-            bail!(
-                "systemctl --user show {UNIT} failed ({}): {detail}",
-                output.status
-            );
-        }
-        // A missing unit can return nonzero with LoadState only on stdout.
-        if let Some(load) = stdout
-            .lines()
-            .find_map(|line| line.strip_prefix("LoadState="))
-        {
-            bail!(
-                "systemctl --user show {UNIT} failed ({}), LoadState={load}",
-                output.status
-            );
-        }
-        bail!("systemctl --user show {UNIT} failed ({})", output.status);
-    }
-    check_status(path, stdout)?;
+    check_status(path, &show(STATUS_PROPERTIES)?)?;
     println!(
         "{UNIT} is installed, enabled and running ({})",
         path.display()
@@ -182,23 +158,53 @@ fn status(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn show(properties: &str) -> Result<String> {
+    let output = Command::new("systemctl")
+        .args(["--user", "show", "--all", "--property", properties, UNIT])
+        .output()
+        .context("cannot execute systemctl --user show")?;
+    let stdout = std::str::from_utf8(&output.stdout)?;
+    if output.status.success()
+        || (output.status.code() == Some(4)
+            && stdout.lines().any(|line| line == "LoadState=not-found"))
+    {
+        return Ok(stdout.to_owned());
+    }
+    bail!(
+        "systemctl --user show {UNIT} failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
 fn check_status(path: &Path, output: &str) -> Result<()> {
-    let properties: std::collections::HashMap<_, _> = output
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .collect();
-    let property = |name: &str| {
-        properties
-            .get(name)
-            .copied()
-            .with_context(|| format!("systemctl omitted {name} for {UNIT}"))
-    };
-    let load = property("LoadState")?;
+    let load = property(output, "LoadState")?;
     ensure!(
         load == "loaded",
         "{UNIT} has LoadState={load} (expected loaded)"
     );
-    let fragment = Path::new(property("FragmentPath")?);
+    check_fragment(path, output)?;
+    let enabled = property(output, "UnitFileState")?;
+    let active = property(output, "ActiveState")?;
+    let sub = property(output, "SubState")?;
+    let reload = property(output, "NeedDaemonReload")?;
+    ensure!(
+        (enabled, active, sub, reload) == ("enabled", "active", "running", "no"),
+        "{UNIT}: UnitFileState={enabled}, ActiveState={active}, SubState={sub}, NeedDaemonReload={reload} (expected enabled, active, running, no)"
+    );
+    Ok(())
+}
+
+fn property<'a>(output: &'a str, name: &str) -> Result<&'a str> {
+    output
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find_map(|(key, value)| (key == name).then_some(value))
+        .with_context(|| format!("systemctl omitted {name} for {UNIT}"))
+}
+
+fn check_fragment(path: &Path, output: &str) -> Result<()> {
+    let fragment = Path::new(property(output, "FragmentPath")?);
     if fragment != path {
         // The user's configuration directory can itself be a symlink.
         let resolved = (fragment.canonicalize(), path.canonicalize());
@@ -209,20 +215,38 @@ fn check_status(path: &Path, output: &str) -> Result<()> {
             path.display()
         );
     }
-    let enabled = property("UnitFileState")?;
-    let active = property("ActiveState")?;
-    let sub = property("SubState")?;
-    let reload = property("NeedDaemonReload")?;
-    ensure!(
-        (enabled, active, sub, reload) == ("enabled", "active", "running", "no"),
-        "{UNIT}: UnitFileState={enabled}, ActiveState={active}, SubState={sub}, NeedDaemonReload={reload} (expected enabled, active, running, no)"
-    );
+    Ok(())
+}
+
+fn manager_has_unit(path: &Path, output: &str) -> Result<bool> {
+    if property(output, "LoadState")? == "not-found" {
+        return Ok(false);
+    }
+    check_fragment(path, output)?;
+    Ok(true)
+}
+
+// systemctl cannot disable a unit outside the manager's search path. Remove
+// only the persistent enable link created for this specific unit.
+fn remove_owned_enable_link(directory: &Path, path: &Path) -> Result<()> {
+    let link = directory.join("default.target.wants").join(UNIT);
+    match fs::read_link(&link) {
+        Ok(target) => {
+            let target = directory.join("default.target.wants").join(target);
+            if target.canonicalize().ok() == Some(path.canonicalize()?) {
+                fs::remove_file(link)?;
+            }
+        }
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::InvalidInput) => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
 
 fn manage(
     directory: &Path,
     desired: Option<&str>,
+    mut inspect: impl FnMut() -> Result<String>,
     mut systemctl: impl FnMut(&[&str]) -> Result<()>,
 ) -> Result<()> {
     if desired.is_some() {
@@ -237,18 +261,37 @@ fn manage(
     let current = owned_unit(&path)?;
     match desired {
         Some(contents) => {
+            manager_has_unit(&path, &inspect()?)?;
             if current.as_deref() != Some(contents) {
                 let mut file = tempfile::NamedTempFile::new_in(directory)?;
                 file.write_all(contents.as_bytes())?;
                 file.persist(&path)?;
             }
             systemctl(&["daemon-reload"])?;
+            ensure!(
+                manager_has_unit(&path, &inspect()?)?,
+                "systemd did not load {}",
+                path.display()
+            );
             systemctl(&["enable", UNIT])?;
+            // Enabling implicitly reloads the manager, so check the fragment
+            // once more before restarting the selected unit.
+            ensure!(
+                manager_has_unit(&path, &inspect()?)?,
+                "systemd did not load {}",
+                path.display()
+            );
             systemctl(&["restart", UNIT])
         }
         None => {
             if current.is_some() {
-                systemctl(&["disable", "--now", UNIT])?;
+                manager_has_unit(&path, &inspect()?)?;
+                systemctl(&["daemon-reload"])?;
+                if manager_has_unit(&path, &inspect()?)? {
+                    systemctl(&["--no-reload", "disable", "--now", UNIT])?;
+                } else {
+                    remove_owned_enable_link(directory, &path)?;
+                }
                 fs::remove_file(&path)?;
             }
             // Also finish a retry after removal succeeded but reload failed.
@@ -293,6 +336,14 @@ mod tests {
         assert!(unit.contains(r#"ExecStart=:/usr/bin/env -C "/home/a/100%%/$USER" "/opt/MCP Memory/mcpmem" --config "/home/a/a\"b\\c.toml""#));
         assert!(unit.contains("WantedBy=default.target"));
         assert!(quote(Path::new("x\ny")).is_err());
+        assert!(
+            render(
+                Path::new("/opt/a=b/mcpmem"),
+                Path::new("/tmp"),
+                Path::new("/tmp/config")
+            )
+            .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -302,13 +353,14 @@ mod tests {
         let dir = tmp.path().join("systemd/user");
         let path = dir.join(UNIT);
         let unit = format!("{MARKER}[Unit]\n");
+        let inspect = || Ok(format!("LoadState=loaded\nFragmentPath={}", path.display()));
         let mut calls = Vec::new();
         let mut record = |args: &[&str]| {
             calls.push(args.join(" "));
             Ok(())
         };
-        manage(&dir, Some(&unit), &mut record).unwrap();
-        manage(&dir, Some(&unit), &mut record).unwrap();
+        manage(&dir, Some(&unit), inspect, &mut record).unwrap();
+        manage(&dir, Some(&unit), inspect, &mut record).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), unit);
         assert_eq!(
             calls,
@@ -320,7 +372,9 @@ mod tests {
             .repeat(2)
         );
 
-        let failure = manage(&dir, None, |_| anyhow::bail!("manager unavailable"));
+        let failure = manage(&dir, None, inspect, |_| {
+            anyhow::bail!("manager unavailable")
+        });
         assert!(failure.is_err());
         assert!(path.exists());
         let mut removal = Vec::new();
@@ -328,12 +382,13 @@ mod tests {
             removal.push(args.join(" "));
             Ok(())
         };
-        manage(&dir, None, &mut record).unwrap();
-        manage(&dir, None, &mut record).unwrap();
+        manage(&dir, None, inspect, &mut record).unwrap();
+        manage(&dir, None, inspect, &mut record).unwrap();
         assert_eq!(
             removal,
             [
-                "disable --now mcpmem.service",
+                "daemon-reload",
+                "--no-reload disable --now mcpmem.service",
                 "daemon-reload",
                 "daemon-reload"
             ]
@@ -343,18 +398,98 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn lifecycle_rejects_a_foreign_fragment_before_and_after_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(UNIT);
+        fs::write(&path, MARKER).unwrap();
+        let foreign = "LoadState=loaded\nFragmentPath=/foreign/mcpmem.service";
+        let own = format!("LoadState=loaded\nFragmentPath={}", path.display());
+        for desired in [Some(MARKER), None] {
+            for before in [foreign, &own] {
+                let mut responses = [before, foreign].into_iter();
+                let mut calls = Vec::new();
+                let result = manage(
+                    tmp.path(),
+                    desired,
+                    || Ok(responses.next().unwrap().to_owned()),
+                    |args| {
+                        calls.push(args.join(" "));
+                        Ok(())
+                    },
+                );
+                assert!(result.unwrap_err().to_string().contains("/foreign/"));
+                assert_eq!(
+                    calls,
+                    if before == foreign {
+                        vec![]
+                    } else {
+                        vec!["daemon-reload"]
+                    }
+                );
+                assert!(path.exists());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_an_unloaded_unit_cleans_only_its_own_enable_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let path = dir.join(UNIT);
+        let wants = dir.join("default.target.wants");
+        fs::create_dir(&wants).unwrap();
+        let foreign = dir.join("foreign.service");
+        fs::write(&foreign, "foreign").unwrap();
+        let link = wants.join(UNIT);
+        for (target, preserve) in [(Path::new("../mcpmem.service"), false), (&foreign, true)] {
+            fs::write(&path, MARKER).unwrap();
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            manage(
+                dir,
+                None,
+                || Ok("LoadState=not-found".into()),
+                |args| {
+                    assert_eq!(args, ["daemon-reload"]);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(!path.exists());
+            assert_eq!(link.is_symlink(), preserve);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn foreign_files_and_symlinks_are_preserved() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(UNIT);
         fs::write(&path, "custom").unwrap();
         for action in [Some(MARKER), None] {
-            assert!(manage(tmp.path(), action, |_| panic!("manager called")).is_err());
+            assert!(
+                manage(
+                    tmp.path(),
+                    action,
+                    || panic!("manager queried"),
+                    |_| panic!("manager called")
+                )
+                .is_err()
+            );
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), "custom");
         fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(tmp.path().join("missing"), &path).unwrap();
         for action in [Some(MARKER), None] {
-            assert!(manage(tmp.path(), action, |_| panic!("manager called")).is_err());
+            assert!(
+                manage(
+                    tmp.path(),
+                    action,
+                    || panic!("manager queried"),
+                    |_| panic!("manager called")
+                )
+                .is_err()
+            );
         }
         assert!(path.is_symlink());
     }
