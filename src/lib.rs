@@ -52,11 +52,36 @@ pub enum Transport {
     Http,
 }
 
+#[derive(clap::Subcommand, Debug)]
+pub enum ServerCommand {
+    /// Manage the Linux systemd service for the current user.
+    #[command(subcommand)]
+    Service(ServiceAction),
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ServiceAction {
+    /// Install, enable and start mcpmem.service.
+    Install {
+        /// Server configuration file. Falls back to MCP_MEMORY_CONFIG.
+        #[arg(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Check whether the installed user service is loaded, enabled and running.
+    Status,
+    /// Stop, disable and remove the installed user service.
+    Uninstall,
+}
+
 #[derive(Parser, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
 #[command(name = "MCP Memory Server")]
 #[command(about = "Knowledge graph memory server for MCP — entities, relations, and observations persisted in SQLite with FTS5 search", long_about = None)]
 #[command(version)]
 pub struct Args {
+    #[command(subcommand)]
+    pub command: Option<ServerCommand>,
+
     /// Path to the memory file
     #[arg(short = 'f', long = "memory-file")]
     pub memory_file: Option<String>,

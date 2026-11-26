@@ -639,6 +639,11 @@ pub fn resolve(
     let matches = <Args as clap::CommandFactory>::command().get_matches_from(argv);
     let mut args = <Args as clap::FromArgMatches>::from_arg_matches(&matches)
         .map_err(|error| MCSError::InvalidParams(error.to_string()))?;
+    // Service management does not start a server. In particular uninstall
+    // must work even when its former configuration no longer exists.
+    if args.command.is_some() {
+        return Ok((args, None));
+    }
     let explicit = ExplicitArgs::from_matches(&matches);
     let file = match FileConfig::resolve_path(&args, std::env::var_os(CONFIG_PATH_ENV)) {
         Some(path) => {

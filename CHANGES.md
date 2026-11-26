@@ -8,6 +8,13 @@ version 5.2.1, commit `d6fe34b`. The license stays Apache-2.0, and
 This entry lists every change since that snapshot. The version line restarts at
 1.0.0, because the upstream crate name belongs to another author.
 
+## Next release
+
+- `mcpmem service install --config PATH` and `mcpmem service uninstall`
+  manage a systemd service under the current Linux user account.
+- `mcpmem service status` checks whether the installed user service is enabled
+  and running.
+
 ## 3.0.4 (unreleased)
 
 ### Added
