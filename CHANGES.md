@@ -14,6 +14,7 @@ This entry lists every change since that snapshot. The version line restarts at
   manage a systemd service under the current Linux user account.
 - `mcpmem service status` checks whether the installed user service is enabled
   and running.
+- `mcpmem service restart` restarts the installed user service after a configuration change.
 
 ## 3.0.4 (unreleased)
 

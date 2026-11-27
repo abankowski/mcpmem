@@ -401,7 +401,8 @@ The unit lives in `~/.config/systemd/user/mcpmem.service` (or under
 `$XDG_CONFIG_HOME/systemd/user/` if set). It records the executable,
 configuration path and working directory.
 Run the install command again if you move them. After editing the TOML,
-run `systemctl --user restart mcpmem.service`. Supply any required environment
+run `mcpmem service restart` (Bash and fish). Restart uses the installed unit
+and preserves its enablement setting. Supply any required environment
 variables to the user service manager or through a systemd drop-in. Installation
 also validates the config in your current shell. If you use a bearer token from
 the environment, make it available to both the installer and the service.
