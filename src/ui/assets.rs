@@ -24,28 +24,20 @@ const MANIFEST: &str = include_str!("../../ui/dist/ui-manifest.json");
 /// manifest exactly. The name is the path after `/ui/assets/`.
 const UI_ASSET_BYTES: &[(&str, &[u8])] = &[
     (
-        "Sheet-BPL84BvF.js",
-        include_bytes!("../../ui/dist/assets/Sheet-BPL84BvF.js"),
+        "Sheet-D9o-sVz5.js",
+        include_bytes!("../../ui/dist/assets/Sheet-D9o-sVz5.js"),
     ),
     (
-        "format-C4s-PMS0.js",
-        include_bytes!("../../ui/dist/assets/format-C4s-PMS0.js"),
-    ),
-    (
-        "index-AYCWQ33I.js",
-        include_bytes!("../../ui/dist/assets/index-AYCWQ33I.js"),
+        "format-mORgIr4H.js",
+        include_bytes!("../../ui/dist/assets/format-mORgIr4H.js"),
     ),
     (
         "index-DUH1G7-3.css",
         include_bytes!("../../ui/dist/assets/index-DUH1G7-3.css"),
     ),
     (
-        "page-8vubvvrY.js",
-        include_bytes!("../../ui/dist/assets/page-8vubvvrY.js"),
-    ),
-    (
-        "page-BEx9tNuR.js",
-        include_bytes!("../../ui/dist/assets/page-BEx9tNuR.js"),
+        "index-Dd1YaGOC.js",
+        include_bytes!("../../ui/dist/assets/index-Dd1YaGOC.js"),
     ),
     (
         "page-C0eQn-H6.css",
@@ -56,16 +48,24 @@ const UI_ASSET_BYTES: &[(&str, &[u8])] = &[
         include_bytes!("../../ui/dist/assets/page-C3KEu0l_.css"),
     ),
     (
-        "page-COwZ0X7r.js",
-        include_bytes!("../../ui/dist/assets/page-COwZ0X7r.js"),
-    ),
-    (
-        "page-Cbwswar9.js",
-        include_bytes!("../../ui/dist/assets/page-Cbwswar9.js"),
+        "page-CZ57786E.js",
+        include_bytes!("../../ui/dist/assets/page-CZ57786E.js"),
     ),
     (
         "page-D6I4gLNh.css",
         include_bytes!("../../ui/dist/assets/page-D6I4gLNh.css"),
+    ),
+    (
+        "page-DE_ZoXn0.js",
+        include_bytes!("../../ui/dist/assets/page-DE_ZoXn0.js"),
+    ),
+    (
+        "page-DPB4gxbG.js",
+        include_bytes!("../../ui/dist/assets/page-DPB4gxbG.js"),
+    ),
+    (
+        "page-Kxp2FzOp.js",
+        include_bytes!("../../ui/dist/assets/page-Kxp2FzOp.js"),
     ),
     (
         "page-UU_xKSHs.css",

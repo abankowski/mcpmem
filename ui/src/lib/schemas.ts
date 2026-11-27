@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const role = z.enum(["owner", "writer", "reader", "public"]);
 const visibility = z.enum(["private", "public"]);
-const attributes = z.record(z.string());
+const attributes = z.record(z.string(), z.string());
 const triple = z.object({ from: z.string(), to: z.string(), relationType: z.string() });
 const observation = z.object({
   observationId: z.number().int(),
