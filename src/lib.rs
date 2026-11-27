@@ -69,6 +69,8 @@ pub enum ServiceAction {
     },
     /// Check whether the installed user service is loaded, enabled and running.
     Status,
+    /// Restart the installed user service.
+    Restart,
     /// Stop, disable and remove the installed user service.
     Uninstall,
 }

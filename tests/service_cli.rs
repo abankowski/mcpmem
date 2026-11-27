@@ -6,6 +6,7 @@ fn service_commands_are_discoverable_without_a_config() {
         (vec!["--help"], "service"),
         (vec!["service", "--help"], "uninstall"),
         (vec!["service", "--help"], "status"),
+        (vec!["service", "--help"], "restart"),
         (vec!["service", "install", "--help"], "--config"),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_mcpmem"))
@@ -57,6 +58,14 @@ fi
     let config = root.join("settings.toml");
     let install = ["service", "install", "--config", "settings.toml"];
     let status = ["service", "status"];
+    let restart = ["service", "restart"];
+    let result = invoke(&restart);
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("mcpmem service install --config PATH")
+    );
+    assert!(!log.exists());
+    assert!(!root.join("systemd").exists());
     let result = invoke(&status);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("not installed"));
@@ -81,6 +90,12 @@ fi
     let text = fs::read_to_string(&unit).unwrap();
     assert!(text.contains(config.to_str().unwrap()));
     assert!(!text.contains("test-secret-value"));
+    let result = invoke(&restart);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     let result = invoke(&status);
     assert!(
         result.status.success(),
@@ -119,6 +134,8 @@ fi
             "--user daemon-reload",
             "--user show --all --property LoadState,FragmentPath mcpmem.service",
             "--user enable mcpmem.service",
+            "--user show --all --property LoadState,FragmentPath mcpmem.service",
+            "--user restart mcpmem.service",
             "--user show --all --property LoadState,FragmentPath mcpmem.service",
             "--user restart mcpmem.service",
             "--user show --all --property LoadState,UnitFileState,ActiveState,SubState,FragmentPath,NeedDaemonReload mcpmem.service",
